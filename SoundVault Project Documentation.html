@@ -1,0 +1,856 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>SoundVault Project Documentation</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 20px; background: #f7f7f7; color: #333; }
+    h1 { color: #2c3e50; }
+    h2 { color: #34495e; }
+    h3 { color: #4a6fa5; }
+    pre { background: #ecf0f1; padding: 10px; border: 1px solid #bdc3c7; overflow-x: auto; }
+    code { font-family: "Courier New", monospace; }
+    hr { border: 0; border-top: 1px solid #ccc; margin: 30px 0; }
+  </style>
+</head>
+<body>
+
+<h1>SoundVault Project Documentation</h1>
+
+<h2>1. Introduction</h2>
+<p>This document compiles all work done so far on the SoundVault project, including:</p>
+<ul>
+  <li>Detailed descriptions of each program created.</li>
+  <li>Current progress and status of the system.</li>
+  <li>Future roadmap and next steps to complete the project.</li>
+</ul>
+
+<hr>
+
+<h2>2. Programs Created So Far</h2>
+
+<h3>2.1 Music Indexer (<code>music_indexer_api.py</code>)</h3>
+<p>A comprehensive Python-based indexer to organize a music library. It:</p>
+<ul>
+  <li>Scans folders recursively for audio files.</li>
+  <li>Reads metadata: artist, title, album, year, track number, embedded cover art.</li>
+  <li>Deduplicates by (artist, title, album), preferring FLAC &gt; M4A &gt; MP3.</li>
+  <li>Implements grouping rules:
+    <ul>
+      <li>Common artist threshold (≥ 5 tracks) → <code>By Artist/&lt;Artist&gt;</code>.</li>
+      <li>Rare artists → <code>By Year/&lt;Year&gt;</code>.</li>
+      <li>Album folder if ≥ 5 tracks; otherwise, singles grouping.</li>
+      <li>“(Remixes)” folder if an album has ≥ 3 remixes.</li>
+      <li>Cover-hash grouping if ≥ 5 files share identical artwork.</li>
+    </ul>
+  </li>
+  <li>Generates a “dry-run” HTML preview of the proposed reorganization (color-coded).</li>
+  <li>Applies the final moves: creates new folders, renames/moves audio files, archives leftovers into <code>Trash/</code>, and deletes empty folders.</li>
+  <li>Writes <code>indexer_log.txt</code> detailing exactly how each file was classified and moved.</li>
+</ul>
+
+<p><strong>Skeleton of <code>music_indexer_api.py</code> (comments only):</strong></p>
+<pre><code>
+import os
+import re
+import shutil
+import hashlib
+from collections import defaultdict
+from mutagen import File as MutagenFile
+
+# Configuration
+COMMON_ARTIST_THRESHOLD = 5
+REMIX_FOLDER_THRESHOLD = 3
+
+def sanitize(name: str) -> str:
+    # Remove invalid filename characters...
+    pass
+
+def collapse_repeats(name: str) -> str:
+    # Collapse repeated substrings (e.g. "ARTISTARTIST" → "ARTIST")
+    pass
+
+def extract_primary_and_collabs(raw_artist: str):
+    # Parse "Artist/Feat. Other" or "Artist & Co." into primary + collaborator list
+    pass
+
+def compute_moves_and_tag_index(root_path, log_callback=None):
+    # 1. Decide music_root (either root_path or root_path/Music).
+    # 2. Walk recursively, collect supported audio files.
+    # 3. Deduplicate by (artist, title, album), choose highest-quality format.
+    # 4. Read metadata for each kept track; build counts:
+    #    • primary_counts: number of tracks per artist
+    #    • album_counts: number of tracks per (artist, album)
+    #    • remix_counts: number of remixed tracks per (artist, album)
+    #    • cover_counts: number of identical embedded-cover hashes
+    # 5. For each file, decide destination:
+    #    • If "(Remixes)" and remix_count ≥ REMIX_FOLDER_THRESHOLD → create "<Album> (Remixes)" folder
+    #    • Else if cover_count ≥ 5 → group by identical cover-hash folder
+    #    • Else if remix in title but remix_count < threshold → treat as single
+    #    • Else if album_count ≥ 5 → create album folder
+    #    • Else if primary_count ≥ COMMON_ARTIST_THRESHOLD → create "<Artist>/Album" or "<Artist> – Singles"
+    #    • Else → <Year>/ ...
+    # 6. Build a moves dict mapping old_path → new_path, plus a tag_index for HTML preview.
+    # 7. Return (moves, tag_index, decision_log).
+    pass
+
+def build_dry_run_html(root_path, output_html_path, log_callback=None):
+    # Calls compute_moves_and_tag_index; uses tag_index to write an HTML
+    # showing old vs. new locations, color-coded.
+    pass
+
+def apply_indexer_moves(root_path, log_callback=None):
+    # Actually performs the file moves:
+    # 1. Creates new directories as needed.
+    # 2. Moves and renames audio files.
+    # 3. Moves any non-audio leftovers into a "Trash/" subfolder.
+    # 4. Deletes empty source folders.
+    # 5. Writes indexer_log.txt summarizing each file’s action.
+    pass
+
+def run_full_indexer(root_path, output_html_path, dry_run_only=False, log_callback=None):
+    # High-level driver:
+    #   1. Compute moves + tag_index
+    #   2. Write indexer_log.txt
+    #   3. build_dry_run_html(...)
+    #   4. If not dry_run_only, call apply_indexer_moves(...)
+    pass
+</code></pre>
+
+<hr>
+
+<h3>2.2 Folder Tree HTML Generator (<code>folder_to_html.py</code>)</h3>
+<p>Generates a simple HTML representation of a folder’s file structure (folders in blue, files in green), without reading any metadata. Useful for a quick visual scan:</p>
+
+<pre><code>
+#!/usr/bin/env python3
+"""
+folder_to_html.py
+
+Recursively scan a directory and produce tree.html showing the folder/file hierarchy.
+"""
+
+import os
+import sys
+import tkinter as tk
+from tkinter import filedialog
+
+def sanitize(text: str) -> str:
+    # Escape HTML: &lt;, &gt;, &amp;
+    pass
+
+def build_folder_tree_html(root_path: str) -> str:
+    # Walk os.walk(root_path), collect folders/files.
+    # Sort lexicographically. Indent by depth (count of os.sep).
+    # Wrap folders in <span class="folder">, files in <span class="file">.
+    pass
+
+def write_html(root_path: str, output_filename: str = "tree.html"):
+    html_body = build_folder_tree_html(root_path)
+    html_content = """<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Folder Tree</title>
+  <style>
+    body { background: #2e3440; color: #d8dee9; font-family: monospace; }
+    .folder { color: #81a1c1; }
+    .file   { color: #a3be8c; }
+  </style>
+</head>
+<body>
+<pre>
+""" + html_body + """
+</pre>
+</body>
+</html>"""
+    with open(os.path.join(root_path, output_filename), "w", encoding="utf-8") as f:
+        f.write(html_content)
+
+def main():
+    root = tk.Tk()
+    root.withdraw()
+    folder_selected = filedialog.askdirectory(title="Select Folder to Visualize")
+    if not folder_selected:
+        sys.exit(0)
+    write_html(folder_selected)
+
+if __name__ == "__main__":
+    main()
+</code></pre>
+
+<hr>
+
+<h3>2.3 Folder Tree + Genre Annotator (<code>folder_to_html_with_genre.py</code>)</h3>
+<p>Extends <code>folder_to_html.py</code> by reading each audio file’s <code>genre</code> tag (using Mutagen) and displaying it in the HTML. This helps you quickly see which raw genre tags exist:</p>
+
+<pre><code>
+#!/usr/bin/env python3
+"""
+folder_to_html_with_genre.py
+
+Similar to folder_to_html, but also extracts and displays each audio file’s <genre> tag.
+"""
+
+import os
+import sys
+import tkinter as tk
+from tkinter import filedialog
+from mutagen import File as MutagenFile
+
+SUPPORTED_EXTS = {".flac", ".m4a", ".aac", ".mp3", ".wav", ".ogg"}
+
+def sanitize(text: str) -> str:
+    # Escape HTML: &lt;, &gt;, &amp;
+    pass
+
+def get_genre(filepath: str) -> str:
+    """
+    Use Mutagen with easy=True to read the 'genre' tag.
+    Return the first genre string, or None if missing.
+    """
+    try:
+        audio = MutagenFile(filepath, easy=True)
+        if not audio or not audio.tags:
+            return None
+        raw = audio.tags.get("genre", [None])[0]
+        if raw:
+            return raw.strip()
+        return None
+    except Exception:
+        return None
+
+def build_folder_tree_html(root_path: str) -> str:
+    lines = []
+    root_name = os.path.basename(root_path) or root_path
+    lines.append(f"<span class=\"folder\">{sanitize(root_name)}/</span>")
+    lines.append("")
+    nodes = set()
+    for dirpath, dirnames, filenames in os.walk(root_path):
+        nodes.add(dirpath)
+        for fname in filenames:
+            nodes.add(os.path.join(dirpath, fname))
+    sorted_nodes = sorted(nodes, key=lambda p: os.path.relpath(p, root_path))
+    for node in sorted_nodes:
+        rel = os.path.relpath(node, root_path)
+        if rel == ".":
+            continue
+        depth = rel.count(os.sep)
+        indent = "    " * depth
+        if os.path.isdir(node):
+            name = sanitize(os.path.basename(node)) + "/"
+            lines.append(f"{indent}<span class=\"folder\">{name}</span>")
+        else:
+            name = sanitize(os.path.basename(node))
+            ext = os.path.splitext(node)[1].lower()
+            if ext in SUPPORTED_EXTS:
+                genre = get_genre(node)
+                if genre:
+                    lines.append(f"{indent}<span class=\"file\">{name}</span>  <span class=\"genre\">[{sanitize(genre)}]</span>")
+                else:
+                    lines.append(f"{indent}<span class=\"file\">{name}</span>")
+            else:
+                lines.append(f"{indent}<span class=\"file\">{name}</span>")
+    return "\n".join(lines)
+
+def write_html(root_path: str, output_filename: str = "index.html"):
+    html_body = build_folder_tree_html(root_path)
+    html_content = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Folder Tree + Genres</title>
+  <style>
+    body {{ background: #2e3440; color: #d8dee9; font-family: monospace; }}
+    .folder {{ color: #81a1c1; }}
+    .file   {{ color: #a3be8c; }}
+    .genre  {{ color: #88c0d0; font-size: 12px; margin-left: 1em; }}
+  </style>
+</head>
+<body>
+<pre>
+{html_body}
+</pre>
+</body>
+</html>"""
+    with open(os.path.join(root_path, output_filename), "w", encoding="utf-8") as f:
+        f.write(html_content)
+
+def main():
+    root = tk.Tk()
+    root.withdraw()
+    folder_selected = filedialog.askdirectory(title="Select Folder to Visualize")
+    if not folder_selected:
+        sys.exit(0)
+    write_html(folder_selected)
+
+if __name__ == "__main__":
+    main()
+</code></pre>
+
+<hr>
+
+<h3>2.4 Unique Genre Lister (<code>list_genres.py</code>)</h3>
+<p>Scans a folder for audio files and builds a deduplicated, sorted list of all <code>genre</code> tags found. Writes <code>genres.html</code> so you can review every raw genre:</p>
+
+<pre><code>
+#!/usr/bin/env python3
+"""
+list_genres.py
+
+Folder picker → scan audio files → extract genre tags → dedupe → output genres.html.
+"""
+
+import os
+import sys
+import tkinter as tk
+from tkinter import filedialog
+from mutagen import File as MutagenFile
+
+SUPPORTED_EXTS = {".flac", ".m4a", ".aac", ".mp3", ".wav", ".ogg"}
+
+def sanitize(text: str) -> str:
+    # Escape HTML: &lt;, &gt;, &amp;
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+def extract_genre(filepath: str) -> str:
+    """
+    Return the first 'genre' tag (string) from the audio file, or None.
+    """
+    try:
+        audio = MutagenFile(filepath, easy=True)
+        if not audio or not audio.tags:
+            return None
+        raw = audio.tags.get("genre", [None])[0]
+        if raw:
+            return raw.strip()
+        return None
+    except Exception:
+        return None
+
+def gather_unique_genres(root_path: str) -> set:
+    unique = set()
+    for dirpath, _, filenames in os.walk(root_path):
+        for fname in filenames:
+            ext = os.path.splitext(fname)[1].lower()
+            if ext in SUPPORTED_EXTS:
+                fullpath = os.path.join(dirpath, fname)
+                genre = extract_genre(fullpath)
+                if genre:
+                    unique.add(genre)
+    return unique
+
+def write_genres_html(root_path: str, genres: set, output_filename: str = "genres.html"):
+    sorted_genres = sorted(genres, key=lambda s: s.lower())
+    lines = []
+    lines.append("<!DOCTYPE html>")
+    lines.append("<html lang='en'>")
+    lines.append("<head><meta charset='UTF-8'><title>Unique Genres</title>")
+    lines.append("<style>body { font-family: Arial, sans-serif; background: #f7f7f7; color: #333; } ul { list-style: none; padding-left: 0; } li { margin: 4px 0; }</style>")
+    lines.append("</head><body>")
+    lines.append(f"<h1>Unique Genres in “{sanitize(os.path.basename(root_path) or root_path)}”</h1>")
+    lines.append("<ul>")
+    if sorted_genres:
+        for genre in sorted_genres:
+            lines.append(f"<li>{sanitize(genre)}</li>")
+    else:
+        lines.append("<li><em>No genre tags found</em></li>")
+    lines.append("</ul>")
+    lines.append("</body></html>")
+
+    out_path = os.path.join(root_path, output_filename)
+    with open(out_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines))
+
+def main():
+    root = tk.Tk()
+    root.withdraw()
+    folder = filedialog.askdirectory(title="Select Folder to Scan for Genres")
+    if not folder:
+        sys.exit(0)
+    genres = gather_unique_genres(folder)
+    write_genres_html(folder, genres)
+
+if __name__ == "__main__":
+    main()
+</code></pre>
+
+<hr>
+
+<h3>2.5 Genre Updater via MusicBrainz (<code>update_genres.py</code>)</h3>
+<p>Walks your music folder, reads each file’s <code>artist</code> and <code>title</code>, queries MusicBrainz for a matching recording, grabs the top 3 tags by popularity, and writes them back into each file’s <code>genre</code> field. Logs all actions into <code>genre_update_log.txt</code>. Rate-limited at 1 request/second.</p>
+
+<pre><code>
+#!/usr/bin/env python3
+"""
+update_genres.py
+
+Folder picker → for each audio file:
+  1. Extract (artist, title) metadata (via Mutagen).
+  2. If missing artist/title, skip.
+  3. Query MusicBrainz: search_recordings(recording=title, artist=artist, limit=1, strict=True).
+  4. If no match, log “no MB match.”
+  5. Else, get recording's "tag-list" (list of {name, count}).
+  6. Pick up to top 3 by descending count (or first if no counts).
+  7. If file already has ≥ 2 genres, skip.
+  8. Write [genre1, genre2, genre3] back into file (EasyID3 or FLAC).
+  9. Wait 1 second (RATE_LIMIT_SECONDS) between calls.
+ 10. Log success/failure.
+
+Requires: pip install mutagen musicbrainzngs
+"""
+
+import os
+import sys
+import time
+import tkinter as tk
+from tkinter import filedialog
+
+import musicbrainzngs
+from mutagen import File as MutagenFile
+from mutagen.easyid3 import EasyID3
+from mutagen.flac import FLAC
+
+# Configuration
+musicbrainzngs.set_useragent(
+    "SoundVaultGenreUpdater",
+    "1.0",
+    "youremail@example.com"
+)
+RATE_LIMIT_SECONDS = 1.0
+SUPPORTED_EXTS = {".mp3", ".flac", ".m4a", ".aac", ".wav", ".ogg"}
+
+def choose_top_genres(mb_tag_list, top_n=3):
+    # Filter out entries missing "name". Assign missing 'count'=0.
+    valid = [t for t in mb_tag_list if "name" in t and t["name"].strip()]
+    if not valid:
+        return []
+    for t in valid:
+        if not isinstance(t.get("count"), int):
+            t["count"] = 0
+    # Sort by (-count, name.lower())
+    sorted_tags = sorted(valid, key=lambda t: (-t["count"], t["name"].lower()))
+    return [t["name"].strip() for t in sorted_tags[:top_n]]
+
+def extract_artist_title(filepath):
+    ext = os.path.splitext(filepath)[1].lower()
+    try:
+        if ext == ".mp3":
+            audio = EasyID3(filepath)
+            artist = audio.get("artist", [None])[0]
+            title  = audio.get("title",  [None])[0]
+        elif ext == ".flac":
+            audio = FLAC(filepath)
+            artist = audio.get("artist", [None])[0]
+            title  = audio.get("title",  [None])[0]
+        else:
+            audio = MutagenFile(filepath, easy=True)
+            if not audio or not audio.tags:
+                return None, None
+            artist = audio.tags.get("artist", [None])[0]
+            title  = audio.tags.get("title",  [None])[0]
+        return (artist.strip() if artist else None, title.strip() if title else None)
+    except Exception:
+        return None, None
+
+def extract_genre_list(filepath):
+    ext = os.path.splitext(filepath)[1].lower()
+    try:
+        if ext == ".mp3":
+            audio = EasyID3(filepath)
+            return audio.get("genre", [])
+        elif ext == ".flac":
+            audio = FLAC(filepath)
+            return audio.get("genre", [])
+        else:
+            audio = MutagenFile(filepath, easy=True)
+            if not audio or not audio.tags:
+                return []
+            return audio.tags.get("genre", [])
+    except Exception:
+        return []
+
+def update_genre_tag(filepath, new_genres):
+    ext = os.path.splitext(filepath)[1].lower()
+    try:
+        if ext == ".mp3":
+            audio = EasyID3(filepath)
+            audio["genre"] = new_genres
+            audio.save()
+        elif ext == ".flac":
+            audio = FLAC(filepath)
+            audio["genre"] = new_genres
+            audio.save()
+        else:
+            audio = MutagenFile(filepath, easy=True)
+            if not audio or not audio.tags:
+                return False
+            audio.tags["genre"] = new_genres
+            audio.save()
+        return True
+    except Exception:
+        return False
+
+def log_line(logfile, message):
+    logfile.write(message + "\n")
+    logfile.flush()
+
+def process_file(filepath, logfile):
+    relative = os.path.relpath(filepath)
+    artist, title = extract_artist_title(filepath)
+    if not artist or not title:
+        log_line(logfile, f"{relative}  → skipped (missing artist/title).")
+        return
+
+    try:
+        result = musicbrainzngs.search_recordings(
+            recording=title,
+            artist=artist,
+            limit=1,
+            strict=True
+        )
+    except Exception as e:
+        log_line(logfile, f"{relative}  → MB search error: {e}")
+        time.sleep(RATE_LIMIT_SECONDS)
+        return
+
+    recordings = result.get("recording-list", [])
+    if not recordings:
+        log_line(logfile, f"{relative}  → no MB match.")
+        time.sleep(RATE_LIMIT_SECONDS)
+        return
+
+    rec = recordings[0]
+    mb_tags = rec.get("tag-list", [])
+    top_genres = choose_top_genres(mb_tags, top_n=3)
+
+    if not top_genres:
+        log_line(logfile, f"{relative}  → matched MB but no tags.")
+        time.sleep(RATE_LIMIT_SECONDS)
+        return
+
+    existing = extract_genre_list(filepath)
+    if existing and len(existing) >= 2:
+        log_line(logfile, f"{relative}  → skipped (already has genres {existing}).")
+        time.sleep(RATE_LIMIT_SECONDS)
+        return
+
+    success = update_genre_tag(filepath, top_genres)
+    if success:
+        log_line(logfile, f"{relative}  → updated genres to [{', '.join(top_genres)}].")
+    else:
+        log_line(logfile, f"{relative}  → failed to write genres [{', '.join(top_genres)}].")
+    time.sleep(RATE_LIMIT_SECONDS)
+
+def main():
+    root = tk.Tk()
+    root.withdraw()
+    folder = filedialog.askdirectory(title="Select Music Folder to Update Genres")
+    if not folder:
+        sys.exit(0)
+
+    logpath = os.path.join(folder, "genre_update_log.txt")
+    try:
+        logfile = open(logpath, "w", encoding="utf-8")
+    except Exception as e:
+        print(f"Cannot open log file: {e}")
+        sys.exit(1)
+
+    log_line(logfile, f"Genre Update Log for: {folder}")
+    log_line(logfile, f"Started: {time.ctime()}")
+    log_line(logfile, "--------------------------------------")
+
+    count = 0
+    for dirpath, _, filenames in os.walk(folder):
+        for fname in filenames:
+            ext = os.path.splitext(fname)[1].lower()
+            if ext in SUPPORTED_EXTS:
+                count += 1
+                fullpath = os.path.join(dirpath, fname)
+                print(f"[{count}] Processing: {os.path.relpath(fullpath, folder)}")
+                process_file(fullpath, logfile)
+
+    log_line(logfile, "--------------------------------------")
+    log_line(logfile, f"Finished: {time.ctime()}")
+    log_line(logfile, f"Total files checked: {count}")
+    logfile.close()
+    print(f"Done. Check log at: {logpath}")
+
+if __name__ == "__main__":
+    main()
+</code></pre>
+
+<hr>
+
+<h3>2.6 Library Index Generator (<code>generate_library_index.py</code>)</h3>
+<p>Scans a folder (including <code>.ogg</code>) for audio files, extracts tags (artist, title, album, year, track, genres), and writes a single HTML table (<code>library_index.html</code>) for rapid review and reference. You can re-run it after adding new files to see only updated entries.</p>
+
+<pre><code>
+#!/usr/bin/env python3
+"""
+generate_library_index.py
+
+Folder picker → scan audio files (.mp3, .flac, .ogg, etc.) via Mutagen → build table:
+Path | Artist | Title | Album | Year | Track | Genres
+Outputs: library_index.html
+"""
+
+import os
+import sys
+import tkinter as tk
+from tkinter import filedialog
+from mutagen import File as MutagenFile
+from mutagen.easyid3 import EasyID3
+from mutagen.flac import FLAC
+
+SUPPORTED_EXTS = {".mp3", ".flac", ".m4a", ".aac", ".wav", ".ogg"}
+
+def sanitize(text: str) -> str:
+    if not text:
+        return ""
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+def extract_tags(path):
+    ext = os.path.splitext(path)[1].lower()
+    artist = title = album = year = track = None
+    genres = []
+    try:
+        if ext == ".mp3":
+            audio = EasyID3(path)
+            artist = audio.get("artist", [None])[0]
+            title  = audio.get("title", [None])[0]
+            album  = audio.get("album", [None])[0]
+            year   = audio.get("date", [None])[0] or audio.get("year", [None])[0]
+            track  = audio.get("tracknumber", [None])[0] or audio.get("track", [None])[0]
+            genres = audio.get("genre", [])
+        elif ext == ".flac":
+            audio = FLAC(path)
+            artist = audio.get("artist", [None])[0]
+            title  = audio.get("title", [None])[0]
+            album  = audio.get("album", [None])[0]
+            year   = audio.get("date", [None])[0] or audio.get("year", [None])[0]
+            track  = audio.get("tracknumber", [None])[0] or audio.get("track", [None])[0]
+            genres = audio.get("genre", [])
+        else:
+            audio = MutagenFile(path, easy=True)
+            if audio and audio.tags:
+                artist = audio.tags.get("artist", [None])[0]
+                title  = audio.tags.get("title", [None])[0]
+                album  = audio.tags.get("album", [None])[0]
+                year   = audio.tags.get("date", [None])[0] or audio.tags.get("year", [None])[0]
+                track  = audio.tags.get("tracknumber", [None])[0] or audio.tags.get("track", [None])[0]
+                genres = audio.tags.get("genre", [])
+    except Exception:
+        pass
+
+    artist = artist.strip() if isinstance(artist, str) else ""
+    title  = title.strip() if isinstance(title, str) else ""
+    album  = album.strip() if isinstance(album, str) else ""
+    year   = year.strip()[:4] if isinstance(year, str) else ""
+    if track:
+        try:
+            track = str(int(track.split("/")[0]))
+        except:
+            track = track.strip()
+    else:
+        track = ""
+    genres = [g.strip() for g in genres if isinstance(g, str) and g.strip()]
+    return {"artist": artist, "title": title, "album": album, "year": year, "track": track, "genres": ", ".join(genres)}
+
+def main():
+    root = tk.Tk()
+    root.withdraw()
+    folder = filedialog.askdirectory(title="Select Music Folder to Index")
+    if not folder:
+        sys.exit(0)
+
+    entries = []
+    for dirpath, _, files in os.walk(folder):
+        for fname in files:
+            ext = os.path.splitext(fname)[1].lower()
+            if ext in SUPPORTED_EXTS:
+                full = os.path.join(dirpath, fname)
+                tags = extract_tags(full)
+                entries.append((os.path.relpath(full, folder), tags))
+
+    html = []
+    html.append("<!DOCTYPE html>")
+    html.append("<html lang='en'><head><meta charset='utf-8'>")
+    html.append(f"<title>Library Index – {sanitize(os.path.basename(folder) or folder)}</title>")
+    html.append("<style>body { font-family: Arial, sans-serif; background: #f7f7f7; color: #333; } table { border-collapse: collapse; width: 100%; } th, td { border: 1px solid #ccc; padding: 6px; } th { background: #ddd; } tr:nth-child(even) { background: #eee; } </style>")
+    html.append("</head><body>")
+    html.append(f"<h1>Library Index: {sanitize(os.path.basename(folder) or folder)}</h1>")
+    html.append("<table>")
+    html.append("<tr><th>Path</th><th>Artist</th><th>Title</th><th>Album</th><th>Year</th><th>Track</th><th>Genres</th></tr>")
+
+    for rel, t in sorted(entries, key=lambda x: x[0].lower()):
+        html.append("<tr>")
+        html.append(f"<td>{sanitize(rel)}</td>")
+        html.append(f"<td>{sanitize(t['artist'])}</td>")
+        html.append(f"<td>{sanitize(t['title'])}</td>")
+        html.append(f"<td>{sanitize(t['album'])}</td>")
+        html.append(f"<td>{sanitize(t['year'])}</td>")
+        html.append(f"<td>{sanitize(t['track'])}</td>")
+        html.append(f"<td>{sanitize(t['genres'])}</td>")
+        html.append("</tr>")
+
+    html.append("</table></body></html>")
+
+    out = os.path.join(folder, "library_index.html")
+    try:
+        with open(out, "w", encoding="utf-8") as f:
+            f.write("\n".join(html))
+        print(f"✓ Wrote library index to: {out}")
+    except Exception as e:
+        print(f"❌ Failed to write HTML: {e}")
+
+if __name__ == "__main__":
+    main()
+</code></pre>
+
+<hr>
+
+<h2>3. Current Progress</h2>
+<ul>
+  <li><strong>Indexer</strong>: Fully implemented as <code>music_indexer_api.py</code>, tested on sample folders. It correctly reorganizes by artist, year, album, singles, and remixes, preserving cover-art groups.</li>
+  <li><strong>Folder HTML Generators</strong>:
+    <ul>
+      <li><code>folder_to_html.py</code>: Produces a plain tree view of any directory.</li>
+      <li><code>folder_to_html_with_genre.py</code>: Produces a tree view that also shows each audio file’s raw genre tag.</li>
+    </ul>
+  </li>
+  <li><strong>Unique Genre Lister</strong>: <code>list_genres.py</code> creates <code>genres.html</code> showing all distinct raw genre tags in one place.</li>
+  <li><strong>Genre Updater</strong>: <code>update_genres.py</code> connects to MusicBrainz, pulls top 3 tags per track, and writes them into files—skipping files that already have ≥ 2 genres.</li>
+  <li><strong>Library Index</strong>: <code>generate_library_index.py</code> builds <code>library_index.html</code>, a table listing path, artist, title, album, year, track, and genre(s) for every audio file. Useful for quick review.</li>
+</ul>
+
+<hr>
+
+<h2>4. Future Roadmap</h2>
+
+<ol>
+  <li><strong>Incremental Updates</strong>
+    <ul>
+      <li>Implement a <code>last_indexed.txt</code> timestamp or a simple SQLite/JSON database to track which files have already been processed. Then:
+        <ul>
+          <li><code>generate_library_index.py</code> will only scan new/modified files.</li>
+          <li><code>update_genres.py</code> will only query MusicBrainz for the new/modified subset.</li>
+        </ul>
+      </li>
+    </ul>
+  </li>
+
+  <li><strong>Playlist Generator Module</strong>
+    <ul>
+      <li>Based on the final, cleaned genres (after mapping synonyms), automatically create:
+        <ul>
+          <li><code>Playlists/ByArtist/&lt;ArtistName&gt;.m3u8</code> (all tracks under that artist’s folder).</li>
+          <li><code>Playlists/ByGenre/&lt;CanonicalGenre&gt;.m3u8</code> (all tracks that carry that canonical genre in their metadata).</li>
+        </ul>
+      </li>
+      <li>Support multi‐genre overlaps: e.g., “tracks tagged both ‘Electronic’ and ‘House’.”</li>
+      <li>Allow “special” playlists:  
+        <ul>
+          <li>High-BPM (≥ 120) using the <code>BPM</code> tag once it’s filled.</li>
+          <li>Holiday songs (by scanning <code>Holidays/</code> or genre “Holiday”).</li>
+        </ul>
+      </li>
+    </ul>
+  </li>
+
+  <li><strong>GUI Integration</strong>
+    <ul>
+      <li>Create a lightweight Tkinter or web‐based dashboard that:
+        <ul>
+          <li>Lets the user click buttons to run the indexer, update genres, build playlists, or generate HTML indices.</li>
+          <li>Displays progress bars/log output in real‐time.</li>
+          <li>Allows browsing the generated HTML from within the app.</li>
+        </ul>
+      </li>
+      <li>Embed a “patch‐only” code editor (e.g. via VS Code’s ChatGPT/Copilot plugin) so that future tweaks can be applied to specific functions without re‐posting the entire file.</li>
+    </ul>
+  </li>
+
+  <li><strong>Performance & Caching</strong>
+    <ul>
+      <li>Caching MusicBrainz queries in a local <code>mb_cache.json</code> so identical (artist, title) lookups are not repeated.</li>
+      <li>Parallelize non‐API‐dependent tasks (HTML generation, file scanning) using Python’s <code>threading</code> or <code>concurrent.futures</code>.</li>
+    </ul>
+  </li>
+
+  <li><strong>Backup & Rollback</strong>
+    <ul>
+      <li>Before running the indexer or genre updater, snapshot the current state:
+        <ul>
+          <li>Copy <code>library_index.html</code> and <code>genre_update_log.txt</code> to an “__archive” folder.</li>
+          <li>Allow a “dry‐run” option for both indexer and genre updater to preview changes.</li>
+        </ul>
+      </li>
+      <li>Implement a simple “undo” by storing the moves log and reversing the file operations if needed.</li>
+    </ul>
+  </li>
+
+  <li><strong>Documentation & Packaging</strong>
+    <ul>
+      <li>Host all code in a GitHub repository with this HTML as <code>docs/project_documentation.html</code>.</li>
+      <li>Provide a <code>requirements.txt</code>:
+        <pre><code>mutagen
+musicbrainzngs</code></pre>
+      <li>Create a single-entry point (e.g. <code>soundvault.py</code>) that imports modules:
+        <ul>
+          <li><code>indexer</code>, <code>genre_updater</code>, <code>library_indexer</code>, <code>playlist_generator</code>, and <code>html_utils</code>.</li>
+          <li>Publish as a pip-installable package (<code>pip install soundvault</code>).</li>
+      </li>
+      <li>Create a Windows MSI or PyInstaller build so users can double-click without installing Python.</li>
+    </ul>
+  </li>
+
+  <li><strong>Long-Term Enhancements</strong>
+    <ul>
+      <li>Integrate additional metadata sources:
+        <ul>
+          <li>Discogs API for backup genre/album info.</li>
+          <li>Last.fm API for crowd-sourced tags.</li>
+          <li>Spotify Web API for audio features (e.g., key, loudness).</li>
+        </ul>
+      </li>
+      <li>“Smart playlists” that update automatically based on folder changes, time (e.g. “Most recently added”), or play count.</li>
+      <li>Mobile sync: Compare a second folder (e.g. phone’s SD card) against the master index and highlight missing/updated tracks.</li>
+    </ul>
+  </li>
+</ol>
+
+<hr>
+
+<h2>5. Summary & Migration Tips</h2>
+<ul>
+  <li><strong>Splitting into Parts:</strong> If this file feels too large, you can save Part 1 (Introduction, Programs 2.1–2.4) and Part 2 (Programs 2.5–2.6, Current Progress, Future Roadmap) separately. Just cut at the &lt;em&gt;“Continue to Part 2”&lt;/em&gt; line.</li>
+  <li><strong>Using Git:</strong> Keep each Python script in its own file, commit to Git. When requesting edits from ChatGPT, refer to specific function names or file paths, not the entire content.</li>
+  <li><strong>Incremental Patches:</strong> In VS Code, install the ChatGPT extension. Select only the function you want to change and ask “Please update this function to do X,” which avoids reposting the entire file.</li>
+  <li><strong>Deployment:</strong> After finalizing, bundle everything into a <code>soundvault</code> folder structure:
+    <pre><code>
+soundvault/
+  indexer/
+    music_indexer_api.py
+  html_utils/
+    folder_to_html.py
+    folder_to_html_with_genre.py
+    list_genres.py
+    generate_library_index.py
+  genre_updater.py
+  playlist_generator.py  (future)
+  soundvault.py         (CLI driver)
+  requirements.txt
+  docs/
+    project_documentation.html
+    part2_project_documentation.html (if split)
+    README.md
+    ...
+    </code></pre>
+  </li>
+</ul>
+
+<p>With this HTML in hand, you can paste it into a new chat session or repository; future edits will be far lighter since you only need to update the small section that changes. Good luck completing your SoundVault system!</p>
+
+</body>
+</html>
