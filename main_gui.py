@@ -7,6 +7,7 @@ from validator import validate_soundvault_structure
 
 # Import the indexer API
 from music_indexer_api import run_full_indexer
+from importer_core import scan_and_import
 
 # Path to remember the last‐used directory
 CONFIG_FILE = os.path.join(os.path.dirname(__file__), "last_path.txt")
@@ -78,15 +79,43 @@ class SoundVaultImporterApp(tk.Tk):
             self._log(f"✘ Invalid SoundVault: {chosen}\n" + "\n".join(errors))
 
     def import_songs(self):
-        """Stub for future 'Add New Songs' functionality."""
+        """Import new audio files into an existing SoundVault."""
         initial = load_last_path()
-        chosen = filedialog.askdirectory(title="Select SoundVault Root", initialdir=initial)
-        if not chosen:
+        vault = filedialog.askdirectory(title="Select SoundVault Root", initialdir=initial)
+        if not vault:
             return
 
-        save_last_path(chosen)
-        messagebox.showinfo("Import New Songs", f"[stub] Would import new songs into:\n{chosen}")
-        self._log(f"[stub] Import New Songs → {chosen}")
+        save_last_path(vault)
+
+        is_valid, errors = validate_soundvault_structure(vault)
+        if not is_valid:
+            messagebox.showerror("Invalid SoundVault", "\n".join(errors))
+            self._log(f"✘ Invalid SoundVault: {vault}\n" + "\n".join(errors))
+            return
+
+        import_folder = filedialog.askdirectory(title="Select Folder of New Songs", initialdir=vault)
+        if not import_folder:
+            return
+
+        dry_run = messagebox.askyesno("Dry Run?", "Perform a dry-run preview only?")
+        estimate = messagebox.askyesno("Estimate BPM?", "Attempt BPM estimation for missing values?")
+
+        try:
+            summary = scan_and_import(vault, import_folder, dry_run=dry_run,
+                                      estimate_bpm=estimate, log_callback=self._log)
+            if summary["dry_run"]:
+                messagebox.showinfo("Dry Run Complete", f"Preview written to:\n{summary['html']}")
+            else:
+                moved = summary.get("moved", 0)
+                messagebox.showinfo("Import Complete", f"Imported {moved} files. Preview:\n{summary['html']}")
+
+            if summary.get("errors"):
+                self._log("! Some files failed to import. Check log for details.")
+
+            self._log(f"✓ Import finished for {import_folder} → {vault}. Dry run: {dry_run}. BPM: {estimate}.")
+        except Exception as e:
+            messagebox.showerror("Import failed", str(e))
+            self._log(f"✘ Import failed for {import_folder}: {e}")
 
     def run_indexer(self):
         """
