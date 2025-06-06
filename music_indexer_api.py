@@ -183,8 +183,8 @@ def compute_moves_and_tag_index(root_path, log_callback=None):
 
     SUPPORTED_EXTS = {".flac", ".m4a", ".aac", ".mp3", ".wav", ".ogg"}
 
-    # --- Phase 0: Pre-scan entire vault ---
-    global_counts = build_primary_counts(root_path)
+    # --- Phase 0: Pre-scan entire vault (under MUSIC_ROOT) ---
+    global_counts = build_primary_counts(MUSIC_ROOT)
     log_callback(f"   → Pre-scan: found {len(global_counts)} unique artists")
 
     # --- Phase 1: Scan for audio files ---
