@@ -1,0 +1,111 @@
+import os
+import sys
+import acoustid
+from mutagen import File as MutagenFile
+
+API_KEY = os.environ.get("ACOUSTID_API_KEY")
+
+USAGE = """Usage: python tag_fixer.py <audio file or folder>\n\nSet the ACOUSTID_API_KEY environment variable with your AcoustID key."""
+
+SUPPORTED_EXTS = {".mp3", ".flac", ".m4a", ".aac", ".ogg", ".wav"}
+
+def is_remix(audio_path):
+    """Return True if the file name or existing title suggests a remix."""
+    if "remix" in os.path.basename(audio_path).lower():
+        return True
+    audio = MutagenFile(audio_path, easy=True)
+    if audio and audio.tags and "title" in audio.tags:
+        title = " ".join(audio.tags["title"]).lower()
+        if "remix" in title:
+            return True
+    return False
+
+def find_files(root):
+    if os.path.isfile(root):
+        return [root]
+    audio_files = []
+    for dirpath, _, files in os.walk(root):
+        for fname in files:
+            ext = os.path.splitext(fname)[1].lower()
+            if ext in SUPPORTED_EXTS:
+                audio_files.append(os.path.join(dirpath, fname))
+    return audio_files
+
+def query_acoustid(path, log_callback):
+    """Return tags from AcoustID if the best match is perfect."""
+    try:
+        results = acoustid.match(API_KEY, path)
+        if not results:
+            return None
+        score, recording_id, title, artist = results[0]
+        if score == 1.0:
+            return {"title": title, "artist": artist}
+        return None
+    except acoustid.NoBackendError:
+        log_callback("Chromaprint library/tool not found")
+    except acoustid.FingerprintGenerationError:
+        log_callback(f"Failed to fingerprint: {path}")
+    except acoustid.WebServiceError as exc:
+        log_callback(f"AcoustID request failed: {exc}")
+    return None
+
+def update_tags(path, new_tags, log_callback):
+    audio = MutagenFile(path, easy=True)
+    if audio is None:
+        return False
+    changed = False
+    if new_tags.get("artist") and not audio.tags.get("artist"):
+        audio.tags["artist"] = [new_tags["artist"]]
+        changed = True
+    if new_tags.get("title") and not audio.tags.get("title"):
+        audio.tags["title"] = [new_tags["title"]]
+        changed = True
+    if changed:
+        try:
+            audio.save()
+            log_callback(f"Updated tags for {path}")
+            return True
+        except Exception as e:
+            log_callback(f"Failed to save {path}: {e}")
+    return False
+
+def fix_tags(target, log_callback=None):
+    """Fill missing tags for files in target using AcoustID."""
+    if log_callback is None:
+        def log_callback(msg):
+            print(msg)
+
+    if not API_KEY:
+        raise RuntimeError("ACOUSTID_API_KEY environment variable not set")
+
+    files = find_files(target)
+    if not files:
+        log_callback("No audio files found.")
+        return {"processed": 0, "updated": 0}
+
+    updated = 0
+    for f in files:
+        if is_remix(f):
+            log_callback(f"Skipping remix {f}")
+            continue
+        log_callback(f"Processing {f}...")
+        tags = query_acoustid(f, log_callback)
+        if tags:
+            if update_tags(f, tags, log_callback):
+                updated += 1
+        else:
+            log_callback("  No perfect match found.")
+    return {"processed": len(files), "updated": updated}
+
+def main():
+    if len(sys.argv) < 2:
+        print(USAGE)
+        sys.exit(1)
+    target = sys.argv[1]
+    try:
+        fix_tags(target)
+    except RuntimeError as e:
+        print(e)
+
+if __name__ == "__main__":
+    main()
