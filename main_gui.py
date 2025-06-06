@@ -1,20 +1,16 @@
-# main_gui.py
-
 import os
 import tkinter as tk
 from tkinter import filedialog, messagebox
-from validator import validate_soundvault_structure
 
-# Import the indexer API
+from validator import validate_soundvault_structure
 from music_indexer_api import run_full_indexer
 from importer_core import scan_and_import
+from tag_fixer import fix_tags  # AcoustID-based fixer
 
-# Path to remember the last‐used directory
 CONFIG_FILE = os.path.join(os.path.dirname(__file__), "last_path.txt")
 
 
 def load_last_path():
-    """Return the last‐used path from last_path.txt, or '' if none."""
     if os.path.exists(CONFIG_FILE):
         try:
             with open(CONFIG_FILE, "r", encoding="utf-8") as f:
@@ -25,7 +21,6 @@ def load_last_path():
 
 
 def save_last_path(path):
-    """Save the given path into last_path.txt."""
     try:
         with open(CONFIG_FILE, "w", encoding="utf-8") as f:
             f.write(path)
@@ -54,45 +49,36 @@ class SoundVaultImporterApp(tk.Tk):
         self.library_path_var = tk.StringVar(value="")
         self.library_stats_var = tk.StringVar(value="")
 
-        top = tk.Frame(self)
-        top.pack(fill="both", expand=True)
+        # ─── Menu Bar ─────────────────────────────────────────────────────────
+        menubar = tk.Menu(self)
+        self.config(menu=menubar)
 
-        info_frame = tk.LabelFrame(top, text="Library Info", width=350)
-        info_frame.pack(side="left", fill="both", expand=True, padx=10, pady=10)
+        file_menu = tk.Menu(menubar, tearoff=False)
+        file_menu.add_command(label="Validate Library", command=self.validate_library)
+        file_menu.add_command(label="Import New Songs", command=self.import_songs)
+        file_menu.add_command(label="Run Indexer", command=self.run_indexer)
+        file_menu.add_command(label="Scan for Orphans", command=self.scan_orphans)
+        file_menu.add_command(label="Compare Libraries", command=self.compare_libraries)
+        file_menu.add_separator()
+        file_menu.add_command(label="Exit", command=self.quit)
+        menubar.add_cascade(label="File", menu=file_menu)
 
-        button_frame = tk.Frame(top)
-        button_frame.pack(side="right", fill="y", padx=10, pady=10)
+        tools_menu = tk.Menu(menubar, tearoff=False)
+        tools_menu.add_command(label="Regenerate Playlists", command=self.regenerate_playlists)
+        tools_menu.add_command(label="Fix Tags via AcoustID", command=self.fix_tags)
+        menubar.add_cascade(label="Tools", menu=tools_menu)
+
+        # ─── Library Info ─────────────────────────────────────────────────────
+        info_frame = tk.LabelFrame(self, text="Library Info")
+        info_frame.pack(fill="x", padx=10, pady=10)
 
         tk.Button(info_frame, text="Select Library", command=self.select_library).pack(anchor="w")
         tk.Label(info_frame, textvariable=self.library_name_var).pack(anchor="w", pady=(5, 0))
-        tk.Label(
-            info_frame, textvariable=self.library_path_var, wraplength=320, justify="left"
-        ).pack(anchor="w")
-        tk.Label(info_frame, textvariable=self.library_stats_var, justify="left").pack(
-            anchor="w", pady=(5, 0)
-        )
+        tk.Label(info_frame, textvariable=self.library_path_var, wraplength=650, justify="left").pack(anchor="w")
+        tk.Label(info_frame, textvariable=self.library_stats_var, justify="left").pack(anchor="w", pady=(5, 0))
 
-        actions_frame = tk.LabelFrame(button_frame, text="Library Tasks")
-        actions_frame.pack(fill="x", pady=(0, 10))
-        for lbl, cmd in [
-            ("Validate Library", self.validate_library),
-            ("Import New Songs", self.import_songs),
-            ("Run Indexer", self.run_indexer),
-        ]:
-            tk.Button(actions_frame, text=lbl, command=cmd).pack(fill="x", pady=2)
-
-        maint_frame = tk.LabelFrame(button_frame, text="Maintenance")
-        maint_frame.pack(fill="x", pady=(0, 10))
-        for lbl, cmd in [
-            ("Scan for Orphans", self.scan_orphans),
-            ("Compare Libraries", self.compare_libraries),
-            ("Regenerate Playlists", self.regenerate_playlists),
-        ]:
-            tk.Button(maint_frame, text=lbl, command=cmd).pack(fill="x", pady=2)
-
-        tk.Button(button_frame, text="Exit", command=self.quit).pack(fill="x", pady=(20, 0))
-
-        self.output = tk.Text(self, wrap="word", state="disabled", height=10)
+        # ─── Output Log ───────────────────────────────────────────────────────
+        self.output = tk.Text(self, wrap="word", state="disabled", height=15)
         self.output.pack(fill="both", expand=True, padx=10, pady=(0, 10))
 
     def select_library(self):
@@ -122,7 +108,6 @@ class SoundVaultImporterApp(tk.Tk):
         return self.library_path
 
     def validate_library(self):
-        """Validate the currently selected library."""
         path = self.require_library()
         if not path:
             return
@@ -137,46 +122,44 @@ class SoundVaultImporterApp(tk.Tk):
         self.update_library_info()
 
     def import_songs(self):
-    """Import new audio files into an existing SoundVault."""
-    initial = load_last_path()
-    vault = filedialog.askdirectory(title="Select SoundVault Root", initialdir=initial)
-    if not vault:
-        return
+        initial = load_last_path()
+        vault = filedialog.askdirectory(title="Select SoundVault Root", initialdir=initial)
+        if not vault:
+            return
 
-    save_last_path(vault)
+        save_last_path(vault)
 
-    is_valid, errors = validate_soundvault_structure(vault)
-    if not is_valid:
-        messagebox.showerror("Invalid SoundVault", "\n".join(errors))
-        self._log(f"✘ Invalid SoundVault: {vault}\n" + "\n".join(errors))
-        return
+        is_valid, errors = validate_soundvault_structure(vault)
+        if not is_valid:
+            messagebox.showerror("Invalid SoundVault", "\n".join(errors))
+            self._log(f"✘ Invalid SoundVault: {vault}\n" + "\n".join(errors))
+            return
 
-    import_folder = filedialog.askdirectory(title="Select Folder of New Songs", initialdir=vault)
-    if not import_folder:
-        return
+        import_folder = filedialog.askdirectory(title="Select Folder of New Songs", initialdir=vault)
+        if not import_folder:
+            return
 
-    dry_run = messagebox.askyesno("Dry Run?", "Perform a dry-run preview only?")
-    estimate = messagebox.askyesno("Estimate BPM?", "Attempt BPM estimation for missing values?")
+        dry_run = messagebox.askyesno("Dry Run?", "Perform a dry-run preview only?")
+        estimate = messagebox.askyesno("Estimate BPM?", "Attempt BPM estimation for missing values?")
 
-    try:
-        summary = scan_and_import(vault, import_folder, dry_run=dry_run,
-                                  estimate_bpm=estimate, log_callback=self._log)
-        if summary["dry_run"]:
-            messagebox.showinfo("Dry Run Complete", f"Preview written to:\n{summary['html']}")
-        else:
-            moved = summary.get("moved", 0)
-            messagebox.showinfo("Import Complete", f"Imported {moved} files. Preview:\n{summary['html']}")
+        try:
+            summary = scan_and_import(vault, import_folder, dry_run=dry_run,
+                                      estimate_bpm=estimate, log_callback=self._log)
+            if summary["dry_run"]:
+                messagebox.showinfo("Dry Run Complete", f"Preview written to:\n{summary['html']}")
+            else:
+                moved = summary.get("moved", 0)
+                messagebox.showinfo("Import Complete", f"Imported {moved} files. Preview:\n{summary['html']}")
 
-        if summary.get("errors"):
-            self._log("! Some files failed to import. Check log for details.")
+            if summary.get("errors"):
+                self._log("! Some files failed to import. Check log for details.")
 
-        self._log(f"✓ Import finished for {import_folder} → {vault}. Dry run: {dry_run}. BPM: {estimate}.")
-    except Exception as e:
-        messagebox.showerror("Import failed", str(e))
-        self._log(f"✘ Import failed for {import_folder}: {e}")
+            self._log(f"✓ Import finished for {import_folder} → {vault}. Dry run: {dry_run}. BPM: {estimate}.")
+        except Exception as e:
+            messagebox.showerror("Import failed", str(e))
+            self._log(f"✘ Import failed for {import_folder}: {e}")
 
     def run_indexer(self):
-        """Run the MusicIndexer on the selected library."""
         path = self.require_library()
         if not path:
             return
@@ -202,7 +185,6 @@ class SoundVaultImporterApp(tk.Tk):
         self.update_library_info()
 
     def scan_orphans(self):
-        """Stub for orphan scan."""
         path = self.require_library()
         if not path:
             return
@@ -211,7 +193,6 @@ class SoundVaultImporterApp(tk.Tk):
         self.update_library_info()
 
     def compare_libraries(self):
-        """Stub for library comparison."""
         master = self.require_library()
         if not master:
             return
@@ -226,7 +207,6 @@ class SoundVaultImporterApp(tk.Tk):
         self.update_library_info()
 
     def regenerate_playlists(self):
-        """Stub for playlist regeneration."""
         path = self.require_library()
         if not path:
             return
@@ -235,6 +215,19 @@ class SoundVaultImporterApp(tk.Tk):
         )
         self._log(f"[stub] Regenerate Playlists → {path}")
         self.update_library_info()
+
+    def fix_tags(self):
+        initial = load_last_path()
+        chosen = filedialog.askdirectory(title="Select Folder for Tag Fixer", initialdir=initial)
+        if not chosen:
+            return
+        save_last_path(chosen)
+        try:
+            summary = fix_tags(chosen, log_callback=self._log)
+            messagebox.showinfo("Tag Fixer Complete",
+                                f"Processed {summary['processed']} files\nUpdated {summary['updated']} files.")
+        except Exception as e:
+            messagebox.showerror("Tag Fixer Error", str(e))
 
     def _log(self, msg):
         self.output.configure(state="normal")
