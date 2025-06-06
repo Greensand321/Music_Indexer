@@ -18,21 +18,18 @@ def build_primary_counts(root_path):
     """
     Walk the entire vault (By Artist, By Year, Incoming, etc.) and
     return a dict mapping each lowercase-normalized artist → total file count.
-    Falls back to filename if metadata “primary” is missing.
+    Falls back to filename if metadata “artist” is missing.
     """
-    counts = {}   # ← Make sure this is the FIRST line in the function
+    counts = {}
     for dirpath, _, files in os.walk(root_path):
         for fname in files:
             ext = os.path.splitext(fname)[1].lower()
             if ext not in SUPPORTED_EXTS:
                 continue
 
-            full_path = os.path.join(dirpath, fname)
-            try:
-                tags    = idx.get_tags(full_path)
-                primary = tags.get("primary", "").strip()
-            except Exception:
-                primary = ""
+            path = os.path.join(dirpath, fname)
+            tags = get_tags(path)
+            primary = (tags.get("artist") or "").strip()
 
             if not primary:
                 name_only = os.path.splitext(fname)[0]
@@ -186,9 +183,11 @@ def compute_moves_and_tag_index(root_path, log_callback=None):
 
     SUPPORTED_EXTS = {".flac", ".m4a", ".aac", ".mp3", ".wav", ".ogg"}
 
-    # ─── Phase 1: Scan for audio files ─────────────────────────────────────────
+    # --- Phase 0: Pre-scan entire vault ---
     global_counts = build_primary_counts(root_path)
-    log_callback(f"   → Pre‐scan complete: found {len(global_counts)} unique artists")
+    log_callback(f"   → Pre-scan: found {len(global_counts)} unique artists")
+
+    # --- Phase 1: Scan for audio files ---
     all_audio = []
     for dirpath, _, files in os.walk(MUSIC_ROOT):
         for fname in files:
@@ -332,6 +331,7 @@ def compute_moves_and_tag_index(root_path, log_callback=None):
         album      = info["album"] or ""
         year       = info["year"] or "Unknown"
         track      = info["track"]
+        folders    = info["folder_tags"]
         p_lower    = info["primary"]  # already lowercase key
 
         # Lookup how many total tracks this primary artist has
