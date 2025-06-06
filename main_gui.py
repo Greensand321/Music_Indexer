@@ -6,7 +6,7 @@ from validator import validate_soundvault_structure
 from music_indexer_api import run_full_indexer
 from importer_core import scan_and_import
 from tag_fixer import fix_tags          # AcoustID-based fixer
-from sample_highlight import play_file_highlight  # Audio peak sampler
+from sample_highlight import play_file_highlight, PYDUB_AVAILABLE
 
 CONFIG_FILE = os.path.join(os.path.dirname(__file__), "last_path.txt")
 
@@ -67,21 +67,14 @@ class SoundVaultImporterApp(tk.Tk):
         tools_menu = tk.Menu(menubar, tearoff=False)
         tools_menu.add_command(label="Regenerate Playlists", command=self.regenerate_playlists)
         tools_menu.add_command(label="Fix Tags via AcoustID", command=self.fix_tags)
-        tools_menu.add_command(label="Sample Song Highlight", command=self.sample_song_highlight)
+        if PYDUB_AVAILABLE:
+            tools_menu.add_command(label="Sample Song Highlight", command=self.sample_song_highlight)
+        else:
+            tools_menu.add_command(
+                label="Sample Song Highlight (requires pydub)",
+                state="disabled"
+            )
         menubar.add_cascade(label="Tools", menu=tools_menu)
-
-        # ─── Library Info ─────────────────────────────────────────────────────
-        info_frame = tk.LabelFrame(self, text="Library Info")
-        info_frame.pack(fill="x", padx=10, pady=10)
-
-        tk.Button(info_frame, text="Select Library", command=self.select_library).pack(anchor="w")
-        tk.Label(info_frame, textvariable=self.library_name_var).pack(anchor="w", pady=(5, 0))
-        tk.Label(
-            info_frame, textvariable=self.library_path_var, wraplength=650, justify="left"
-        ).pack(anchor="w")
-        tk.Label(info_frame, textvariable=self.library_stats_var, justify="left").pack(
-            anchor="w", pady=(5, 0)
-        )
 
         # ─── Output Log ───────────────────────────────────────────────────────
         self.output = tk.Text(self, wrap="word", state="disabled", height=15)
