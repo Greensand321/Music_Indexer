@@ -7,6 +7,7 @@ from validator import validate_soundvault_structure
 
 # Import the indexer API
 from music_indexer_api import run_full_indexer
+from tag_fixer import fix_tags
 
 # Path to remember the last‐used directory
 CONFIG_FILE = os.path.join(os.path.dirname(__file__), "last_path.txt")
@@ -54,6 +55,7 @@ class SoundVaultImporterApp(tk.Tk):
         # ─── Tools Menu ────────────────────────────────────────────────
         tools_menu = tk.Menu(menubar, tearoff=False)
         tools_menu.add_command(label="Regenerate Playlists", command=self.regenerate_playlists)
+        tools_menu.add_command(label="Fix Tags via AcoustID", command=self.fix_tags)
         menubar.add_cascade(label="Tools", menu=tools_menu)
 
         # A main text area for logging
@@ -158,6 +160,20 @@ class SoundVaultImporterApp(tk.Tk):
         save_last_path(chosen)
         messagebox.showinfo("Regenerate Playlists", f"[stub] Would regenerate playlists in:\n{chosen}")
         self._log(f"[stub] Regenerate Playlists → {chosen}")
+
+    def fix_tags(self):
+        """Run the AcoustID tag fixer on a selected folder."""
+        initial = load_last_path()
+        chosen = filedialog.askdirectory(title="Select Folder for Tag Fixer", initialdir=initial)
+        if not chosen:
+            return
+        save_last_path(chosen)
+        try:
+            summary = fix_tags(chosen, log_callback=self._log)
+            messagebox.showinfo("Tag Fixer Complete",
+                                f"Processed {summary['processed']} files\nUpdated {summary['updated']} files.")
+        except Exception as e:
+            messagebox.showerror("Tag Fixer Error", str(e))
 
     def _log(self, msg):
         self.output.configure(state="normal")
