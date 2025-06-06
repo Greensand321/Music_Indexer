@@ -55,6 +55,7 @@ class SoundVaultImporterApp(tk.Tk):
         self.config(menu=menubar)
 
         file_menu = tk.Menu(menubar, tearoff=False)
+        file_menu.add_command(label="Open Library…", command=self.select_library)
         file_menu.add_command(label="Validate Library", command=self.validate_library)
         file_menu.add_command(label="Import New Songs", command=self.import_songs)
         file_menu.add_command(label="Run Indexer", command=self.run_indexer)
@@ -75,6 +76,14 @@ class SoundVaultImporterApp(tk.Tk):
                 state="disabled"
             )
         menubar.add_cascade(label="Tools", menu=tools_menu)
+
+        # ─── Library Info ─────────────────────────────────────────────────────
+        top = tk.Frame(self)
+        top.pack(fill="x", padx=10, pady=(10, 0))
+        tk.Button(top, text="Choose Library…", command=self.select_library).pack(side="left")
+        tk.Label(top, textvariable=self.library_name_var, anchor="w").pack(side="left", padx=(5, 0))
+        tk.Label(self, textvariable=self.library_path_var, anchor="w").pack(fill="x", padx=10)
+        tk.Label(self, textvariable=self.library_stats_var, justify="left").pack(anchor="w", padx=10, pady=(0, 10))
 
         # ─── Output Log ───────────────────────────────────────────────────────
         self.output = tk.Text(self, wrap="word", state="disabled", height=15)

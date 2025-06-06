@@ -20,7 +20,8 @@ Navigate to the project folder and run:
 python main_gui.py
 ```
 
-A simple window will open that lets you choose your SoundVault folder and run the importer.
+A window will open. Use **File → Open Library…** to choose the folder you want
+to index or import music into.
 
 ## Recommended folder layout
 
