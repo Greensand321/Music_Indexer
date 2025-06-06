@@ -18,9 +18,9 @@ def build_primary_counts(root_path):
     """
     Walk the entire vault (By Artist, By Year, Incoming, etc.) and
     return a dict mapping each lowercase-normalized artist → total file count.
-    Falls back to filename if metadata “primary” is missing.
+    Falls back to filename if metadata "primary" is missing.
     """
-    counts = {}   # ← Make sure this is the FIRST line in the function
+    counts = {}
     for dirpath, _, files in os.walk(root_path):
         for fname in files:
             ext = os.path.splitext(fname)[1].lower()
@@ -29,8 +29,8 @@ def build_primary_counts(root_path):
 
             full_path = os.path.join(dirpath, fname)
             try:
-                tags    = idx.get_tags(full_path)
-                primary = tags.get("primary", "").strip()
+                tags    = get_tags(full_path)
+                primary = tags.get("artist", "").strip() or tags.get("primary", "").strip()
             except Exception:
                 primary = ""
 
@@ -53,17 +53,7 @@ def sanitize(name: str) -> str:
     invalid = r'<>:"/\\|?*'
     return "".join(c for c in (name or "Unknown") if c not in invalid).strip() or "Unknown"
 
-# ─── Then follows your main compute_moves_and_tag_index() definition ───────
-def compute_moves_and_tag_index(root_path, log_callback=None):
-    # Phase 0: Pre-scan
-    global_counts = build_primary_counts(root_path)
-    log_callback(f"   → Pre-scan complete: found {len(global_counts)} unique artists")
-    
 def collapse_repeats(name: str) -> str:
-    """
-    If name is something like 'DROELOEDROELOE', collapse to 'DROELOE'.
-    For strings shorter than 4 characters, return unchanged.
-    """
     if not name or len(name) < 4:
         return name or "Unknown"
     for length in range(1, len(name)//2 + 1):
@@ -74,10 +64,6 @@ def collapse_repeats(name: str) -> str:
     return name
 
 def is_repeated(name: str) -> bool:
-    """
-    Detect if the entire artist tag is a repeated substring,
-    e.g. 'DROELOEDROELOE'. For strings shorter than 4, return False.
-    """
     if not name or len(name) < 4:
         return False
     for length in range(1, len(name)//2 + 1):
@@ -87,11 +73,7 @@ def is_repeated(name: str) -> bool:
                 return True
     return False
 
-def get_tags(path: str):
-    """
-    Read basic tags using Mutagen (artist, title, album, year, track, genre).
-    Return a dict with those fields (or None if missing).
-    """
+def get_tags(path: str) -> dict:
     try:
         audio = MutagenFile(path, easy=True)
         if not audio or not audio.tags:
@@ -118,14 +100,6 @@ def get_tags(path: str):
                 "year": None, "track": None, "genre": None}
 
 def extract_primary_and_collabs(raw_artist: str):
-    """
-    Use collapse_repeats on raw_artist. Then:
-      - If raw_artist contains "/" → split on "/" → first part is primary, rest are collabs.
-      - Else look for separators: " feat.", " ft.", " & ", " x ", ", ", ";"
-        First segment is primary, remainder split by commas/& is collabs.
-      - Else split on uppercase boundary, treat first as primary and rest as a single collab string.
-      - Otherwise, primary = raw_artist, collabs = [].
-    """
     if not raw_artist:
         return ("Unknown", [])
     text = raw_artist.strip()
@@ -153,49 +127,23 @@ def extract_primary_and_collabs(raw_artist: str):
 
     return (text, [])
 
-def derive_tags_from_path(filepath: str, music_root: str):
-    """
-    If a file lives in subfolders under music_root, gather those folder names
-    as “inherited tags.” E.g. /…/By Artist/ArtistName/AlbumX/Track.mp3 → {"ArtistName", "AlbumX"}.
-    """
+def derive_tags_from_path(filepath: str, music_root: str) -> set:
     rel = os.path.relpath(os.path.dirname(filepath), music_root)
-    parts = [p for p in rel.split(os.sep) if p and p != "."]
-    return set(parts)
-
+    return {p for p in rel.split(os.sep) if p and p != '.'}
 
 # ─── A. HELPER: COMPUTE MOVES & TAG INDEX ───────────────────────────────
-
 def compute_moves_and_tag_index(root_path, log_callback=None):
-    """
-    1) Determine MUSIC_ROOT: if root_path/Music exists, use that; otherwise root_path itself.
-    2) Scan for all audio files under MUSIC_ROOT.
-    3) Deduplicate by (primary, title, album) and delete lower-priority duplicates.
-    4) Read metadata into `songs` dict, build:
-       - primary_counts: how many kept files per artist
-       - album_counts: how many genuine (non-remix) tracks per (artist, album)
-       - remix_counts: how many remix‐tagged tracks per (artist, album)
-       - cover_counts: how many files share each embedded cover
-    5) Phase 4: For each entry in `songs`, decide new folder & filename,
-       with special‐case for small “(Remixes)” albums.
-    Returns:
-      - moves: { old_path: new_path, ... }
-      - tag_index: { new_path: { "leftover_tags": [...], "old_paths": [...] }, ... }
-      - decision_log: list of strings explaining each track’s decision
-    """
     if log_callback is None:
         def log_callback(msg): pass
 
     # ─── 1) Determine MUSIC_ROOT ──────────────────────────────────────────────
-    MUSIC_ROOT = os.path.join(root_path, "Music") \
-        if os.path.isdir(os.path.join(root_path, "Music")) \
-        else root_path
+    MUSIC_ROOT = os.path.join(root_path, "Music") if os.path.isdir(os.path.join(root_path, "Music")) else root_path
 
-    SUPPORTED_EXTS = {".flac", ".m4a", ".aac", ".mp3", ".wav", ".ogg"}
+    # ─── 0) Pre-scan entire vault for global counts ────────────────────────────
+    global_counts = build_primary_counts(root_path)
+    log_callback(f"   → Pre-scan complete: found {len(global_counts)} unique artists")
 
-    return counts
     # ─── Phase 1: Scan for audio files ─────────────────────────────────────────
-    global_counts = build_primary_counts(vault_root)
-    log_callback(f"   → Pre‐scan complete: found {len(global_counts)} unique artists")
     all_audio = []
     for dirpath, _, files in os.walk(MUSIC_ROOT):
         for fname in files:
@@ -214,25 +162,20 @@ def compute_moves_and_tag_index(root_path, log_callback=None):
         data = get_tags(fullpath)
         raw_artist = data["artist"] or os.path.splitext(os.path.basename(fullpath))[0]
         raw_artist = collapse_repeats(raw_artist)
-        title  = data["title"]  or os.path.splitext(os.path.basename(fullpath))[0]
-        album  = data["album"]  or ""
+        title  = data["title"] or os.path.splitext(os.path.basename(fullpath))[0]
+        album  = data["album"] or ""
         primary, _ = extract_primary_and_collabs(raw_artist)
         key = (primary.lower(), title.lower(), album.lower())
         dup_groups[key].append(fullpath)
 
     kept_files = set()
-    EXT_PRIORITY = {".flac": 0, ".m4a": 1, ".aac": 1, ".mp3": 2, ".wav": 3, ".ogg": 4}
-
-    for key, paths in dup_groups.items():
+    EXT_PRIORITY = {ext: i for i, ext in enumerate([".flac", ".m4a", ".aac", ".mp3", ".wav", ".ogg"]) }
+    for paths in dup_groups.values():
         if len(paths) == 1:
             kept_files.add(paths[0])
         else:
-            paths_sorted = sorted(
-                paths,
-                key=lambda p: EXT_PRIORITY.get(os.path.splitext(p)[1].lower(), 999)
-            )
-            best = paths_sorted[0]
-            kept_files.add(best)
+            paths_sorted = sorted(paths, key=lambda p: EXT_PRIORITY.get(os.path.splitext(p)[1].lower(), 999))
+            kept_files.add(paths_sorted[0])
             for loser in paths_sorted[1:]:
                 try:
                     os.remove(loser)
@@ -252,38 +195,31 @@ def compute_moves_and_tag_index(root_path, log_callback=None):
     for idx, fullpath in enumerate(kept_files, start=1):
         if idx % 50 == 0 or idx == total_kept:
             log_callback(f"   • Reading metadata {idx}/{total_kept}")
+        data      = get_tags(fullpath)
+        raw_artist= data["artist"] or os.path.splitext(os.path.basename(fullpath))[0]
+        raw_artist= collapse_repeats(raw_artist)
+        title      = data["title"]
+        album      = data["album"]
+        year       = data["year"]
+        genre      = data["genre"]
+        track      = data["track"]
 
-        data = get_tags(fullpath)
-        raw_artist = data["artist"] or os.path.splitext(os.path.basename(fullpath))[0]
-        raw_artist = collapse_repeats(raw_artist)
-        title   = data["title"] or os.path.splitext(os.path.basename(fullpath))[0]
-        album   = data["album"]
-        year    = data["year"]
-        genre   = data["genre"]
-        track   = data["track"]
-
-        # 1) Primary & collabs (normalize case)
         primary, collabs = extract_primary_and_collabs(raw_artist)
         primary = primary.upper()
         p_lower = primary.lower()
 
-        # 2) Count how often each artist appears
         primary_counts[p_lower] += 1
-
-        # 3) album_counts for genuine (non-remix) tracks under each (artist, album)
         if album and "remix" not in title.lower() and album.strip().lower() != title.strip().lower():
             album_counts[(p_lower, album.lower())] += 1
-
-        # 4) remix_counts for tracks whose album tag contains "remix"
         if album and "remix" in album.lower():
             remix_counts[(p_lower, album.lower())] += 1
 
-        # 5) EXTRACT EMBEDDED COVER DATA → compute SHA-1 and store first 10 hex digits
+        # embedded cover counts
         cover_hash = None
         try:
             audio_file = MutagenFile(fullpath)
             img_data = None
-            if hasattr(audio_file, "tags") and audio_file.tags is not None:
+            if hasattr(audio_file, "tags") and audio_file.tags:
                 for key in audio_file.tags.keys():
                     if key.startswith("APIC"):
                         img_data = audio_file.tags[key].data
@@ -302,32 +238,20 @@ def compute_moves_and_tag_index(root_path, log_callback=None):
             pass
 
         folder_tags = derive_tags_from_path(fullpath, MUSIC_ROOT)
-
-        songs[fullpath] = {
-            "raw_artist": raw_artist,
-            "primary":    primary,
-            "collabs":    collabs,
-            "title":      title,
-            "album":      album,
-            "year":       year,
-            "genre":      genre,
-            "track":      track,
-            "cover_hash": cover_hash,
-            "folder_tags": folder_tags
-        }
+        songs[fullpath] = {"raw_artist": raw_artist, "primary": primary, "collabs": collabs,
+                           "title": title,       "album": album,    "year": year,
+                           "genre": genre,       "track": track,    "cover_hash": cover_hash,
+                           "folder_tags": folder_tags}
 
     log_callback(f"   → Collected metadata for {total_kept} files.")
 
     # ─── Phase 4: Determine destination for each file (with logging) ─────────────
     log_callback("4/6: Determining destination paths for each file…")
-    tag_index = {}
-    moves = {}
-    decision_log = []
-    index = 0
-    total = len(songs)
-
-    # Precompute any necessary lookups from songs data
-    # (primary_counts, album_counts, remix_counts, etc. were built in Phase 3)
+    tag_index     = {}
+    moves         = {}
+    decision_log  = []
+    index         = 0
+    total         = len(songs)
 
     for old_path, info in songs.items():
         index += 1
@@ -339,169 +263,100 @@ def compute_moves_and_tag_index(root_path, log_callback=None):
         album      = info["album"] or ""
         year       = info["year"] or "Unknown"
         track      = info["track"]
-        p_lower    = info["primary"]  # already lowercase key
+        p_lower    = info["primary"].lower()
 
-        # Lookup how many total tracks this primary artist has
         count_now = global_counts.get(p_lower, 0)
-        decision_log.append(f"Song: {raw_artist} – {title} ({album}) → primary_counts[{raw_artist}] = {count_now}")
+        decision_log.append(f"Song: {raw_artist} – {title} ({album}) → total count = {count_now}")
 
-        # ─── 4.1) EARLY BAIL-OUT: “Rare” artists go straight to By Year ─────────────────
         if count_now < COMMON_ARTIST_THRESHOLD:
             base_folder = os.path.join(MUSIC_ROOT, "By Year", sanitize(year))
-            decision_log.append(
-                f"  Early-exit: Count {count_now} < {COMMON_ARTIST_THRESHOLD} → group under By Year/{year}"
-            )
-
-            # Build the new filename as usual (rename invalid artists or use sanitized tags)
+            decision_log.append(f"  Earlyexit: {count_now} < {COMMON_ARTIST_THRESHOLD} → Year/{year}")
             if "/" in raw_artist or is_repeated(raw_artist):
                 new_filename = os.path.basename(old_path)
-                decision_log.append(f"  Raw artist '{raw_artist}' malformed → keeping filename '{new_filename}'")
+                decision_log.append(f"  keep filename '{new_filename}'")
             else:
                 ext = os.path.splitext(old_path)[1].lower()
-                filename_artist = sanitize(raw_artist)
-                track_str = f"{track:02d}" if track is not None else "00"
-                title_str = sanitize(title)
-                new_filename = f"{filename_artist}_{track_str}_{title_str}{ext}"
-                decision_log.append(f"  Renaming to '{new_filename}' (using raw artist)")
-
+                fa = sanitize(raw_artist)
+                ts= f"{track:02d}" if track is not None else "00"
+                ti= sanitize(title)
+                new_filename = f"{fa}_{ts}_{ti}{ext}"
+                decision_log.append(f"  renaming to '{new_filename}'")
             new_path = os.path.join(base_folder, new_filename)
             moves[old_path] = new_path
-            decision_log.append(
-                f"  → Final: '{os.path.relpath(new_path, MUSIC_ROOT)}'"
-            )
-            # Skip all other logic (no remix or album/singles checks)
+            decision_log.append(f"  → Final: {os.path.relpath(new_path, MUSIC_ROOT)}")
             continue
 
-        # At this point, count_now ≥ COMMON_ARTIST_THRESHOLD
-        # ─── 4.2) SPECIAL CASE: Album ends with “(Remixes)” ──────────────────────────
-        if album and album.strip().lower().endswith("(remixes)"):
+        if album.lower().endswith("(remixes)"):
             rcount = remix_counts.get((p_lower, album.lower()), 0)
-            decision_log.append(
-                f"  Album '{album}' has {rcount} remix-tagged tracks (threshold={REMIX_FOLDER_THRESHOLD})"
-            )
-
-            # Only force into By Artist if both remix-count AND artist-count thresholds are met
-            if rcount >= REMIX_FOLDER_THRESHOLD and count_now >= COMMON_ARTIST_THRESHOLD:
-                # Promote primary to remixer (first part of raw_artist before “/”)
-                main_artist = raw_artist.split("/", 1)[0].upper()
-                p_lower = main_artist.lower()
-                decision_log.append(
-                    f"  → Enough remixes ({rcount} ≥ {REMIX_FOLDER_THRESHOLD}) "
-                    f"AND count_now ({count_now}) ≥ {COMMON_ARTIST_THRESHOLD}; force primary = '{main_artist}'"
-                )
-                artist_folder = os.path.join(MUSIC_ROOT, "By Artist", sanitize(main_artist))
-                base_folder = os.path.join(artist_folder, sanitize(album))
-
-                # Build filename (skip normal album logic)
-                basename = os.path.basename(old_path)
+            decision_log.append(f"  Album '{album}' has {rcount} remixes (thr={REMIX_FOLDER_THRESHOLD})")
+            if rcount >= REMIX_FOLDER_THRESHOLD:
+                ma = raw_artist.split("/",1)[0].upper()
+                p_lower = ma.lower()
+                decision_log.append(f"  force remixes under '{ma}'")
+                artist_f = os.path.join(MUSIC_ROOT, "By Artist", sanitize(ma))
+                base_folder = os.path.join(artist_f, sanitize(album))
+                bn = os.path.basename(old_path)
                 if "/" in raw_artist or is_repeated(raw_artist):
-                    new_filename = basename
-                    decision_log.append(f"  Raw artist '{raw_artist}' malformed → keeping '{basename}'")
+                    nf = bn
+                    decision_log.append(f"  malformed → keep '{bn}'")
                 else:
                     ext = os.path.splitext(old_path)[1].lower()
-                    filename_artist = sanitize(raw_artist)
-                    track_str = f"{track:02d}" if track is not None else "00"
-                    title_str = sanitize(title)
-                    new_filename = f"{filename_artist}_{track_str}_{title_str}{ext}"
-                    decision_log.append(f"  Renaming to '{new_filename}' (using raw artist)")
-
-                new_path = os.path.join(base_folder, new_filename)
-                moves[old_path] = new_path
-                decision_log.append(
-                    f"  → (Remixes folder) placed under By Artist/{main_artist}/{album} "
-                    f"→ Final: '{os.path.relpath(new_path, MUSIC_ROOT)}'"
-                )
+                    fa= sanitize(raw_artist)
+                    ts= f"{track:02d}" if track is not None else "00"
+                    ti= sanitize(title)
+                    nf= f"{fa}_{ts}_{ti}{ext}"
+                    decision_log.append(f"  rename → '{nf}'")
+                new_path= os.path.join(base_folder, nf)
+                moves[old_path]= new_path
+                decision_log.append(f"  → placed in Remixes: {os.path.relpath(new_path, MUSIC_ROOT)}")
                 continue
-            else:
-                decision_log.append(
-                    f"  → Either only {rcount} remixes (< {REMIX_FOLDER_THRESHOLD}) "
-                    f"or count_now ({count_now}) < {COMMON_ARTIST_THRESHOLD}; "
-                    f"fall back to album/singles logic"
-                )
 
-        # ─── 4.3) BROAD COLLABORATOR RANKING (unchanged) ────────────────────────────
-        all_candidates = [info["primary"]] + info["collabs"]
-        counts = {artist: primary_counts.get(artist.lower(), 0) for artist in all_candidates}
-        best_artist = max(counts, key=lambda a: counts[a])
-        decision_log.append(f"  Candidates: {all_candidates}, counts: {counts}")
-        primary = best_artist.upper()
+        all_c = [info["primary"]] + info["collabs"]
+        cts = {a: global_counts.get(a.lower(),0) for a in all_c}
+        best = max(cts, key=cts.get)
+        decision_log.append(f"  candidates {all_c}, counts {cts}")
+        primary = best.upper()
         p_lower = primary.lower()
-        decision_log.append(f"  → After ranking, primary = '{primary}'")
+        artist_f= os.path.join(MUSIC_ROOT, "By Artist", sanitize(primary))
 
-        # Build “By Artist/<primary>” base path
-        artist_folder = os.path.join(MUSIC_ROOT, "By Artist", sanitize(primary))
-
-        # ─── 4.4) COMMON ARTIST: decide between “Album” vs. “Singles” ───────────────
-        # (At this point, count_now ≥ COMMON_ARTIST_THRESHOLD is guaranteed.)
-        if not album or album.strip().lower() == title.strip().lower():
-            # No album tag (or album == title) → put into “<Artist> - Singles”
-            base_folder = os.path.join(artist_folder, f"{sanitize(primary)} - Singles")
-            decision_log.append(
-                f"  Count {count_now} ≥ {COMMON_ARTIST_THRESHOLD}, no album or album=title "
-                f"→ group under '{primary} - Singles'"
-            )
+        if not album or album.strip().lower()== title.strip().lower():
+            base_folder = os.path.join(artist_f, f"{sanitize(primary)} - Singles")
+            decision_log.append(f"  singles for '{primary}'")
         else:
-            c2 = album_counts.get((p_lower, album.lower()), 0)
-            if c2 > 3:
-                # Enough tracks in this album → put into “<Artist>/<Album>”
-                base_folder = os.path.join(artist_folder, sanitize(album))
-                decision_log.append(
-                    f"  Count {count_now} ≥ {COMMON_ARTIST_THRESHOLD}, album_count={c2} > 3 "
-                    f"→ group under Album '{album}'"
-                )
+            c2= album_counts.get((p_lower, album.lower()),0)
+            if c2>3:
+                base_folder = os.path.join(artist_f, sanitize(album))
+                decision_log.append(f"  album '{album}' (count {c2}>3)")
             else:
-                # Few tracks in album → treat as a “Singles” release
-                base_folder = os.path.join(artist_folder, f"{sanitize(primary)} - Singles")
-                decision_log.append(
-                    f"  Count {count_now} ≥ {COMMON_ARTIST_THRESHOLD}, but "
-                    f"album_count={c2} ≤ 3 → group under '{primary} - Singles'"
-                )
+                base_folder = os.path.join(artist_f, f"{sanitize(primary)} - Singles")
+                decision_log.append(f"  fallback singles for '{primary}'")
 
-        # Build filename for all “common” tracks
-        basename = os.path.basename(old_path)
+        bn = os.path.basename(old_path)
         if "/" in raw_artist or is_repeated(raw_artist):
-            new_filename = basename
-            decision_log.append(f"  Raw artist '{raw_artist}' malformed → keeping '{basename}'")
+            nf = bn
+            decision_log.append(f"  malformed → keep '{bn}'")
         else:
             ext = os.path.splitext(old_path)[1].lower()
-            filename_artist = sanitize(raw_artist)
-            track_str = f"{track:02d}" if track is not None else "00"
-            title_str = sanitize(title)
-            new_filename = f"{filename_artist}_{track_str}_{title_str}{ext}"
-            decision_log.append(f"  Renaming to '{new_filename}' (using raw artist)")
+            fa= sanitize(raw_artist)
+            ts= f"{track:02d}" if track is not None else "00"
+            ti= sanitize(title)
+            nf= f"{fa}_{ts}_{ti}{ext}"
+            decision_log.append(f"  rename → '{nf}'")
 
-        new_path = os.path.join(base_folder, new_filename)
+        new_path = os.path.join(base_folder, nf)
         moves[old_path] = new_path
-        decision_log.append(
-            f"  → Final: '{os.path.relpath(new_path, MUSIC_ROOT)}'"
-        )
+        decision_log.append(f"  → Final: {os.path.relpath(new_path, MUSIC_ROOT)}")
 
-        # ─── 4.4) Build “leftover_tags” for HTML preview (optional) ───────────────
-        leftover = set(folders)
-        leftover.discard(primary)
-        if album:
-            leftover.discard(album)
-        leftover.discard(year)
+        leftover = derive_tags_from_path(old_path, MUSIC_ROOT)
         if genre:
             leftover.add(genre)
-
-        tag_index[new_path] = {
-            "leftover_tags": sorted(leftover),
-            "old_paths": sorted(folders)
-        }
+        tag_index[new_path] = {"leftover_tags": sorted(leftover),"old_paths": sorted(info.get("folder_tags", []))}
 
     log_callback("   → Destination paths determined for all files.")
     return moves, tag_index, decision_log
 
-
 # ─── B. BUILD DRY-RUN HTML ─────────────────────────────────────────────
-
 def build_dry_run_html(root_path, output_html_path, log_callback=None):
-    """
-    1) Call compute_moves_and_tag_index() to get (moves, tag_index, decision_log).
-    2) Write a dry-run HTML to output_html_path showing the proposed tree.
-    Does NOT move any files.
-    """
     if log_callback is None:
         def log_callback(msg): pass
 
