@@ -7,6 +7,10 @@ its “artist” and “title” tags, query MusicBrainz for a matching recordin
 the MB recording’s tags (genres), pick the top 3 by popularity, and write them
 back into the file’s own “genre” tag field (using Mutagen).
 
+While processing, the script prints simple progress messages like
+``[index/total] Processing <file>``. Install ``tqdm`` if you’d prefer a fancy
+progress bar instead.
+
 Produces a log file “genre_update_log.txt” summarizing each file’s result.
 
 Prerequisites:
@@ -205,19 +209,22 @@ def main():
     log_line(logfile, f"Started: {time.ctime()}")
     log_line(logfile, "--------------------------------------")
 
-    count = 0
+    all_files = []
     for dirpath, _, filenames in os.walk(folder):
         for fname in filenames:
-            ext = os.path.splitext(fname)[1].lower()
-            if ext in SUPPORTED_EXTS:
-                count += 1
-                fullpath = os.path.join(dirpath, fname)
-                print(f"[{count}] Processing: {os.path.relpath(fullpath, folder)}")
-                process_file(fullpath, logfile)
+            if os.path.splitext(fname)[1].lower() in SUPPORTED_EXTS:
+                all_files.append(os.path.join(dirpath, fname))
+
+    total = len(all_files)
+
+    for index, fullpath in enumerate(all_files, 1):
+        rel = os.path.relpath(fullpath, folder)
+        print(f"[{index}/{total}] Processing: {rel}")
+        process_file(fullpath, logfile)
 
     log_line(logfile, "--------------------------------------")
     log_line(logfile, f"Finished: {time.ctime()}")
-    log_line(logfile, f"Total files checked: {count}")
+    log_line(logfile, f"Total files checked: {total}")
     logfile.close()
     print(f"Done. Check log at: {logpath}")
 

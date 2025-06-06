@@ -1,7 +1,7 @@
 """Importer entry point.
 
 This function scans a folder of new audio files and places them into an
-existing SoundVault.  It mirrors the decision logic of the music indexer so the
+existing SoundVault. It mirrors the decision logic of the music indexer so the
 new files land in the correct ``By Artist``/``By Year`` structure.
 
 Parameters
@@ -16,14 +16,15 @@ dry_run : bool, optional
 estimate_bpm : bool, optional
     If True, attempt to fill in missing BPM information using ``librosa``.
 log_callback : callable, optional
-    Function that accepts a single string for progress logging.  If ``None`` a
+    Function that accepts a single string for progress logging. If ``None`` a
     no-op logger is used.
 
 Returns
 -------
 dict
     Summary dictionary with keys ``moved`` (number of files moved), ``html``
-    (path to the dry-run preview if generated) and ``dry_run`` (boolean).
+    (path to the dry-run preview if generated), ``dry_run`` (boolean),
+    and ``errors`` (list of any move failures).
 """
 
 import os
@@ -38,6 +39,7 @@ import music_indexer_api as idx
 
 
 def scan_and_import(vault_root, import_folder, dry_run=False, estimate_bpm=False, log_callback=None):
+    """Core logic for importing new songs into a SoundVault library."""
     if log_callback is None:
         def log_callback(msg):
             pass
@@ -47,15 +49,14 @@ def scan_and_import(vault_root, import_folder, dry_run=False, estimate_bpm=False
     if not valid:
         raise ValueError("Invalid SoundVault root:\n" + "\n".join(errors))
 
-    music_root = os.path.join(vault_root, "Music") if os.path.isdir(os.path.join(vault_root, "Music")) else vault_root
-    supported_exts = {".flac", ".m4a", ".aac", ".mp3", ".wav", ".ogg"}
+    SUPPORTED_EXTS = {".flac", ".m4a", ".aac", ".mp3", ".wav", ".ogg"}
 
-    # ─── 2) Scan import folder for audio files ───────────────────────────────
+    # ─── 2) Collect all audio files ──────────────────────────────────────────
     new_files = []
     for dirpath, _, files in os.walk(import_folder):
         for fname in files:
             ext = os.path.splitext(fname)[1].lower()
-            if ext in supported_exts:
+            if ext in SUPPORTED_EXTS:
                 new_files.append(os.path.join(dirpath, fname))
 
     if not new_files:
@@ -69,7 +70,7 @@ def scan_and_import(vault_root, import_folder, dry_run=False, estimate_bpm=False
     for path in new_files:
         tags = idx.get_tags(path)
 
-        # Extract embedded cover art hash (same logic as indexer)
+        # Extract embedded cover art hash
         cover_hash = None
         try:
             audio_file = MutagenFile(path)
@@ -106,6 +107,7 @@ def scan_and_import(vault_root, import_folder, dry_run=False, estimate_bpm=False
         file_info[path] = tags
 
     # ─── 5) Determine final destinations using indexer logic ─────────────────
+    music_root = vault_root  # Ensures temp_dir is within the vault
     temp_dir = tempfile.mkdtemp(dir=music_root, prefix="import_tmp_")
     orig_to_temp = {}
     for src in new_files:
