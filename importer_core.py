@@ -135,12 +135,29 @@ def scan_and_import(vault_root, import_folder, dry_run=False, estimate_bpm=False
     moved = 0
     errors = []
     for src, dest in import_moves.items():
+        parent_dir = os.path.dirname(dest)
+
+        # DEBUG: print out src/dest and whether parent exists
+        print(f"[DEBUG] About to move file:")
+        print(f"       src  = {src}")
+        print(f"       dest = {dest}")
+        print(f"       parent exists? {os.path.exists(parent_dir)}")
+        if not os.path.exists(parent_dir):
+            print(f"[DEBUG] → Parent doesn’t exist, creating: {parent_dir}")
+
         try:
-            os.makedirs(os.path.dirname(dest), exist_ok=True)
+            # Ensure the parent directory is created before moving
+            os.makedirs(parent_dir, exist_ok=True)
             shutil.move(src, dest)
             moved += 1
+            print(f"[DEBUG] Moved successfully!\n")
         except Exception as e:
             errors.append(f"Failed to move {src} → {dest}: {e}")
+            print(f"[DEBUG] Move failed: {e}\n")
+
+    if errors:
+        for err in errors:
+            log_callback(f"! {err}")
 
     shutil.rmtree(temp_dir, ignore_errors=True)
 
@@ -152,10 +169,6 @@ def scan_and_import(vault_root, import_folder, dry_run=False, estimate_bpm=False
                 lf.write(f"{os.path.basename(src)} → {os.path.relpath(dest, music_root)}\n")
     except Exception:
         pass
-
-    if errors:
-        for err in errors:
-            log_callback(f"! {err}")
 
     # Generate preview HTML of the final library state after import
     idx.build_dry_run_html(vault_root, preview_html, log_callback)
