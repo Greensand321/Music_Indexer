@@ -279,6 +279,7 @@ def compute_moves_and_tag_index(root_path, log_callback=None):
 
     # ─── Phase 4: Determine destination for each file (with logging) ─────────────
     log_callback("4/6: Determining destination paths for each file…")
+    tag_index = {}
     moves = {}
     decision_log = []
     index = 0
