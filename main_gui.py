@@ -5,7 +5,8 @@ from tkinter import filedialog, messagebox
 from validator import validate_soundvault_structure
 from music_indexer_api import run_full_indexer
 from importer_core import scan_and_import
-from tag_fixer import fix_tags  # AcoustID-based fixer
+from tag_fixer import fix_tags          # AcoustID-based fixer
+from sample_highlight import play_file_highlight  # Audio peak sampler
 
 CONFIG_FILE = os.path.join(os.path.dirname(__file__), "last_path.txt")
 
@@ -66,6 +67,7 @@ class SoundVaultImporterApp(tk.Tk):
         tools_menu = tk.Menu(menubar, tearoff=False)
         tools_menu.add_command(label="Regenerate Playlists", command=self.regenerate_playlists)
         tools_menu.add_command(label="Fix Tags via AcoustID", command=self.fix_tags)
+        tools_menu.add_command(label="Sample Song Highlight", command=self.sample_song_highlight)
         menubar.add_cascade(label="Tools", menu=tools_menu)
 
         # ─── Library Info ─────────────────────────────────────────────────────
@@ -74,8 +76,12 @@ class SoundVaultImporterApp(tk.Tk):
 
         tk.Button(info_frame, text="Select Library", command=self.select_library).pack(anchor="w")
         tk.Label(info_frame, textvariable=self.library_name_var).pack(anchor="w", pady=(5, 0))
-        tk.Label(info_frame, textvariable=self.library_path_var, wraplength=650, justify="left").pack(anchor="w")
-        tk.Label(info_frame, textvariable=self.library_stats_var, justify="left").pack(anchor="w", pady=(5, 0))
+        tk.Label(
+            info_frame, textvariable=self.library_path_var, wraplength=650, justify="left"
+        ).pack(anchor="w")
+        tk.Label(info_frame, textvariable=self.library_stats_var, justify="left").pack(
+            anchor="w", pady=(5, 0)
+        )
 
         # ─── Output Log ───────────────────────────────────────────────────────
         self.output = tk.Text(self, wrap="word", state="disabled", height=15)
@@ -228,6 +234,25 @@ class SoundVaultImporterApp(tk.Tk):
                                 f"Processed {summary['processed']} files\nUpdated {summary['updated']} files.")
         except Exception as e:
             messagebox.showerror("Tag Fixer Error", str(e))
+
+    def sample_song_highlight(self):
+        """Ask the user for an audio file and play its highlight."""
+        initial = load_last_path()
+        path = filedialog.askopenfilename(
+            title="Select Audio File",
+            initialdir=initial,
+            filetypes=[("Audio Files", "*.mp3 *.wav *.flac *.ogg"), ("All files", "*")],
+        )
+        if not path:
+            return
+
+        save_last_path(os.path.dirname(path))
+        try:
+            start_sec = play_file_highlight(path)
+            self._log(f"Played highlight of '{os.path.basename(path)}' starting at {start_sec:.2f}s")
+        except Exception as e:
+            messagebox.showerror("Playback failed", str(e))
+            self._log(f"✘ Playback failed for {path}: {e}")
 
     def _log(self, msg):
         self.output.configure(state="normal")
