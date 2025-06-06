@@ -10,17 +10,17 @@ from mutagen.id3 import ID3NoHeaderError
 
 # ─── CONFIGURATION ─────────────────────────────────────────────────────
 COMMON_ARTIST_THRESHOLD = 10
-REMIX_FOLDER_THRESHOLD  = 3   # minimum tracks for a “(Remixes)” album folder
+REMIX_FOLDER_THRESHOLD  = 3
 SUPPORTED_EXTS          = {".flac", ".m4a", ".aac", ".mp3", ".wav", ".ogg"}
 
 # ─── Helper: build primary_counts for the entire vault ─────────────────────
 def build_primary_counts(root_path):
     """
     Walk the entire vault (By Artist, By Year, Incoming, etc.) and
-    return a dict mapping each lowercase‐normalized artist → total file count.
+    return a dict mapping each lowercase-normalized artist → total file count.
     Falls back to filename if metadata “primary” is missing.
     """
-    counts = {}
+    counts = {}   # ← Make sure this is the FIRST line in the function
     for dirpath, _, files in os.walk(root_path):
         for fname in files:
             ext = os.path.splitext(fname)[1].lower()
@@ -29,7 +29,7 @@ def build_primary_counts(root_path):
 
             full_path = os.path.join(dirpath, fname)
             try:
-                tags    = get_tags(full_path)                 # note: get_tags is defined below
+                tags    = idx.get_tags(full_path)
                 primary = tags.get("primary", "").strip()
             except Exception:
                 primary = ""
@@ -50,12 +50,15 @@ def build_primary_counts(root_path):
 
 # ─── Shared Utility Functions ─────────────────────────────────────────
 def sanitize(name: str) -> str:
-    if name is None:
-        return "Unknown"
     invalid = r'<>:"/\\|?*'
-    cleaned = "".join(c for c in name if c not in invalid).strip()
-    return cleaned or "Unknown"
+    return "".join(c for c in (name or "Unknown") if c not in invalid).strip() or "Unknown"
 
+# ─── Then follows your main compute_moves_and_tag_index() definition ───────
+def compute_moves_and_tag_index(root_path, log_callback=None):
+    # Phase 0: Pre-scan
+    global_counts = build_primary_counts(root_path)
+    log_callback(f"   → Pre-scan complete: found {len(global_counts)} unique artists")
+    
 def collapse_repeats(name: str) -> str:
     """
     If name is something like 'DROELOEDROELOE', collapse to 'DROELOE'.
