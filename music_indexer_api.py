@@ -307,11 +307,15 @@ def compute_moves_and_tag_index(root_path, log_callback=None):
         if album and album.strip().lower().endswith("(remixes)"):
             rcount = remix_counts.get((p_lower, album.lower()), 0)
             decision_log.append(f"  Album '{album}' has {rcount} remix‐tagged tracks (threshold={REMIX_FOLDER_THRESHOLD})")
-            if rcount >= REMIX_FOLDER_THRESHOLD:
+            # Only force into By Artist if artist_count (count_now) is already ≥ COMMON_ARTIST_THRESHOLD
+            if rcount >= REMIX_FOLDER_THRESHOLD and count_now >= COMMON_ARTIST_THRESHOLD:
                 # Force primary to the first segment of raw_artist (before “/”)
                 main_artist = raw_artist.split("/", 1)[0].upper()
                 p_lower = main_artist.lower()
-                decision_log.append(f"  → Enough remixes ({rcount} ≥ {REMIX_FOLDER_THRESHOLD}); force primary = '{main_artist}'")
+                decision_log.append(
+                    f"  → Enough remixes ({rcount} ≥ {REMIX_FOLDER_THRESHOLD}) AND count_now ({count_now}) ≥ {COMMON_ARTIST_THRESHOLD}; "
+                    f"force primary = '{main_artist}'"
+                )
                 artist_folder = os.path.join(MUSIC_ROOT, "By Artist", sanitize(main_artist))
                 base_folder = os.path.join(artist_folder, sanitize(album))
 
@@ -336,7 +340,7 @@ def compute_moves_and_tag_index(root_path, log_callback=None):
                 continue
             else:
                 decision_log.append(
-                    f"  → Only {rcount} remixes (< {REMIX_FOLDER_THRESHOLD}); treat as singles/year."
+                    f"  → Either only {rcount} remixes (< {REMIX_FOLDER_THRESHOLD}) or count_now ({count_now}) < {COMMON_ARTIST_THRESHOLD}; treat as singles/year."
                 )
 
         # ─── 4.0) BROAD COLLABORATOR RANKING ───────────────────────────────────
