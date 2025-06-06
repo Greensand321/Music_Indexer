@@ -1,51 +1,32 @@
 # Music Indexer / SoundVault
 
-This project contains utilities for organizing and tagging music files. The programs rely on the
-[mutagen](https://mutagen.readthedocs.io/) library to read and write audio metadata and
-[musicbrainzngs](https://musicbrainzngs.readthedocs.io/) to query MusicBrainz.
+This project contains utilities and a GUI for organizing, tagging, and managing music files. Under the hood, it uses:
+
+- [`mutagen`](https://mutagen.readthedocs.io/) to read/write audio metadata  
+- [`musicbrainzngs`](https://musicbrainzngs.readthedocs.io/) to query MusicBrainz for tags  
+- [`pydub`](https://github.com/jiaaro/pydub) + FFmpeg for audio previewing (“Sample Song Highlight”)  
+- [`pyacoustid`](https://github.com/beetbox/pyacoustid) for AcoustID-based tag fixing  
+- [`librosa`](https://librosa.org/) (optional) for BPM estimation  
+
+## Prerequisites
+
+1. **Python 3.10 – 3.12** (Python 3.13 lacks `audioop`, so “Sample Song Highlight” will be disabled)  
+2. **FFmpeg** on your PATH (for `pydub` to work)  
+   - On Windows, you can install via:
+     - **Winget**:  
+       ```powershell
+       winget install "FFmpeg (Essentials Build)"
+       ```
+     - or download an Essentials build from https://www.gyan.dev/ffmpeg/builds/, unzip, and add its `bin\` folder to your system PATH.  
+   - Verify with:  
+     ```bash
+     ffmpeg -version
+     ```
+3. **Git** (to clone/pull the repository)
 
 ## Installation
 
-Install the Python dependencies in your environment:
-
-```bash
-pip install mutagen musicbrainzngs
-```
-
-## Starting the GUI
-
-Navigate to the project folder and run:
-
-```bash
-python main_gui.py
-```
-
-A simple window will open that lets you choose your SoundVault folder and run the importer.
-
-## Recommended folder layout
-
-The HTML documentation proposes collecting all tools under a single `soundvault/` directory.
-The structure looks like:
-
-```
-soundvault/
-  indexer/
-    music_indexer_api.py
-  html_utils/
-    folder_to_html.py
-    folder_to_html_with_genre.py
-    list_genres.py
-    generate_library_index.py
-  genre_updater.py
-  playlist_generator.py  (future)
-  soundvault.py         (CLI driver)
-  requirements.txt
-  docs/
-    project_documentation.html
-    part2_project_documentation.html (if split)
-    README.md
-    ...
-```
-
-This repository currently contains the early versions of these scripts along with the project
-documentation.
+1. **Clone this repository** (if you haven’t already):
+   ```bash
+   git clone https://github.com/<your-username>/Music_Indexer.git
+   cd Music_Indexer
