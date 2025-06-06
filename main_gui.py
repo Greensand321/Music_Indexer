@@ -4,6 +4,7 @@ import os
 import tkinter as tk
 from tkinter import filedialog, messagebox
 from validator import validate_soundvault_structure
+from sample_highlight import play_file_highlight
 
 # Import the indexer API
 from music_indexer_api import run_full_indexer
@@ -54,6 +55,7 @@ class SoundVaultImporterApp(tk.Tk):
         # ─── Tools Menu ────────────────────────────────────────────────
         tools_menu = tk.Menu(menubar, tearoff=False)
         tools_menu.add_command(label="Regenerate Playlists", command=self.regenerate_playlists)
+        tools_menu.add_command(label="Sample Song Highlight", command=self.sample_song_highlight)
         menubar.add_cascade(label="Tools", menu=tools_menu)
 
         # A main text area for logging
@@ -158,6 +160,25 @@ class SoundVaultImporterApp(tk.Tk):
         save_last_path(chosen)
         messagebox.showinfo("Regenerate Playlists", f"[stub] Would regenerate playlists in:\n{chosen}")
         self._log(f"[stub] Regenerate Playlists → {chosen}")
+
+    def sample_song_highlight(self):
+        """Ask the user for an audio file and play its highlight."""
+        initial = load_last_path()
+        path = filedialog.askopenfilename(
+            title="Select Audio File",
+            initialdir=initial,
+            filetypes=[("Audio Files", "*.mp3 *.wav *.flac *.ogg"), ("All files", "*")],
+        )
+        if not path:
+            return
+
+        save_last_path(os.path.dirname(path))
+        try:
+            start_sec = play_file_highlight(path)
+            self._log(f"Played highlight of '{os.path.basename(path)}' starting at {start_sec:.2f}s")
+        except Exception as e:
+            messagebox.showerror("Playback failed", str(e))
+            self._log(f"✘ Playback failed for {path}: {e}")
 
     def _log(self, msg):
         self.output.configure(state="normal")
