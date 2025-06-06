@@ -1,0 +1,4 @@
+mutagen
+pydub
+pyacoustid
+librosa
