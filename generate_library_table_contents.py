@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-generate_library_index.py
+generate_library_table_contents.py
 
 Pops up a folder picker, scans for audio files (including .ogg), reads tags
 (artist, title, album, year, track, genre), and writes a single HTML file

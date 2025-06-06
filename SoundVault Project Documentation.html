@@ -582,13 +582,13 @@ if __name__ == "__main__":
 
 <hr>
 
-<h3>2.6 Library Index Generator (<code>generate_library_index.py</code>)</h3>
+<h3>2.6 Library Index Generator (<code>generate_library_table_contents.py</code>)</h3>
 <p>Scans a folder (including <code>.ogg</code>) for audio files, extracts tags (artist, title, album, year, track, genres), and writes a single HTML table (<code>library_index.html</code>) for rapid review and reference. You can re-run it after adding new files to see only updated entries.</p>
 
 <pre><code>
 #!/usr/bin/env python3
 """
-generate_library_index.py
+generate_library_table_contents.py
 
 Folder picker → scan audio files (.mp3, .flac, .ogg, etc.) via Mutagen → build table:
 Path | Artist | Title | Album | Year | Track | Genres
@@ -721,7 +721,7 @@ if __name__ == "__main__":
   </li>
   <li><strong>Unique Genre Lister</strong>: <code>list_genres.py</code> creates <code>genres.html</code> showing all distinct raw genre tags in one place.</li>
   <li><strong>Genre Updater</strong>: <code>update_genres.py</code> connects to MusicBrainz, pulls top 3 tags per track, and writes them into files—skipping files that already have ≥ 2 genres.</li>
-  <li><strong>Library Index</strong>: <code>generate_library_index.py</code> builds <code>library_index.html</code>, a table listing path, artist, title, album, year, track, and genre(s) for every audio file. Useful for quick review.</li>
+  <li><strong>Library Index</strong>: <code>generate_library_table_contents.py</code> builds <code>library_index.html</code>, a table listing path, artist, title, album, year, track, and genre(s) for every audio file. Useful for quick review.</li>
 </ul>
 
 <hr>
@@ -733,7 +733,7 @@ if __name__ == "__main__":
     <ul>
       <li>Implement a <code>last_indexed.txt</code> timestamp or a simple SQLite/JSON database to track which files have already been processed. Then:
         <ul>
-          <li><code>generate_library_index.py</code> will only scan new/modified files.</li>
+          <li><code>generate_library_table_contents.py</code> will only scan new/modified files.</li>
           <li><code>update_genres.py</code> will only query MusicBrainz for the new/modified subset.</li>
         </ul>
       </li>
@@ -836,7 +836,7 @@ soundvault/
     folder_to_html.py
     folder_to_html_with_genre.py
     list_genres.py
-    generate_library_index.py
+    generate_library_table_contents.py
   genre_updater.py
   playlist_generator.py  (future)
   soundvault.py         (CLI driver)
