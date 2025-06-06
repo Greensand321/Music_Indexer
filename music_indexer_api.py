@@ -8,39 +8,37 @@ from collections import defaultdict
 from mutagen import File as MutagenFile
 from mutagen.id3 import ID3NoHeaderError
 
+# ─── Global County Function ─────────────────────────────────────────
+def build_primary_counts(vault_root):
+        counts = {}
+        for dirpath, _, files in os.walk(vault_root):
+            for fname in files:
+                ext = os.path.splitext(fname)[1].lower()
+                if ext not in SUPPORTED_EXTS:
+                    continue
+    
+                full_path = os.path.join(dirpath, fname)
+                try:
+                    tags = idx.get_tags(full_path)
+                    primary = tags.get("primary", "").strip()
+                except:
+                    primary = ""
+    
+                if not primary:
+                    name_only = os.path.splitext(fname)[0]
+                    if "_" in name_only:
+                        primary = name_only.split("_", 1)[0]
+                    elif " - " in name_only:
+                        primary = name_only.split(" - ", 1)[0]
+                    else:
+                        primary = name_only
+    
+                p_lower = primary.lower()
+                counts[p_lower] = counts.get(p_lower, 0) + 1
+
 # ─── CONFIGURATION ─────────────────────────────────────────────────────
 COMMON_ARTIST_THRESHOLD = 10
 REMIX_FOLDER_THRESHOLD = 3   # minimum number of tracks for a “(Remixes)” album folder
-
-# ─── Global County Function ─────────────────────────────────────────
-def build_primary_counts(vault_root):
-    counts = {}
-    for dirpath, _, files in os.walk(vault_root):
-        for fname in files:
-            ext = os.path.splitext(fname)[1].lower()
-            if ext not in SUPPORTED_EXTS:
-                continue
-
-            full_path = os.path.join(dirpath, fname)
-            try:
-                tags = idx.get_tags(full_path)
-                primary = tags.get("primary", "").strip()
-            except:
-                primary = ""
-
-            if not primary:
-                name_only = os.path.splitext(fname)[0]
-                if "_" in name_only:
-                    primary = name_only.split("_", 1)[0]
-                elif " - " in name_only:
-                    primary = name_only.split(" - ", 1)[0]
-                else:
-                    primary = name_only
-
-            p_lower = primary.lower()
-            counts[p_lower] = counts.get(p_lower, 0) + 1
-
-    return counts
 
 # ─── Shared Utility Functions ─────────────────────────────────────────
 def sanitize(name: str) -> str:
@@ -183,6 +181,7 @@ def compute_moves_and_tag_index(root_path, log_callback=None):
 
     SUPPORTED_EXTS = {".flac", ".m4a", ".aac", ".mp3", ".wav", ".ogg"}
 
+    return counts
     # ─── Phase 1: Scan for audio files ─────────────────────────────────────────
     global_counts = build_primary_counts(vault_root)
     log_callback(f"   → Pre‐scan complete: found {len(global_counts)} unique artists")
