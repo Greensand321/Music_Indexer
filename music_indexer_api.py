@@ -53,12 +53,6 @@ def sanitize(name: str) -> str:
     invalid = r'<>:"/\\|?*'
     return "".join(c for c in (name or "Unknown") if c not in invalid).strip() or "Unknown"
 
-# ─── Then follows your main compute_moves_and_tag_index() definition ───────
-def compute_moves_and_tag_index(root_path, log_callback=None):
-    # Phase 0: Pre-scan
-    global_counts = build_primary_counts(root_path)
-    log_callback(f"   → Pre-scan complete: found {len(global_counts)} unique artists")
-    
 def collapse_repeats(name: str) -> str:
     """
     If name is something like 'DROELOEDROELOE', collapse to 'DROELOE'.
@@ -192,9 +186,8 @@ def compute_moves_and_tag_index(root_path, log_callback=None):
 
     SUPPORTED_EXTS = {".flac", ".m4a", ".aac", ".mp3", ".wav", ".ogg"}
 
-    return counts
     # ─── Phase 1: Scan for audio files ─────────────────────────────────────────
-    global_counts = build_primary_counts(vault_root)
+    global_counts = build_primary_counts(root_path)
     log_callback(f"   → Pre‐scan complete: found {len(global_counts)} unique artists")
     all_audio = []
     for dirpath, _, files in os.walk(MUSIC_ROOT):
