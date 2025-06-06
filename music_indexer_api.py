@@ -29,17 +29,20 @@ def build_primary_counts(root_path):
 
             path = os.path.join(dirpath, fname)
             tags = get_tags(path)
-            primary = (tags.get("artist") or "").strip()
 
-            if not primary:
+            # Normalize artist identically to Phase 4
+            raw = (tags.get("artist") or "").strip()
+
+            if not raw:
                 name_only = os.path.splitext(fname)[0]
                 if "_" in name_only:
-                    primary = name_only.split("_", 1)[0]
+                    raw = name_only.split("_", 1)[0]
                 elif " - " in name_only:
-                    primary = name_only.split(" - ", 1)[0]
+                    raw = name_only.split(" - ", 1)[0]
                 else:
-                    primary = name_only
+                    raw = name_only
 
+            primary, _ = extract_primary_and_collabs(raw)
             p_lower = primary.lower()
             counts[p_lower] = counts.get(p_lower, 0) + 1
 
@@ -186,6 +189,8 @@ def compute_moves_and_tag_index(root_path, log_callback=None):
     # --- Phase 0: Pre-scan entire vault (under MUSIC_ROOT) ---
     global_counts = build_primary_counts(MUSIC_ROOT)
     log_callback(f"   → Pre-scan: found {len(global_counts)} unique artists")
+    log_callback(f"   → DEBUG: MUSIC_ROOT = {MUSIC_ROOT}")
+    log_callback(f"   → DEBUG: droeloe count = {global_counts.get('droeloe', 0)}")
 
     # --- Phase 1: Scan for audio files ---
     all_audio = []
@@ -332,11 +337,14 @@ def compute_moves_and_tag_index(root_path, log_callback=None):
         year       = info["year"] or "Unknown"
         track      = info["track"]
         folders    = info["folder_tags"]
-        p_lower    = info["primary"]  # already lowercase key
 
-        # Lookup how many total tracks this primary artist has
+        # Normalize again for consistent global lookup
+        primary_norm, _ = extract_primary_and_collabs(raw_artist)
+        p_lower = primary_norm.lower()
+
+        # Lookup how many total tracks this artist has across the entire vault
         count_now = global_counts.get(p_lower, 0)
-        decision_log.append(f"Song: {raw_artist} – {title} ({album}) → primary_counts[{raw_artist}] = {count_now}")
+        decision_log.append(f"Song: {raw_artist} – {title} ({album}) → global_counts[{raw_artist}] = {count_now}")
 
         # ─── 4.1) EARLY BAIL-OUT: “Rare” artists go straight to By Year ─────────────────
         if count_now < COMMON_ARTIST_THRESHOLD:
