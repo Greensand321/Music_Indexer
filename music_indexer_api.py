@@ -9,7 +9,7 @@ from mutagen import File as MutagenFile
 from mutagen.id3 import ID3NoHeaderError
 
 # ─── CONFIGURATION ─────────────────────────────────────────────────────
-COMMON_ARTIST_THRESHOLD = 5
+COMMON_ARTIST_THRESHOLD = 10
 REMIX_FOLDER_THRESHOLD = 3   # minimum number of tracks for a “(Remixes)” album folder
 
 # ─── Shared Utility Functions ─────────────────────────────────────────
