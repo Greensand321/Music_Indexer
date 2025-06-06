@@ -23,10 +23,3 @@ This project contains utilities and a GUI for organizing, tagging, and managing 
      ffmpeg -version
      ```
 3. **Git** (to clone/pull the repository)
-
-## Installation
-
-1. **Clone this repository** (if you haven’t already):
-   ```bash
-   git clone https://github.com/<your-username>/Music_Indexer.git
-   cd Music_Indexer
