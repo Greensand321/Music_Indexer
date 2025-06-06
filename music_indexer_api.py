@@ -29,17 +29,20 @@ def build_primary_counts(root_path):
 
             path = os.path.join(dirpath, fname)
             tags = get_tags(path)
-            primary = (tags.get("artist") or "").strip()
 
-            if not primary:
+            # Normalize artist identically to Phase 4
+            raw = (tags.get("artist") or "").strip()
+
+            if not raw:
                 name_only = os.path.splitext(fname)[0]
                 if "_" in name_only:
-                    primary = name_only.split("_", 1)[0]
+                    raw = name_only.split("_", 1)[0]
                 elif " - " in name_only:
-                    primary = name_only.split(" - ", 1)[0]
+                    raw = name_only.split(" - ", 1)[0]
                 else:
-                    primary = name_only
+                    raw = name_only
 
+            primary, _ = extract_primary_and_collabs(raw)
             p_lower = primary.lower()
             counts[p_lower] = counts.get(p_lower, 0) + 1
 
@@ -162,7 +165,6 @@ def compute_moves_and_tag_index(root_path, log_callback=None):
     2) Scan for all audio files under MUSIC_ROOT.
     3) Deduplicate by (primary, title, album) and delete lower-priority duplicates.
     4) Read metadata into `songs` dict, build:
-       - primary_counts: how many kept files per artist
        - album_counts: how many genuine (non-remix) tracks per (artist, album)
        - remix_counts: how many remix‐tagged tracks per (artist, album)
        - cover_counts: how many files share each embedded cover
@@ -186,6 +188,8 @@ def compute_moves_and_tag_index(root_path, log_callback=None):
     # --- Phase 0: Pre-scan entire vault (under MUSIC_ROOT) ---
     global_counts = build_primary_counts(MUSIC_ROOT)
     log_callback(f"   → Pre-scan: found {len(global_counts)} unique artists")
+    log_callback(f"   → DEBUG: MUSIC_ROOT = {MUSIC_ROOT}")
+    log_callback(f"   → DEBUG: droeloe count = {global_counts.get('droeloe', 0)}")
 
     # --- Phase 1: Scan for audio files ---
     all_audio = []
@@ -235,7 +239,6 @@ def compute_moves_and_tag_index(root_path, log_callback=None):
     # ─── Phase 3: Read metadata & build counters ─────────────────────────────────
     log_callback("3/6: Reading metadata and building counters…")
     songs = {}
-    primary_counts = defaultdict(int)
     album_counts   = defaultdict(int)
     remix_counts   = defaultdict(int)
     cover_counts   = defaultdict(int)
@@ -259,18 +262,15 @@ def compute_moves_and_tag_index(root_path, log_callback=None):
         primary = primary.upper()
         p_lower = primary.lower()
 
-        # 2) Count how often each artist appears
-        primary_counts[p_lower] += 1
-
-        # 3) album_counts for genuine (non-remix) tracks under each (artist, album)
+        # 2) album_counts for genuine (non-remix) tracks under each (artist, album)
         if album and "remix" not in title.lower() and album.strip().lower() != title.strip().lower():
             album_counts[(p_lower, album.lower())] += 1
 
-        # 4) remix_counts for tracks whose album tag contains "remix"
+        # 3) remix_counts for tracks whose album tag contains "remix"
         if album and "remix" in album.lower():
             remix_counts[(p_lower, album.lower())] += 1
 
-        # 5) EXTRACT EMBEDDED COVER DATA → compute SHA-1 and store first 10 hex digits
+        # 4) EXTRACT EMBEDDED COVER DATA → compute SHA-1 and store first 10 hex digits
         cover_hash = None
         try:
             audio_file = MutagenFile(fullpath)
@@ -319,7 +319,7 @@ def compute_moves_and_tag_index(root_path, log_callback=None):
     total = len(songs)
 
     # Precompute any necessary lookups from songs data
-    # (primary_counts, album_counts, remix_counts, etc. were built in Phase 3)
+    # (album_counts, remix_counts, etc. were built in Phase 3)
 
     for old_path, info in songs.items():
         index += 1
@@ -332,11 +332,14 @@ def compute_moves_and_tag_index(root_path, log_callback=None):
         year       = info["year"] or "Unknown"
         track      = info["track"]
         folders    = info["folder_tags"]
-        p_lower    = info["primary"]  # already lowercase key
 
-        # Lookup how many total tracks this primary artist has
+        # Normalize again for consistent global lookup
+        primary_norm, _ = extract_primary_and_collabs(raw_artist)
+        p_lower = primary_norm.lower()
+
+        # Lookup how many total tracks this artist has across the entire vault
         count_now = global_counts.get(p_lower, 0)
-        decision_log.append(f"Song: {raw_artist} – {title} ({album}) → primary_counts[{raw_artist}] = {count_now}")
+        decision_log.append(f"Song: {raw_artist} – {title} ({album}) → global_counts[{raw_artist}] = {count_now}")
 
         # ─── 4.1) EARLY BAIL-OUT: “Rare” artists go straight to By Year ─────────────────
         if count_now < COMMON_ARTIST_THRESHOLD:
@@ -414,7 +417,7 @@ def compute_moves_and_tag_index(root_path, log_callback=None):
 
         # ─── 4.3) BROAD COLLABORATOR RANKING (unchanged) ────────────────────────────
         all_candidates = [info["primary"]] + info["collabs"]
-        counts = {artist: primary_counts.get(artist.lower(), 0) for artist in all_candidates}
+        counts = {artist: global_counts.get(artist.lower(), 0) for artist in all_candidates}
         best_artist = max(counts, key=lambda a: counts[a])
         decision_log.append(f"  Candidates: {all_candidates}, counts: {counts}")
         primary = best_artist.upper()
