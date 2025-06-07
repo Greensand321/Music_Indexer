@@ -376,6 +376,9 @@ class SoundVaultImporterApp(tk.Tk):
         self.after(100, poll_queue)
 
     def show_proposals_dialog(self, diff_proposals, no_diff_files):
+        # Reset from any prior invocation
+        self._proceed = False
+        self._selected = []
         dlg = tk.Toplevel(self)
         dlg.title("Review Tag Fix Proposals")
         dlg.grab_set()
