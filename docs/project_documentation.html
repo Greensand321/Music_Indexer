@@ -586,7 +586,7 @@ if __name__ == "__main__":
   <li><strong>collect_tag_proposals(target, log_callback)</strong>: fingerprints each file, returns a list of proposals <code>{file, old_artist, old_title, new_artist, new_title, score}</code> for all matches ≥ MIN_INTERACTIVE_SCORE.</li>
   <li><strong>apply_tag_proposals(proposals, log_callback)</strong>: writes only the confirmed subset of tags back into files.</li>
   <li>CLI wrapper still supports <code>--interactive</code>, falling back to per-file Y/N prompts.</li>
-  <li>Dependencies: <code>acoustid</code> + Chromaprint (<code>fpcalc</code>), <code>mutagen</code>.</li>
+  <li>Dependencies: <code>pyacoustid</code> (module <code>acoustid</code>) + Chromaprint (<code>fpcalc</code>), <code>mutagen</code>.</li>
 </ul>
 
 
@@ -802,9 +802,10 @@ if __name__ == "__main__":
       <li>Provide a <code>requirements.txt</code>:
           <pre><code>mutagen
 musicbrainzngs
-acoustid        # for tag_fixer
-pydub           # for sample_highlight (if used)</code></pre>
-          ffmpeg (fpcalc) must be installed and on PATH.
+pydub
+pyacoustid   # provides the acoustid module
+librosa      # optional, for BPM estimation</code></pre>
+          FFmpeg and Chromaprint's fpcalc must be installed and on PATH.
       <li>Create a single-entry point (e.g. <code>soundvault.py</code>) that imports modules:
         <ul>
           <li><code>indexer</code>, <code>genre_updater</code>, <code>library_indexer</code>, <code>playlist_generator</code>, and <code>html_utils</code>.</li>

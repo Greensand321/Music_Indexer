@@ -1,4 +1,5 @@
 mutagen
+musicbrainzngs
 pydub
 pyacoustid
-librosa
+librosa  # optional, for BPM estimation

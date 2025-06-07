@@ -11,15 +11,16 @@ This project contains utilities and a GUI for organizing, tagging, and managing 
 ## Prerequisites
 
 1. **Python 3.10 – 3.12** (Python 3.13 lacks `audioop`, so “Sample Song Highlight” will be disabled)  
-2. **FFmpeg** on your PATH (for `pydub` to work)  
+2. **FFmpeg** on your PATH (for `pydub` to work)
    - On Windows, you can install via:
-     - **Winget**:  
+     - **Winget**:
        ```powershell
        winget install "FFmpeg (Essentials Build)"
        ```
-     - or download an Essentials build from https://www.gyan.dev/ffmpeg/builds/, unzip, and add its `bin\` folder to your system PATH.  
-   - Verify with:  
+     - or download an Essentials build from https://www.gyan.dev/ffmpeg/builds/, unzip, and add its `bin\` folder to your system PATH.
+   - Verify with:
      ```bash
      ffmpeg -version
      ```
-3. **Git** (to clone/pull the repository)
+3. **Chromaprint's `fpcalc`** on your PATH (for the tag fixer)
+4. **Git** (to clone/pull the repository)
