@@ -314,48 +314,92 @@ class SoundVaultImporterApp(tk.Tk):
         dlg.title("Review Tag Fix Proposals")
         dlg.grab_set()
 
-        cols = ("File", "Score", "Old Artist", "New Artist", "Old Title", "New Title", "Apply")
-        tv = ttk.Treeview(dlg, columns=cols, show="headings", height=15)
+        cols = ("File", "Score", "Old Artist", "New Artist", "Old Title", "New Title")
+
+        container = tk.Frame(dlg)
+        container.pack(fill="both", expand=True, padx=10, pady=10)
+
+        vsb = ttk.Scrollbar(container, orient="vertical")
+        vsb.pack(side="right", fill="y")
+        hsb = ttk.Scrollbar(container, orient="horizontal")
+        hsb.pack(side="bottom", fill="x")
+
+        tv = ttk.Treeview(
+            container,
+            columns=cols,
+            show="headings",
+            yscrollcommand=vsb.set,
+            xscrollcommand=hsb.set,
+            selectmode="extended",
+        )
+        vsb.config(command=tv.yview)
+        hsb.config(command=tv.xview)
+        tv.pack(fill="both", expand=True)
+
+        def treeview_sort_column(tv, col, reverse=False):
+            data = [(tv.set(k, col), k) for k in tv.get_children("")]
+            try:
+                data = [(float(v), k) for v, k in data]
+            except ValueError:
+                pass
+            data.sort(reverse=reverse)
+            for idx, (_, k) in enumerate(data):
+                tv.move(k, "", idx)
+            tv.heading(col, command=lambda: treeview_sort_column(tv, col, not reverse))
+
         for c in cols:
-            tv.heading(c, text=c)
+            tv.heading(c, text=c, command=lambda _c=c: treeview_sort_column(tv, _c, False))
             tv.column(c, width=100, anchor="w")
         tv.column("File", width=300)
-        tv.column("Apply", width=50, anchor="center")
 
-        checks = {}
-        for p in proposals:
-            iid = tv.insert("", "end", values=(
-                p["file"],
-                f"{p['score']:.2f}",
-                p["old_artist"] or "",
-                p["new_artist"],
-                p["old_title"] or "",
-                p["new_title"],
-                ""
-            ))
-            var = tk.BooleanVar(value=True)
-            checks[iid] = var
+        tv.tag_configure("perfect", background="white")
+        tv.tag_configure("changed", background="#fff8c6")
 
-        tv.pack(fill="both", expand=True, padx=10, pady=10)
+        iid_to_index = {}
+        for idx, p in enumerate(proposals):
+            row_tag = "perfect" if (p["old_artist"] == p["new_artist"] and p["old_title"] == p["new_title"]) else "changed"
+            iid = tv.insert(
+                "",
+                "end",
+                values=(
+                    p["file"],
+                    f"{p['score']:.2f}",
+                    p["old_artist"] or "",
+                    p["new_artist"],
+                    p["old_title"] or "",
+                    p["new_title"],
+                ),
+                tags=(row_tag,),
+            )
+            iid_to_index[iid] = idx
 
-        def place_checks(event=None):
-            for iid, var in checks.items():
-                bbox = tv.bbox(iid, column="Apply")
-                if bbox:
-                    x, y, width, height = bbox
-                    chk = tk.Checkbutton(tv, variable=var, width=0)
-                    tv.create_window(x + width//2, y + height//2, window=chk, anchor="center")
-        tv.bind("<Configure>", place_checks)
-        tv.bind("<Expose>", place_checks)
+        def select_all(event):
+            tv.selection_set(tv.get_children(""))
+            return "break"
+
+        tv.bind("<Control-a>", select_all)
+
+        sel_label = tk.Label(dlg, text="Selected: 0")
+        sel_label.pack(anchor="w", padx=10)
+
+        def update_selection_count(event=None):
+            sel_label.config(text=f"Selected: {len(tv.selection())}")
+
+        tv.bind("<<TreeviewSelect>>", update_selection_count)
+
+        def on_apply():
+            selected = [proposals[iid_to_index[iid]] for iid in tv.selection()]
+            proposals[:] = selected
+            dlg.destroy()
+            setattr(self, "_proceed", True)
 
         btn_frame = tk.Frame(dlg)
-        tk.Button(btn_frame, text="Apply", command=lambda: dlg.destroy() or setattr(self, "_proceed", True)).pack(side="left", padx=5)
-        tk.Button(btn_frame, text="Cancel", command=lambda: dlg.destroy()).pack(side="left", padx=5)
-        btn_frame.pack(pady=5)
+        tk.Button(btn_frame, text="Apply Selection", command=on_apply).pack(side="left", padx=5)
+        tk.Button(btn_frame, text="Cancel", command=dlg.destroy).pack(side="left", padx=5)
+        btn_frame.pack(pady=10)
 
+        update_selection_count()
         dlg.wait_window()
-        apply_list = [proposals[i] for i, p in enumerate(proposals) if checks[list(checks.keys())[i]].get()]
-        proposals[:] = apply_list
         return bool(getattr(self, "_proceed", False))
 
     def sample_song_highlight(self):
