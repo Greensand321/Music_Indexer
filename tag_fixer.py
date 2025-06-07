@@ -44,7 +44,7 @@ def query_acoustid(path, log_callback):
     Returns dict(title, artist, score) for the best candidate, or None.
     """
     try:
-        status, results = acoustid.match(ACOUSTID_API_KEY, path)
+        results = acoustid.match(ACOUSTID_API_KEY, path)
         if not results:
             log_callback("  No matches at all")
             return None
