@@ -215,7 +215,13 @@ def collect_tag_proposals(
             score=score,
         )
 
-        if old_artist == entry.new_artist and old_title == entry.new_title:
+        all_match = (
+            entry.old_artist == entry.new_artist
+            and entry.old_title == entry.new_title
+            and entry.old_album == entry.new_album
+            and sorted(entry.old_genres or []) == sorted(entry.new_genres or [])
+        )
+        if all_match:
             no_diff.append(entry)
         else:
             diff.append(entry)

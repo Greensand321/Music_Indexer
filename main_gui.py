@@ -469,7 +469,13 @@ class SoundVaultImporterApp(tk.Tk):
         all_rows = sorted(diff_proposals, key=lambda p: p.score, reverse=True) + list(no_diff_files)
         iid_to_prop = {}
         for p in all_rows:
-            row_tag = "perfect" if (p.old_artist == p.new_artist and p.old_title == p.new_title) else "changed"
+            all_same = (
+                p.old_artist == p.new_artist
+                and p.old_title == p.new_title
+                and p.old_album == p.new_album
+                and sorted(p.old_genres or []) == sorted(p.new_genres or [])
+            )
+            row_tag = "perfect" if all_same else "changed"
             iid = tv.insert(
                 "",
                 "end",
