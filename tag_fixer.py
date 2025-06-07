@@ -173,14 +173,18 @@ def collect_tag_proposals(
 
         log_callback(f"Fingerprinting {f}")
         result = query_acoustid(f, log_callback)
-        if progress_callback:
-            progress_callback(idx)
         if not result:
+            if progress_callback:
+                progress_callback(idx)
             continue
 
         score = result["score"]
         if not show_all and score < MIN_INTERACTIVE_SCORE:
+            if progress_callback:
+                progress_callback(idx)
             continue
+        if progress_callback:
+            progress_callback(idx)
 
         mb_album = None
         mb_genres = []

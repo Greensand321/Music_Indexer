@@ -377,7 +377,7 @@ class SoundVaultImporterApp(tk.Tk):
                 filtered,
                 log_callback=lambda m: None,
                 progress_callback=lambda idx: q.put(("progress", idx)),
-                show_all=(self.show_all or show_all),
+                show_all=show_all,
             )
             q.put(("done", (diff_props, no_diff)))
 
