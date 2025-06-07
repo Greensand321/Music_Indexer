@@ -151,6 +151,8 @@ def collect_tag_proposals(
     files: Iterable[str],
     log_callback: Callable[[str], None] | None = None,
     progress_callback: Callable[[int], None] | None = None,
+    *,
+    show_all: bool = False,
 ) -> Tuple[List[TagProposal], List[TagProposal]]:
     """Return (diff_proposals, no_diff_files) for the given ``files``."""
     if log_callback is None:
@@ -176,7 +178,7 @@ def collect_tag_proposals(
             continue
 
         score = result["score"]
-        if score < MIN_INTERACTIVE_SCORE:
+        if not show_all and score < MIN_INTERACTIVE_SCORE:
             continue
 
         mb_album = None
