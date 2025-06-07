@@ -521,8 +521,8 @@ class SoundVaultImporterApp(tk.Tk):
                     p.new_title or "",
                     p.old_album or "",
                     p.new_album or "",
-                    ", ".join(p.old_genres),
-                    ", ".join(p.new_genres),
+                    "; ".join(p.old_genres or []),
+                    "; ".join(p.new_genres or []),
                 ),
                 tags=(row_tag,),
             )

@@ -122,7 +122,7 @@ def update_tags(path: str, proposal: TagProposal, fields: List[str], log_callbac
                 merged.append(g)
                 seen.add(g)
         if merged != existing:
-            audio["genre"] = merged
+            audio["genre"] = ["; ".join(merged)]
             changed = True
     if changed:
         try:
