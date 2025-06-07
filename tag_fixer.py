@@ -3,9 +3,12 @@ import sys
 import acoustid
 from mutagen import File as MutagenFile
 
-API_KEY = os.environ.get("ACOUSTID_API_KEY")
+# AcoustID credentials and client identification
+ACOUSTID_API_KEY = "eBOqCZhyAx"
+ACOUSTID_APP_NAME = "SoundVaultTagFixer"
+ACOUSTID_APP_VERSION = "1.0.0"
 
-USAGE = """Usage: python tag_fixer.py <audio file or folder>\n\nSet the ACOUSTID_API_KEY environment variable with your AcoustID key."""
+USAGE = """Usage: python tag_fixer.py <audio file or folder>"""
 
 SUPPORTED_EXTS = {".mp3", ".flac", ".m4a", ".aac", ".ogg", ".wav"}
 
@@ -34,7 +37,12 @@ def find_files(root):
 def query_acoustid(path, log_callback):
     """Return tags from AcoustID if the best match is perfect."""
     try:
-        results = acoustid.match(API_KEY, path)
+        user_agent = f"{ACOUSTID_APP_NAME}/{ACOUSTID_APP_VERSION}"
+        status, results = acoustid.match(
+            ACOUSTID_API_KEY,
+            path,
+            user_agent=user_agent,
+        )
         if not results:
             return None
         score, recording_id, title, artist = results[0]
@@ -75,8 +83,8 @@ def fix_tags(target, log_callback=None):
         def log_callback(msg):
             print(msg)
 
-    if not API_KEY:
-        raise RuntimeError("ACOUSTID_API_KEY environment variable not set")
+    if not ACOUSTID_API_KEY:
+        raise RuntimeError("ACOUSTID_API_KEY not configured")
 
     files = find_files(target)
     if not files:
