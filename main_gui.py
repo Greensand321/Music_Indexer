@@ -1,11 +1,14 @@
 import os
 import tkinter as tk
-from tkinter import filedialog, messagebox
+from tkinter import filedialog, messagebox, ttk
 
 from validator import validate_soundvault_structure
 from music_indexer_api import run_full_indexer
 from importer_core import scan_and_import
-from tag_fixer import fix_tags          # AcoustID-based fixer
+from tag_fixer import (
+    collect_tag_proposals,
+    apply_tag_proposals,
+)
 from sample_highlight import play_file_highlight, PYDUB_AVAILABLE
 
 CONFIG_FILE = os.path.join(os.path.dirname(__file__), "last_path.txt")
@@ -67,7 +70,7 @@ class SoundVaultImporterApp(tk.Tk):
 
         tools_menu = tk.Menu(menubar, tearoff=False)
         tools_menu.add_command(label="Regenerate Playlists", command=self.regenerate_playlists)
-        tools_menu.add_command(label="Fix Tags via AcoustID", command=self.fix_tags)
+        tools_menu.add_command(label="Fix Tags via AcoustID", command=self.fix_tags_gui)
         if PYDUB_AVAILABLE:
             tools_menu.add_command(label="Sample Song Highlight", command=self.sample_song_highlight)
         else:
@@ -224,18 +227,72 @@ class SoundVaultImporterApp(tk.Tk):
         self._log(f"[stub] Regenerate Playlists → {path}")
         self.update_library_info()
 
-    def fix_tags(self):
-        initial = load_last_path()
-        chosen = filedialog.askdirectory(title="Select Folder for Tag Fixer", initialdir=initial)
-        if not chosen:
+    def fix_tags_gui(self):
+        folder = filedialog.askdirectory(title="Select Folder to Fix Tags")
+        if not folder:
             return
-        save_last_path(chosen)
-        try:
-            summary = fix_tags(chosen, log_callback=self._log)
-            messagebox.showinfo("Tag Fixer Complete",
-                                f"Processed {summary['processed']} files\nUpdated {summary['updated']} files.")
-        except Exception as e:
-            messagebox.showerror("Tag Fixer Error", str(e))
+
+        proposals = collect_tag_proposals(folder, log_callback=self._log)
+        if not proposals:
+            messagebox.showinfo("No Proposals", "No missing tags found above threshold.")
+            return
+
+        confirmed = self.show_proposals_dialog(proposals)
+        if not confirmed:
+            self._log("Tag-fix cancelled by user.")
+            return
+
+        updated = apply_tag_proposals(proposals, log_callback=self._log)
+        messagebox.showinfo("Done", f"Updated tags on {updated} files.")
+
+    def show_proposals_dialog(self, proposals):
+        dlg = tk.Toplevel(self)
+        dlg.title("Review Tag Fix Proposals")
+        dlg.grab_set()
+
+        cols = ("File", "Score", "Old Artist", "New Artist", "Old Title", "New Title", "Apply")
+        tv = ttk.Treeview(dlg, columns=cols, show="headings", height=15)
+        for c in cols:
+            tv.heading(c, text=c)
+            tv.column(c, width=100, anchor="w")
+        tv.column("File", width=300)
+        tv.column("Apply", width=50, anchor="center")
+
+        checks = {}
+        for p in proposals:
+            iid = tv.insert("", "end", values=(
+                p["file"],
+                f"{p['score']:.2f}",
+                p["old_artist"] or "",
+                p["new_artist"],
+                p["old_title"] or "",
+                p["new_title"],
+                ""
+            ))
+            var = tk.BooleanVar(value=True)
+            checks[iid] = var
+
+        tv.pack(fill="both", expand=True, padx=10, pady=10)
+
+        def place_checks(event=None):
+            for iid, var in checks.items():
+                bbox = tv.bbox(iid, column="Apply")
+                if bbox:
+                    x, y, width, height = bbox
+                    chk = tk.Checkbutton(tv, variable=var, width=0)
+                    tv.create_window(x + width//2, y + height//2, window=chk, anchor="center")
+        tv.bind("<Configure>", place_checks)
+        tv.bind("<Expose>", place_checks)
+
+        btn_frame = tk.Frame(dlg)
+        tk.Button(btn_frame, text="Apply", command=lambda: dlg.destroy() or setattr(self, "_proceed", True)).pack(side="left", padx=5)
+        tk.Button(btn_frame, text="Cancel", command=lambda: dlg.destroy()).pack(side="left", padx=5)
+        btn_frame.pack(pady=5)
+
+        dlg.wait_window()
+        apply_list = [proposals[i] for i, p in enumerate(proposals) if checks[list(checks.keys())[i]].get()]
+        proposals[:] = apply_list
+        return bool(getattr(self, "_proceed", False))
 
     def sample_song_highlight(self):
         """Ask the user for an audio file and play its highlight."""
