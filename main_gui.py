@@ -305,14 +305,6 @@ class SoundVaultImporterApp(tk.Tk):
         finally:
             self.show_all = False
 
-    def _on_show_all(self):
-        """Run tag-fix scan showing every file regardless of prior log."""
-        self.show_all = True
-        try:
-            self.fix_tags_gui()
-        finally:
-            self.show_all = False
-
     def fix_tags_gui(self):
         folder = filedialog.askdirectory(title="Select Folder to Fix Tags")
         if not folder:
@@ -331,6 +323,7 @@ class SoundVaultImporterApp(tk.Tk):
         from tag_fixer import find_files
 
         files = find_files(folder)
+        print(f"[DEBUG] Total discovered files: {len(files)}")
         if not files:
             messagebox.showinfo(
                 "No audio files", "No supported audio found in that folder."
@@ -343,21 +336,31 @@ class SoundVaultImporterApp(tk.Tk):
 
         if self.show_all or show_all:
             filtered = list(files)
+            print(
+                f"[DEBUG] Show All mode: returning {len(filtered)} files (should match total)"
+            )
         else:
             filtered = []
             for f in files:
                 rel = os.path.relpath(f, folder)
                 entry = log_data.get(rel)
+                print(
+                    f"[DEBUG] Checking {rel}, status={entry.get('status') if entry else 'none'}"
+                )
                 if entry:
                     # always skip files already applied
                     if entry.get("status") == "applied":
+                        print("  → skipped: already applied")
                         continue
                     # optionally skip no-difference or skipped entries
                     if ex_no_diff and entry.get("status") == "no_diff":
+                        print("  → skipped: no_diff")
                         continue
                     if ex_skipped and entry.get("status") == "skipped":
+                        print("  → skipped: skipped")
                         continue
                 filtered.append(f)
+            print(f"[DEBUG] After filtering: {len(filtered)} files")
 
         if not filtered:
             messagebox.showinfo("No files", "All files were excluded by your filters.")
