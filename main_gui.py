@@ -417,7 +417,7 @@ class SoundVaultImporterApp(tk.Tk):
             "New Title",
             "Old Album",
             "New Album",
-            "Genres",
+            "Suggested Genre",
         )
 
         container = tk.Frame(dlg)
@@ -458,7 +458,7 @@ class SoundVaultImporterApp(tk.Tk):
                 width = 300
             elif c in ("Old Album", "New Album"):
                 width = 120
-            elif c == "Genres":
+            elif c == "Suggested Genre":
                 width = 150
             tv.column(c, width=width, anchor="w")
 
