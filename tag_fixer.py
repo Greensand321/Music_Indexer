@@ -3,6 +3,9 @@ import sys
 import argparse
 import acoustid
 from mutagen import File as MutagenFile
+from typing import Iterable, Callable, List, Tuple, Dict
+
+import log_manager
 
 # ─── Configuration ────────────────────────────────────────────────────────
 ACOUSTID_API_KEY       = "eBOqCZhyAx"
@@ -65,15 +68,15 @@ def query_acoustid(path, log_callback):
     return None
 
 def update_tags(path, new_tags, log_callback):
-    """Write missing artist/title tags to the file. Returns True if saved."""
+    """Write artist/title tags if they differ. Returns True if saved."""
     audio = MutagenFile(path, easy=True)
     if audio is None:
         return False
     changed = False
-    if new_tags.get("artist") and not audio.tags.get("artist"):
+    if new_tags.get("artist") and audio.tags.get("artist", [None])[0] != new_tags["artist"]:
         audio.tags["artist"] = [new_tags["artist"]]
         changed = True
-    if new_tags.get("title") and not audio.tags.get("title"):
+    if new_tags.get("title") and audio.tags.get("title", [None])[0] != new_tags["title"]:
         audio.tags["title"] = [new_tags["title"]]
         changed = True
     if changed:
@@ -99,22 +102,31 @@ def prompt_user_about_tags(f, old_artist, old_title, new_tags):
     return (resp == "y")
 
 # ─── Main Tag-Fixing Logic ────────────────────────────────────────────────
-def collect_tag_proposals(target, log_callback=None):
-    """Walk files under ``target`` and return tagging proposals."""
+def collect_tag_proposals(
+    files: Iterable[str],
+    log_callback: Callable[[str], None] | None = None,
+    progress_callback: Callable[[int], None] | None = None,
+) -> Tuple[List[Dict], List[Dict]]:
+    """Return (diff_proposals, no_diff_files) for the given ``files``."""
     if log_callback is None:
-        def log_callback(msg):
+        def log_callback(msg: str):
             print(msg)
 
     if not ACOUSTID_API_KEY:
         raise RuntimeError("ACOUSTID_API_KEY not configured")
 
-    proposals = []
-    for f in find_files(target):
+    diff: List[Dict] = []
+    no_diff: List[Dict] = []
+    for idx, f in enumerate(files, start=1):
         if is_remix(f):
+            if progress_callback:
+                progress_callback(idx)
             continue
 
         log_callback(f"Fingerprinting {f}")
         result = query_acoustid(f, log_callback)
+        if progress_callback:
+            progress_callback(idx)
         if not result:
             continue
 
@@ -126,31 +138,67 @@ def collect_tag_proposals(target, log_callback=None):
         old_artist = (audio.tags.get("artist") or [None])[0] if audio and audio.tags else None
         old_title = (audio.tags.get("title") or [None])[0] if audio and audio.tags else None
 
-        proposals.append({
+        entry = {
             "file": f,
             "old_artist": old_artist,
             "old_title": old_title,
             "new_artist": result["artist"],
             "new_title": result["title"],
             "score": score,
-        })
+        }
 
-    return proposals
+        if old_artist == entry["new_artist"] and old_title == entry["new_title"]:
+            no_diff.append(entry)
+        else:
+            diff.append(entry)
+
+    return diff, no_diff
 
 
-def apply_tag_proposals(proposals, log_callback=None):
-    """Write the tags for each proposal and return the count updated."""
+def apply_tag_proposals(
+    selected: Iterable[Dict],
+    diff_proposals: Iterable[Dict],
+    no_diff_files: Iterable[Dict],
+    library_root: str,
+    log_callback: Callable[[str], None] | None = None,
+) -> int:
+    """Apply ``selected`` proposals and log all scan results."""
     if log_callback is None:
-        def log_callback(msg):
+        def log_callback(msg: str):
             print(msg)
 
+    selected_paths = {p["file"] for p in selected}
+
     updated = 0
-    for p in proposals:
+    for p in selected:
         path = p["file"]
         tags = {"artist": p["new_artist"], "title": p["new_title"]}
         if update_tags(path, tags, log_callback):
             updated += 1
 
+    # ─── Update log only after successful writes ──────────────────────────
+    log_data = log_manager.load_log(library_root)
+
+    def record(entry: Dict, status: str):
+        rel = os.path.relpath(entry["file"], library_root)
+        log_data[rel] = {
+            "status": status,
+            "old_artist": entry["old_artist"],
+            "old_title": entry["old_title"],
+            "new_artist": entry["new_artist"],
+            "new_title": entry["new_title"],
+        }
+
+    for p in diff_proposals:
+        if p["file"] in selected_paths:
+            record(p, "applied")
+        else:
+            record(p, "skipped")
+
+    for p in no_diff_files:
+        record(p, "no_diff")
+
+    log_manager.save_log(log_data, library_root)
     return updated
 
 
@@ -165,20 +213,21 @@ def fix_tags(target, log_callback=None, interactive=False):
         log_callback("No audio files found.")
         return {"processed": 0, "updated": 0}
 
-    proposals = collect_tag_proposals(target, log_callback)
+    diff_props, no_diff = collect_tag_proposals(files, log_callback)
+    selected = diff_props
 
     if interactive:
-        filtered = []
-        for p in proposals:
+        selected = []
+        for p in diff_props:
             apply_change = prompt_user_about_tags(
                 p["file"], p["old_artist"], p["old_title"],
                 {"artist": p["new_artist"], "title": p["new_title"]}
             )
             if apply_change:
-                filtered.append(p)
-        proposals = filtered
+                selected.append(p)
 
-    updated = apply_tag_proposals(proposals, log_callback)
+    root_path = target if os.path.isdir(target) else os.path.dirname(target)
+    updated = apply_tag_proposals(selected, diff_props, no_diff, root_path, log_callback)
 
     return {"processed": len(files), "updated": updated}
 
