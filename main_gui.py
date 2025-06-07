@@ -408,7 +408,17 @@ class SoundVaultImporterApp(tk.Tk):
         chk_frame.pack(pady=5)
 
 
-        cols = ("File", "Score", "Old Artist", "New Artist", "Old Title", "New Title")
+        cols = (
+            "File",
+            "Score",
+            "Old Artist",
+            "New Artist",
+            "Old Title",
+            "New Title",
+            "Old Album",
+            "New Album",
+            "Genres",
+        )
 
         container = tk.Frame(dlg)
         container.pack(fill="both", expand=True, padx=10, pady=10)
@@ -443,8 +453,14 @@ class SoundVaultImporterApp(tk.Tk):
 
         for c in cols:
             tv.heading(c, text=c, command=lambda _c=c: treeview_sort_column(tv, _c, False))
-            tv.column(c, width=100, anchor="w")
-        tv.column("File", width=300)
+            width = 100
+            if c == "File":
+                width = 300
+            elif c in ("Old Album", "New Album"):
+                width = 120
+            elif c == "Genres":
+                width = 150
+            tv.column(c, width=width, anchor="w")
 
         tv.tag_configure("perfect", background="white")
         tv.tag_configure("changed", background="#fff8c6")
@@ -463,6 +479,9 @@ class SoundVaultImporterApp(tk.Tk):
                     p.new_artist or "",
                     p.old_title or "",
                     p.new_title or "",
+                    p.old_album or "",
+                    p.new_album or "",
+                    ", ".join(p.new_genres or []),
                 ),
                 tags=(row_tag,),
             )
