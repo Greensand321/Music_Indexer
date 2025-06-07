@@ -9,6 +9,7 @@ from music_indexer_api import run_full_indexer
 from importer_core import scan_and_import
 from sample_highlight import play_file_highlight, PYDUB_AVAILABLE
 import log_manager
+from tag_fixer import MIN_INTERACTIVE_SCORE
 
 CONFIG_FILE = os.path.join(os.path.dirname(__file__), "last_path.txt")
 
@@ -376,6 +377,7 @@ class SoundVaultImporterApp(tk.Tk):
                 filtered,
                 log_callback=lambda m: None,
                 progress_callback=lambda idx: q.put(("progress", idx)),
+                show_all=(self.show_all or show_all),
             )
             q.put(("done", (diff_props, no_diff)))
 
@@ -501,6 +503,7 @@ class SoundVaultImporterApp(tk.Tk):
 
         tv.tag_configure("perfect", background="white")
         tv.tag_configure("changed", background="#fff8c6")
+        tv.tag_configure("lowconf", background="#f8d7da")
 
         all_rows = sorted(diff_proposals, key=lambda p: p.score, reverse=True) + list(no_diff_files)
         iid_to_prop = {}
@@ -511,7 +514,12 @@ class SoundVaultImporterApp(tk.Tk):
                 and p.old_album == p.new_album
                 and sorted(p.old_genres or []) == sorted(p.new_genres or [])
             )
-            row_tag = "perfect" if all_same else "changed"
+            if p.score < MIN_INTERACTIVE_SCORE:
+                row_tag = "lowconf"
+            elif all_same:
+                row_tag = "perfect"
+            else:
+                row_tag = "changed"
             iid = tv.insert(
                 "",
                 "end",
