@@ -35,24 +35,38 @@ def find_files(root):
     return audio_files
 
 def query_acoustid(path, log_callback):
-    """Return tags from AcoustID if the best match is perfect."""
+    """
+    Return tags from AcoustID if the best fingerprint match meets your threshold.
+    Also logs the top‐5 candidate scores for debugging.
+    """
     try:
         status, results = acoustid.match(
             ACOUSTID_API_KEY,
             path
         )
         if not results:
+            log_callback("  No matches at all")
             return None
-        score, recording_id, title, artist = results[0]
-        if score == 1.0:
-            return {"title": title, "artist": artist}
+
+        # Debug: show top‐5 scores
+        for i, (score, rid, title, artist) in enumerate(results[:5], start=1):
+            log_callback(f"  [{i}] score={score:.4f} → “{artist} – {title}”")
+
+        best_score, _, best_title, best_artist = results[0]
+        # Change 1.0 → 0.95 here if you want a looser match
+        if best_score >= 1.0:
+            return {"title": best_title, "artist": best_artist}
+
+        log_callback(f"  Best score {best_score:.4f} < 1.00 → skipping")
         return None
+
     except acoustid.NoBackendError:
         log_callback("Chromaprint library/tool not found")
     except acoustid.FingerprintGenerationError:
         log_callback(f"Failed to fingerprint: {path}")
     except acoustid.WebServiceError as exc:
         log_callback(f"AcoustID request failed: {exc}")
+
     return None
 
 def update_tags(path, new_tags, log_callback):
