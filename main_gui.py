@@ -335,7 +335,9 @@ class SoundVaultImporterApp(tk.Tk):
         if not proceed:
             return
 
-        if self.show_all or show_all:
+        show_all = show_all or self.show_all
+
+        if show_all:
             filtered = list(files)
             print(
                 f"[DEBUG] Show All mode: returning {len(filtered)} files (should match total)"
@@ -349,8 +351,8 @@ class SoundVaultImporterApp(tk.Tk):
                     f"[DEBUG] Checking {rel}, status={entry.get('status') if entry else 'none'}"
                 )
                 if entry:
-                    # always skip files already applied
-                    if entry.get("status") == "applied":
+                    # Skip already-applied only when NOT in Show All mode
+                    if entry.get("status") == "applied" and not show_all:
                         print("  → skipped: already applied")
                         continue
                     # optionally skip no-difference or skipped entries
