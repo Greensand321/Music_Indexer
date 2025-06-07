@@ -417,8 +417,8 @@ class SoundVaultImporterApp(tk.Tk):
             "New Title",
             "Old Album",
             "New Album",
-            "Genres",
-            "Suggested Genre",
+            "Genres",            # existing embedded genres
+            "Suggested Genre",   # fetched from MusicBrainz
         )
 
         container = tk.Frame(dlg)
@@ -482,6 +482,7 @@ class SoundVaultImporterApp(tk.Tk):
                     p.new_title or "",
                     p.old_album or "",
                     p.new_album or "",
+                    ", ".join(p.old_genres or []),
                     ", ".join(p.new_genres or []),
                 ),
                 tags=(row_tag,),
