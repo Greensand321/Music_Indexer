@@ -37,11 +37,10 @@
   <li>Deduplicates by (artist, title, album), preferring FLAC &gt; M4A &gt; MP3.</li>
   <li>Implements grouping rules:
     <ul>
-      <li>Common artist threshold (≥ 5 tracks) → <code>By Artist/&lt;Artist&gt;</code>.</li>
+      <li>Common artist threshold (≥ 10 tracks) → <code>By Artist/&lt;Artist&gt;</code>.</li>
       <li>Rare artists → <code>By Year/&lt;Year&gt;</code>.</li>
       <li>Album folder if ≥ 5 tracks; otherwise, singles grouping.</li>
       <li>“(Remixes)” folder if an album has ≥ 3 remixes.</li>
-      <li>Cover-hash grouping if ≥ 5 files share identical artwork.</li>
     </ul>
   </li>
   <li>Generates a “dry-run” HTML preview of the proposed reorganization (color-coded).</li>
@@ -59,7 +58,7 @@ from collections import defaultdict
 from mutagen import File as MutagenFile
 
 # Configuration
-COMMON_ARTIST_THRESHOLD = 5
+COMMON_ARTIST_THRESHOLD = 10
 REMIX_FOLDER_THRESHOLD = 3
 
 def sanitize(name: str) -> str:
@@ -75,6 +74,7 @@ def extract_primary_and_collabs(raw_artist: str):
     pass
 
 def compute_moves_and_tag_index(root_path, log_callback=None):
+    # 0. Pre-scan entire vault under MUSIC_ROOT -> build_primary_counts()
     # 1. Decide music_root (either root_path or root_path/Music).
     # 2. Walk recursively, collect supported audio files.
     # 3. Deduplicate by (artist, title, album), choose highest-quality format.
@@ -85,7 +85,6 @@ def compute_moves_and_tag_index(root_path, log_callback=None):
     #    • cover_counts: number of identical embedded-cover hashes
     # 5. For each file, decide destination:
     #    • If "(Remixes)" and remix_count ≥ REMIX_FOLDER_THRESHOLD → create "<Album> (Remixes)" folder
-    #    • Else if cover_count ≥ 5 → group by identical cover-hash folder
     #    • Else if remix in title but remix_count < threshold → treat as single
     #    • Else if album_count ≥ 5 → create album folder
     #    • Else if primary_count ≥ COMMON_ARTIST_THRESHOLD → create "<Artist>/Album" or "<Artist> – Singles"
@@ -581,6 +580,14 @@ if __name__ == "__main__":
 </code></pre>
 
 <hr>
+<h3>2.x Tag Fixer (<code>tag_fixer.py</code>)</h3>
+<ul>
+  <li><strong>collect_tag_proposals(target, log_callback)</strong>: fingerprints each file, returns a list of proposals <code>{file, old_artist, old_title, new_artist, new_title, score}</code> for all matches ≥ MIN_INTERACTIVE_SCORE.</li>
+  <li><strong>apply_tag_proposals(proposals, log_callback)</strong>: writes only the confirmed subset of tags back into files.</li>
+  <li>CLI wrapper still supports <code>--interactive</code>, falling back to per-file Y/N prompts.</li>
+  <li>Dependencies: <code>acoustid</code> + Chromaprint (<code>fpcalc</code>), <code>mutagen</code>.</li>
+</ul>
+
 
 <h3>2.6 Library Index Generator (<code>generate_library_table_contents.py</code>)</h3>
 <p>Scans a folder (including <code>.ogg</code>) for audio files, extracts tags (artist, title, album, year, track, genres), and writes a single HTML table (<code>library_index.html</code>) for rapid review and reference. You can re-run it after adding new files to see only updated entries.</p>
@@ -707,6 +714,15 @@ def main():
 if __name__ == "__main__":
     main()
 </code></pre>
+<h3>2.y GUI Front-end (<code>main_gui.py</code>)</h3>
+<ul>
+  <li>New menu item <strong>Fix Tags</strong>.</li>
+  <li><strong>ProgressDialog</strong>: modal Toplevel + determinate Progressbar to show fingerprint progress.</li>
+  <li>Background thread calls <code>collect_tag_proposals()</code> and reports each file to the UI via a <code>queue.Queue</code>.</li>
+  <li>Once done, the “Review Tag Fix Proposals” dialog appears (sortable, scrollable Treeview, color-coded, multi-select, Apply Selection button).</li>
+</ul>
+<p>Uses helper functions <code>collect_tag_proposals()</code>, <code>apply_tag_proposals()</code>, and <code>show_proposals_dialog()</code>.</p>
+
 
 <hr>
 
@@ -758,18 +774,7 @@ if __name__ == "__main__":
     </ul>
   </li>
 
-  <li><strong>GUI Integration</strong>
-    <ul>
-      <li>Create a lightweight Tkinter or web‐based dashboard that:
-        <ul>
-          <li>Lets the user click buttons to run the indexer, update genres, build playlists, or generate HTML indices.</li>
-          <li>Displays progress bars/log output in real‐time.</li>
-          <li>Allows browsing the generated HTML from within the app.</li>
-        </ul>
-      </li>
-      <li>Embed a “patch‐only” code editor (e.g. via VS Code’s ChatGPT/Copilot plugin) so that future tweaks can be applied to specific functions without re‐posting the entire file.</li>
-    </ul>
-  </li>
+  <li><del><strong>GUI Integration (completed)</strong></del></li>
 
   <li><strong>Performance & Caching</strong>
     <ul>
@@ -794,8 +799,11 @@ if __name__ == "__main__":
     <ul>
       <li>Host all code in a GitHub repository with this HTML as <code>docs/project_documentation.html</code>.</li>
       <li>Provide a <code>requirements.txt</code>:
-        <pre><code>mutagen
-musicbrainzngs</code></pre>
+          <pre><code>mutagen
+musicbrainzngs
+acoustid        # for tag_fixer
+pydub           # for sample_highlight (if used)</code></pre>
+          ffmpeg (fpcalc) must be installed and on PATH.
       <li>Create a single-entry point (e.g. <code>soundvault.py</code>) that imports modules:
         <ul>
           <li><code>indexer</code>, <code>genre_updater</code>, <code>library_indexer</code>, <code>playlist_generator</code>, and <code>html_utils</code>.</li>
@@ -830,6 +838,8 @@ musicbrainzngs</code></pre>
   <li><strong>Deployment:</strong> After finalizing, bundle everything into a <code>soundvault</code> folder structure:
     <pre><code>
 soundvault/
+  gui/
+    main_gui.py
   indexer/
     music_indexer_api.py
   html_utils/
@@ -837,6 +847,10 @@ soundvault/
     folder_to_html_with_genre.py
     list_genres.py
     generate_library_table_contents.py
+    tag_fixer.py
+    sample_highlight.py
+  tools/
+    ffmpeg/  ← note: requirement for Chromaprint’s fpcalc.exe
   genre_updater.py
   playlist_generator.py  (future)
   soundvault.py         (CLI driver)
