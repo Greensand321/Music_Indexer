@@ -37,23 +37,23 @@ def find_files(root):
                 audio_files.append(os.path.join(dirpath, fname))
     return audio_files
 
+from itertools import islice
+
 def query_acoustid(path, log_callback):
-    """
-    Fingerprint & query AcoustID.
-    Logs top-5 candidate scores.
-    Returns dict(title, artist, score) for the best candidate, or None.
-    """
     try:
-        results = acoustid.match(ACOUSTID_API_KEY, path)
-        if not results:
+        match_gen = acoustid.match(ACOUSTID_API_KEY, path)
+        # Grab first 5 for debugging, then put them back into a list
+        peek = list(islice(match_gen, 5))
+        if not peek:
             log_callback("  No matches at all")
             return None
 
-        # Debug: show top-5 scores
-        for i, (score, rid, title, artist) in enumerate(results[:5], start=1):
+        # Debug: show those 5
+        for i, (score, rid, title, artist) in enumerate(peek, start=1):
             log_callback(f"  [{i}] score={score:.4f} → “{artist} – {title}”")
 
-        best_score, _, best_title, best_artist = results[0]
+        # Now get the very first result for your decision
+        best_score, _, best_title, best_artist = peek[0]
         return {"title": best_title, "artist": best_artist, "score": best_score}
 
     except acoustid.NoBackendError:
