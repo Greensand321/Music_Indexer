@@ -318,6 +318,8 @@ class SoundVaultImporterApp(tk.Tk):
             rel = os.path.relpath(f, folder)
             entry = log_data.get(rel)
             if entry:
+                if entry.get("status") == "applied":
+                            continue
                 if ex_no_diff and entry.get("status") == "no_diff":
                     continue
                 if ex_skipped and entry.get("status") == "skipped":
@@ -376,9 +378,15 @@ class SoundVaultImporterApp(tk.Tk):
         self.after(100, poll_queue)
 
     def show_proposals_dialog(self, diff_proposals, no_diff_files):
+        # Reset from any prior invocation
+        self._proceed = False
+        self._selected = []
+
         dlg = tk.Toplevel(self)
         dlg.title("Review Tag Fix Proposals")
         dlg.grab_set()
+        # …rest of dialog setup…
+
 
         cols = ("File", "Score", "Old Artist", "New Artist", "Old Title", "New Title")
 

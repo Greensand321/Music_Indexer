@@ -68,15 +68,15 @@ def query_acoustid(path, log_callback):
     return None
 
 def update_tags(path, new_tags, log_callback):
-    """Write missing artist/title tags to the file. Returns True if saved."""
+    """Write artist/title tags if they differ. Returns True if saved."""
     audio = MutagenFile(path, easy=True)
     if audio is None:
         return False
     changed = False
-    if new_tags.get("artist") and not audio.tags.get("artist"):
+    if new_tags.get("artist") and audio.tags.get("artist", [None])[0] != new_tags["artist"]:
         audio.tags["artist"] = [new_tags["artist"]]
         changed = True
-    if new_tags.get("title") and not audio.tags.get("title"):
+    if new_tags.get("title") and audio.tags.get("title", [None])[0] != new_tags["title"]:
         audio.tags["title"] = [new_tags["title"]]
         changed = True
     if changed:
