@@ -1,14 +1,12 @@
 import os
+import threading
+import queue
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 from validator import validate_soundvault_structure
 from music_indexer_api import run_full_indexer
 from importer_core import scan_and_import
-from tag_fixer import (
-    collect_tag_proposals,
-    apply_tag_proposals,
-)
 from sample_highlight import play_file_highlight, PYDUB_AVAILABLE
 
 CONFIG_FILE = os.path.join(os.path.dirname(__file__), "last_path.txt")
@@ -40,6 +38,31 @@ def count_audio_files(root):
             if os.path.splitext(fname)[1].lower() in exts:
                 count += 1
     return count
+
+
+class ProgressDialog(tk.Toplevel):
+    def __init__(self, parent, total, title="Working…"):
+        super().__init__(parent)
+        self.title(title)
+        self.grab_set()
+        self.resizable(False, False)
+
+        tk.Label(self, text="Scanning files, please wait…").pack(padx=10, pady=(10, 0))
+        self.pb = ttk.Progressbar(
+            self,
+            orient="horizontal",
+            length=300,
+            mode="determinate",
+            maximum=total,
+        )
+        self.pb.pack(padx=10, pady=10)
+
+        self.protocol("WM_DELETE_WINDOW", lambda: None)
+        self.update()
+
+    def update_progress(self, value):
+        self.pb["value"] = value
+        self.update_idletasks()
 
 
 class SoundVaultImporterApp(tk.Tk):
@@ -232,18 +255,59 @@ class SoundVaultImporterApp(tk.Tk):
         if not folder:
             return
 
-        proposals = collect_tag_proposals(folder, log_callback=self._log)
-        if not proposals:
-            messagebox.showinfo("No Proposals", "No missing tags found above threshold.")
+        from tag_fixer import find_files
+
+        files = find_files(folder)
+        if not files:
+            messagebox.showinfo(
+                "No audio files", "No supported audio found in that folder."
+            )
             return
 
-        confirmed = self.show_proposals_dialog(proposals)
-        if not confirmed:
-            self._log("Tag-fix cancelled by user.")
-            return
+        q = queue.Queue()
+        progress = ProgressDialog(self, total=len(files), title="Fingerprinting…")
 
-        updated = apply_tag_proposals(proposals, log_callback=self._log)
-        messagebox.showinfo("Done", f"Updated tags on {updated} files.")
+        def worker():
+            from tag_fixer import collect_tag_proposals
+
+            proposals = []
+            for idx, f in enumerate(files, start=1):
+                q.put(("progress", idx))
+                props = collect_tag_proposals(f, log_callback=lambda m: None)
+                if props:
+                    proposals.extend(props)
+            q.put(("done", proposals))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+        def poll_queue():
+            try:
+                while True:
+                    msg, payload = q.get_nowait()
+                    if msg == "progress":
+                        progress.update_progress(payload)
+                    elif msg == "done":
+                        progress.destroy()
+                        proposals = payload
+                        if not proposals:
+                            messagebox.showinfo(
+                                "No proposals", "No missing tags above threshold."
+                            )
+                            return
+                        confirmed = self.show_proposals_dialog(proposals)
+                        if confirmed:
+                            from tag_fixer import apply_tag_proposals
+
+                            count = apply_tag_proposals(
+                                proposals, log_callback=self._log
+                            )
+                            messagebox.showinfo("Done", f"Updated {count} files.")
+                        return
+            except queue.Empty:
+                pass
+            self.after(100, poll_queue)
+
+        self.after(100, poll_queue)
 
     def show_proposals_dialog(self, proposals):
         dlg = tk.Toplevel(self)
