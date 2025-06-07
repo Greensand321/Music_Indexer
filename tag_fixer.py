@@ -99,8 +99,8 @@ def prompt_user_about_tags(f, old_artist, old_title, new_tags):
     return (resp == "y")
 
 # ─── Main Tag-Fixing Logic ────────────────────────────────────────────────
-def fix_tags(target, log_callback=None, interactive=False):
-    """Fill missing tags for files in target using AcoustID."""
+def collect_tag_proposals(target, log_callback=None):
+    """Walk files under ``target`` and return tagging proposals."""
     if log_callback is None:
         def log_callback(msg):
             print(msg)
@@ -108,43 +108,77 @@ def fix_tags(target, log_callback=None, interactive=False):
     if not ACOUSTID_API_KEY:
         raise RuntimeError("ACOUSTID_API_KEY not configured")
 
+    proposals = []
+    for f in find_files(target):
+        if is_remix(f):
+            continue
+
+        log_callback(f"Fingerprinting {f}")
+        result = query_acoustid(f, log_callback)
+        if not result:
+            continue
+
+        score = result["score"]
+        if score < MIN_INTERACTIVE_SCORE:
+            continue
+
+        audio = MutagenFile(f, easy=True)
+        old_artist = (audio.tags.get("artist") or [None])[0] if audio and audio.tags else None
+        old_title = (audio.tags.get("title") or [None])[0] if audio and audio.tags else None
+
+        proposals.append({
+            "file": f,
+            "old_artist": old_artist,
+            "old_title": old_title,
+            "new_artist": result["artist"],
+            "new_title": result["title"],
+            "score": score,
+        })
+
+    return proposals
+
+
+def apply_tag_proposals(proposals, log_callback=None):
+    """Write the tags for each proposal and return the count updated."""
+    if log_callback is None:
+        def log_callback(msg):
+            print(msg)
+
+    updated = 0
+    for p in proposals:
+        path = p["file"]
+        tags = {"artist": p["new_artist"], "title": p["new_title"]}
+        if update_tags(path, tags, log_callback):
+            updated += 1
+
+    return updated
+
+
+def fix_tags(target, log_callback=None, interactive=False):
+    """Fill missing tags for files in target using AcoustID."""
+    if log_callback is None:
+        def log_callback(msg):
+            print(msg)
+
     files = find_files(target)
     if not files:
         log_callback("No audio files found.")
         return {"processed": 0, "updated": 0}
 
-    updated = 0
-    for f in files:
-        if is_remix(f):
-            log_callback(f"Skipping remix {f}")
-            continue
+    proposals = collect_tag_proposals(target, log_callback)
 
-        log_callback(f"Processing {f}...")
-        result = query_acoustid(f, log_callback)
-        if not result:
-            log_callback("  No candidate returned")
-            continue
+    if interactive:
+        filtered = []
+        for p in proposals:
+            apply_change = prompt_user_about_tags(
+                p["file"], p["old_artist"], p["old_title"],
+                {"artist": p["new_artist"], "title": p["new_title"]}
+            )
+            if apply_change:
+                filtered.append(p)
+        proposals = filtered
 
-        score = result["score"]
-        log_callback(f"  Best match score = {score:.2f}")
-
-        # Load old tags for possible interactive prompt
-        audio = MutagenFile(f, easy=True)
-        old_artist = (audio.tags.get("artist") or [None])[0] if audio and audio.tags else None
-        old_title  = (audio.tags.get("title")  or [None])[0] if audio and audio.tags else None
-
-        # Decide
-        apply_change = False
-        if score >= MIN_AUTOMATIC_SCORE:
-            apply_change = True
-        elif score >= MIN_INTERACTIVE_SCORE and interactive:
-            apply_change = prompt_user_about_tags(f, old_artist, old_title, result)
-        else:
-            log_callback(f"  Score {score:.2f} below {MIN_INTERACTIVE_SCORE:.2f}; skipping")
-            continue
-
-        if apply_change and update_tags(f, result, log_callback):
-            updated += 1
+    updated = apply_tag_proposals(proposals, log_callback)
 
     return {"processed": len(files), "updated": updated}
 
