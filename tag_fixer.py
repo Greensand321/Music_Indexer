@@ -2,8 +2,10 @@ import os
 import sys
 import argparse
 import acoustid
+from pathlib import Path
+from dataclasses import dataclass
+from typing import Iterable, Callable, List, Tuple, Dict, Optional
 from mutagen import File as MutagenFile
-from typing import Iterable, Callable, List, Tuple, Dict
 
 import log_manager
 
@@ -12,6 +14,21 @@ ACOUSTID_API_KEY       = "eBOqCZhyAx"
 ACOUSTID_APP_NAME      = "SoundVaultTagFixer"
 ACOUSTID_APP_VERSION   = "1.0.0"
 SUPPORTED_EXTS         = {".mp3", ".flac", ".m4a", ".aac", ".ogg", ".wav"}
+
+# ─── Data Classes ────────────────────────────────────────────────────────
+
+@dataclass
+class TagProposal:
+    file: Path
+    old_artist: Optional[str] = None
+    new_artist: Optional[str] = None
+    old_title: Optional[str] = None
+    new_title: Optional[str] = None
+    old_album: Optional[str] = None
+    new_album: Optional[str] = None
+    old_genres: List[str] | None = None
+    new_genres: List[str] | None = None
+    score: float = 0.0
 
 # Score thresholds
 MIN_AUTOMATIC_SCORE   = 0.90   # ≥90% → apply automatically
@@ -67,17 +84,23 @@ def query_acoustid(path, log_callback):
         log_callback(f"AcoustID request failed: {exc}")
     return None
 
-def update_tags(path, new_tags, log_callback):
-    """Write artist/title tags if they differ. Returns True if saved."""
+def update_tags(path: str, proposal: TagProposal, fields: List[str], log_callback):
+    """Write selected tags from ``proposal`` into ``path``. Return True if saved."""
     audio = MutagenFile(path, easy=True)
     if audio is None:
         return False
     changed = False
-    if new_tags.get("artist") and audio.tags.get("artist", [None])[0] != new_tags["artist"]:
-        audio.tags["artist"] = [new_tags["artist"]]
+    if "artist" in fields and proposal.new_artist is not None and proposal.new_artist != proposal.old_artist:
+        audio["artist"] = [proposal.new_artist]
         changed = True
-    if new_tags.get("title") and audio.tags.get("title", [None])[0] != new_tags["title"]:
-        audio.tags["title"] = [new_tags["title"]]
+    if "title" in fields and proposal.new_title is not None and proposal.new_title != proposal.old_title:
+        audio["title"] = [proposal.new_title]
+        changed = True
+    if "album" in fields and proposal.new_album is not None and proposal.new_album != proposal.old_album:
+        audio["album"] = [proposal.new_album]
+        changed = True
+    if "genres" in fields and proposal.new_genres is not None and proposal.new_genres != proposal.old_genres:
+        audio["genre"] = proposal.new_genres
         changed = True
     if changed:
         try:
@@ -106,7 +129,7 @@ def collect_tag_proposals(
     files: Iterable[str],
     log_callback: Callable[[str], None] | None = None,
     progress_callback: Callable[[int], None] | None = None,
-) -> Tuple[List[Dict], List[Dict]]:
+) -> Tuple[List[TagProposal], List[TagProposal]]:
     """Return (diff_proposals, no_diff_files) for the given ``files``."""
     if log_callback is None:
         def log_callback(msg: str):
@@ -115,8 +138,8 @@ def collect_tag_proposals(
     if not ACOUSTID_API_KEY:
         raise RuntimeError("ACOUSTID_API_KEY not configured")
 
-    diff: List[Dict] = []
-    no_diff: List[Dict] = []
+    diff: List[TagProposal] = []
+    no_diff: List[TagProposal] = []
     for idx, f in enumerate(files, start=1):
         if is_remix(f):
             if progress_callback:
@@ -137,17 +160,23 @@ def collect_tag_proposals(
         audio = MutagenFile(f, easy=True)
         old_artist = (audio.tags.get("artist") or [None])[0] if audio and audio.tags else None
         old_title = (audio.tags.get("title") or [None])[0] if audio and audio.tags else None
+        old_album = (audio.tags.get("album") or [None])[0] if audio and audio.tags else None
+        old_genres = audio.tags.get("genre", []) if audio and audio.tags else []
 
-        entry = {
-            "file": f,
-            "old_artist": old_artist,
-            "old_title": old_title,
-            "new_artist": result["artist"],
-            "new_title": result["title"],
-            "score": score,
-        }
+        entry = TagProposal(
+            file=Path(f),
+            old_artist=old_artist,
+            new_artist=result["artist"],
+            old_title=old_title,
+            new_title=result["title"],
+            old_album=old_album,
+            new_album=None,
+            old_genres=old_genres,
+            new_genres=[],
+            score=score,
+        )
 
-        if old_artist == entry["new_artist"] and old_title == entry["new_title"]:
+        if old_artist == entry.new_artist and old_title == entry.new_title:
             no_diff.append(entry)
         else:
             diff.append(entry)
@@ -156,10 +185,11 @@ def collect_tag_proposals(
 
 
 def apply_tag_proposals(
-    selected: Iterable[Dict],
-    diff_proposals: Iterable[Dict],
-    no_diff_files: Iterable[Dict],
+    selected: Iterable[TagProposal],
+    diff_proposals: Iterable[TagProposal],
+    no_diff_files: Iterable[TagProposal],
     library_root: str,
+    fields: List[str] | None = None,
     log_callback: Callable[[str], None] | None = None,
 ) -> int:
     """Apply ``selected`` proposals and log all scan results."""
@@ -167,30 +197,35 @@ def apply_tag_proposals(
         def log_callback(msg: str):
             print(msg)
 
-    selected_paths = {p["file"] for p in selected}
+    if fields is None:
+        fields = ["artist", "title"]
+
+    selected_paths = {str(p.file) for p in selected}
 
     updated = 0
     for p in selected:
-        path = p["file"]
-        tags = {"artist": p["new_artist"], "title": p["new_title"]}
-        if update_tags(path, tags, log_callback):
+        if update_tags(str(p.file), p, fields, log_callback):
             updated += 1
 
     # ─── Update log only after successful writes ──────────────────────────
     log_data = log_manager.load_log(library_root)
 
-    def record(entry: Dict, status: str):
-        rel = os.path.relpath(entry["file"], library_root)
+    def record(entry: TagProposal, status: str):
+        rel = os.path.relpath(entry.file, library_root)
         log_data[rel] = {
             "status": status,
-            "old_artist": entry["old_artist"],
-            "old_title": entry["old_title"],
-            "new_artist": entry["new_artist"],
-            "new_title": entry["new_title"],
+            "old_artist": entry.old_artist,
+            "old_title": entry.old_title,
+            "new_artist": entry.new_artist,
+            "new_title": entry.new_title,
+            "old_album": entry.old_album,
+            "new_album": entry.new_album,
+            "old_genres": entry.old_genres,
+            "new_genres": entry.new_genres,
         }
 
     for p in diff_proposals:
-        if p["file"] in selected_paths:
+        if str(p.file) in selected_paths:
             record(p, "applied")
         else:
             record(p, "skipped")
@@ -220,14 +255,23 @@ def fix_tags(target, log_callback=None, interactive=False):
         selected = []
         for p in diff_props:
             apply_change = prompt_user_about_tags(
-                p["file"], p["old_artist"], p["old_title"],
-                {"artist": p["new_artist"], "title": p["new_title"]}
+                str(p.file),
+                p.old_artist,
+                p.old_title,
+                {"artist": p.new_artist, "title": p.new_title}
             )
             if apply_change:
                 selected.append(p)
 
     root_path = target if os.path.isdir(target) else os.path.dirname(target)
-    updated = apply_tag_proposals(selected, diff_props, no_diff, root_path, log_callback)
+    updated = apply_tag_proposals(
+        selected,
+        diff_props,
+        no_diff,
+        root_path,
+        fields=["artist", "title"],
+        log_callback=log_callback,
+    )
 
     return {"processed": len(files), "updated": updated}
 

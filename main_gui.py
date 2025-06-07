@@ -359,15 +359,21 @@ class SoundVaultImporterApp(tk.Tk):
                                 "No proposals", "No missing tags above threshold."
                             )
                             return
-                        selected = self.show_proposals_dialog(
+                        result = self.show_proposals_dialog(
                             diff_props,
                             [] if ex_no_diff else no_diff_files,
                         )
-                        if selected is not None:
+                        if result is not None:
+                            selected, fields = result
                             from tag_fixer import apply_tag_proposals
 
                             count = apply_tag_proposals(
-                                selected, diff_props, no_diff_files, folder, log_callback=self._log
+                                selected,
+                                diff_props,
+                                no_diff_files,
+                                folder,
+                                fields=fields,
+                                log_callback=self._log,
                             )
                             messagebox.showinfo("Done", f"Updated {count} files.")
                         return
@@ -380,12 +386,26 @@ class SoundVaultImporterApp(tk.Tk):
     def show_proposals_dialog(self, diff_proposals, no_diff_files):
         # Reset from any prior invocation
         self._proceed = False
-        self._selected = []
+        self._selected = ([], [])
 
         dlg = tk.Toplevel(self)
         dlg.title("Review Tag Fix Proposals")
         dlg.grab_set()
-        # …rest of dialog setup…
+
+        self.apply_artist = tk.BooleanVar(value=True)
+        self.apply_title = tk.BooleanVar(value=True)
+        self.apply_album = tk.BooleanVar(value=False)
+        self.apply_genres = tk.BooleanVar(value=False)
+
+        chk_frame = ttk.Frame(dlg)
+        for var, label in (
+            (self.apply_artist, "Artist"),
+            (self.apply_title, "Title"),
+            (self.apply_album, "Album"),
+            (self.apply_genres, "Genres"),
+        ):
+            ttk.Checkbutton(chk_frame, text=label, variable=var).pack(side="left", padx=5)
+        chk_frame.pack(pady=5)
 
 
         cols = ("File", "Score", "Old Artist", "New Artist", "Old Title", "New Title")
@@ -429,20 +449,20 @@ class SoundVaultImporterApp(tk.Tk):
         tv.tag_configure("perfect", background="white")
         tv.tag_configure("changed", background="#fff8c6")
 
-        all_rows = sorted(diff_proposals, key=lambda p: p["score"], reverse=True) + list(no_diff_files)
+        all_rows = sorted(diff_proposals, key=lambda p: p.score, reverse=True) + list(no_diff_files)
         iid_to_prop = {}
         for p in all_rows:
-            row_tag = "perfect" if (p["old_artist"] == p["new_artist"] and p["old_title"] == p["new_title"]) else "changed"
+            row_tag = "perfect" if (p.old_artist == p.new_artist and p.old_title == p.new_title) else "changed"
             iid = tv.insert(
                 "",
                 "end",
                 values=(
-                    p["file"],
-                    f"{p['score']:.2f}",
-                    p["old_artist"] or "",
-                    p["new_artist"],
-                    p["old_title"] or "",
-                    p["new_title"],
+                    str(p.file),
+                    f"{p.score:.2f}",
+                    p.old_artist or "",
+                    p.new_artist or "",
+                    p.old_title or "",
+                    p.new_title or "",
                 ),
                 tags=(row_tag,),
             )
@@ -466,7 +486,16 @@ class SoundVaultImporterApp(tk.Tk):
 
         def on_apply():
             selected = [iid_to_prop[iid] for iid in tv.selection() if iid in iid_to_prop]
-            self._selected = selected
+            fields = []
+            if self.apply_artist.get():
+                fields.append("artist")
+            if self.apply_title.get():
+                fields.append("title")
+            if self.apply_album.get():
+                fields.append("album")
+            if self.apply_genres.get():
+                fields.append("genres")
+            self._selected = (selected, fields)
             dlg.destroy()
             setattr(self, "_proceed", True)
 
