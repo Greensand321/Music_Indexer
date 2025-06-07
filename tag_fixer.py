@@ -4,15 +4,19 @@ import argparse
 import acoustid
 from mutagen import File as MutagenFile
 
-# AcoustID credentials and client identification
-ACOUSTID_API_KEY     = "eBOqCZhyAx"
-ACOUSTID_APP_NAME    = "SoundVaultTagFixer"
-ACOUSTID_APP_VERSION = "1.0.0"
+# ─── Configuration ────────────────────────────────────────────────────────
+ACOUSTID_API_KEY       = "eBOqCZhyAx"
+ACOUSTID_APP_NAME      = "SoundVaultTagFixer"
+ACOUSTID_APP_VERSION   = "1.0.0"
+SUPPORTED_EXTS         = {".mp3", ".flac", ".m4a", ".aac", ".ogg", ".wav"}
 
-SUPPORTED_EXTS = {".mp3", ".flac", ".m4a", ".aac", ".ogg", ".wav"}
+# Score thresholds
+MIN_AUTOMATIC_SCORE   = 0.90   # ≥90% → apply automatically
+MIN_INTERACTIVE_SCORE = 0.75   # ≥75% & <90% → prompt user
 
+# ─── Utility Functions ────────────────────────────────────────────────────
 def is_remix(audio_path):
-    """Return True if the filename or existing title suggests a remix."""
+    """Return True if filename or existing title suggests a remix."""
     if "remix" in os.path.basename(audio_path).lower():
         return True
     audio = MutagenFile(audio_path, easy=True)
@@ -29,36 +33,28 @@ def find_files(root):
     audio_files = []
     for dirpath, _, files in os.walk(root):
         for fname in files:
-            ext = os.path.splitext(fname)[1].lower()
-            if ext in SUPPORTED_EXTS:
+            if os.path.splitext(fname)[1].lower() in SUPPORTED_EXTS:
                 audio_files.append(os.path.join(dirpath, fname))
     return audio_files
 
 def query_acoustid(path, log_callback):
     """
-    Return tags from AcoustID if the best fingerprint match meets your threshold.
-    Also logs the top‐5 candidate scores for debugging.
+    Fingerprint & query AcoustID.
+    Logs top-5 candidate scores.
+    Returns dict(title, artist, score) for the best candidate, or None.
     """
     try:
-        status, results = acoustid.match(
-            ACOUSTID_API_KEY,
-            path
-        )
+        status, results = acoustid.match(ACOUSTID_API_KEY, path)
         if not results:
             log_callback("  No matches at all")
             return None
 
-        # Debug: show top‐5 scores
+        # Debug: show top-5 scores
         for i, (score, rid, title, artist) in enumerate(results[:5], start=1):
             log_callback(f"  [{i}] score={score:.4f} → “{artist} – {title}”")
 
         best_score, _, best_title, best_artist = results[0]
-        # Change 1.0 → 0.95 here if you want a looser match
-        if best_score >= 1.0:
-            return {"title": best_title, "artist": best_artist}
-
-        log_callback(f"  Best score {best_score:.4f} < 1.00 → skipping")
-        return None
+        return {"title": best_title, "artist": best_artist, "score": best_score}
 
     except acoustid.NoBackendError:
         log_callback("Chromaprint library/tool not found")
@@ -66,10 +62,10 @@ def query_acoustid(path, log_callback):
         log_callback(f"Failed to fingerprint: {path}")
     except acoustid.WebServiceError as exc:
         log_callback(f"AcoustID request failed: {exc}")
-
     return None
 
 def update_tags(path, new_tags, log_callback):
+    """Write missing artist/title tags to the file. Returns True if saved."""
     audio = MutagenFile(path, easy=True)
     if audio is None:
         return False
@@ -89,6 +85,20 @@ def update_tags(path, new_tags, log_callback):
             log_callback(f"Failed to save {path}: {e}")
     return False
 
+def prompt_user_about_tags(f, old_artist, old_title, new_tags):
+    """Show side-by-side old vs new and ask Y/N."""
+    new_artist = new_tags["artist"]
+    new_title  = new_tags["title"]
+    print(f"\nFile: {f}")
+    print(f"{'Field':10} │ {'Current':30} │ {'New from AcoustID':30}")
+    print("-" * 75)
+    print(f"{'Artist':10} │ {old_artist or '—':30} │ {new_artist:30}")
+    print(f"{'Title':10} │ {old_title  or '—':30} │ {new_title:30}")
+    print()
+    resp = input("Apply these changes? [y/N]: ").strip().lower()
+    return (resp == "y")
+
+# ─── Main Tag-Fixing Logic ────────────────────────────────────────────────
 def fix_tags(target, log_callback=None, interactive=False):
     """Fill missing tags for files in target using AcoustID."""
     if log_callback is None:
@@ -108,39 +118,37 @@ def fix_tags(target, log_callback=None, interactive=False):
         if is_remix(f):
             log_callback(f"Skipping remix {f}")
             continue
+
         log_callback(f"Processing {f}...")
-        tags = query_acoustid(f, log_callback)
-        if not tags:
-            log_callback("  No perfect match found.")
+        result = query_acoustid(f, log_callback)
+        if not result:
+            log_callback("  No candidate returned")
             continue
 
+        score = result["score"]
+        log_callback(f"  Best match score = {score:.2f}")
+
+        # Load old tags for possible interactive prompt
         audio = MutagenFile(f, easy=True)
-        old_artist = None
-        old_title  = None
-        if audio and audio.tags:
-            old_artist = (audio.tags.get("artist") or [None])[0]
-            old_title  = (audio.tags.get("title")  or [None])[0]
+        old_artist = (audio.tags.get("artist") or [None])[0] if audio and audio.tags else None
+        old_title  = (audio.tags.get("title")  or [None])[0] if audio and audio.tags else None
 
-        new_artist = tags["artist"]
-        new_title  = tags["title"]
+        # Decide
+        apply_change = False
+        if score >= MIN_AUTOMATIC_SCORE:
+            apply_change = True
+        elif score >= MIN_INTERACTIVE_SCORE and interactive:
+            apply_change = prompt_user_about_tags(f, old_artist, old_title, result)
+        else:
+            log_callback(f"  Score {score:.2f} below {MIN_INTERACTIVE_SCORE:.2f}; skipping")
+            continue
 
-        if interactive:
-            print(f"\nFile: {f}")
-            print(f"{'Field':10} │ {'Current':30} │ {'New from AcoustID':30}")
-            print("-" * 75)
-            print(f"{'Artist':10} │ {old_artist or '—':30} │ {new_artist:30}")
-            print(f"{'Title':10} │ {old_title  or '—':30} │ {new_title:30}")
-            print()
-            resp = input("Apply these changes? [y/N]: ").strip().lower()
-            if resp != 'y':
-                log_callback("  Skipped.")
-                continue
-
-        if update_tags(f, tags, log_callback):
+        if apply_change and update_tags(f, result, log_callback):
             updated += 1
 
     return {"processed": len(files), "updated": updated}
 
+# ─── CLI Entry Point ─────────────────────────────────────────────────────
 def main():
     parser = argparse.ArgumentParser(
         description="Fill missing audio tags using AcoustID"
@@ -149,17 +157,16 @@ def main():
     parser.add_argument(
         "--interactive",
         action="store_true",
-        help="show proposed tag changes and ask before writing",
+        help="show and confirm tag changes for medium-confidence matches",
     )
     args = parser.parse_args()
 
     try:
         summary = fix_tags(args.target, interactive=args.interactive)
-        print(
-            f"\nProcessed {summary['processed']} files, updated {summary['updated']}."
-        )
+        print(f"\nProcessed {summary['processed']} files, updated {summary['updated']}.")
     except RuntimeError as e:
         print(e)
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()
