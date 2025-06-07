@@ -305,6 +305,14 @@ class SoundVaultImporterApp(tk.Tk):
         finally:
             self.show_all = False
 
+    def _on_show_all(self):
+        """Run tag-fix scan showing every file regardless of prior log."""
+        self.show_all = True
+        try:
+            self.fix_tags_gui()
+        finally:
+            self.show_all = False
+
     def fix_tags_gui(self):
         folder = filedialog.askdirectory(title="Select Folder to Fix Tags")
         if not folder:
@@ -341,8 +349,10 @@ class SoundVaultImporterApp(tk.Tk):
                 rel = os.path.relpath(f, folder)
                 entry = log_data.get(rel)
                 if entry:
+                    # always skip files already applied
                     if entry.get("status") == "applied":
                         continue
+                    # optionally skip no-difference or skipped entries
                     if ex_no_diff and entry.get("status") == "no_diff":
                         continue
                     if ex_skipped and entry.get("status") == "skipped":
