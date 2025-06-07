@@ -8,6 +8,7 @@ from validator import validate_soundvault_structure
 from music_indexer_api import run_full_indexer
 from importer_core import scan_and_import
 from sample_highlight import play_file_highlight, PYDUB_AVAILABLE
+import log_manager
 
 CONFIG_FILE = os.path.join(os.path.dirname(__file__), "last_path.txt")
 
@@ -101,6 +102,8 @@ class SoundVaultImporterApp(tk.Tk):
                 label="Sample Song Highlight (requires pydub)",
                 state="disabled"
             )
+        tools_menu.add_separator()
+        tools_menu.add_command(label="Reset Tag-Fix Log", command=self.reset_tagfix_log)
         menubar.add_cascade(label="Tools", menu=tools_menu)
 
         # ─── Library Info ─────────────────────────────────────────────────────
@@ -250,10 +253,52 @@ class SoundVaultImporterApp(tk.Tk):
         self._log(f"[stub] Regenerate Playlists → {path}")
         self.update_library_info()
 
+    def _tagfix_filter_dialog(self):
+        dlg = tk.Toplevel(self)
+        dlg.title("Exclude from this scan")
+        dlg.grab_set()
+        var_no_diff = tk.BooleanVar()
+        var_skipped = tk.BooleanVar()
+        tk.Checkbutton(
+            dlg,
+            text="Songs previously logged as \u201cno differences\u201d",
+            variable=var_no_diff,
+        ).pack(anchor="w", padx=10, pady=(10, 5))
+        tk.Checkbutton(
+            dlg,
+            text="Songs previously logged as \u201cskipped\u201d",
+            variable=var_skipped,
+        ).pack(anchor="w", padx=10)
+        btn = tk.Frame(dlg)
+        btn.pack(pady=10)
+        result = {"proceed": False}
+
+        def ok():
+            result["proceed"] = True
+            dlg.destroy()
+
+        def cancel():
+            dlg.destroy()
+
+        tk.Button(btn, text="OK", command=ok).pack(side="left", padx=5)
+        tk.Button(btn, text="Cancel", command=cancel).pack(side="left", padx=5)
+        dlg.wait_window()
+        return result["proceed"], var_no_diff.get(), var_skipped.get()
+
     def fix_tags_gui(self):
         folder = filedialog.askdirectory(title="Select Folder to Fix Tags")
         if not folder:
             return
+
+        log_data = log_manager.load_log(folder)
+        removed = log_manager.prune_missing_entries(log_data, folder)
+        if removed:
+            msg = "Cleaned up %d log entries for missing files:\n" % len(removed)
+            msg += "\n".join("\u2022 " + p for p in removed)
+            msg += "\nProceed with scan?"
+            if not messagebox.askyesno("Cleanup", msg):
+                return
+            log_manager.save_log(log_data, folder)
 
         from tag_fixer import find_files
 
@@ -264,19 +309,37 @@ class SoundVaultImporterApp(tk.Tk):
             )
             return
 
+        proceed, ex_no_diff, ex_skipped = self._tagfix_filter_dialog()
+        if not proceed:
+            return
+
+        filtered = []
+        for f in files:
+            rel = os.path.relpath(f, folder)
+            entry = log_data.get(rel)
+            if entry:
+                if ex_no_diff and entry.get("status") == "no_diff":
+                    continue
+                if ex_skipped and entry.get("status") == "skipped":
+                    continue
+            filtered.append(f)
+
+        if not filtered:
+            messagebox.showinfo("No files", "All files were excluded by your filters.")
+            return
+
         q = queue.Queue()
-        progress = ProgressDialog(self, total=len(files), title="Fingerprinting…")
+        progress = ProgressDialog(self, total=len(filtered), title="Fingerprinting…")
 
         def worker():
             from tag_fixer import collect_tag_proposals
 
-            proposals = []
-            for idx, f in enumerate(files, start=1):
-                q.put(("progress", idx))
-                props = collect_tag_proposals(f, log_callback=lambda m: None)
-                if props:
-                    proposals.extend(props)
-            q.put(("done", proposals))
+            diff_props, no_diff = collect_tag_proposals(
+                filtered,
+                log_callback=lambda m: None,
+                progress_callback=lambda idx: q.put(("progress", idx)),
+            )
+            q.put(("done", (diff_props, no_diff)))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -288,18 +351,21 @@ class SoundVaultImporterApp(tk.Tk):
                         progress.update_progress(payload)
                     elif msg == "done":
                         progress.destroy()
-                        proposals = payload
-                        if not proposals:
+                        diff_props, no_diff_files = payload
+                        if not diff_props and (ex_no_diff or not no_diff_files):
                             messagebox.showinfo(
                                 "No proposals", "No missing tags above threshold."
                             )
                             return
-                        confirmed = self.show_proposals_dialog(proposals)
-                        if confirmed:
+                        selected = self.show_proposals_dialog(
+                            diff_props,
+                            [] if ex_no_diff else no_diff_files,
+                        )
+                        if selected is not None:
                             from tag_fixer import apply_tag_proposals
 
                             count = apply_tag_proposals(
-                                proposals, log_callback=self._log
+                                selected, diff_props, no_diff_files, folder, log_callback=self._log
                             )
                             messagebox.showinfo("Done", f"Updated {count} files.")
                         return
@@ -309,7 +375,7 @@ class SoundVaultImporterApp(tk.Tk):
 
         self.after(100, poll_queue)
 
-    def show_proposals_dialog(self, proposals):
+    def show_proposals_dialog(self, diff_proposals, no_diff_files):
         dlg = tk.Toplevel(self)
         dlg.title("Review Tag Fix Proposals")
         dlg.grab_set()
@@ -355,8 +421,9 @@ class SoundVaultImporterApp(tk.Tk):
         tv.tag_configure("perfect", background="white")
         tv.tag_configure("changed", background="#fff8c6")
 
-        iid_to_index = {}
-        for idx, p in enumerate(proposals):
+        all_rows = sorted(diff_proposals, key=lambda p: p["score"], reverse=True) + list(no_diff_files)
+        iid_to_prop = {}
+        for p in all_rows:
             row_tag = "perfect" if (p["old_artist"] == p["new_artist"] and p["old_title"] == p["new_title"]) else "changed"
             iid = tv.insert(
                 "",
@@ -371,7 +438,8 @@ class SoundVaultImporterApp(tk.Tk):
                 ),
                 tags=(row_tag,),
             )
-            iid_to_index[iid] = idx
+            if p in diff_proposals:
+                iid_to_prop[iid] = p
 
         def select_all(event):
             tv.selection_set(tv.get_children(""))
@@ -383,13 +451,14 @@ class SoundVaultImporterApp(tk.Tk):
         sel_label.pack(anchor="w", padx=10)
 
         def update_selection_count(event=None):
-            sel_label.config(text=f"Selected: {len(tv.selection())}")
+            cnt = sum(1 for iid in tv.selection() if iid in iid_to_prop)
+            sel_label.config(text=f"Selected: {cnt}")
 
         tv.bind("<<TreeviewSelect>>", update_selection_count)
 
         def on_apply():
-            selected = [proposals[iid_to_index[iid]] for iid in tv.selection()]
-            proposals[:] = selected
+            selected = [iid_to_prop[iid] for iid in tv.selection() if iid in iid_to_prop]
+            self._selected = selected
             dlg.destroy()
             setattr(self, "_proceed", True)
 
@@ -400,7 +469,9 @@ class SoundVaultImporterApp(tk.Tk):
 
         update_selection_count()
         dlg.wait_window()
-        return bool(getattr(self, "_proceed", False))
+        if getattr(self, "_proceed", False):
+            return self._selected
+        return None
 
     def sample_song_highlight(self):
         """Ask the user for an audio file and play its highlight."""
@@ -420,6 +491,17 @@ class SoundVaultImporterApp(tk.Tk):
         except Exception as e:
             messagebox.showerror("Playback failed", str(e))
             self._log(f"✘ Playback failed for {path}: {e}")
+
+    def reset_tagfix_log(self):
+        initial = self.library_path or load_last_path()
+        folder = filedialog.askdirectory(title="Select Library Root", initialdir=initial)
+        if not folder:
+            return
+        if not messagebox.askyesno("Reset Log", "This will erase all history of prior scans. Continue?"):
+            return
+        log_manager.reset_log(folder)
+        messagebox.showinfo("Reset", "Tag-fix log cleared.")
+        self._log(f"Reset tag-fix log for {folder}")
 
     def _log(self, msg):
         self.output.configure(state="normal")
