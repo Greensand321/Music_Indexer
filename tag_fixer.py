@@ -4,7 +4,7 @@ import argparse
 import acoustid
 import musicbrainzngs
 from pathlib import Path
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Iterable, Callable, List, Tuple, Dict, Optional
 from mutagen import File as MutagenFile
 
@@ -33,8 +33,8 @@ class TagProposal:
     new_title: Optional[str] = None
     old_album: Optional[str] = None
     new_album: Optional[str] = None
-    old_genres: List[str] | None = None
-    new_genres: List[str] | None = None
+    old_genres: List[str] = field(default_factory=list)
+    new_genres: List[str] = field(default_factory=list)
     score: float = 0.0
 
 # Score thresholds
@@ -111,9 +111,19 @@ def update_tags(path: str, proposal: TagProposal, fields: List[str], log_callbac
     if "album" in fields and proposal.new_album is not None and proposal.new_album != proposal.old_album:
         audio["album"] = [proposal.new_album]
         changed = True
-    if "genres" in fields and proposal.new_genres is not None and proposal.new_genres != proposal.old_genres:
-        audio["genre"] = proposal.new_genres
-        changed = True
+    if "genres" in fields:
+        existing = audio.tags.get("genre", []) if audio.tags else []
+        old = proposal.old_genres or existing
+        new = proposal.new_genres or []
+        merged = []
+        seen: set[str] = set()
+        for g in list(old) + list(new):
+            if g not in seen:
+                merged.append(g)
+                seen.add(g)
+        if merged != existing:
+            audio["genre"] = merged
+            changed = True
     if changed:
         try:
             audio.save()
