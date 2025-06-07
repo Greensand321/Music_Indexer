@@ -2,6 +2,7 @@ import os
 import sys
 import argparse
 import acoustid
+import musicbrainzngs
 from pathlib import Path
 from dataclasses import dataclass
 from typing import Iterable, Callable, List, Tuple, Dict, Optional
@@ -14,6 +15,12 @@ ACOUSTID_API_KEY       = "eBOqCZhyAx"
 ACOUSTID_APP_NAME      = "SoundVaultTagFixer"
 ACOUSTID_APP_VERSION   = "1.0.0"
 SUPPORTED_EXTS         = {".mp3", ".flac", ".m4a", ".aac", ".ogg", ".wav"}
+
+musicbrainzngs.set_useragent(
+    "SoundVaultTagFixer",
+    "1.0",
+    "youremail@example.com",
+)
 
 # ─── Data Classes ────────────────────────────────────────────────────────
 
@@ -73,8 +80,13 @@ def query_acoustid(path, log_callback):
             log_callback(f"  [{i}] score={score:.4f} → “{artist} – {title}”")
 
         # Now get the very first result for your decision
-        best_score, _, best_title, best_artist = peek[0]
-        return {"title": best_title, "artist": best_artist, "score": best_score}
+        best_score, best_rid, best_title, best_artist = peek[0]
+        return {
+            "title": best_title,
+            "artist": best_artist,
+            "score": best_score,
+            "recording_id": best_rid,
+        }
 
     except acoustid.NoBackendError:
         log_callback("Chromaprint library/tool not found")
@@ -157,6 +169,23 @@ def collect_tag_proposals(
         if score < MIN_INTERACTIVE_SCORE:
             continue
 
+        mb_album = None
+        mb_genres = []
+        mbid = result.get("recording_id")
+        if mbid:
+            try:
+                rec = musicbrainzngs.get_recording_by_id(
+                    mbid,
+                    includes=["releases", "tags"],
+                )["recording"]
+                rels = rec.get("releases", [])
+                if rels:
+                    mb_album = rels[0].get("title")
+                mb_tags = rec.get("tag-list", [])
+                mb_genres = [t["name"] for t in mb_tags if "name" in t]
+            except Exception as e:
+                log_callback(f"  MB lookup failed: {e}")
+
         audio = MutagenFile(f, easy=True)
         old_artist = (audio.tags.get("artist") or [None])[0] if audio and audio.tags else None
         old_title = (audio.tags.get("title") or [None])[0] if audio and audio.tags else None
@@ -170,9 +199,9 @@ def collect_tag_proposals(
             old_title=old_title,
             new_title=result["title"],
             old_album=old_album,
-            new_album=None,
+            new_album=mb_album,
             old_genres=old_genres,
-            new_genres=[],
+            new_genres=mb_genres,
             score=score,
         )
 
