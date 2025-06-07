@@ -76,6 +76,7 @@ class SoundVaultImporterApp(tk.Tk):
         self.library_name_var = tk.StringVar(value="No library selected")
         self.library_path_var = tk.StringVar(value="")
         self.library_stats_var = tk.StringVar(value="")
+        self.show_all = False
 
         # ─── Menu Bar ─────────────────────────────────────────────────────────
         menubar = tk.Menu(self)
@@ -88,6 +89,7 @@ class SoundVaultImporterApp(tk.Tk):
         file_menu.add_command(label="Run Indexer", command=self.run_indexer)
         file_menu.add_command(label="Scan for Orphans", command=self.scan_orphans)
         file_menu.add_command(label="Compare Libraries", command=self.compare_libraries)
+        file_menu.add_command(label="Show All Files", command=self._on_show_all)
         file_menu.add_separator()
         file_menu.add_command(label="Exit", command=self.quit)
         menubar.add_cascade(label="File", menu=file_menu)
@@ -259,6 +261,7 @@ class SoundVaultImporterApp(tk.Tk):
         dlg.grab_set()
         var_no_diff = tk.BooleanVar()
         var_skipped = tk.BooleanVar()
+        show_all = False
         tk.Checkbutton(
             dlg,
             text="Songs previously logged as \u201cno differences\u201d",
@@ -280,10 +283,27 @@ class SoundVaultImporterApp(tk.Tk):
         def cancel():
             dlg.destroy()
 
+        def on_show_all():
+            nonlocal show_all
+            result["proceed"] = True
+            show_all = True
+            var_no_diff.set(False)
+            var_skipped.set(False)
+            dlg.destroy()
+
         tk.Button(btn, text="OK", command=ok).pack(side="left", padx=5)
         tk.Button(btn, text="Cancel", command=cancel).pack(side="left", padx=5)
+        tk.Button(btn, text="Show All Songs", command=on_show_all).pack(side="left", padx=5)
         dlg.wait_window()
-        return result["proceed"], var_no_diff.get(), var_skipped.get()
+        return result["proceed"], var_no_diff.get(), var_skipped.get(), show_all
+
+    def _on_show_all(self):
+        """Run tag-fix scan showing every file regardless of prior log."""
+        self.show_all = True
+        try:
+            self.fix_tags_gui()
+        finally:
+            self.show_all = False
 
     def fix_tags_gui(self):
         folder = filedialog.askdirectory(title="Select Folder to Fix Tags")
@@ -309,22 +329,25 @@ class SoundVaultImporterApp(tk.Tk):
             )
             return
 
-        proceed, ex_no_diff, ex_skipped = self._tagfix_filter_dialog()
+        proceed, ex_no_diff, ex_skipped, show_all = self._tagfix_filter_dialog()
         if not proceed:
             return
 
-        filtered = []
-        for f in files:
-            rel = os.path.relpath(f, folder)
-            entry = log_data.get(rel)
-            if entry:
-                if entry.get("status") == "applied":
-                            continue
-                if ex_no_diff and entry.get("status") == "no_diff":
-                    continue
-                if ex_skipped and entry.get("status") == "skipped":
-                    continue
-            filtered.append(f)
+        if self.show_all or show_all:
+            filtered = list(files)
+        else:
+            filtered = []
+            for f in files:
+                rel = os.path.relpath(f, folder)
+                entry = log_data.get(rel)
+                if entry:
+                    if entry.get("status") == "applied":
+                        continue
+                    if ex_no_diff and entry.get("status") == "no_diff":
+                        continue
+                    if ex_skipped and entry.get("status") == "skipped":
+                        continue
+                filtered.append(f)
 
         if not filtered:
             messagebox.showinfo("No files", "All files were excluded by your filters.")
