@@ -165,7 +165,8 @@ def collect_tag_proposals(
     diff: List[TagProposal] = []
     no_diff: List[TagProposal] = []
     for idx, f in enumerate(files, start=1):
-        if is_remix(f):
+        # only skip remixes when NOT in Show All mode
+        if is_remix(f) and not show_all:
             if progress_callback:
                 progress_callback(idx)
             continue
