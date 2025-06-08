@@ -182,17 +182,41 @@ def build_file_records(
             continue
 
         log_callback(f"Fingerprinting {f}")
-        result = query_acoustid(f, log_callback)
-        if not result:
+        try:
+            result = query_acoustid(f, log_callback)
+        except Exception as e:
+            log_callback(f"  lookup error: {e}")
+            result = None
+
+        if not result or not result.get("title"):
+            if not result:
+                log_callback(f"  no fingerprint match")
+
+            audio = MutagenFile(f, easy=True)
+            old_artist = (audio.tags.get("artist") or [None])[0] if audio and audio.tags else None
+            old_title = (audio.tags.get("title") or [None])[0] if audio and audio.tags else None
+            old_album = (audio.tags.get("album") or [None])[0] if audio and audio.tags else None
+            old_genres = audio.tags.get("genre", []) if audio and audio.tags else []
+
+            rec = FileRecord(
+                path=Path(f),
+                status="unmatched",
+                score=None,
+                old_artist=old_artist,
+                new_artist=None,
+                old_title=old_title,
+                new_title=None,
+                old_album=old_album,
+                new_album=None,
+                old_genres=old_genres,
+                new_genres=[],
+            )
+            records.append(rec)
             if progress_callback:
                 progress_callback(idx)
             continue
 
         score = result.get("score")
-        if not show_all and score is not None and score < MIN_INTERACTIVE_SCORE:
-            if progress_callback:
-                progress_callback(idx)
-            continue
         if progress_callback:
             progress_callback(idx)
 
