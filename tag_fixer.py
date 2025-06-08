@@ -8,7 +8,28 @@ from dataclasses import dataclass, field
 from typing import Iterable, Callable, List, Optional
 from mutagen import File as MutagenFile
 
-import log_manager
+import sqlite3
+
+# ─── Database Helpers ─────────────────────────────────────────────────────
+def init_db(path: str) -> sqlite3.Connection:
+    conn = sqlite3.connect(path)
+    c = conn.cursor()
+    c.execute(
+        """
+        CREATE TABLE IF NOT EXISTS files (
+          path        TEXT PRIMARY KEY,
+          status      TEXT,
+          score       REAL,
+          old_artist  TEXT, new_artist TEXT,
+          old_title   TEXT, new_title  TEXT,
+          old_album   TEXT, new_album  TEXT,
+          old_genres  TEXT, new_genres TEXT
+        )
+        """
+    )
+    c.execute("CREATE INDEX IF NOT EXISTS idx_status ON files(status)")
+    conn.commit()
+    return conn
 
 # ─── Configuration ────────────────────────────────────────────────────────
 ACOUSTID_API_KEY       = "eBOqCZhyAx"
@@ -153,6 +174,7 @@ def prompt_user_about_tags(f, old_artist, old_title, new_tags):
 def build_file_records(
     root: str,
     *,
+    db: sqlite3.Connection,
     show_all: bool = False,
     log_callback: Callable[[str], None] | None = None,
     progress_callback: Callable[[int], None] | None = None,
@@ -163,13 +185,13 @@ def build_file_records(
         def log_callback(msg: str):
             print(msg)
 
-    log = log_manager.load_log(root)
     records: List[FileRecord] = []
+
+    existing_status = dict(db.execute("SELECT path, status FROM files"))
 
     files = find_files(root)
     for idx, f in enumerate(files, start=1):
-        rel = os.path.relpath(f, root)
-        status = log.get(rel, {}).get("status", "new")
+        status = existing_status.get(f, "new")
 
         if status == "applied" and not show_all:
             if progress_callback:
@@ -212,6 +234,19 @@ def build_file_records(
                 new_genres=[],
             )
             records.append(rec)
+            genres_old = ";".join(rec.old_genres)
+            genres_new = ";".join(rec.new_genres)
+            vals = (
+                str(rec.path), rec.status, rec.score,
+                rec.old_artist, rec.new_artist,
+                rec.old_title, rec.new_title,
+                rec.old_album, rec.new_album,
+                genres_old, genres_new,
+            )
+            db.execute(
+                "INSERT OR REPLACE INTO files VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                vals,
+            )
             if progress_callback:
                 progress_callback(idx)
             continue
@@ -266,7 +301,21 @@ def build_file_records(
         if all_match:
             rec.status = "no_diff"
         records.append(rec)
+        genres_old = ";".join(rec.old_genres)
+        genres_new = ";".join(rec.new_genres)
+        vals = (
+            str(rec.path), rec.status, rec.score,
+            rec.old_artist, rec.new_artist,
+            rec.old_title, rec.new_title,
+            rec.old_album, rec.new_album,
+            genres_old, genres_new,
+        )
+        db.execute(
+            "INSERT OR REPLACE INTO files VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            vals,
+        )
 
+    db.commit()
     return records
 
 
@@ -302,7 +351,18 @@ def fix_tags(target, log_callback=None, interactive=False):
         log_callback("No audio files found.")
         return {"processed": 0, "updated": 0}
 
-    records = build_file_records(target, show_all=False, log_callback=log_callback)
+    db_path = os.path.join(
+        target if os.path.isdir(target) else os.path.dirname(target),
+        ".soundvault.db",
+    )
+    db = init_db(db_path)
+
+    records = build_file_records(
+        target,
+        db=db,
+        show_all=False,
+        log_callback=log_callback,
+    )
     selected = [p for p in records if p.status != "no_diff"]
 
     if interactive:
@@ -324,10 +384,8 @@ def fix_tags(target, log_callback=None, interactive=False):
         log_callback=log_callback,
     )
 
-    log_data = log_manager.load_log(root_path)
     selected_set = {rec.path for rec in selected}
     for rec in records:
-        rel = os.path.relpath(rec.path, root_path)
         if rec.path in selected_set:
             status = "applied"
         elif rec.status == "no_diff":
@@ -335,19 +393,12 @@ def fix_tags(target, log_callback=None, interactive=False):
         else:
             status = "skipped"
         rec.status = status
-        log_data[rel] = {
-            "status": status,
-            "old_artist": rec.old_artist,
-            "old_title": rec.old_title,
-            "new_artist": rec.new_artist,
-            "new_title": rec.new_title,
-            "old_album": rec.old_album,
-            "new_album": rec.new_album,
-            "old_genres": rec.old_genres,
-            "new_genres": rec.new_genres,
-        }
-    log_manager.save_log(log_data, root_path)
+        db.execute(
+            "UPDATE files SET status=? WHERE path=?",
+            (status, str(rec.path)),
+        )
 
+    db.commit()
     return {"processed": len(files), "updated": updated}
 
 # ─── CLI Entry Point ─────────────────────────────────────────────────────
