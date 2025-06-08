@@ -574,7 +574,7 @@ class SoundVaultImporterApp(tk.Tk):
         tv = self._prop_tv
         tv.delete(*tv.get_children())
         for idx, rec in enumerate(records):
-            if rec.score is not None and rec.score < MIN_INTERACTIVE_SCORE:
+            if rec.score is None or rec.score < MIN_INTERACTIVE_SCORE or rec.status == 'unmatched':
                 tag = 'lowconf'
             elif (
                 rec.old_artist == rec.new_artist
