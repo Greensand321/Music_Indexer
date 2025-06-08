@@ -5,7 +5,7 @@ import acoustid
 import musicbrainzngs
 from pathlib import Path
 from dataclasses import dataclass, field
-from typing import Iterable, Callable, List, Tuple, Dict, Optional
+from typing import Iterable, Callable, List, Optional
 from mutagen import File as MutagenFile
 
 import log_manager
@@ -25,8 +25,12 @@ musicbrainzngs.set_useragent(
 # ─── Data Classes ────────────────────────────────────────────────────────
 
 @dataclass
-class TagProposal:
-    file: Path
+class FileRecord:
+    """Representation of a single audio file and proposed tags."""
+
+    path: Path
+    status: str
+    score: Optional[float] = None
     old_artist: Optional[str] = None
     new_artist: Optional[str] = None
     old_title: Optional[str] = None
@@ -35,7 +39,6 @@ class TagProposal:
     new_album: Optional[str] = None
     old_genres: List[str] = field(default_factory=list)
     new_genres: List[str] = field(default_factory=list)
-    score: float = 0.0
 
 # Score thresholds
 MIN_AUTOMATIC_SCORE   = 0.90   # ≥90% → apply automatically
@@ -96,7 +99,7 @@ def query_acoustid(path, log_callback):
         log_callback(f"AcoustID request failed: {exc}")
     return None
 
-def update_tags(path: str, proposal: TagProposal, fields: List[str], log_callback):
+def update_tags(path: str, proposal: FileRecord, fields: List[str], log_callback):
     """Write selected tags from ``proposal`` into ``path``. Return True if saved."""
     audio = MutagenFile(path, easy=True)
     if audio is None:
@@ -147,25 +150,32 @@ def prompt_user_about_tags(f, old_artist, old_title, new_tags):
     return (resp == "y")
 
 # ─── Main Tag-Fixing Logic ────────────────────────────────────────────────
-def collect_tag_proposals(
-    files: Iterable[str],
-    log_callback: Callable[[str], None] | None = None,
-    progress_callback: Callable[[int], None] | None = None,
+def build_file_records(
+    root: str,
     *,
     show_all: bool = False,
-) -> Tuple[List[TagProposal], List[TagProposal]]:
-    """Return (diff_proposals, no_diff_files) for the given ``files``."""
+    log_callback: Callable[[str], None] | None = None,
+    progress_callback: Callable[[int], None] | None = None,
+) -> List[FileRecord]:
+    """Return a list of ``FileRecord`` objects for ``root``."""
+
     if log_callback is None:
         def log_callback(msg: str):
             print(msg)
 
-    if not ACOUSTID_API_KEY:
-        raise RuntimeError("ACOUSTID_API_KEY not configured")
+    log = log_manager.load_log(root)
+    records: List[FileRecord] = []
 
-    diff: List[TagProposal] = []
-    no_diff: List[TagProposal] = []
+    files = find_files(root)
     for idx, f in enumerate(files, start=1):
-        # only skip remixes when NOT in Show All mode
+        rel = os.path.relpath(f, root)
+        status = log.get(rel, {}).get("status", "new")
+
+        if status == "applied" and not show_all:
+            if progress_callback:
+                progress_callback(idx)
+            continue
+
         if is_remix(f) and not show_all:
             if progress_callback:
                 progress_callback(idx)
@@ -178,8 +188,8 @@ def collect_tag_proposals(
                 progress_callback(idx)
             continue
 
-        score = result["score"]
-        if not show_all and score < MIN_INTERACTIVE_SCORE:
+        score = result.get("score")
+        if not show_all and score is not None and score < MIN_INTERACTIVE_SCORE:
             if progress_callback:
                 progress_callback(idx)
             continue
@@ -187,7 +197,7 @@ def collect_tag_proposals(
             progress_callback(idx)
 
         mb_album = None
-        mb_genres = []
+        mb_genres: List[str] = []
         mbid = result.get("recording_id")
         if mbid:
             try:
@@ -209,37 +219,37 @@ def collect_tag_proposals(
         old_album = (audio.tags.get("album") or [None])[0] if audio and audio.tags else None
         old_genres = audio.tags.get("genre", []) if audio and audio.tags else []
 
-        entry = TagProposal(
-            file=Path(f),
+        rec = FileRecord(
+            path=Path(f),
+            status=status,
+            score=score,
             old_artist=old_artist,
-            new_artist=result["artist"],
+            new_artist=result.get("artist"),
             old_title=old_title,
-            new_title=result["title"],
+            new_title=result.get("title"),
             old_album=old_album,
             new_album=mb_album,
             old_genres=old_genres,
             new_genres=mb_genres,
-            score=score,
         )
 
         all_match = (
-            entry.old_artist == entry.new_artist
-            and entry.old_title == entry.new_title
-            and entry.old_album == entry.new_album
-            and sorted(entry.old_genres or []) == sorted(entry.new_genres or [])
+            rec.old_artist == rec.new_artist
+            and rec.old_title == rec.new_title
+            and rec.old_album == rec.new_album
+            and sorted(rec.old_genres or []) == sorted(rec.new_genres or [])
         )
         if all_match:
-            no_diff.append(entry)
-        else:
-            diff.append(entry)
+            rec.status = "no_diff"
+        records.append(rec)
 
-    return diff, no_diff
+    return records
 
 
 def apply_tag_proposals(
-    selected: Iterable[TagProposal],
-    diff_proposals: Iterable[TagProposal],
-    no_diff_files: Iterable[TagProposal],
+    selected: Iterable[FileRecord],
+    diff_proposals: Iterable[FileRecord],
+    no_diff_files: Iterable[FileRecord],
     library_root: str,
     fields: List[str] | None = None,
     log_callback: Callable[[str], None] | None = None,
@@ -252,18 +262,18 @@ def apply_tag_proposals(
     if fields is None:
         fields = ["artist", "title"]
 
-    selected_paths = {str(p.file) for p in selected}
+    selected_paths = {str(p.path) for p in selected}
 
     updated = 0
     for p in selected:
-        if update_tags(str(p.file), p, fields, log_callback):
+        if update_tags(str(p.path), p, fields, log_callback):
             updated += 1
 
     # ─── Update log only after successful writes ──────────────────────────
     log_data = log_manager.load_log(library_root)
 
-    def record(entry: TagProposal, status: str):
-        rel = os.path.relpath(entry.file, library_root)
+    def record(entry: FileRecord, status: str):
+        rel = os.path.relpath(entry.path, library_root)
         log_data[rel] = {
             "status": status,
             "old_artist": entry.old_artist,
@@ -277,7 +287,7 @@ def apply_tag_proposals(
         }
 
     for p in diff_proposals:
-        if str(p.file) in selected_paths:
+        if str(p.path) in selected_paths:
             record(p, "applied")
         else:
             record(p, "skipped")
@@ -300,14 +310,16 @@ def fix_tags(target, log_callback=None, interactive=False):
         log_callback("No audio files found.")
         return {"processed": 0, "updated": 0}
 
-    diff_props, no_diff = collect_tag_proposals(files, log_callback)
+    records = build_file_records(target, show_all=False, log_callback=log_callback)
+    no_diff = [p for p in records if p.status == "no_diff"]
+    diff_props = [p for p in records if p.status != "no_diff"]
     selected = diff_props
 
     if interactive:
         selected = []
         for p in diff_props:
             apply_change = prompt_user_about_tags(
-                str(p.file),
+                str(p.path),
                 p.old_artist,
                 p.old_title,
                 {"artist": p.new_artist, "title": p.new_title}
