@@ -335,7 +335,7 @@ class SoundVaultImporterApp(tk.Tk):
         if not proceed:
             return
 
-        show_all = show_all or self.show_all
+        show_all = show_all or getattr(self, "show_all", False)
 
         if show_all:
             filtered = list(files)
