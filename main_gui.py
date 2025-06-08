@@ -338,7 +338,7 @@ class SoundVaultImporterApp(tk.Tk):
 
         from tag_fixer import init_db
         db_path = os.path.join(folder, ".soundvault.db")
-        db = init_db(db_path)
+        init_db(db_path)
 
         from tag_fixer import find_files
 
@@ -361,14 +361,21 @@ class SoundVaultImporterApp(tk.Tk):
 
         def worker():
             from tag_fixer import build_file_records
+            import sqlite3
+
+            conn = sqlite3.connect(db_path)
 
             records = build_file_records(
                 folder,
-                db=db,
+                db_conn=conn,
                 show_all=show_all,
                 log_callback=lambda m: None,
                 progress_callback=lambda idx: q.put(("progress", idx)),
             )
+
+            conn.commit()
+            conn.close()
+
             q.put(("done", records))
 
         threading.Thread(target=worker, daemon=True).start()
@@ -383,34 +390,25 @@ class SoundVaultImporterApp(tk.Tk):
                         progress.destroy()
                         all_records = payload
 
-                        conditions = []
-                        if not show_all:
-                            conditions.append("status!='applied'")
-                            if ex_no_diff:
-                                conditions.append("status!='no_diff'")
-                            if ex_skipped:
-                                conditions.append("status!='skipped'")
-                        where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
-                        query = f"SELECT * FROM files {where} ORDER BY score DESC"
-                        rows = db.execute(query).fetchall()
-                        from pathlib import Path
                         from tag_fixer import FileRecord, apply_tag_proposals
 
-                        records = []
-                        for (
-                            path, status, score,
-                            old_a, new_a, old_t, new_t,
-                            old_al, new_al, old_g, new_g,
-                        ) in rows:
-                            rec = FileRecord(
-                                path=Path(path), status=status, score=score,
-                                old_artist=old_a, new_artist=new_a,
-                                old_title=old_t, new_title=new_t,
-                                old_album=old_al, new_album=new_al,
-                                old_genres=old_g.split(";") if old_g else [],
-                                new_genres=new_g.split(";") if new_g else [],
-                            )
-                            records.append(rec)
+                        records = all_records
+
+                        if not show_all:
+                            filtered = []
+                            for rec in records:
+                                if ex_no_diff and rec.status == 'no_diff':
+                                    continue
+                                if ex_skipped and rec.status == 'skipped':
+                                    continue
+                                filtered.append(rec)
+                            records = filtered
+
+                        records = sorted(
+                            records,
+                            key=lambda r: (r.score is not None, r.score if r.score is not None else 0),
+                            reverse=True,
+                        )
 
                         if not records:
                             messagebox.showinfo(
@@ -429,6 +427,8 @@ class SoundVaultImporterApp(tk.Tk):
                             )
 
                             selected_set = {rec.path for rec in selected}
+                            import sqlite3
+                            conn = sqlite3.connect(db_path)
                             for rec in all_records:
                                 if rec.path in selected_set:
                                     status = 'applied'
@@ -437,11 +437,12 @@ class SoundVaultImporterApp(tk.Tk):
                                 else:
                                     status = 'skipped'
                                 rec.status = status
-                                db.execute(
+                                conn.execute(
                                     "UPDATE files SET status=? WHERE path=?",
                                     (status, str(rec.path)),
                                 )
-                            db.commit()
+                            conn.commit()
+                            conn.close()
                             messagebox.showinfo('Done', f'Updated {count} files.')
                         return
             except queue.Empty:

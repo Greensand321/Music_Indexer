@@ -11,25 +11,26 @@ from mutagen import File as MutagenFile
 import sqlite3
 
 # ─── Database Helpers ─────────────────────────────────────────────────────
-def init_db(path: str) -> sqlite3.Connection:
+def init_db(path: str):
+    """Create the SQLite database schema if needed."""
     conn = sqlite3.connect(path)
     c = conn.cursor()
     c.execute(
         """
-        CREATE TABLE IF NOT EXISTS files (
-          path        TEXT PRIMARY KEY,
-          status      TEXT,
-          score       REAL,
-          old_artist  TEXT, new_artist TEXT,
-          old_title   TEXT, new_title  TEXT,
-          old_album   TEXT, new_album  TEXT,
-          old_genres  TEXT, new_genres TEXT
-        )
+      CREATE TABLE IF NOT EXISTS files (
+        path        TEXT PRIMARY KEY,
+        status      TEXT,
+        score       REAL,
+        old_artist  TEXT, new_artist TEXT,
+        old_title   TEXT, new_title  TEXT,
+        old_album   TEXT, new_album  TEXT,
+        old_genres  TEXT, new_genres TEXT
+      );
         """
     )
-    c.execute("CREATE INDEX IF NOT EXISTS idx_status ON files(status)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_status ON files(status);")
     conn.commit()
-    return conn
+    conn.close()
 
 # ─── Configuration ────────────────────────────────────────────────────────
 ACOUSTID_API_KEY       = "eBOqCZhyAx"
@@ -174,7 +175,7 @@ def prompt_user_about_tags(f, old_artist, old_title, new_tags):
 def build_file_records(
     root: str,
     *,
-    db: sqlite3.Connection,
+    db_conn: sqlite3.Connection,
     show_all: bool = False,
     log_callback: Callable[[str], None] | None = None,
     progress_callback: Callable[[int], None] | None = None,
@@ -187,7 +188,7 @@ def build_file_records(
 
     records: List[FileRecord] = []
 
-    existing_status = dict(db.execute("SELECT path, status FROM files"))
+    existing_status = dict(db_conn.execute("SELECT path, status FROM files"))
 
     files = find_files(root)
     for idx, f in enumerate(files, start=1):
@@ -243,7 +244,7 @@ def build_file_records(
                 rec.old_album, rec.new_album,
                 genres_old, genres_new,
             )
-            db.execute(
+            db_conn.execute(
                 "INSERT OR REPLACE INTO files VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                 vals,
             )
@@ -310,12 +311,12 @@ def build_file_records(
             rec.old_album, rec.new_album,
             genres_old, genres_new,
         )
-        db.execute(
+        db_conn.execute(
             "INSERT OR REPLACE INTO files VALUES (?,?,?,?,?,?,?,?,?,?,?)",
             vals,
         )
 
-    db.commit()
+    db_conn.commit()
     return records
 
 
@@ -355,14 +356,17 @@ def fix_tags(target, log_callback=None, interactive=False):
         target if os.path.isdir(target) else os.path.dirname(target),
         ".soundvault.db",
     )
-    db = init_db(db_path)
+    init_db(db_path)
 
+    db_conn = sqlite3.connect(db_path)
     records = build_file_records(
         target,
-        db=db,
+        db_conn=db_conn,
         show_all=False,
         log_callback=log_callback,
     )
+    db_conn.commit()
+    db_conn.close()
     selected = [p for p in records if p.status != "no_diff"]
 
     if interactive:
@@ -377,13 +381,13 @@ def fix_tags(target, log_callback=None, interactive=False):
             if apply_change:
                 selected.append(p)
 
-    root_path = target if os.path.isdir(target) else os.path.dirname(target)
     updated = apply_tag_proposals(
         selected,
         fields=["artist", "title"],
         log_callback=log_callback,
     )
 
+    db_conn = sqlite3.connect(db_path)
     selected_set = {rec.path for rec in selected}
     for rec in records:
         if rec.path in selected_set:
@@ -393,12 +397,13 @@ def fix_tags(target, log_callback=None, interactive=False):
         else:
             status = "skipped"
         rec.status = status
-        db.execute(
+        db_conn.execute(
             "UPDATE files SET status=? WHERE path=?",
             (status, str(rec.path)),
         )
 
-    db.commit()
+    db_conn.commit()
+    db_conn.close()
     return {"processed": len(files), "updated": updated}
 
 # ─── CLI Entry Point ─────────────────────────────────────────────────────
