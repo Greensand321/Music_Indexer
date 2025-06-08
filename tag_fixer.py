@@ -248,13 +248,11 @@ def build_file_records(
 
 def apply_tag_proposals(
     selected: Iterable[FileRecord],
-    diff_proposals: Iterable[FileRecord],
-    no_diff_files: Iterable[FileRecord],
-    library_root: str,
+    *,
     fields: List[str] | None = None,
     log_callback: Callable[[str], None] | None = None,
 ) -> int:
-    """Apply ``selected`` proposals and log all scan results."""
+    """Apply ``selected`` proposals and return number of files updated."""
     if log_callback is None:
         def log_callback(msg: str):
             print(msg)
@@ -262,40 +260,10 @@ def apply_tag_proposals(
     if fields is None:
         fields = ["artist", "title"]
 
-    selected_paths = {str(p.path) for p in selected}
-
     updated = 0
     for p in selected:
         if update_tags(str(p.path), p, fields, log_callback):
             updated += 1
-
-    # ─── Update log only after successful writes ──────────────────────────
-    log_data = log_manager.load_log(library_root)
-
-    def record(entry: FileRecord, status: str):
-        rel = os.path.relpath(entry.path, library_root)
-        log_data[rel] = {
-            "status": status,
-            "old_artist": entry.old_artist,
-            "old_title": entry.old_title,
-            "new_artist": entry.new_artist,
-            "new_title": entry.new_title,
-            "old_album": entry.old_album,
-            "new_album": entry.new_album,
-            "old_genres": entry.old_genres,
-            "new_genres": entry.new_genres,
-        }
-
-    for p in diff_proposals:
-        if str(p.path) in selected_paths:
-            record(p, "applied")
-        else:
-            record(p, "skipped")
-
-    for p in no_diff_files:
-        record(p, "no_diff")
-
-    log_manager.save_log(log_data, library_root)
     return updated
 
 
@@ -311,13 +279,11 @@ def fix_tags(target, log_callback=None, interactive=False):
         return {"processed": 0, "updated": 0}
 
     records = build_file_records(target, show_all=False, log_callback=log_callback)
-    no_diff = [p for p in records if p.status == "no_diff"]
-    diff_props = [p for p in records if p.status != "no_diff"]
-    selected = diff_props
+    selected = [p for p in records if p.status != "no_diff"]
 
     if interactive:
         selected = []
-        for p in diff_props:
+        for p in [r for r in records if r.status != "no_diff"]:
             apply_change = prompt_user_about_tags(
                 str(p.path),
                 p.old_artist,
@@ -330,12 +296,33 @@ def fix_tags(target, log_callback=None, interactive=False):
     root_path = target if os.path.isdir(target) else os.path.dirname(target)
     updated = apply_tag_proposals(
         selected,
-        diff_props,
-        no_diff,
-        root_path,
         fields=["artist", "title"],
         log_callback=log_callback,
     )
+
+    log_data = log_manager.load_log(root_path)
+    selected_set = {rec.path for rec in selected}
+    for rec in records:
+        rel = os.path.relpath(rec.path, root_path)
+        if rec.path in selected_set:
+            status = "applied"
+        elif rec.status == "no_diff":
+            status = "no_diff"
+        else:
+            status = "skipped"
+        rec.status = status
+        log_data[rel] = {
+            "status": status,
+            "old_artist": rec.old_artist,
+            "old_title": rec.old_title,
+            "new_artist": rec.new_artist,
+            "new_title": rec.new_title,
+            "old_album": rec.old_album,
+            "new_album": rec.new_album,
+            "old_genres": rec.old_genres,
+            "new_genres": rec.new_genres,
+        }
+    log_manager.save_log(log_data, root_path)
 
     return {"processed": len(files), "updated": updated}
 

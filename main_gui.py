@@ -387,34 +387,50 @@ class SoundVaultImporterApp(tk.Tk):
                         progress.update_progress(payload)
                     elif msg == "done":
                         progress.destroy()
-                        records = payload
-                        diff_all = [r for r in records if r.status != 'no_diff']
-                        no_diff_all = [r for r in records if r.status == 'no_diff']
+                        all_records = payload
                         filters = make_filters(ex_no_diff, ex_skipped, show_all)
-                        display = apply_filters(records, filters)
-                        diff_disp = [r for r in display if r.status != 'no_diff']
-                        no_diff_disp = [r for r in display if r.status == 'no_diff']
-                        if not diff_disp and (ex_no_diff or not no_diff_disp):
+                        filtered = apply_filters(all_records, filters)
+                        self.all_records = all_records
+                        self.filtered_records = filtered
+                        if not filtered:
                             messagebox.showinfo(
                                 'No proposals', 'No missing tags above threshold.'
                             )
                             return
-                        result = self.show_proposals_dialog(
-                            diff_disp,
-                            [] if ex_no_diff else no_diff_disp,
-                        )
+                        result = self.show_proposals_dialog(filtered)
                         if result is not None:
                             selected, fields = result
                             from tag_fixer import apply_tag_proposals
 
                             count = apply_tag_proposals(
                                 selected,
-                                diff_all,
-                                no_diff_all,
-                                folder,
                                 fields=fields,
                                 log_callback=self._log,
                             )
+
+                            log_data = log_manager.load_log(folder)
+                            selected_set = {rec.path for rec in selected}
+                            for rec in all_records:
+                                rel = os.path.relpath(rec.path, folder)
+                                if rec.path in selected_set:
+                                    status = 'applied'
+                                elif rec.status == 'no_diff':
+                                    status = 'no_diff'
+                                else:
+                                    status = 'skipped'
+                                rec.status = status
+                                log_data[rel] = {
+                                    'status': status,
+                                    'old_artist': rec.old_artist,
+                                    'old_title': rec.old_title,
+                                    'new_artist': rec.new_artist,
+                                    'new_title': rec.new_title,
+                                    'old_album': rec.old_album,
+                                    'new_album': rec.new_album,
+                                    'old_genres': rec.old_genres,
+                                    'new_genres': rec.new_genres,
+                                }
+                            log_manager.save_log(log_data, folder)
                             messagebox.showinfo('Done', f'Updated {count} files.')
                         return
             except queue.Empty:
@@ -423,7 +439,7 @@ class SoundVaultImporterApp(tk.Tk):
 
         self.after(100, poll_queue)
 
-    def show_proposals_dialog(self, diff_proposals, no_diff_files):
+    def show_proposals_dialog(self, records: List[FileRecord]):
         # Reset from any prior invocation
         self._proceed = False
         self._selected = ([], [])
@@ -509,12 +525,9 @@ class SoundVaultImporterApp(tk.Tk):
         tv.tag_configure("changed", background="#fff8c6")
         tv.tag_configure("lowconf", background="#f8d7da")
 
-        all_rows = sorted(diff_proposals, key=lambda p: p.score or 0, reverse=True) + list(no_diff_files)
+        all_rows = sorted(records, key=lambda p: p.score or 0, reverse=True)
         self._render_table(all_rows)
-        iid_to_prop = {}
-        for iid, rec in zip(tv.get_children(""), all_rows):
-            if rec in diff_proposals:
-                iid_to_prop[iid] = rec
+        iid_to_prop = {iid: rec for iid, rec in zip(tv.get_children(""), all_rows)}
 
         def select_all(event):
             tv.selection_set(tv.get_children(""))
@@ -526,13 +539,13 @@ class SoundVaultImporterApp(tk.Tk):
         sel_label.pack(anchor="w", padx=10)
 
         def update_selection_count(event=None):
-            cnt = sum(1 for iid in tv.selection() if iid in iid_to_prop)
+            cnt = len(tv.selection())
             sel_label.config(text=f"Selected: {cnt}")
 
         tv.bind("<<TreeviewSelect>>", update_selection_count)
 
         def on_apply():
-            selected = [iid_to_prop[iid] for iid in tv.selection() if iid in iid_to_prop]
+            selected = [iid_to_prop[iid] for iid in tv.selection()]
             fields = []
             if self.apply_artist.get():
                 fields.append("artist")
@@ -560,7 +573,7 @@ class SoundVaultImporterApp(tk.Tk):
     def _render_table(self, records: List[FileRecord]):
         tv = self._prop_tv
         tv.delete(*tv.get_children())
-        for rec in records:
+        for idx, rec in enumerate(records):
             if rec.score is not None and rec.score < MIN_INTERACTIVE_SCORE:
                 tag = 'lowconf'
             elif (
@@ -576,6 +589,7 @@ class SoundVaultImporterApp(tk.Tk):
             tv.insert(
                 '',
                 'end',
+                iid=str(idx),
                 values=(
                     str(rec.path),
                     f"{rec.score:.2f}" if rec.score is not None else '',
