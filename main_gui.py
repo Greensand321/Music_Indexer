@@ -9,7 +9,33 @@ from music_indexer_api import run_full_indexer
 from importer_core import scan_and_import
 from sample_highlight import play_file_highlight, PYDUB_AVAILABLE
 import log_manager
-from tag_fixer import MIN_INTERACTIVE_SCORE
+from tag_fixer import MIN_INTERACTIVE_SCORE, FileRecord
+from typing import Callable, List
+
+FilterFn = Callable[[FileRecord], bool]
+_cached_filters = None
+
+def make_filters(ex_no_diff: bool, ex_skipped: bool, show_all: bool) -> List[FilterFn]:
+    global _cached_filters
+    key = (ex_no_diff, ex_skipped, show_all)
+    if _cached_filters and _cached_filters[0] == key:
+        return _cached_filters[1]
+
+    fns: List[FilterFn] = []
+    if not show_all:
+        fns.append(lambda r: r.status != 'applied')
+        if ex_no_diff:
+            fns.append(lambda r: r.status != 'no_diff')
+        if ex_skipped:
+            fns.append(lambda r: r.status != 'skipped')
+
+    _cached_filters = (key, fns)
+    return fns
+
+def apply_filters(records: List[FileRecord], filters: List[FilterFn]) -> List[FileRecord]:
+    for fn in filters:
+        records = [r for r in records if fn(r)]
+    return records
 
 CONFIG_FILE = os.path.join(os.path.dirname(__file__), "last_path.txt")
 
@@ -337,51 +363,19 @@ class SoundVaultImporterApp(tk.Tk):
 
         show_all = show_all or getattr(self, "show_all", False)
 
-        if show_all:
-            filtered = list(files)
-            print(
-                f"[DEBUG] Show All mode: returning {len(filtered)} files (should match total)"
-            )
-        else:
-            filtered = []
-            for f in files:
-                rel = os.path.relpath(f, folder)
-                entry = log_data.get(rel)
-                print(
-                    f"[DEBUG] Checking {rel}, status={entry.get('status') if entry else 'none'}"
-                )
-                if entry:
-                    # Skip already-applied only when NOT in Show All mode
-                    if entry.get("status") == "applied" and not show_all:
-                        print("  → skipped: already applied")
-                        continue
-                    # optionally skip no-difference or skipped entries
-                    if ex_no_diff and entry.get("status") == "no_diff":
-                        print("  → skipped: no_diff")
-                        continue
-                    if ex_skipped and entry.get("status") == "skipped":
-                        print("  → skipped: skipped")
-                        continue
-                filtered.append(f)
-            print(f"[DEBUG] After filtering: {len(filtered)} files")
-
-        if not filtered:
-            messagebox.showinfo("No files", "All files were excluded by your filters.")
-            return
-
         q = queue.Queue()
-        progress = ProgressDialog(self, total=len(filtered), title="Fingerprinting…")
+        progress = ProgressDialog(self, total=len(files), title="Fingerprinting…")
 
         def worker():
-            from tag_fixer import collect_tag_proposals
+            from tag_fixer import build_file_records
 
-            diff_props, no_diff = collect_tag_proposals(
-                filtered,
+            records = build_file_records(
+                folder,
+                show_all=show_all,
                 log_callback=lambda m: None,
                 progress_callback=lambda idx: q.put(("progress", idx)),
-                show_all=show_all,
             )
-            q.put(("done", (diff_props, no_diff)))
+            q.put(("done", records))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -393,15 +387,21 @@ class SoundVaultImporterApp(tk.Tk):
                         progress.update_progress(payload)
                     elif msg == "done":
                         progress.destroy()
-                        diff_props, no_diff_files = payload
-                        if not diff_props and (ex_no_diff or not no_diff_files):
+                        records = payload
+                        diff_all = [r for r in records if r.status != 'no_diff']
+                        no_diff_all = [r for r in records if r.status == 'no_diff']
+                        filters = make_filters(ex_no_diff, ex_skipped, show_all)
+                        display = apply_filters(records, filters)
+                        diff_disp = [r for r in display if r.status != 'no_diff']
+                        no_diff_disp = [r for r in display if r.status == 'no_diff']
+                        if not diff_disp and (ex_no_diff or not no_diff_disp):
                             messagebox.showinfo(
-                                "No proposals", "No missing tags above threshold."
+                                'No proposals', 'No missing tags above threshold.'
                             )
                             return
                         result = self.show_proposals_dialog(
-                            diff_props,
-                            [] if ex_no_diff else no_diff_files,
+                            diff_disp,
+                            [] if ex_no_diff else no_diff_disp,
                         )
                         if result is not None:
                             selected, fields = result
@@ -409,13 +409,13 @@ class SoundVaultImporterApp(tk.Tk):
 
                             count = apply_tag_proposals(
                                 selected,
-                                diff_props,
-                                no_diff_files,
+                                diff_all,
+                                no_diff_all,
                                 folder,
                                 fields=fields,
                                 log_callback=self._log,
                             )
-                            messagebox.showinfo("Done", f"Updated {count} files.")
+                            messagebox.showinfo('Done', f'Updated {count} files.')
                         return
             except queue.Empty:
                 pass
@@ -481,6 +481,8 @@ class SoundVaultImporterApp(tk.Tk):
         hsb.config(command=tv.xview)
         tv.pack(fill="both", expand=True)
 
+        self._prop_tv = tv
+
         def treeview_sort_column(tv, col, reverse=False):
             data = [(tv.set(k, col), k) for k in tv.get_children("")]
             try:
@@ -507,40 +509,12 @@ class SoundVaultImporterApp(tk.Tk):
         tv.tag_configure("changed", background="#fff8c6")
         tv.tag_configure("lowconf", background="#f8d7da")
 
-        all_rows = sorted(diff_proposals, key=lambda p: p.score, reverse=True) + list(no_diff_files)
+        all_rows = sorted(diff_proposals, key=lambda p: p.score or 0, reverse=True) + list(no_diff_files)
+        self._render_table(all_rows)
         iid_to_prop = {}
-        for p in all_rows:
-            all_same = (
-                p.old_artist == p.new_artist
-                and p.old_title == p.new_title
-                and p.old_album == p.new_album
-                and sorted(p.old_genres or []) == sorted(p.new_genres or [])
-            )
-            if p.score < MIN_INTERACTIVE_SCORE:
-                row_tag = "lowconf"
-            elif all_same:
-                row_tag = "perfect"
-            else:
-                row_tag = "changed"
-            iid = tv.insert(
-                "",
-                "end",
-                values=(
-                    str(p.file),
-                    f"{p.score:.2f}",
-                    p.old_artist or "",
-                    p.new_artist or "",
-                    p.old_title or "",
-                    p.new_title or "",
-                    p.old_album or "",
-                    p.new_album or "",
-                    "; ".join(p.old_genres or []),
-                    "; ".join(p.new_genres or []),
-                ),
-                tags=(row_tag,),
-            )
-            if p in diff_proposals:
-                iid_to_prop[iid] = p
+        for iid, rec in zip(tv.get_children(""), all_rows):
+            if rec in diff_proposals:
+                iid_to_prop[iid] = rec
 
         def select_all(event):
             tv.selection_set(tv.get_children(""))
@@ -582,6 +556,40 @@ class SoundVaultImporterApp(tk.Tk):
         if getattr(self, "_proceed", False):
             return self._selected
         return None
+
+    def _render_table(self, records: List[FileRecord]):
+        tv = self._prop_tv
+        tv.delete(*tv.get_children())
+        for rec in records:
+            if rec.score is not None and rec.score < MIN_INTERACTIVE_SCORE:
+                tag = 'lowconf'
+            elif (
+                rec.old_artist == rec.new_artist
+                and rec.old_title == rec.new_title
+                and rec.old_album == rec.new_album
+                and sorted(rec.old_genres) == sorted(rec.new_genres)
+            ):
+                tag = 'perfect'
+            else:
+                tag = 'changed'
+
+            tv.insert(
+                '',
+                'end',
+                values=(
+                    str(rec.path),
+                    f"{rec.score:.2f}" if rec.score is not None else '',
+                    rec.old_artist or '',
+                    rec.new_artist or '',
+                    rec.old_title or '',
+                    rec.new_title or '',
+                    rec.old_album or '',
+                    rec.new_album or '',
+                    '; '.join(rec.old_genres),
+                    '; '.join(rec.new_genres),
+                ),
+                tags=(tag,),
+            )
 
     def sample_song_highlight(self):
         """Ask the user for an audio file and play its highlight."""
