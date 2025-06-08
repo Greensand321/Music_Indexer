@@ -8,7 +8,6 @@ from validator import validate_soundvault_structure
 from music_indexer_api import run_full_indexer
 from importer_core import scan_and_import
 from sample_highlight import play_file_highlight, PYDUB_AVAILABLE
-import log_manager
 from tag_fixer import MIN_INTERACTIVE_SCORE, FileRecord
 from typing import Callable, List
 
@@ -337,15 +336,9 @@ class SoundVaultImporterApp(tk.Tk):
         if not folder:
             return
 
-        log_data = log_manager.load_log(folder)
-        removed = log_manager.prune_missing_entries(log_data, folder)
-        if removed:
-            msg = "Cleaned up %d log entries for missing files:\n" % len(removed)
-            msg += "\n".join("\u2022 " + p for p in removed)
-            msg += "\nProceed with scan?"
-            if not messagebox.askyesno("Cleanup", msg):
-                return
-            log_manager.save_log(log_data, folder)
+        from tag_fixer import init_db
+        db_path = os.path.join(folder, ".soundvault.db")
+        db = init_db(db_path)
 
         from tag_fixer import find_files
 
@@ -371,6 +364,7 @@ class SoundVaultImporterApp(tk.Tk):
 
             records = build_file_records(
                 folder,
+                db=db,
                 show_all=show_all,
                 log_callback=lambda m: None,
                 progress_callback=lambda idx: q.put(("progress", idx)),
@@ -388,19 +382,45 @@ class SoundVaultImporterApp(tk.Tk):
                     elif msg == "done":
                         progress.destroy()
                         all_records = payload
-                        filters = make_filters(ex_no_diff, ex_skipped, show_all)
-                        filtered = apply_filters(all_records, filters)
-                        self.all_records = all_records
-                        self.filtered_records = filtered
-                        if not filtered:
+
+                        conditions = []
+                        if not show_all:
+                            conditions.append("status!='applied'")
+                            if ex_no_diff:
+                                conditions.append("status!='no_diff'")
+                            if ex_skipped:
+                                conditions.append("status!='skipped'")
+                        where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+                        query = f"SELECT * FROM files {where} ORDER BY score DESC"
+                        rows = db.execute(query).fetchall()
+                        from pathlib import Path
+                        from tag_fixer import FileRecord, apply_tag_proposals
+
+                        records = []
+                        for (
+                            path, status, score,
+                            old_a, new_a, old_t, new_t,
+                            old_al, new_al, old_g, new_g,
+                        ) in rows:
+                            rec = FileRecord(
+                                path=Path(path), status=status, score=score,
+                                old_artist=old_a, new_artist=new_a,
+                                old_title=old_t, new_title=new_t,
+                                old_album=old_al, new_album=new_al,
+                                old_genres=old_g.split(";") if old_g else [],
+                                new_genres=new_g.split(";") if new_g else [],
+                            )
+                            records.append(rec)
+
+                        if not records:
                             messagebox.showinfo(
                                 'No proposals', 'No missing tags above threshold.'
                             )
                             return
-                        result = self.show_proposals_dialog(filtered)
+
+                        result = self.show_proposals_dialog(records)
                         if result is not None:
                             selected, fields = result
-                            from tag_fixer import apply_tag_proposals
 
                             count = apply_tag_proposals(
                                 selected,
@@ -408,10 +428,8 @@ class SoundVaultImporterApp(tk.Tk):
                                 log_callback=self._log,
                             )
 
-                            log_data = log_manager.load_log(folder)
                             selected_set = {rec.path for rec in selected}
                             for rec in all_records:
-                                rel = os.path.relpath(rec.path, folder)
                                 if rec.path in selected_set:
                                     status = 'applied'
                                 elif rec.status == 'no_diff':
@@ -419,18 +437,11 @@ class SoundVaultImporterApp(tk.Tk):
                                 else:
                                     status = 'skipped'
                                 rec.status = status
-                                log_data[rel] = {
-                                    'status': status,
-                                    'old_artist': rec.old_artist,
-                                    'old_title': rec.old_title,
-                                    'new_artist': rec.new_artist,
-                                    'new_title': rec.new_title,
-                                    'old_album': rec.old_album,
-                                    'new_album': rec.new_album,
-                                    'old_genres': rec.old_genres,
-                                    'new_genres': rec.new_genres,
-                                }
-                            log_manager.save_log(log_data, folder)
+                                db.execute(
+                                    "UPDATE files SET status=? WHERE path=?",
+                                    (status, str(rec.path)),
+                                )
+                            db.commit()
                             messagebox.showinfo('Done', f'Updated {count} files.')
                         return
             except queue.Empty:
@@ -631,7 +642,9 @@ class SoundVaultImporterApp(tk.Tk):
             return
         if not messagebox.askyesno("Reset Log", "This will erase all history of prior scans. Continue?"):
             return
-        log_manager.reset_log(folder)
+        db_path = os.path.join(folder, ".soundvault.db")
+        if os.path.exists(db_path):
+            os.remove(db_path)
         messagebox.showinfo("Reset", "Tag-fix log cleared.")
         self._log(f"Reset tag-fix log for {folder}")
 
