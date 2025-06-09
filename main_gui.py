@@ -1,8 +1,10 @@
 import os
+import json
 import threading
 import queue
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
+from tkinter.scrolledtext import ScrolledText
 
 from validator import validate_soundvault_structure
 from music_indexer_api import run_full_indexer
@@ -103,6 +105,8 @@ class SoundVaultImporterApp(tk.Tk):
         self.library_path_var = tk.StringVar(value="")
         self.library_stats_var = tk.StringVar(value="")
         self.show_all = False
+        self.genre_mapping = {}
+        self.mapping_path = ""
 
         # ─── Menu Bar ─────────────────────────────────────────────────────────
         menubar = tk.Menu(self)
@@ -131,6 +135,7 @@ class SoundVaultImporterApp(tk.Tk):
                 state="disabled"
             )
         tools_menu.add_separator()
+        tools_menu.add_command(label="Genre Normalizer", command=self._open_genre_normalizer)
         tools_menu.add_command(label="Reset Tag-Fix Log", command=self.reset_tagfix_log)
         menubar.add_cascade(label="Tools", menu=tools_menu)
 
@@ -340,6 +345,16 @@ class SoundVaultImporterApp(tk.Tk):
         db_path = os.path.join(folder, ".soundvault.db")
         init_db(db_path)
 
+        # Load any saved genre mapping for this library
+        self.mapping_path = os.path.join(folder, ".genre_mapping.json")
+        self.genre_mapping = {}
+        if os.path.isfile(self.mapping_path):
+            try:
+                with open(self.mapping_path, "r", encoding="utf-8") as f:
+                    self.genre_mapping = json.load(f)
+            except Exception:
+                self.genre_mapping = {}
+
         from tag_fixer import find_files
 
         files = find_files(folder)
@@ -389,26 +404,27 @@ class SoundVaultImporterApp(tk.Tk):
                     elif msg == "done":
                         progress.destroy()
                         all_records = payload
+                        self.all_records = all_records
+
+                        # Apply genre normalization if mapping is loaded
+                        def normalize_list(lst):
+                            return [self.genre_mapping.get(g, g) for g in lst]
+
+                        for rec in all_records:
+                            rec.old_genres = normalize_list(rec.old_genres)
+                            rec.new_genres = normalize_list(rec.new_genres)
 
                         from tag_fixer import FileRecord, apply_tag_proposals
 
-                        records = all_records
-
-                        if not show_all:
-                            filtered = []
-                            for rec in records:
-                                if ex_no_diff and rec.status == 'no_diff':
-                                    continue
-                                if ex_skipped and rec.status == 'skipped':
-                                    continue
-                                filtered.append(rec)
-                            records = filtered
+                        filters = make_filters(ex_no_diff, ex_skipped, show_all)
+                        records = apply_filters(all_records, filters)
 
                         records = sorted(
                             records,
                             key=lambda r: (r.score is not None, r.score if r.score is not None else 0),
                             reverse=True,
                         )
+                        self.filtered_records = records
 
                         if not records:
                             messagebox.showinfo(
@@ -585,8 +601,10 @@ class SoundVaultImporterApp(tk.Tk):
     def _render_table(self, records: List[FileRecord]):
         tv = self._prop_tv
         tv.delete(*tv.get_children())
-        for idx, rec in enumerate(records):
-            if rec.score is None or rec.score < MIN_INTERACTIVE_SCORE or rec.status == 'unmatched':
+        for rec in records:
+            if rec.status == 'unmatched' or (
+                rec.score is not None and rec.score < MIN_INTERACTIVE_SCORE
+            ):
                 tag = 'lowconf'
             elif (
                 rec.old_artist == rec.new_artist
@@ -597,11 +615,9 @@ class SoundVaultImporterApp(tk.Tk):
                 tag = 'perfect'
             else:
                 tag = 'changed'
-
             tv.insert(
                 '',
                 'end',
-                iid=str(idx),
                 values=(
                     str(rec.path),
                     f"{rec.score:.2f}" if rec.score is not None else '',
@@ -635,6 +651,92 @@ class SoundVaultImporterApp(tk.Tk):
         except Exception as e:
             messagebox.showerror("Playback failed", str(e))
             self._log(f"✘ Playback failed for {path}: {e}")
+
+    def _open_genre_normalizer(self):
+        """Open a dialog to assist with genre normalization."""
+        folder = self.require_library()
+        if not folder:
+            return
+        all_genres = set()
+        for rec in getattr(self, "all_records", []):
+            all_genres.update(rec.old_genres or [])
+            all_genres.update(rec.new_genres or [])
+        genre_list = "\n".join(sorted(all_genres))
+
+        ai_prompt = (
+            "I will provide a list of raw music genres (one per line). "
+            "Your job is to group and map each raw genre into a canonical key in JSON format, "
+            "e.g. {\"rock & roll\": \"Rock\", \"hip hop\": \"Hip-Hop\", …}. "
+            "If a term is not a genre, list it under \"invalid\". "
+            "If you have questions about ambiguous names, ask clarifying questions."
+        )
+
+        win = tk.Toplevel(self)
+        win.title("Genre Normalization Assistant")
+        win.grab_set()
+
+        tk.Label(win, text="LLM Prompt Template:").pack(anchor="w", padx=10, pady=(10, 0))
+        text_prompt = ScrolledText(win, width=50, height=6)
+        text_prompt.pack(fill="both", padx=10, pady=(0, 10))
+        text_prompt.insert("1.0", ai_prompt)
+        text_prompt.configure(state="disabled")
+
+        def copy_prompt():
+            self.clipboard_clear()
+            self.clipboard_append(ai_prompt)
+
+        tk.Button(win, text="Copy Prompt", command=copy_prompt).pack(pady=(0, 10))
+
+        tk.Label(win, text="Raw Genre List:").pack(anchor="w", padx=10)
+        text_genres = ScrolledText(win, width=50, height=15)
+        text_genres.pack(fill="both", padx=10, pady=(0, 10))
+        text_genres.insert("1.0", genre_list)
+        text_genres.configure(state="disabled")
+
+        def copy_genres():
+            self.clipboard_clear()
+            self.clipboard_append(genre_list)
+
+        tk.Button(win, text="Copy Raw List", command=copy_genres).pack(pady=(0, 10))
+
+        tk.Label(win, text="Mapping JSON Input:").pack(anchor="w", padx=10)
+        text_map = ScrolledText(win, width=50, height=10)
+        text_map.pack(fill="both", padx=10, pady=(0, 10))
+
+        def apply_mapping():
+            mapping_json = text_map.get("1.0", "end").strip()
+            mapping_path = os.path.join(self.library_path or "", ".genre_mapping.json")
+            try:
+                mapping = json.loads(mapping_json)
+                if not isinstance(mapping, dict):
+                    raise ValueError("Mapping must be a JSON object")
+            except Exception as e:
+                messagebox.showerror("Invalid Mapping", f"Could not parse JSON key:\n{e}")
+                return
+            try:
+                with open(mapping_path, "w", encoding="utf-8") as f:
+                    json.dump(mapping, f, indent=2)
+            except Exception as e:
+                messagebox.showerror("Save Failed", str(e))
+                return
+
+            self.mapping_path = mapping_path
+            self.genre_mapping = mapping
+
+            def normalize_list(lst):
+                return [self.genre_mapping.get(g, g) for g in lst]
+
+            for rec in getattr(self, "all_records", []):
+                rec.old_genres = normalize_list(rec.old_genres)
+                rec.new_genres = normalize_list(rec.new_genres)
+
+            if hasattr(self, "filtered_records") and hasattr(self, "_prop_tv"):
+                self._render_table(self.filtered_records)
+
+            win.destroy()
+
+        tk.Button(win, text="Apply Mapping", command=apply_mapping).pack(side="left", padx=10, pady=(0, 10))
+        tk.Button(win, text="Close", command=win.destroy).pack(side="right", padx=10, pady=(0, 10))
 
     def reset_tagfix_log(self):
         initial = self.library_path or load_last_path()
