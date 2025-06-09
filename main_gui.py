@@ -442,20 +442,20 @@ class SoundVaultImporterApp(tk.Tk):
                                 log_callback=self._log,
                             )
 
-                            selected_set = {rec.path for rec in selected}
+                            selected_paths = {rec.path for rec in selected}
                             import sqlite3
                             conn = sqlite3.connect(db_path)
                             for rec in all_records:
-                                if rec.path in selected_set:
-                                    status = 'applied'
+                                if rec.path in selected_paths:
+                                    new_status = 'applied'
                                 elif rec.status == 'no_diff':
-                                    status = 'no_diff'
+                                    new_status = 'no_diff'
                                 else:
-                                    status = 'skipped'
-                                rec.status = status
+                                    new_status = 'skipped'
+                                rec.status = new_status
                                 conn.execute(
                                     "UPDATE files SET status=? WHERE path=?",
-                                    (status, str(rec.path)),
+                                    (new_status, str(rec.path)),
                                 )
                             conn.commit()
                             conn.close()
