@@ -346,14 +346,15 @@ class SoundVaultImporterApp(tk.Tk):
         init_db(db_path)
 
         # Load any saved genre mapping for this library
-        self.mapping_path = os.path.join(folder, ".genre_mapping.json")
+        mapping_path = os.path.join(folder, ".genre_mapping.json")
         self.genre_mapping = {}
-        if os.path.isfile(self.mapping_path):
+        if os.path.isfile(mapping_path):
             try:
-                with open(self.mapping_path, "r", encoding="utf-8") as f:
+                with open(mapping_path, "r", encoding="utf-8") as f:
                     self.genre_mapping = json.load(f)
             except Exception:
                 self.genre_mapping = {}
+        self.mapping_path = mapping_path
 
         from tag_fixer import find_files
 
@@ -406,13 +407,13 @@ class SoundVaultImporterApp(tk.Tk):
                         all_records = payload
                         self.all_records = all_records
 
-                        # Apply genre normalization if mapping is loaded
-                        def normalize_list(lst):
-                            return [self.genre_mapping.get(g, g) for g in lst]
+                        # Apply genre normalization before filtering
+                        def _normalize_list(raw):
+                            return [self.genre_mapping.get(g, g) for g in raw]
 
-                        for rec in all_records:
-                            rec.old_genres = normalize_list(rec.old_genres)
-                            rec.new_genres = normalize_list(rec.new_genres)
+                        for rec in self.all_records:
+                            rec.old_genres = _normalize_list(rec.old_genres)
+                            rec.new_genres = _normalize_list(rec.new_genres)
 
                         from tag_fixer import FileRecord, apply_tag_proposals
 
@@ -704,16 +705,20 @@ class SoundVaultImporterApp(tk.Tk):
         text_map.pack(fill="both", padx=10, pady=(0, 10))
 
         def apply_mapping():
-            mapping_json = text_map.get("1.0", "end").strip()
-            mapping_path = os.path.join(self.library_path or "", ".genre_mapping.json")
+            mapping_json = text_map.get("1.0", "end")
+            mapping_path = os.path.join(folder, ".genre_mapping.json")
             try:
                 mapping = json.loads(mapping_json)
                 if not isinstance(mapping, dict):
                     raise ValueError("Mapping must be a JSON object")
+            except json.JSONDecodeError as e:
+                messagebox.showerror("Invalid JSON", str(e))
+                return
             except Exception as e:
-                messagebox.showerror("Invalid Mapping", f"Could not parse JSON key:\n{e}")
+                messagebox.showerror("Invalid Mapping", str(e))
                 return
             try:
+                os.makedirs(folder, exist_ok=True)
                 with open(mapping_path, "w", encoding="utf-8") as f:
                     json.dump(mapping, f, indent=2)
             except Exception as e:
