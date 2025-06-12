@@ -39,7 +39,6 @@ def apply_filters(records: List[FileRecord], filters: List[FilterFn]) -> List[Fi
     return records
 
 CONFIG_FILE = os.path.join(os.path.dirname(__file__), "last_path.txt")
-GENRE_MAPPING_FILENAME = ".genre_mapping.json"
 
 
 def load_last_path():
@@ -136,7 +135,7 @@ class SoundVaultImporterApp(tk.Tk):
                 state="disabled"
             )
         tools_menu.add_separator()
-        tools_menu.add_command(label="Normalize Genres", command=self.normalize_genres_flow)
+        tools_menu.add_command(label="Genre Normalizer", command=self._open_genre_normalizer)
         tools_menu.add_command(label="Reset Tag-Fix Log", command=self.reset_tagfix_log)
         menubar.add_cascade(label="Tools", menu=tools_menu)
 
@@ -347,7 +346,7 @@ class SoundVaultImporterApp(tk.Tk):
         init_db(db_path)
 
         # Load any saved genre mapping for this library
-        mapping_path = os.path.join(folder, GENRE_MAPPING_FILENAME)
+        mapping_path = os.path.join(folder, ".genre_mapping.json")
         self.genre_mapping = {}
         if os.path.isfile(mapping_path):
             try:
@@ -462,83 +461,6 @@ class SoundVaultImporterApp(tk.Tk):
                             conn.commit()
                             conn.close()
                             messagebox.showinfo('Done', f'Updated {count} files.')
-                        return
-            except queue.Empty:
-                pass
-            self.after(100, poll_queue)
-
-        self.after(100, poll_queue)
-
-    def normalize_genres_flow(self):
-        """Scan library and open the genre normalizer."""
-        folder = self.require_library()
-        if not folder:
-            return
-
-        proceed, ex_no_diff, ex_skipped, show_all = self._tagfix_filter_dialog()
-        if not proceed:
-            return
-
-        from tag_fixer import init_db, find_files, build_file_records
-        db_path = os.path.join(folder, ".soundvault.db")
-        init_db(db_path)
-
-        files = find_files(folder)
-        if not files:
-            messagebox.showinfo("No audio files", "No supported audio found in that folder.")
-            return
-
-        q = queue.Queue()
-        progress = ProgressDialog(self, total=len(files), title="Scanning…")
-
-        def worker():
-            import sqlite3
-            conn = sqlite3.connect(db_path)
-            records = build_file_records(
-                folder,
-                db_conn=conn,
-                show_all=show_all,
-                log_callback=lambda m: None,
-                progress_callback=lambda idx: q.put(("progress", idx)),
-            )
-            conn.commit()
-            conn.close()
-            q.put(("done", records))
-
-        threading.Thread(target=worker, daemon=True).start()
-
-        def poll_queue():
-            try:
-                while True:
-                    msg, payload = q.get_nowait()
-                    if msg == "progress":
-                        progress.update_progress(payload)
-                    elif msg == "done":
-                        progress.destroy()
-                        self.all_records = payload
-
-                        # Load mapping
-                        mapping_path = os.path.join(folder, GENRE_MAPPING_FILENAME)
-                        self.mapping_path = mapping_path
-                        self.genre_mapping = {}
-                        if os.path.isfile(mapping_path):
-                            try:
-                                with open(mapping_path, "r", encoding="utf-8") as f:
-                                    self.genre_mapping = json.load(f)
-                            except Exception:
-                                self.genre_mapping = {}
-
-                        def _normalize_list(raw):
-                            return [self.genre_mapping.get(g, g) for g in raw]
-
-                        for rec in self.all_records:
-                            rec.old_genres = _normalize_list(rec.old_genres)
-                            rec.new_genres = _normalize_list(rec.new_genres)
-
-                        filters = make_filters(ex_no_diff, ex_skipped, show_all)
-                        self.filtered_records = apply_filters(self.all_records, filters)
-
-                        self._open_genre_normalizer()
                         return
             except queue.Empty:
                 pass
@@ -781,12 +703,10 @@ class SoundVaultImporterApp(tk.Tk):
         tk.Label(win, text="Mapping JSON Input:").pack(anchor="w", padx=10)
         text_map = ScrolledText(win, width=50, height=10)
         text_map.pack(fill="both", padx=10, pady=(0, 10))
-        if self.genre_mapping:
-            text_map.insert("1.0", json.dumps(self.genre_mapping, indent=2))
 
         def apply_mapping():
             mapping_json = text_map.get("1.0", "end")
-            mapping_path = self.mapping_path or os.path.join(folder, GENRE_MAPPING_FILENAME)
+            mapping_path = os.path.join(folder, ".genre_mapping.json")
             try:
                 mapping = json.loads(mapping_json)
                 if not isinstance(mapping, dict):
