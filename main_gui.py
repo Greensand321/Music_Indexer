@@ -109,6 +109,7 @@ class SoundVaultImporterApp(tk.Tk):
         self.genre_mapping = {}
         self.mapping_path = ""
         self.main_tree = None
+        self._prop_tv = None
 
         # ─── Menu Bar ─────────────────────────────────────────────────────────
         menubar = tk.Menu(self)
@@ -153,13 +154,64 @@ class SoundVaultImporterApp(tk.Tk):
         self.output = tk.Text(self, wrap="word", state="disabled", height=15)
         self.output.pack(fill="both", expand=True, padx=10, pady=(0, 10))
 
-    def _normalize_genre_list(self, raw):
-        """Return a list of genres mapped through ``self.genre_mapping``."""
+        # ─── Results Table ───────────────────────────────────────────────────
+        cols = (
+            "File",
+            "Score",
+            "Old Artist",
+            "New Artist",
+            "Old Title",
+            "New Title",
+            "Old Album",
+            "New Album",
+            "Genres",
+            "Suggested Genre",
+        )
+
+        container = tk.Frame(self)
+        container.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+        vsb = ttk.Scrollbar(container, orient="vertical")
+        vsb.pack(side="right", fill="y")
+        hsb = ttk.Scrollbar(container, orient="horizontal")
+        hsb.pack(side="bottom", fill="x")
+
+        tv = ttk.Treeview(
+            container,
+            columns=cols,
+            show="headings",
+            yscrollcommand=vsb.set,
+            xscrollcommand=hsb.set,
+            selectmode="extended",
+        )
+        vsb.config(command=tv.yview)
+        hsb.config(command=tv.xview)
+        tv.pack(fill="both", expand=True)
+        self.main_tree = tv
+
+        for c in cols:
+            tv.heading(c, text=c)
+            width = 100
+            if c == "File":
+                width = 300
+            elif c in ("Old Album", "New Album"):
+                width = 120
+            elif c in ("Genres", "Suggested Genre"):
+                width = 150
+            tv.column(c, width=width, anchor="w")
+
+        tv.tag_configure("perfect", background="white")
+        tv.tag_configure("changed", background="#fff8c6")
+        tv.tag_configure("lowconf", background="#f8d7da")
+
+
+
+    def _normalize_list(self, raw):
+        """Return a flat list of genres mapped through ``self.genre_mapping``."""
         normalized = []
         for item in raw:
             if isinstance(item, list):
-                for g in item:
-                    normalized.append(self.genre_mapping.get(g, g))
+                for sub in item:
+                    normalized.append(self.genre_mapping.get(sub, sub))
             else:
                 normalized.append(self.genre_mapping.get(item, item))
         return normalized
@@ -171,6 +223,14 @@ class SoundVaultImporterApp(tk.Tk):
             return
         save_last_path(chosen)
         self.library_path = chosen
+        self.mapping_path = os.path.join(self.library_path, GENRE_MAPPING_FILENAME)
+        self.genre_mapping = {}
+        if os.path.isfile(self.mapping_path):
+            try:
+                with open(self.mapping_path, "r", encoding="utf-8") as f:
+                    self.genre_mapping = json.load(f)
+            except Exception:
+                self.genre_mapping = {}
         self.library_name_var.set(os.path.basename(chosen) or chosen)
         self.library_path_var.set(chosen)
         self.update_library_info()
@@ -359,15 +419,13 @@ class SoundVaultImporterApp(tk.Tk):
         init_db(db_path)
 
         # Load any saved genre mapping for this library
-        mapping_path = os.path.join(folder, GENRE_MAPPING_FILENAME)
         self.genre_mapping = {}
-        if os.path.isfile(mapping_path):
+        if os.path.isfile(self.mapping_path):
             try:
-                with open(mapping_path, "r", encoding="utf-8") as f:
+                with open(self.mapping_path, "r", encoding="utf-8") as f:
                     self.genre_mapping = json.load(f)
             except Exception:
                 self.genre_mapping = {}
-        self.mapping_path = mapping_path
 
         from tag_fixer import find_files
 
@@ -420,10 +478,17 @@ class SoundVaultImporterApp(tk.Tk):
                         all_records = payload
                         self.all_records = all_records
 
+                        # Reload mapping to pick up in-session edits
+                        try:
+                            with open(self.mapping_path, "r", encoding="utf-8") as f:
+                                self.genre_mapping = json.load(f)
+                        except Exception:
+                            self.genre_mapping = {}
+
                         # Apply genre normalization before filtering
                         for rec in self.all_records:
-                            rec.old_genres = self._normalize_genre_list(rec.old_genres)
-                            rec.new_genres = self._normalize_genre_list(rec.new_genres)
+                            rec.old_genres = self._normalize_list(rec.old_genres)
+                            rec.new_genres = self._normalize_list(rec.new_genres)
 
                         from tag_fixer import FileRecord, apply_tag_proposals
 
@@ -483,11 +548,45 @@ class SoundVaultImporterApp(tk.Tk):
         folder = self.require_library()
         if not folder:
             return
-        # Precompute mapping path for this library
-        self.mapping_path = self.mapping_path or os.path.join(folder, GENRE_MAPPING_FILENAME)
+        # Load mapping for this library
+        self.genre_mapping = {}
+        if os.path.isfile(self.mapping_path):
+            try:
+                with open(self.mapping_path, "r", encoding="utf-8") as f:
+                    self.genre_mapping = json.load(f)
+            except Exception:
+                self.genre_mapping = {}
 
         proceed, ex_no_diff, ex_skipped, show_all = self._tagfix_filter_dialog()
         if not proceed:
+            return
+
+        skip_scan = False
+        if show_all:
+            skip_scan = messagebox.askyesno(
+                "Skip Full Scan?",
+                "You’ve chosen “Show All.”\n\nSkip rescanning and display the current data immediately?",
+            )
+
+        if skip_scan:
+            records = getattr(self, "all_records", [])
+
+            # Reload mapping
+            self.genre_mapping = {}
+            if os.path.isfile(self.mapping_path):
+                try:
+                    with open(self.mapping_path, "r", encoding="utf-8") as f:
+                        self.genre_mapping = json.load(f)
+                except Exception:
+                    self.genre_mapping = {}
+
+            for rec in records:
+                rec.old_genres = self._normalize_list(rec.old_genres)
+                rec.new_genres = self._normalize_list(rec.new_genres)
+
+            self.all_records = records
+            self.filtered_records = apply_filters(records, make_filters(ex_no_diff, ex_skipped, show_all))
+            self._open_genre_normalizer(ex_no_diff, ex_skipped, show_all)
             return
 
         from tag_fixer import init_db, find_files, build_file_records
@@ -529,18 +628,17 @@ class SoundVaultImporterApp(tk.Tk):
                         self.all_records = payload
 
                         # Load mapping
-                        mapping_path = self.mapping_path
                         self.genre_mapping = {}
-                        if os.path.isfile(mapping_path):
+                        if os.path.isfile(self.mapping_path):
                             try:
-                                with open(mapping_path, "r", encoding="utf-8") as f:
+                                with open(self.mapping_path, "r", encoding="utf-8") as f:
                                     self.genre_mapping = json.load(f)
                             except Exception:
                                 self.genre_mapping = {}
 
                         for rec in self.all_records:
-                            rec.old_genres = self._normalize_genre_list(rec.old_genres)
-                            rec.new_genres = self._normalize_genre_list(rec.new_genres)
+                            rec.old_genres = self._normalize_list(rec.old_genres)
+                            rec.new_genres = self._normalize_list(rec.new_genres)
 
                         filters = make_filters(ex_no_diff, ex_skipped, show_all)
                         self.filtered_records = apply_filters(self.all_records, filters)
@@ -610,8 +708,7 @@ class SoundVaultImporterApp(tk.Tk):
         vsb.config(command=tv.yview)
         hsb.config(command=tv.xview)
         tv.pack(fill="both", expand=True)
-
-        self.main_tree = tv
+        self._prop_tv = tv
 
         def treeview_sort_column(tv, col, reverse=False):
             data = [(tv.set(k, col), k) for k in tv.get_children("")]
@@ -640,7 +737,40 @@ class SoundVaultImporterApp(tk.Tk):
         tv.tag_configure("lowconf", background="#f8d7da")
 
         all_rows = sorted(records, key=lambda p: p.score or 0, reverse=True)
+        # Render both the main table and this dialog's tree
         self._render_table(all_rows)
+        tv.delete(*tv.get_children())
+        for rec in all_rows:
+            if rec.status == 'unmatched' or (
+                rec.score is not None and rec.score < MIN_INTERACTIVE_SCORE
+            ):
+                tag = 'lowconf'
+            elif (
+                rec.old_artist == rec.new_artist
+                and rec.old_title == rec.new_title
+                and rec.old_album == rec.new_album
+                and sorted(rec.old_genres) == sorted(rec.new_genres)
+            ):
+                tag = 'perfect'
+            else:
+                tag = 'changed'
+            tv.insert(
+                '',
+                'end',
+                values=(
+                    str(rec.path),
+                    f"{rec.score:.2f}" if rec.score is not None else '',
+                    rec.old_artist or '',
+                    rec.new_artist or '',
+                    rec.old_title or '',
+                    rec.new_title or '',
+                    rec.old_album or '',
+                    rec.new_album or '',
+                    '; '.join(rec.old_genres),
+                    '; '.join(rec.new_genres),
+                ),
+                tags=(tag,),
+            )
         iid_to_prop = {iid: rec for iid, rec in zip(tv.get_children(""), all_rows)}
 
         def select_all(event):
@@ -745,8 +875,7 @@ class SoundVaultImporterApp(tk.Tk):
         folder = self.require_library()
         if not folder:
             return
-        self.mapping_path = self.mapping_path or os.path.join(folder, GENRE_MAPPING_FILENAME)
-        mapping_path = self.mapping_path
+
 
         records = getattr(self, "all_records", [])
         filters = make_filters(ex_no_diff, ex_skipped, show_all)
@@ -824,18 +953,17 @@ class SoundVaultImporterApp(tk.Tk):
                 return
             try:
                 os.makedirs(folder, exist_ok=True)
-                with open(mapping_path, "w", encoding="utf-8") as f:
+                with open(self.mapping_path, "w", encoding="utf-8") as f:
                     json.dump(mapping, f, indent=2)
             except Exception as e:
                 messagebox.showerror("Save Failed", str(e))
                 return
 
-            self.mapping_path = mapping_path
             self.genre_mapping = mapping
 
             for rec in getattr(self, "all_records", []):
-                rec.old_genres = self._normalize_genre_list(rec.old_genres)
-                rec.new_genres = self._normalize_genre_list(rec.new_genres)
+                rec.old_genres = self._normalize_list(rec.old_genres)
+                rec.new_genres = self._normalize_list(rec.new_genres)
 
             if hasattr(self, "all_records"):
                 filters = make_filters(ex_no_diff, ex_skipped, show_all)
