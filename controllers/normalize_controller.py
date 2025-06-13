@@ -3,17 +3,22 @@ import json
 from typing import Dict
 
 PROMPT_TEMPLATE = """
-I will provide a list of raw music genres (one per line). Your task is to group and map each raw genre into a canonical key in JSON format, for example: {"rock & roll": "Rock", "hip hop": "Hip-Hop", …}.
+I will provide a list of raw music genres (one per line). Your task is to group and map each raw genre into a canonical key in JSON format, for example:
+
+{
+  "rock & roll": ["Rock"],
+  "future bass": ["Future Bass","Electronic"],
+  "indie rock": ["Indie Rock","Rock"],
+  "90s": ["invalid"]
+}
 
 Follow these guidelines:
 
-If a genre has clearly defined subgenres, include both the subgenre and its parent genre(s). For instance, "future bass" should map to both "Future Bass" and "Electronic"; similarly, "indie rock" maps to both "Indie Rock" and "Rock". Keep the granularity and original details intact.
-
-Ensure genres like "hiphoprap" are split and listed separately as "Hip-Hop" and "Rap".
-
-If a provided term does not represent a valid music genre, list it under "invalid".
-
-If you encounter ambiguous genre terms, please ask clarifying questions before proceeding.
+• For each raw genre key, return an array of one or more canonical genre names as the value.  
+• If a genre has clearly defined subgenres, list both the subgenre and its parent(s) (e.g. "future bass": ["Future Bass","Electronic"]).  
+• Split and list merged terms separately (e.g. "hiphoprap": ["Hip-Hop","Rap"]).  
+• Map non-genres to ["invalid"].  
+• Ask clarifying questions if any terms are ambiguous.
 """
 
 
