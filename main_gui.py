@@ -625,11 +625,51 @@ class SoundVaultImporterApp(tk.Tk):
             messagebox.showerror("Playback failed", str(e))
             self._log(f"✘ Playback failed for {path}: {e}")
 
-    def _open_genre_normalizer(self):
+    def _open_genre_normalizer(self, _show_dialog: bool = False):
         """Open a dialog to assist with genre normalization."""
         folder = self.require_library()
         if not folder:
             return
+
+        if not _show_dialog:
+            # ── NEW: Rescan the library to get the latest FileRecord list ──
+            db_path, _ = prepare_library(folder)
+            files = discover_files(folder)
+            if not files:
+                messagebox.showinfo(
+                    "No audio files", "No supported audio found in that folder."
+                )
+                return
+
+            # ── Progress Bar ──
+            prog_win = tk.Toplevel(self)
+            prog_win.title("Scanning Library…")
+            prog_bar = ttk.Progressbar(
+                prog_win, orient="horizontal", length=300, mode="determinate"
+            )
+            prog_bar.pack(padx=20, pady=20)
+            prog_bar["maximum"] = len(files)
+
+            def on_progress(idx):
+                prog_bar["value"] = idx
+                prog_win.update_idletasks()
+
+            def scan_task():
+                records = gather_records(
+                    folder,
+                    db_path,
+                    show_all=True,
+                    progress_callback=on_progress,
+                )
+                self.all_records = records
+                prog_win.destroy()
+                # re-open dialog on main thread
+                self.after(0, lambda: self._open_genre_normalizer(True))
+
+            threading.Thread(target=scan_task, daemon=True).start()
+            return
+
+        # ── Existing: Load or initialize the mapping file ──
         self.mapping_path = os.path.join(folder, ".genre_mapping.json")
         self._load_genre_mapping()
 
