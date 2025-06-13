@@ -27,7 +27,7 @@ from controllers.tagfix_controller import (
     gather_records,
     apply_proposals,
 )
-from controllers.normalize_controller import normalize_genres, PROMPT_TEMPLATE
+from controllers.normalize_controller import normalize_genres, PROMPT_TEMPLATE, get_raw_genres
 
 FilterFn = Callable[[FileRecord], bool]
 _cached_filters = None
@@ -653,13 +653,8 @@ class SoundVaultImporterApp(tk.Tk):
         self.text_raw = ScrolledText(win, width=50, height=15)
         self.text_raw.pack(fill="both", padx=10, pady=(0, 10))
 
-        # ── Raw Genre List Section ──
-        raw_set = set()
-        for rec in getattr(self, "all_records", []):
-            raw_set.update(rec.old_genres or [])
-            raw_set.update(rec.new_genres or [])
-        raw_list = sorted(raw_set)
-
+        # Populate via controller
+        raw_list = get_raw_genres(self.all_records)
         self.text_raw.configure(state="normal")
         self.text_raw.delete("1.0", "end")
         self.text_raw.insert("1.0", "\n".join(raw_list))

@@ -47,3 +47,17 @@ def save_mapping(folder: str, mapping: Dict[str, str]) -> str:
 def normalize_genres(genres: list[str], mapping: Dict[str, str]) -> list[str]:
     """Return list of genres normalized via mapping."""
     return [mapping.get(g, g) for g in genres]
+
+
+def get_raw_genres(records):
+    """
+    Given a list of FileRecord objects, return a sorted, deduplicated list of
+    all raw genre strings (from rec.old_genres and rec.new_genres).
+    """
+    raw_set = set()
+    for rec in records:
+        # include whatever fields you want—typically the pre-normalized tags:
+        raw_set.update(rec.old_genres)
+        # if you want newly suggested genres too:
+        raw_set.update(rec.new_genres)
+    return sorted(raw_set)
