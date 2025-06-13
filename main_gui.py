@@ -13,6 +13,23 @@ from sample_highlight import play_file_highlight, PYDUB_AVAILABLE
 from tag_fixer import MIN_INTERACTIVE_SCORE, FileRecord
 from typing import Callable, List
 
+from controllers.library_controller import (
+    load_last_path,
+    save_last_path,
+    count_audio_files,
+    open_library,
+)
+from controllers.tagfix_controller import (
+    prepare_library,
+    discover_files,
+    gather_records,
+    apply_proposals,
+)
+from controllers.normalize_controller import (
+    save_mapping,
+    normalize_genres,
+)
+
 FilterFn = Callable[[FileRecord], bool]
 _cached_filters = None
 
@@ -38,35 +55,6 @@ def apply_filters(records: List[FileRecord], filters: List[FilterFn]) -> List[Fi
         records = [r for r in records if fn(r)]
     return records
 
-CONFIG_FILE = os.path.join(os.path.dirname(__file__), "last_path.txt")
-
-
-def load_last_path():
-    if os.path.exists(CONFIG_FILE):
-        try:
-            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-                return f.read().strip()
-        except Exception:
-            pass
-    return ""
-
-
-def save_last_path(path):
-    try:
-        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-            f.write(path)
-    except Exception:
-        pass
-
-
-def count_audio_files(root):
-    exts = {".flac", ".m4a", ".aac", ".mp3", ".wav", ".ogg"}
-    count = 0
-    for dirpath, _, files in os.walk(root):
-        for fname in files:
-            if os.path.splitext(fname)[1].lower() in exts:
-                count += 1
-    return count
 
 
 class ProgressDialog(tk.Toplevel):
@@ -153,13 +141,17 @@ class SoundVaultImporterApp(tk.Tk):
 
     def select_library(self):
         initial = load_last_path()
-        chosen = filedialog.askdirectory(title="Select SoundVault Root", initialdir=initial)
+        chosen = filedialog.askdirectory(
+            title="Select SoundVault Root", initialdir=initial
+        )
         if not chosen:
             return
         save_last_path(chosen)
-        self.library_path = chosen
-        self.library_name_var.set(os.path.basename(chosen) or chosen)
-        self.library_path_var.set(chosen)
+
+        info = open_library(chosen)
+        self.library_path = info["path"]
+        self.library_name_var.set(info["name"])
+        self.library_path_var.set(info["path"])
         self.update_library_info()
 
     def update_library_info(self):
@@ -341,24 +333,11 @@ class SoundVaultImporterApp(tk.Tk):
         if not folder:
             return
 
-        from tag_fixer import init_db
-        db_path = os.path.join(folder, ".soundvault.db")
-        init_db(db_path)
+        db_path, mapping = prepare_library(folder)
+        self.genre_mapping = mapping
+        self.mapping_path = os.path.join(folder, ".genre_mapping.json")
 
-        # Load any saved genre mapping for this library
-        mapping_path = os.path.join(folder, ".genre_mapping.json")
-        self.genre_mapping = {}
-        if os.path.isfile(mapping_path):
-            try:
-                with open(mapping_path, "r", encoding="utf-8") as f:
-                    self.genre_mapping = json.load(f)
-            except Exception:
-                self.genre_mapping = {}
-        self.mapping_path = mapping_path
-
-        from tag_fixer import find_files
-
-        files = find_files(folder)
+        files = discover_files(folder)
         print(f"[DEBUG] Total discovered files: {len(files)}")
         if not files:
             messagebox.showinfo(
@@ -376,22 +355,12 @@ class SoundVaultImporterApp(tk.Tk):
         progress = ProgressDialog(self, total=len(files), title="Fingerprinting…")
 
         def worker():
-            from tag_fixer import build_file_records
-            import sqlite3
-
-            conn = sqlite3.connect(db_path)
-
-            records = build_file_records(
+            records = gather_records(
                 folder,
-                db_conn=conn,
-                show_all=show_all,
-                log_callback=lambda m: None,
+                db_path,
+                show_all,
                 progress_callback=lambda idx: q.put(("progress", idx)),
             )
-
-            conn.commit()
-            conn.close()
-
             q.put(("done", records))
 
         threading.Thread(target=worker, daemon=True).start()
@@ -408,14 +377,9 @@ class SoundVaultImporterApp(tk.Tk):
                         self.all_records = all_records
 
                         # Apply genre normalization before filtering
-                        def _normalize_list(raw):
-                            return [self.genre_mapping.get(g, g) for g in raw]
-
                         for rec in self.all_records:
-                            rec.old_genres = _normalize_list(rec.old_genres)
-                            rec.new_genres = _normalize_list(rec.new_genres)
-
-                        from tag_fixer import FileRecord, apply_tag_proposals
+                            rec.old_genres = normalize_genres(rec.old_genres, self.genre_mapping)
+                            rec.new_genres = normalize_genres(rec.new_genres, self.genre_mapping)
 
                         filters = make_filters(ex_no_diff, ex_skipped, show_all)
                         records = apply_filters(all_records, filters)
@@ -437,29 +401,13 @@ class SoundVaultImporterApp(tk.Tk):
                         if result is not None:
                             selected, fields = result
 
-                            count = apply_tag_proposals(
+                            count = apply_proposals(
                                 selected,
-                                fields=fields,
+                                all_records,
+                                db_path,
+                                fields,
                                 log_callback=self._log,
                             )
-
-                            selected_paths = {rec.path for rec in selected}
-                            import sqlite3
-                            conn = sqlite3.connect(db_path)
-                            for rec in all_records:
-                                if rec.path in selected_paths:
-                                    new_status = 'applied'
-                                elif rec.status == 'no_diff':
-                                    new_status = 'no_diff'
-                                else:
-                                    new_status = 'skipped'
-                                rec.status = new_status
-                                conn.execute(
-                                    "UPDATE files SET status=? WHERE path=?",
-                                    (new_status, str(rec.path)),
-                                )
-                            conn.commit()
-                            conn.close()
                             messagebox.showinfo('Done', f'Updated {count} files.')
                         return
             except queue.Empty:
@@ -706,7 +654,6 @@ class SoundVaultImporterApp(tk.Tk):
 
         def apply_mapping():
             mapping_json = text_map.get("1.0", "end")
-            mapping_path = os.path.join(folder, ".genre_mapping.json")
             try:
                 mapping = json.loads(mapping_json)
                 if not isinstance(mapping, dict):
@@ -718,9 +665,7 @@ class SoundVaultImporterApp(tk.Tk):
                 messagebox.showerror("Invalid Mapping", str(e))
                 return
             try:
-                os.makedirs(folder, exist_ok=True)
-                with open(mapping_path, "w", encoding="utf-8") as f:
-                    json.dump(mapping, f, indent=2)
+                mapping_path = save_mapping(folder, mapping)
             except Exception as e:
                 messagebox.showerror("Save Failed", str(e))
                 return
@@ -728,12 +673,9 @@ class SoundVaultImporterApp(tk.Tk):
             self.mapping_path = mapping_path
             self.genre_mapping = mapping
 
-            def normalize_list(lst):
-                return [self.genre_mapping.get(g, g) for g in lst]
-
             for rec in getattr(self, "all_records", []):
-                rec.old_genres = normalize_list(rec.old_genres)
-                rec.new_genres = normalize_list(rec.new_genres)
+                rec.old_genres = normalize_genres(rec.old_genres, self.genre_mapping)
+                rec.new_genres = normalize_genres(rec.new_genres, self.genre_mapping)
 
             if hasattr(self, "filtered_records") and hasattr(self, "_prop_tv"):
                 self._render_table(self.filtered_records)
