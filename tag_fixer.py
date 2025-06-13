@@ -1,12 +1,14 @@
 import os
 import sys
 import argparse
-import acoustid
-import musicbrainzngs
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Iterable, Callable, List, Optional
+import pkgutil
+import importlib
 from mutagen import File as MutagenFile
+
+from plugins.base import MetadataPlugin
 
 import sqlite3
 
@@ -38,11 +40,17 @@ ACOUSTID_APP_NAME      = "SoundVaultTagFixer"
 ACOUSTID_APP_VERSION   = "1.0.0"
 SUPPORTED_EXTS         = {".mp3", ".flac", ".m4a", ".aac", ".ogg", ".wav"}
 
-musicbrainzngs.set_useragent(
-    "SoundVaultTagFixer",
-    "1.0",
-    "youremail@example.com",
-)
+# ─── Plugin Discovery ─────────────────────────────────────────────────────
+PLUGINS: List[MetadataPlugin] = []
+for finder, name, _ in pkgutil.iter_modules(['plugins']):
+    try:
+        module = importlib.import_module(f'plugins.{name}')
+    except Exception:
+        continue
+    for attr in dir(module):
+        obj = getattr(module, attr)
+        if isinstance(obj, type) and issubclass(obj, MetadataPlugin) and obj is not MetadataPlugin:
+            PLUGINS.append(obj())
 
 # ─── Data Classes ────────────────────────────────────────────────────────
 
@@ -89,37 +97,6 @@ def find_files(root):
                 audio_files.append(os.path.join(dirpath, fname))
     return audio_files
 
-from itertools import islice
-
-def query_acoustid(path, log_callback):
-    try:
-        match_gen = acoustid.match(ACOUSTID_API_KEY, path)
-        # Grab first 5 for debugging, then put them back into a list
-        peek = list(islice(match_gen, 5))
-        if not peek:
-            log_callback("  No matches at all")
-            return None
-
-        # Debug: show those 5
-        for i, (score, rid, title, artist) in enumerate(peek, start=1):
-            log_callback(f"  [{i}] score={score:.4f} → “{artist} – {title}”")
-
-        # Now get the very first result for your decision
-        best_score, best_rid, best_title, best_artist = peek[0]
-        return {
-            "title": best_title,
-            "artist": best_artist,
-            "score": best_score,
-            "recording_id": best_rid,
-        }
-
-    except acoustid.NoBackendError:
-        log_callback("Chromaprint library/tool not found")
-    except acoustid.FingerprintGenerationError:
-        log_callback(f"Failed to fingerprint: {path}")
-    except acoustid.WebServiceError as exc:
-        log_callback(f"AcoustID request failed: {exc}")
-    return None
 
 def update_tags(path: str, proposal: FileRecord, fields: List[str], log_callback):
     """Write selected tags from ``proposal`` into ``path``. Return True if saved."""
@@ -204,74 +181,7 @@ def build_file_records(
                 progress_callback(idx)
             continue
 
-        log_callback(f"Fingerprinting {f}")
-        try:
-            result = query_acoustid(f, log_callback)
-        except Exception as e:
-            log_callback(f"  lookup error: {e}")
-            result = None
-
-        if not result or not result.get("title"):
-            if not result:
-                log_callback(f"  no fingerprint match")
-
-            audio = MutagenFile(f, easy=True)
-            old_artist = (audio.tags.get("artist") or [None])[0] if audio and audio.tags else None
-            old_title = (audio.tags.get("title") or [None])[0] if audio and audio.tags else None
-            old_album = (audio.tags.get("album") or [None])[0] if audio and audio.tags else None
-            old_genres = audio.tags.get("genre", []) if audio and audio.tags else []
-
-            rec = FileRecord(
-                path=Path(f),
-                status="unmatched",
-                score=None,
-                old_artist=old_artist,
-                new_artist=None,
-                old_title=old_title,
-                new_title=None,
-                old_album=old_album,
-                new_album=None,
-                old_genres=old_genres,
-                new_genres=[],
-            )
-            records.append(rec)
-            genres_old = ";".join(rec.old_genres)
-            genres_new = ";".join(rec.new_genres)
-            vals = (
-                str(rec.path), rec.status, rec.score,
-                rec.old_artist, rec.new_artist,
-                rec.old_title, rec.new_title,
-                rec.old_album, rec.new_album,
-                genres_old, genres_new,
-            )
-            db_conn.execute(
-                "INSERT OR REPLACE INTO files VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-                vals,
-            )
-            if progress_callback:
-                progress_callback(idx)
-            continue
-
-        score = result.get("score")
-        if progress_callback:
-            progress_callback(idx)
-
-        mb_album = None
-        mb_genres: List[str] = []
-        mbid = result.get("recording_id")
-        if mbid:
-            try:
-                rec = musicbrainzngs.get_recording_by_id(
-                    mbid,
-                    includes=["releases", "tags"],
-                )["recording"]
-                rels = rec.get("releases", [])
-                if rels:
-                    mb_album = rels[0].get("title")
-                mb_tags = rec.get("tag-list", [])
-                mb_genres = [t["name"] for t in mb_tags if "name" in t]
-            except Exception as e:
-                log_callback(f"  MB lookup failed: {e}")
+        log_callback(f"Processing {f}")
 
         audio = MutagenFile(f, easy=True)
         old_artist = (audio.tags.get("artist") or [None])[0] if audio and audio.tags else None
@@ -282,25 +192,41 @@ def build_file_records(
         rec = FileRecord(
             path=Path(f),
             status=status,
-            score=score,
+            score=None,
             old_artist=old_artist,
-            new_artist=result.get("artist"),
+            new_artist=None,
             old_title=old_title,
-            new_title=result.get("title"),
+            new_title=None,
             old_album=old_album,
-            new_album=mb_album,
+            new_album=None,
             old_genres=old_genres,
-            new_genres=mb_genres,
+            new_genres=[],
         )
 
-        all_match = (
-            rec.old_artist == rec.new_artist
-            and rec.old_title == rec.new_title
-            and rec.old_album == rec.new_album
-            and sorted(rec.old_genres or []) == sorted(rec.new_genres or [])
-        )
-        if all_match:
-            rec.status = "no_diff"
+        for plugin in PLUGINS:
+            result = plugin.identify(f)
+            if result and result.get('score', 0) >= MIN_INTERACTIVE_SCORE:
+                rec.new_artist = result.get('artist', rec.new_artist)
+                rec.new_title  = result.get('title', rec.new_title)
+                rec.new_album  = result.get('album', rec.new_album)
+                rec.new_genres = result.get('genres', rec.new_genres)
+                rec.score      = result.get('score', rec.score)
+                break
+
+        if progress_callback:
+            progress_callback(idx)
+
+        if rec.new_artist is None and rec.new_title is None and rec.new_album is None and not rec.new_genres:
+            rec.status = "unmatched"
+        else:
+            all_match = (
+                rec.old_artist == rec.new_artist
+                and rec.old_title == rec.new_title
+                and rec.old_album == rec.new_album
+                and sorted(rec.old_genres or []) == sorted(rec.new_genres or [])
+            )
+            if all_match:
+                rec.status = "no_diff"
         records.append(rec)
         genres_old = ";".join(rec.old_genres)
         genres_new = ";".join(rec.new_genres)
