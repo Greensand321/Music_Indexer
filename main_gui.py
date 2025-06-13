@@ -632,50 +632,55 @@ class SoundVaultImporterApp(tk.Tk):
             return
         self.mapping_path = os.path.join(folder, ".genre_mapping.json")
         self._load_genre_mapping()
-        all_genres = set()
-        for rec in getattr(self, "all_records", []):
-            all_genres.update(rec.old_genres or [])
-            all_genres.update(rec.new_genres or [])
-        genre_list = "\n".join(sorted(all_genres))
 
         win = tk.Toplevel(self)
         win.title("Genre Normalization Assistant")
         win.grab_set()
 
         tk.Label(win, text="LLM Prompt Template:").pack(anchor="w", padx=10, pady=(10, 0))
-        text_prompt = ScrolledText(win, width=50, height=6)
-        text_prompt.pack(fill="both", padx=10, pady=(0, 10))
-        text_prompt.insert("1.0", PROMPT_TEMPLATE.strip())
-        text_prompt.configure(state="disabled")
+        self.text_prompt = ScrolledText(win, width=50, height=6)
+        self.text_prompt.pack(fill="both", padx=10, pady=(0, 10))
+        self.text_prompt.insert("1.0", PROMPT_TEMPLATE.strip())
+        self.text_prompt.configure(state="disabled")
 
         def copy_prompt():
             self.clipboard_clear()
-            self.clipboard_append(text_prompt.get("1.0", "end").strip())
+            self.clipboard_append(self.text_prompt.get("1.0", "end").strip())
 
         tk.Button(win, text="Copy Prompt", command=copy_prompt).pack(pady=(0, 10))
 
         tk.Label(win, text="Raw Genre List:").pack(anchor="w", padx=10)
-        text_genres = ScrolledText(win, width=50, height=15)
-        text_genres.pack(fill="both", padx=10, pady=(0, 10))
-        text_genres.insert("1.0", genre_list)
-        text_genres.configure(state="disabled")
+        self.text_raw = ScrolledText(win, width=50, height=15)
+        self.text_raw.pack(fill="both", padx=10, pady=(0, 10))
+
+        # ── Raw Genre List Section ──
+        raw_set = set()
+        for rec in getattr(self, "all_records", []):
+            raw_set.update(rec.old_genres or [])
+            raw_set.update(rec.new_genres or [])
+        raw_list = sorted(raw_set)
+
+        self.text_raw.configure(state="normal")
+        self.text_raw.delete("1.0", "end")
+        self.text_raw.insert("1.0", "\n".join(raw_list))
+        self.text_raw.configure(state="disabled")
 
         def copy_genres():
             self.clipboard_clear()
-            self.clipboard_append(genre_list)
+            self.clipboard_append(self.text_raw.get("1.0", "end").strip())
 
         tk.Button(win, text="Copy Raw List", command=copy_genres).pack(pady=(0, 10))
 
         tk.Label(win, text="Mapping JSON Input:").pack(anchor="w", padx=10)
-        text_map = ScrolledText(win, width=50, height=10)
-        text_map.pack(fill="both", padx=10, pady=(0, 10))
+        self.text_map = ScrolledText(win, width=50, height=10)
+        self.text_map.pack(fill="both", padx=10, pady=(0, 10))
         try:
             with open(self.mapping_path, "r", encoding="utf-8") as f:
                 existing_map = json.load(f)
         except Exception:
             existing_map = {}
-        text_map.delete("1.0", "end")
-        text_map.insert("1.0", json.dumps(existing_map, indent=2))
+        self.text_map.delete("1.0", "end")
+        self.text_map.insert("1.0", json.dumps(existing_map, indent=2))
 
         def apply_mapping():
             try:
@@ -684,7 +689,7 @@ class SoundVaultImporterApp(tk.Tk):
             except Exception:
                 existing_map = {}
 
-            raw = text_map.get("1.0", "end").strip()
+            raw = self.text_map.get("1.0", "end").strip()
             try:
                 new_map = json.loads(raw)
             except json.JSONDecodeError as e:
