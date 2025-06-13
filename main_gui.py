@@ -25,10 +25,7 @@ from controllers.tagfix_controller import (
     gather_records,
     apply_proposals,
 )
-from controllers.normalize_controller import (
-    save_mapping,
-    normalize_genres,
-)
+from controllers.normalize_controller import normalize_genres
 
 FilterFn = Callable[[FileRecord], bool]
 _cached_filters = None
@@ -139,6 +136,14 @@ class SoundVaultImporterApp(tk.Tk):
         self.output = tk.Text(self, wrap="word", state="disabled", height=15)
         self.output.pack(fill="both", expand=True, padx=10, pady=(0, 10))
 
+    def _load_genre_mapping(self):
+        """Load genre mapping from ``self.mapping_path`` if possible."""
+        try:
+            with open(self.mapping_path, "r", encoding="utf-8") as f:
+                self.genre_mapping = json.load(f)
+        except Exception:
+            self.genre_mapping = {}
+
     def select_library(self):
         initial = load_last_path()
         chosen = filedialog.askdirectory(
@@ -152,6 +157,8 @@ class SoundVaultImporterApp(tk.Tk):
         self.library_path = info["path"]
         self.library_name_var.set(info["name"])
         self.library_path_var.set(info["path"])
+        self.mapping_path = os.path.join(self.library_path, ".genre_mapping.json")
+        self._load_genre_mapping()
         self.update_library_info()
 
     def update_library_info(self):
@@ -333,9 +340,9 @@ class SoundVaultImporterApp(tk.Tk):
         if not folder:
             return
 
-        db_path, mapping = prepare_library(folder)
-        self.genre_mapping = mapping
+        db_path, _ = prepare_library(folder)
         self.mapping_path = os.path.join(folder, ".genre_mapping.json")
+        self._load_genre_mapping()
 
         files = discover_files(folder)
         print(f"[DEBUG] Total discovered files: {len(files)}")
@@ -606,6 +613,8 @@ class SoundVaultImporterApp(tk.Tk):
         folder = self.require_library()
         if not folder:
             return
+        self.mapping_path = os.path.join(folder, ".genre_mapping.json")
+        self._load_genre_mapping()
         all_genres = set()
         for rec in getattr(self, "all_records", []):
             all_genres.update(rec.old_genres or [])
@@ -613,11 +622,12 @@ class SoundVaultImporterApp(tk.Tk):
         genre_list = "\n".join(sorted(all_genres))
 
         ai_prompt = (
-            "I will provide a list of raw music genres (one per line). "
-            "Your job is to group and map each raw genre into a canonical key in JSON format, "
-            "e.g. {\"rock & roll\": \"Rock\", \"hip hop\": \"Hip-Hop\", …}. "
-            "If a term is not a genre, list it under \"invalid\". "
-            "If you have questions about ambiguous names, ask clarifying questions."
+            "I will provide a list of raw music genres (one per line). Your task is to group and map each raw genre into a canonical key in JSON format, for example: {\"rock & roll\": \"Rock\", \"hip hop\": \"Hip-Hop\", \u2026}.\n\n"
+            "Follow these guidelines:\n\n"
+            "If a genre has clearly defined subgenres, include both the subgenre and its parent genre(s). For instance, \"future bass\" should map to both \"Future Bass\" and \"Electronic\"; similarly, \"indie rock\" maps to both \"Indie Rock\" and \"Rock\". Keep the granularity and original details intact.\n\n"
+            "Ensure genres like \"hiphoprap\" are split and listed separately as \"Hip-Hop\" and \"Rap\".\n\n"
+            "If a provided term does not represent a valid music genre, list it under \"invalid\".\n\n"
+            "If you encounter ambiguous genre terms, please ask clarifying questions before proceeding."
         )
 
         win = tk.Toplevel(self)
@@ -632,7 +642,7 @@ class SoundVaultImporterApp(tk.Tk):
 
         def copy_prompt():
             self.clipboard_clear()
-            self.clipboard_append(ai_prompt)
+            self.clipboard_append(text_prompt.get("1.0", "end").strip())
 
         tk.Button(win, text="Copy Prompt", command=copy_prompt).pack(pady=(0, 10))
 
@@ -651,27 +661,44 @@ class SoundVaultImporterApp(tk.Tk):
         tk.Label(win, text="Mapping JSON Input:").pack(anchor="w", padx=10)
         text_map = ScrolledText(win, width=50, height=10)
         text_map.pack(fill="both", padx=10, pady=(0, 10))
+        try:
+            with open(self.mapping_path, "r", encoding="utf-8") as f:
+                existing_map = json.load(f)
+        except Exception:
+            existing_map = {}
+        text_map.delete("1.0", "end")
+        text_map.insert("1.0", json.dumps(existing_map, indent=2))
 
         def apply_mapping():
-            mapping_json = text_map.get("1.0", "end")
             try:
-                mapping = json.loads(mapping_json)
-                if not isinstance(mapping, dict):
-                    raise ValueError("Mapping must be a JSON object")
+                with open(self.mapping_path, "r", encoding="utf-8") as f:
+                    existing_map = json.load(f)
+            except Exception:
+                existing_map = {}
+
+            raw = text_map.get("1.0", "end").strip()
+            try:
+                new_map = json.loads(raw)
             except json.JSONDecodeError as e:
                 messagebox.showerror("Invalid JSON", str(e))
                 return
-            except Exception as e:
-                messagebox.showerror("Invalid Mapping", str(e))
-                return
-            try:
-                mapping_path = save_mapping(folder, mapping)
-            except Exception as e:
-                messagebox.showerror("Save Failed", str(e))
-                return
 
-            self.mapping_path = mapping_path
-            self.genre_mapping = mapping
+            conflicts = [k for k, v in new_map.items() if k in existing_map and existing_map[k] != v]
+
+            if conflicts:
+                msg = (
+                    "You’re about to change existing mappings for:\n\n"
+                    + "\n".join(conflicts)
+                    + "\n\nClick “Yes” to override or “No” to cancel."
+                )
+                override = messagebox.askyesno("Overwrite Detected", msg)
+                if not override:
+                    return
+
+            os.makedirs(os.path.dirname(self.mapping_path), exist_ok=True)
+            with open(self.mapping_path, "w", encoding="utf-8") as f:
+                json.dump(new_map, f, indent=2)
+            self.genre_mapping = new_map
 
             for rec in getattr(self, "all_records", []):
                 rec.old_genres = normalize_genres(rec.old_genres, self.genre_mapping)
