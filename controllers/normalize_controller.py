@@ -3,23 +3,26 @@ import json
 from typing import Dict
 
 PROMPT_TEMPLATE = """
-I will provide a list of raw music genres (one per line). Your task is to group and map each raw genre into a canonical key in JSON format, for example:
+I will provide a list of raw music genres (one per line). Your task is to group each variant under a controlled vocabulary by mapping each raw genre to an array of canonical genre names in JSON format. For example:
 
 {
   "rock & roll": ["Rock"],
-  "future bass": ["Future Bass","Electronic"],
-  "indie rock": ["Indie Rock","Rock"],
+  "rock n roll": ["Rock"],
+  "rock": ["Rock"],
+  "indie rock": ["Indie Rock", "Rock"],
+  "hip hop": ["Hip-Hop"],
   "90s": ["invalid"]
 }
 
 Follow these guidelines:
 
-• For each raw genre key, return an array of one or more canonical genre names as the value.  
-• If a genre has clearly defined subgenres, list both the subgenre and its parent(s) (e.g. "future bass": ["Future Bass","Electronic"]).  
-• Split and list merged terms separately (e.g. "hiphoprap": ["Hip-Hop","Rap"]).  
-• Map non-genres to ["invalid"].  
-• Ask clarifying questions if any terms are ambiguous.
+• Use arrays as values, so each raw genre key maps to one or more canonical genre names.  
+• If a genre has clearly defined subgenres, include both the subgenre(s) and the parent genre(s) in the array—keep all granularity intact.  
+• Split any merged or concatenated terms into separate genres (e.g. "hiphoprap" → ["Hip-Hop", "Rap"]).  
+• Map any term that isn’t a valid music genre to ["invalid"].  
+• If you encounter ambiguous terms, ask clarifying questions before proceeding.
 """
+
 
 
 def load_mapping(folder: str) -> tuple[Dict[str, str], str]:
