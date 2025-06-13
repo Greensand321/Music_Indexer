@@ -750,6 +750,16 @@ class SoundVaultImporterApp(tk.Tk):
         if hasattr(self, "filtered_records") and hasattr(self, "_prop_tv"):
             self._render_table(self.filtered_records)
 
+        # Confirm success and close the normalization dialog
+        messagebox.showinfo(
+            "Mapping Applied",
+            "Your genre mapping has been successfully saved and applied to the library."
+        )
+        try:
+            self.text_map.winfo_toplevel().destroy()
+        except Exception:
+            pass
+
     def reset_tagfix_log(self):
         initial = self.library_path or load_last_path()
         folder = filedialog.askdirectory(title="Select Library Root", initialdir=initial)
