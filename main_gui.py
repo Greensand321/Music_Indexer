@@ -27,7 +27,7 @@ from controllers.tagfix_controller import (
     gather_records,
     apply_proposals,
 )
-from controllers.normalize_controller import normalize_genres
+from controllers.normalize_controller import normalize_genres, PROMPT_TEMPLATE
 
 FilterFn = Callable[[FileRecord], bool]
 _cached_filters = None
@@ -638,15 +638,6 @@ class SoundVaultImporterApp(tk.Tk):
             all_genres.update(rec.new_genres or [])
         genre_list = "\n".join(sorted(all_genres))
 
-        ai_prompt = (
-            "I will provide a list of raw music genres (one per line). Your task is to group and map each raw genre into a canonical key in JSON format, for example: {\"rock & roll\": \"Rock\", \"hip hop\": \"Hip-Hop\", \u2026}.\n\n"
-            "Follow these guidelines:\n\n"
-            "If a genre has clearly defined subgenres, include both the subgenre and its parent genre(s). For instance, \"future bass\" should map to both \"Future Bass\" and \"Electronic\"; similarly, \"indie rock\" maps to both \"Indie Rock\" and \"Rock\". Keep the granularity and original details intact.\n\n"
-            "Ensure genres like \"hiphoprap\" are split and listed separately as \"Hip-Hop\" and \"Rap\".\n\n"
-            "If a provided term does not represent a valid music genre, list it under \"invalid\".\n\n"
-            "If you encounter ambiguous genre terms, please ask clarifying questions before proceeding."
-        )
-
         win = tk.Toplevel(self)
         win.title("Genre Normalization Assistant")
         win.grab_set()
@@ -654,7 +645,7 @@ class SoundVaultImporterApp(tk.Tk):
         tk.Label(win, text="LLM Prompt Template:").pack(anchor="w", padx=10, pady=(10, 0))
         text_prompt = ScrolledText(win, width=50, height=6)
         text_prompt.pack(fill="both", padx=10, pady=(0, 10))
-        text_prompt.insert("1.0", ai_prompt)
+        text_prompt.insert("1.0", PROMPT_TEMPLATE.strip())
         text_prompt.configure(state="disabled")
 
         def copy_prompt():
