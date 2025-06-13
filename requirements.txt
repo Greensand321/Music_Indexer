@@ -3,3 +3,4 @@ musicbrainzngs
 pydub
 pyacoustid
 librosa  # optional, for BPM estimation
+requests
