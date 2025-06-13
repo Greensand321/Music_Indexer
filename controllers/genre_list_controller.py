@@ -1,4 +1,5 @@
 import os
+from tkinter import messagebox
 from typing import Set
 from mutagen import File as MutagenFile
 
@@ -76,4 +77,9 @@ def write_genres_html(root_path: str, genres: Set[str], output_filename: str = "
 def list_unique_genres(folder_path: str) -> str:
     """Scan ``folder_path`` and write genres.html listing unique genres."""
     genres = gather_unique_genres(folder_path)
-    return write_genres_html(folder_path, genres)
+    output_path = write_genres_html(folder_path, genres)
+    messagebox.showinfo(
+        "Genre List Generated",
+        f"Your genre list has been saved to:\n{output_path}"
+    )
+    return output_path

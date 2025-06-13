@@ -1,4 +1,5 @@
 import os
+from tkinter import messagebox
 from mutagen import File as MutagenFile
 from mutagen.easyid3 import EasyID3
 from mutagen.flac import FLAC
@@ -119,4 +120,8 @@ def generate_index(folder_path: str) -> str:
     out_path = os.path.join(folder_path, "library_index.html")
     with open(out_path, "w", encoding="utf-8") as f:
         f.write("\n".join(html_lines))
+    messagebox.showinfo(
+        "Library Index Generated",
+        f"Your library index has been saved to:\n{out_path}"
+    )
     return out_path
