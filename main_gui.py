@@ -8,8 +8,10 @@ from tkinter.scrolledtext import ScrolledText
 
 from validator import validate_soundvault_structure
 from music_indexer_api import run_full_indexer
-from importer_core import scan_and_import
-from sample_highlight import play_file_highlight, PYDUB_AVAILABLE
+from controllers.library_index_controller import generate_index
+from controllers.import_controller import import_new_files
+from controllers.genre_list_controller import list_unique_genres
+from controllers.highlight_controller import play_snippet, PYDUB_AVAILABLE
 from tag_fixer import MIN_INTERACTIVE_SCORE, FileRecord
 from typing import Callable, List
 
@@ -112,12 +114,20 @@ class SoundVaultImporterApp(tk.Tk):
         tools_menu = tk.Menu(menubar, tearoff=False)
         tools_menu.add_command(label="Regenerate Playlists", command=self.regenerate_playlists)
         tools_menu.add_command(label="Fix Tags via AcoustID", command=self.fix_tags_gui)
+        tools_menu.add_command(
+            label="Generate Library Index…",
+            command=lambda: generate_index(self.require_library()),
+        )
+        tools_menu.add_command(
+            label="List Unique Genres…",
+            command=lambda: list_unique_genres(self.require_library()),
+        )
         if PYDUB_AVAILABLE:
-            tools_menu.add_command(label="Sample Song Highlight", command=self.sample_song_highlight)
+            tools_menu.add_command(label="Play Highlight…", command=self.sample_song_highlight)
         else:
             tools_menu.add_command(
-                label="Sample Song Highlight (requires pydub)",
-                state="disabled"
+                label="Play Highlight… (requires pydub)",
+                state="disabled",
             )
         tools_menu.add_separator()
         tools_menu.add_command(label="Genre Normalizer", command=self._open_genre_normalizer)
@@ -212,8 +222,13 @@ class SoundVaultImporterApp(tk.Tk):
         estimate = messagebox.askyesno("Estimate BPM?", "Attempt BPM estimation for missing values?")
 
         try:
-            summary = scan_and_import(vault, import_folder, dry_run=dry_run,
-                                      estimate_bpm=estimate, log_callback=self._log)
+            summary = import_new_files(
+                vault,
+                import_folder,
+                dry_run=dry_run,
+                estimate_bpm=estimate,
+                log_callback=self._log,
+            )
             if summary["dry_run"]:
                 messagebox.showinfo("Dry Run Complete", f"Preview written to:\n{summary['html']}")
             else:
@@ -602,8 +617,10 @@ class SoundVaultImporterApp(tk.Tk):
 
         save_last_path(os.path.dirname(path))
         try:
-            start_sec = play_file_highlight(path)
-            self._log(f"Played highlight of '{os.path.basename(path)}' starting at {start_sec:.2f}s")
+            start_sec = play_snippet(path)
+            self._log(
+                f"Played highlight of '{os.path.basename(path)}' starting at {start_sec:.2f}s"
+            )
         except Exception as e:
             messagebox.showerror("Playback failed", str(e))
             self._log(f"✘ Playback failed for {path}: {e}")
