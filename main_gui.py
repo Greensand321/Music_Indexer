@@ -1,6 +1,5 @@
-import os
-import json
 import threading
+import os, json
 import queue
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
@@ -27,7 +26,12 @@ from controllers.tagfix_controller import (
     gather_records,
     apply_proposals,
 )
-from controllers.normalize_controller import normalize_genres, PROMPT_TEMPLATE, get_raw_genres
+from controllers.normalize_controller import (
+    normalize_genres,
+    PROMPT_TEMPLATE,
+    load_mapping,
+    scan_raw_genres,
+)
 
 FilterFn = Callable[[FileRecord], bool]
 _cached_filters = None
@@ -631,134 +635,120 @@ class SoundVaultImporterApp(tk.Tk):
         if not folder:
             return
 
+        # Always refresh mapping path
+        self.mapping_path = os.path.join(folder, ".genre_mapping.json")
+
         if not _show_dialog:
-            # ── NEW: Rescan the library to get the latest FileRecord list ──
-            db_path, _ = prepare_library(folder)
+            # ── Show progress bar and run raw-only scan ──
             files = discover_files(folder)
             if not files:
-                messagebox.showinfo(
-                    "No audio files", "No supported audio found in that folder."
-                )
+                messagebox.showinfo("No audio files", "No supported audio found.")
                 return
 
-            # ── Progress Bar ──
             prog_win = tk.Toplevel(self)
-            prog_win.title("Scanning Library…")
+            prog_win.title("Scanning Genres…")
             prog_bar = ttk.Progressbar(
                 prog_win, orient="horizontal", length=300, mode="determinate"
             )
             prog_bar.pack(padx=20, pady=20)
             prog_bar["maximum"] = len(files)
 
-            def on_progress(idx):
+            def on_progress(idx, total):
                 prog_bar["value"] = idx
                 prog_win.update_idletasks()
 
             def scan_task():
-                records = gather_records(
-                    folder,
-                    db_path,
-                    show_all=True,
-                    progress_callback=on_progress,
-                )
-                self.all_records = records
+                self.raw_genre_list = scan_raw_genres(folder, on_progress)
                 prog_win.destroy()
-                # re-open dialog on main thread
+                # reopen dialog to show panels
                 self.after(0, lambda: self._open_genre_normalizer(True))
 
             threading.Thread(target=scan_task, daemon=True).start()
             return
 
-        # ── Existing: Load or initialize the mapping file ──
-        self.mapping_path = os.path.join(folder, ".genre_mapping.json")
-        self._load_genre_mapping()
-
+        # ── Now _show_dialog == True: build the three-panel dialog ──
         win = tk.Toplevel(self)
         win.title("Genre Normalization Assistant")
         win.grab_set()
 
-        tk.Label(win, text="LLM Prompt Template:").pack(anchor="w", padx=10, pady=(10, 0))
-        self.text_prompt = ScrolledText(win, width=50, height=6)
-        self.text_prompt.pack(fill="both", padx=10, pady=(0, 10))
+        # 1) LLM Prompt
+        tk.Label(win, text="LLM Prompt Template:").pack(anchor="w", padx=10, pady=(10,0))
+        self.text_prompt = ScrolledText(win, height=8, wrap="word")
+        self.text_prompt.pack(fill="both", padx=10)
         self.text_prompt.insert("1.0", PROMPT_TEMPLATE.strip())
         self.text_prompt.configure(state="disabled")
+        ttk.Button(
+            win,
+            text="Copy Prompt",
+            command=lambda: self.clipboard_append(PROMPT_TEMPLATE.strip()),
+        ).pack(anchor="e", padx=10, pady=(0,10))
 
-        def copy_prompt():
-            self.clipboard_clear()
-            self.clipboard_append(self.text_prompt.get("1.0", "end").strip())
-
-        tk.Button(win, text="Copy Prompt", command=copy_prompt).pack(pady=(0, 10))
-
+        # 2) Raw Genre List
         tk.Label(win, text="Raw Genre List:").pack(anchor="w", padx=10)
         self.text_raw = ScrolledText(win, width=50, height=15)
-        self.text_raw.pack(fill="both", padx=10, pady=(0, 10))
-
-        # Populate via controller
-        raw_list = get_raw_genres(self.all_records)
-        self.text_raw.configure(state="normal")
-        self.text_raw.delete("1.0", "end")
-        self.text_raw.insert("1.0", "\n".join(raw_list))
+        self.text_raw.pack(fill="both", padx=10, pady=(0,10))
+        self.text_raw.insert("1.0", "\n".join(self.raw_genre_list))
         self.text_raw.configure(state="disabled")
+        ttk.Button(
+            win,
+            text="Copy Raw List",
+            command=lambda: self.clipboard_append("\n".join(self.raw_genre_list)),
+        ).pack(anchor="e", padx=10, pady=(0,10))
 
-        def copy_genres():
-            self.clipboard_clear()
-            self.clipboard_append(self.text_raw.get("1.0", "end").strip())
-
-        tk.Button(win, text="Copy Raw List", command=copy_genres).pack(pady=(0, 10))
-
-        tk.Label(win, text="Mapping JSON Input:").pack(anchor="w", padx=10)
+        # 3) Mapping JSON Input
+        tk.Label(win, text="Paste JSON Mapping Here:").pack(anchor="w", padx=10)
         self.text_map = ScrolledText(win, width=50, height=10)
-        self.text_map.pack(fill="both", padx=10, pady=(0, 10))
+        self.text_map.pack(fill="both", padx=10, pady=(0,10))
+        # pre-load existing mapping
+        try:
+            with open(self.mapping_path, "r", encoding="utf-8") as f:
+                existing = json.load(f)
+        except Exception:
+            existing = {}
+        self.text_map.insert("1.0", json.dumps(existing, indent=2))
+
+        # Buttons: Apply Mapping & Close
+        btn_frame = ttk.Frame(win)
+        btn_frame.pack(fill="x", padx=10, pady=(0,10))
+        ttk.Button(btn_frame, text="Apply Mapping", command=self.apply_mapping).pack(side="right")
+        ttk.Button(btn_frame, text="Close", command=win.destroy).pack(side="right", padx=(0,5))
+
+    def apply_mapping(self):
+        """Persist mapping JSON from text box and apply normalization."""
         try:
             with open(self.mapping_path, "r", encoding="utf-8") as f:
                 existing_map = json.load(f)
         except Exception:
             existing_map = {}
-        self.text_map.delete("1.0", "end")
-        self.text_map.insert("1.0", json.dumps(existing_map, indent=2))
 
-        def apply_mapping():
-            try:
-                with open(self.mapping_path, "r", encoding="utf-8") as f:
-                    existing_map = json.load(f)
-            except Exception:
-                existing_map = {}
+        raw = self.text_map.get("1.0", "end").strip()
+        try:
+            new_map = json.loads(raw)
+        except json.JSONDecodeError as e:
+            messagebox.showerror("Invalid JSON", str(e))
+            return
 
-            raw = self.text_map.get("1.0", "end").strip()
-            try:
-                new_map = json.loads(raw)
-            except json.JSONDecodeError as e:
-                messagebox.showerror("Invalid JSON", str(e))
+        conflicts = [k for k, v in new_map.items() if k in existing_map and existing_map[k] != v]
+        if conflicts:
+            msg = (
+                "You’re about to change existing mappings for:\n\n"
+                + "\n".join(conflicts)
+                + "\n\nClick “Yes” to override or “No” to cancel."
+            )
+            if not messagebox.askyesno("Overwrite Detected", msg):
                 return
 
-            conflicts = [k for k, v in new_map.items() if k in existing_map and existing_map[k] != v]
+        os.makedirs(os.path.dirname(self.mapping_path), exist_ok=True)
+        with open(self.mapping_path, "w", encoding="utf-8") as f:
+            json.dump(new_map, f, indent=2)
+        self.genre_mapping = new_map
 
-            if conflicts:
-                msg = (
-                    "You’re about to change existing mappings for:\n\n"
-                    + "\n".join(conflicts)
-                    + "\n\nClick “Yes” to override or “No” to cancel."
-                )
-                override = messagebox.askyesno("Overwrite Detected", msg)
-                if not override:
-                    return
+        for rec in getattr(self, "all_records", []):
+            rec.old_genres = normalize_genres(rec.old_genres, self.genre_mapping)
+            rec.new_genres = normalize_genres(rec.new_genres, self.genre_mapping)
 
-            os.makedirs(os.path.dirname(self.mapping_path), exist_ok=True)
-            with open(self.mapping_path, "w", encoding="utf-8") as f:
-                json.dump(new_map, f, indent=2)
-            self.genre_mapping = new_map
-
-            for rec in getattr(self, "all_records", []):
-                rec.old_genres = normalize_genres(rec.old_genres, self.genre_mapping)
-                rec.new_genres = normalize_genres(rec.new_genres, self.genre_mapping)
-
-            if hasattr(self, "filtered_records") and hasattr(self, "_prop_tv"):
-                self._render_table(self.filtered_records)
-
-            win.destroy()
-
-        tk.Button(win, text="Apply Mapping", command=apply_mapping).pack(side="left", padx=10, pady=(0, 10))
-        tk.Button(win, text="Close", command=win.destroy).pack(side="right", padx=10, pady=(0, 10))
+        if hasattr(self, "filtered_records") and hasattr(self, "_prop_tv"):
+            self._render_table(self.filtered_records)
 
     def reset_tagfix_log(self):
         initial = self.library_path or load_last_path()

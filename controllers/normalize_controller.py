@@ -1,5 +1,6 @@
 import os
 import json
+import re
 from typing import Dict
 
 PROMPT_TEMPLATE = """
@@ -60,4 +61,32 @@ def get_raw_genres(records):
         raw_set.update(rec.old_genres)
         # if you want newly suggested genres too:
         raw_set.update(rec.new_genres)
+    return sorted(raw_set)
+
+
+def scan_raw_genres(folder: str, progress_callback):
+    """
+    Walk the folder, read each file’s embedded 'genre' tags only,
+    split on [],;,/ to separate combined entries, and return a
+    sorted, deduplicated list of raw genres.
+    """
+    # discover_files comes from your tagfix controller
+    from controllers.tagfix_controller import discover_files
+    from mutagen import File as MutagenFile
+
+    files = discover_files(folder)
+    total = len(files)
+    raw_set = set()
+    progress_callback(0, total)
+    for idx, path in enumerate(files, start=1):
+        progress_callback(idx, total)
+        audio = MutagenFile(path, easy=True)
+        genres = audio.get("genre", []) or []
+        for entry in genres:
+            # split on semicolon, comma or slash
+            parts = re.split(r'[;,/]', entry)
+            for part in parts:
+                part = part.strip()
+                if part:
+                    raw_set.add(part)
     return sorted(raw_set)
