@@ -203,15 +203,27 @@ def build_file_records(
             new_genres=[],
         )
 
+        best_result = None
+        best_score = 0.0
+        merged_genres: set[str] = set()
         for plugin in PLUGINS:
             result = plugin.identify(f)
-            if result and result.get('score', 0) >= MIN_INTERACTIVE_SCORE:
-                rec.new_artist = result.get('artist', rec.new_artist)
-                rec.new_title  = result.get('title', rec.new_title)
-                rec.new_album  = result.get('album', rec.new_album)
-                rec.new_genres = result.get('genres', rec.new_genres)
-                rec.score      = result.get('score', rec.score)
-                break
+            if not result:
+                continue
+            if result.get('genres'):
+                merged_genres.update(result['genres'])
+            score = result.get('score', 0)
+            if score > best_score:
+                best_score = score
+                best_result = result
+
+        if best_result and best_score >= MIN_INTERACTIVE_SCORE:
+            rec.new_artist = best_result.get('artist', rec.new_artist)
+            rec.new_title  = best_result.get('title', rec.new_title)
+            rec.new_album  = best_result.get('album', rec.new_album)
+            if merged_genres:
+                rec.new_genres = list(merged_genres)
+            rec.score      = best_score
 
         if progress_callback:
             progress_callback(idx)
