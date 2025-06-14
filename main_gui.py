@@ -173,6 +173,8 @@ class SoundVaultImporterApp(tk.Tk):
         self.chat_input.pack(side="left", fill="x", expand=True)
         send_btn = ttk.Button(entry_frame, text="Send", command=self._send_help_query)
         send_btn.pack(side="right", padx=(5,0))
+        reload_btn = ttk.Button(help_frame, text="Reload Models", command=self._reload_models)
+        reload_btn.pack(side="right", padx=10, pady=(0,10))
 
     def _load_genre_mapping(self):
         """Load genre mapping from ``self.mapping_path`` if possible."""
@@ -796,6 +798,18 @@ class SoundVaultImporterApp(tk.Tk):
             os.remove(db_path)
         messagebox.showinfo("Reset", "Tag-fix log cleared.")
         self._log(f"Reset tag-fix log for {folder}")
+
+    def _reload_models(self):
+        """
+        Re-initialize the AssistantPlugin so it re-scans models/ and reloads
+        any newly dropped GGUF files.
+        """
+        try:
+            self.assistant_plugin = AssistantPlugin()
+            messagebox.showinfo("Models Reloaded", "Model directory rescanned successfully.")
+        except Exception:
+            # Error dialogs are shown by AssistantPlugin already
+            pass
 
     def _send_help_query(self):
         user_q = self.chat_input.get().strip()
