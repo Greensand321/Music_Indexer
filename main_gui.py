@@ -32,6 +32,7 @@ from controllers.normalize_controller import (
     load_mapping,
     scan_raw_genres,
 )
+from plugins.assistant_plugin import AssistantPlugin
 
 FilterFn = Callable[[FileRecord], bool]
 _cached_filters = None
@@ -98,6 +99,7 @@ class SoundVaultImporterApp(tk.Tk):
         self.show_all = False
         self.genre_mapping = {}
         self.mapping_path = ""
+        self.assistant_plugin = AssistantPlugin()
 
         # ─── Menu Bar ─────────────────────────────────────────────────────────
         menubar = tk.Menu(self)
@@ -804,8 +806,11 @@ class SoundVaultImporterApp(tk.Tk):
         self.chat_history.insert("end", f"User: {user_q}\n")
         self.chat_input.delete(0, "end")
 
-        # TODO: call your assistant_plugin.chat() here
-        bot_reply = "Assistant: (not yet implemented)\n"
+        try:
+            reply_text = self.assistant_plugin.chat(user_q)
+            bot_reply = f"Assistant: {reply_text}\n"
+        except Exception as e:
+            bot_reply = f"Assistant error: {e}\n"
 
         self.chat_history.insert("end", bot_reply)
         self.chat_history.configure(state="disabled")
