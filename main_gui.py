@@ -146,9 +146,31 @@ class SoundVaultImporterApp(tk.Tk):
         tk.Label(self, textvariable=self.library_path_var, anchor="w").pack(fill="x", padx=10)
         tk.Label(self, textvariable=self.library_stats_var, justify="left").pack(anchor="w", padx=10, pady=(0, 10))
 
-        # ─── Output Log ───────────────────────────────────────────────────────
-        self.output = tk.Text(self, wrap="word", state="disabled", height=15)
-        self.output.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+        # ─── Output + Help Notebook ──────────────────────────────────────────
+        self.notebook = ttk.Notebook(self)
+        self.notebook.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+
+        log_frame = ttk.Frame(self.notebook)
+        self.notebook.add(log_frame, text="Log")
+
+        self.output = tk.Text(log_frame, wrap="word", state="disabled", height=15)
+        self.output.pack(fill="both", expand=True)
+
+        # after your other tabs
+        help_frame = ttk.Frame(self.notebook)
+        self.notebook.add(help_frame, text="Help")
+
+        # Chat history display
+        self.chat_history = ScrolledText(help_frame, height=15, state="disabled", wrap="word")
+        self.chat_history.pack(fill="both", expand=True, padx=10, pady=(10,5))
+
+        # Entry + send button
+        entry_frame = ttk.Frame(help_frame)
+        entry_frame.pack(fill="x", padx=10, pady=(0,10))
+        self.chat_input = ttk.Entry(entry_frame)
+        self.chat_input.pack(side="left", fill="x", expand=True)
+        send_btn = ttk.Button(entry_frame, text="Send", command=self._send_help_query)
+        send_btn.pack(side="right", padx=(5,0))
 
     def _load_genre_mapping(self):
         """Load genre mapping from ``self.mapping_path`` if possible."""
@@ -772,6 +794,22 @@ class SoundVaultImporterApp(tk.Tk):
             os.remove(db_path)
         messagebox.showinfo("Reset", "Tag-fix log cleared.")
         self._log(f"Reset tag-fix log for {folder}")
+
+    def _send_help_query(self):
+        user_q = self.chat_input.get().strip()
+        if not user_q:
+            return
+        # Echo user query
+        self.chat_history.configure(state="normal")
+        self.chat_history.insert("end", f"User: {user_q}\n")
+        self.chat_input.delete(0, "end")
+
+        # TODO: call your assistant_plugin.chat() here
+        bot_reply = "Assistant: (not yet implemented)\n"
+
+        self.chat_history.insert("end", bot_reply)
+        self.chat_history.configure(state="disabled")
+        self.chat_history.see("end")
 
     def _log(self, msg):
         self.output.configure(state="normal")
