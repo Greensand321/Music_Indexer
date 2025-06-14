@@ -815,18 +815,19 @@ class SoundVaultImporterApp(tk.Tk):
         user_q = self.chat_input.get().strip()
         if not user_q:
             return
-        # Echo user query
+
+        # echo the user's question
         self.chat_history.configure(state="normal")
-        self.chat_history.insert("end", f"User: {user_q}\n")
+        self.chat_history.insert("end", f"You: {user_q}\n")
         self.chat_input.delete(0, "end")
 
         try:
-            reply_text = self.assistant_plugin.chat(user_q)
-            bot_reply = f"Assistant: {reply_text}\n"
-        except Exception as e:
-            bot_reply = f"Assistant error: {e}\n"
+            reply = self.assistant_plugin.chat(user_q)
+        except Exception as err:
+            reply = f"[Error initializing or querying model]\n{err}"
 
-        self.chat_history.insert("end", bot_reply)
+        # display the assistant's response
+        self.chat_history.insert("end", f"Assistant: {reply}\n\n")
         self.chat_history.configure(state="disabled")
         self.chat_history.see("end")
 
