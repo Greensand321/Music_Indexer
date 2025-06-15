@@ -1,6 +1,5 @@
 import threading
 import os, json
-import shutil
 import queue
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
@@ -102,18 +101,8 @@ class SoundVaultImporterApp(tk.Tk):
         self.mapping_path = ""
         self.assistant_plugin = AssistantPlugin()
 
-        # check for ffmpeg
-        ffmpeg_path = shutil.which("ffmpeg") or shutil.which("avconv")
-        if not ffmpeg_path:
-            messagebox.showwarning(
-                "FFmpeg Not Found",
-                "FFmpeg is required for audio highlights.\n"
-                "Please install FFmpeg and ensure it's on your system PATH."
-            )
-            # disable the menu item—set a flag
-            self.ffmpeg_available = False
-        else:
-            self.ffmpeg_available = True
+        # assume ffmpeg is available without performing checks
+        self.ffmpeg_available = True
 
         # ─── Menu Bar ─────────────────────────────────────────────────────────
         menubar = tk.Menu(self)
@@ -187,19 +176,7 @@ class SoundVaultImporterApp(tk.Tk):
         self.chat_input.pack(side="left", fill="x", expand=True)
         send_btn = ttk.Button(entry_frame, text="Send", command=self._send_help_query)
         send_btn.pack(side="right", padx=(5,0))
-        reload_btn = ttk.Button(help_frame, text="Reload Models", command=self._reload_models)
-        reload_btn.pack(side="right", padx=10, pady=(0,10))
 
-        # ensure we clean up the model on exit to avoid destructor recursion
-        def _on_close():
-            try:
-                # free the underlying C library 
-                self.assistant_plugin.llm.free()
-            except Exception:
-                pass
-            self.destroy()
-
-        self.protocol("WM_DELETE_WINDOW", _on_close)
 
     def _load_genre_mapping(self):
         """Load genre mapping from ``self.mapping_path`` if possible."""
@@ -824,17 +801,6 @@ class SoundVaultImporterApp(tk.Tk):
         messagebox.showinfo("Reset", "Tag-fix log cleared.")
         self._log(f"Reset tag-fix log for {folder}")
 
-    def _reload_models(self):
-        """
-        Re-initialize the AssistantPlugin so it re-scans models/ and reloads
-        any newly dropped GGUF files.
-        """
-        try:
-            self.assistant_plugin = AssistantPlugin()
-            messagebox.showinfo("Models Reloaded", "Model directory rescanned successfully.")
-        except Exception:
-            # Error dialogs are shown by AssistantPlugin already
-            pass
 
     def _send_help_query(self):
         user_q = self.chat_input.get().strip()
