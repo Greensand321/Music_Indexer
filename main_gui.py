@@ -1,4 +1,4 @@
-import threading
+import threading  # used for asynchronous operations
 import os, json
 import queue
 import tkinter as tk
@@ -803,13 +803,16 @@ class SoundVaultImporterApp(tk.Tk):
 
 
     def _send_help_query(self):
+        threading.Thread(target=self._do_help_query, daemon=True).start()
+
+    def _do_help_query(self):
         user_q = self.chat_input.get().strip()
         if not user_q:
             return
 
-        # echo the user's question
         self.chat_history.configure(state="normal")
         self.chat_history.insert("end", f"You: {user_q}\n")
+        self.chat_history.configure(state="disabled")
         self.chat_input.delete(0, "end")
 
         try:
@@ -817,7 +820,10 @@ class SoundVaultImporterApp(tk.Tk):
         except Exception as err:
             reply = f"[Error initializing or querying model]\n{err}"
 
-        # display the assistant's response
+        self.after(0, lambda: self._append_help_response(reply))
+
+    def _append_help_response(self, reply):
+        self.chat_history.configure(state="normal")
         self.chat_history.insert("end", f"Assistant: {reply}\n\n")
         self.chat_history.configure(state="disabled")
         self.chat_history.see("end")

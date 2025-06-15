@@ -1,0 +1,4 @@
+bindings/build/
+# C++ binding outputs
+llama_bindings*.pyd
+llama_bindings*.so
