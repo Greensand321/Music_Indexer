@@ -1,37 +1,28 @@
 import glob, os
-from llama_cpp import Llama
+from ctransformers import LLM
 
 class AssistantPlugin:
     def __init__(self):
         """
-        Load the first GGUF model found in ./models/, or raise an error.
+        Load the first GGUF model found in ./models/
+        using ctransformers (bundled DLLs/no build).
         """
         models_dir = os.path.join(os.getcwd(), "models")
         os.makedirs(models_dir, exist_ok=True)
 
-        # 1) Discover any local .gguf file
-        gguf_paths = glob.glob(os.path.join(models_dir, "*.gguf"))
-        if gguf_paths:
-            # pick the newest by modification time
-            gguf_paths.sort(key=os.path.getmtime, reverse=True)
-            model_path = gguf_paths[0]
-            try:
-                self.llm = Llama(model_path=model_path, n_threads=6, n_ctx=2048)
-                return
-            except Exception as e:
-                raise RuntimeError(f"Failed to load model '{model_path}': {e}") from e
+        # 1) Find any .gguf in models/
+        ggufs = glob.glob(os.path.join(models_dir, "*.gguf"))
+        if not ggufs:
+            raise RuntimeError(
+                "No GGUF model found in './models/'. "
+                "Please drop your .gguf file into the models folder."
+            )
+        ggufs.sort(key=os.path.getmtime, reverse=True)
+        model_path = ggufs[0]
 
-        # 2) No local model found
-        raise RuntimeError(
-            "No GGUF model found in './models/'.\n"
-            "Please download or copy your .gguf file into the 'models' folder and restart."
-        )
+        # 2) Initialize ctransformers LLM
+        self.llm = LLM(model=model_path, model_type="llama", n_ctx=2048, n_threads=6)
 
-    def chat(self, prompt: str, max_tokens: int = 256) -> str:
-        """Return the assistant's reply for ``prompt``."""
-        result = self.llm(
-            prompt,
-            max_tokens=max_tokens,
-            stop=["</s>"]
-        )
-        return result["choices"][0]["text"].strip()
+    def chat(self, prompt: str) -> str:
+        """Send a prompt to the local model and return its response."""
+        return self.llm(prompt, max_tokens=256)
