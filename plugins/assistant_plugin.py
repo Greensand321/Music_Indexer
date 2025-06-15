@@ -22,7 +22,7 @@ class AssistantPlugin:
 
         # 2) Initialize ctransformers LLM
         # Pass the path as the first argument instead of using the 'model' keyword
-        self.llm = LLM(model_path, model_type="llama", n_ctx=2048, n_threads=6)
+        self.llm = LLM(model_path, model_type="llama", n_threads=6)
 
     def chat(self, prompt: str) -> str:
         """Send a prompt to the local model and return its response."""

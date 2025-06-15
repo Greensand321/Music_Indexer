@@ -1,5 +1,6 @@
 import threading
 import os, json
+import shutil
 import queue
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
@@ -101,6 +102,19 @@ class SoundVaultImporterApp(tk.Tk):
         self.mapping_path = ""
         self.assistant_plugin = AssistantPlugin()
 
+        # check for ffmpeg
+        ffmpeg_path = shutil.which("ffmpeg") or shutil.which("avconv")
+        if not ffmpeg_path:
+            messagebox.showwarning(
+                "FFmpeg Not Found",
+                "FFmpeg is required for audio highlights.\n"
+                "Please install FFmpeg and ensure it's on your system PATH."
+            )
+            # disable the menu item—set a flag
+            self.ffmpeg_available = False
+        else:
+            self.ffmpeg_available = True
+
         # ─── Menu Bar ─────────────────────────────────────────────────────────
         menubar = tk.Menu(self)
         self.config(menu=menubar)
@@ -128,12 +142,12 @@ class SoundVaultImporterApp(tk.Tk):
             label="List Unique Genres…",
             command=lambda: list_unique_genres(self.require_library()),
         )
-        if PYDUB_AVAILABLE:
+        if PYDUB_AVAILABLE and self.ffmpeg_available:
             tools_menu.add_command(label="Play Highlight…", command=self.sample_song_highlight)
         else:
             tools_menu.add_command(
-                label="Play Highlight… (requires pydub)",
-                state="disabled",
+                label="Play Highlight… (requires pydub & ffmpeg)",
+                state="disabled"
             )
         tools_menu.add_separator()
         tools_menu.add_command(label="Genre Normalizer", command=self._open_genre_normalizer)
@@ -175,6 +189,17 @@ class SoundVaultImporterApp(tk.Tk):
         send_btn.pack(side="right", padx=(5,0))
         reload_btn = ttk.Button(help_frame, text="Reload Models", command=self._reload_models)
         reload_btn.pack(side="right", padx=10, pady=(0,10))
+
+        # ensure we clean up the model on exit to avoid destructor recursion
+        def _on_close():
+            try:
+                # free the underlying C library 
+                self.assistant_plugin.llm.free()
+            except Exception:
+                pass
+            self.destroy()
+
+        self.protocol("WM_DELETE_WINDOW", _on_close)
 
     def _load_genre_mapping(self):
         """Load genre mapping from ``self.mapping_path`` if possible."""
