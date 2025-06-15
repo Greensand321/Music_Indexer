@@ -21,7 +21,8 @@ class AssistantPlugin:
         model_path = ggufs[0]
 
         # 2) Initialize ctransformers LLM
-        self.llm = LLM(model=model_path, model_type="llama", n_ctx=2048, n_threads=6)
+        # Pass the path as the first argument instead of using the 'model' keyword
+        self.llm = LLM(model_path, model_type="llama", n_ctx=2048, n_threads=6)
 
     def chat(self, prompt: str) -> str:
         """Send a prompt to the local model and return its response."""
