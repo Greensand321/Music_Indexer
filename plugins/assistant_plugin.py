@@ -1,6 +1,8 @@
+import llama_bindings
+
 class AssistantPlugin:
     def __init__(self):
-        pass
+        self.model = llama_bindings.load_model("models/your-model.gguf")
 
     def chat(self, prompt: str) -> str:
-        raise NotImplementedError("LLM integration not yet implemented")
+        return llama_bindings.chat(self.model, prompt)
