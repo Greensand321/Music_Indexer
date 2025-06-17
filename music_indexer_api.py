@@ -646,6 +646,24 @@ def apply_indexer_moves(root_path, log_callback=None):
             except Exception:
                 pass
 
+    # ─── Phase 7: Generate Playlists with edge-case handling ────────────
+    try:
+        from playlist_generator import generate_playlists
+        log_callback("7/7: Generating safe playlists…")
+        generate_playlists(
+            moves,
+            root_path,
+            output_dir=None,        # default: root_path/Playlists
+            valid_exts=None,        # default extensions
+            overwrite=True,
+            log_callback=log_callback,
+        )
+        log_callback("✓ Robust playlists created.")
+    except ImportError:
+        log_callback("! playlist_generator.py missing; skipping playlists.")
+    except Exception as e:
+        log_callback(f"! Playlist generation error: {e}")
+
     return summary
 
 
