@@ -1,6 +1,15 @@
 mutagen
-musicbrainzngs
 pydub
+ffmpeg-python
 pyacoustid
-librosa  # optional, for BPM estimation
+musicbrainzngs
+essentia
+librosa
+scipy
+numpy
+scikit-learn
+hdbscan
 requests
+# optional metadata helpers
+spotipy
+tidal-dl

@@ -715,6 +715,18 @@ def main():
 if __name__ == "__main__":
     main()
 </code></pre>
+<h3>2.7 Normalize Genres (<code>normalize_controller.py</code>)</h3>
+<p>Maps raw genre tags to canonical genres using a JSON mapping file. Updated tags are written back to each track.</p>
+
+<h3>2.8 Playlist Engine</h3>
+<ul>
+  <li><strong>Tempo Buckets</strong>: group tracks by BPM.</li>
+  <li><strong>Nearest-Neighbor Playlists</strong>: “More Like This” suggestions.</li>
+  <li><strong>Clustering Approaches</strong>: K-Means and HDBSCAN based sets.</li>
+  <li><strong>Auto-DJ / Deej-AI</strong> integration.</li>
+  <li>Wireframe: <code>playlist_wireframe.png</code></li>
+</ul>
+
 <h3>2.y GUI Front-end (<code>main_gui.py</code>)</h3>
 <ul>
   <li>New menu item <strong>Fix Tags</strong>.</li>
@@ -746,6 +758,15 @@ if __name__ == "__main__":
 <h2>4. Future Roadmap</h2>
 
 <ol>
+
+  <li><strong>Playlist Engine</strong></li>
+  <li><strong>Tempo/Energy Bucket Generation</strong></li>
+  <li><strong>“More Like This” (Nearest-Neighbor)</strong></li>
+  <li><strong>Clustered Playlists</strong> (K-Means, HDBSCAN)</li>
+  <li><strong>Deej-AI / Auto-DJ Integration</strong></li>
+  <li><strong>Metadata Plugins</strong> (Discogs, Spotify)</li>
+  <li><strong>UI Polish & Theme Toggles</strong></li>
+
   <li><strong>Incremental Updates</strong>
     <ul>
       <li>Implement a <code>last_indexed.txt</code> timestamp or a simple SQLite/JSON database to track which files have already been processed. Then:
@@ -756,26 +777,6 @@ if __name__ == "__main__":
       </li>
     </ul>
   </li>
-
-  <li><strong>Playlist Generator Module</strong>
-    <ul>
-      <li>Based on the final, cleaned genres (after mapping synonyms), automatically create:
-        <ul>
-          <li><code>Playlists/ByArtist/&lt;ArtistName&gt;.m3u8</code> (all tracks under that artist’s folder).</li>
-          <li><code>Playlists/ByGenre/&lt;CanonicalGenre&gt;.m3u8</code> (all tracks that carry that canonical genre in their metadata).</li>
-        </ul>
-      </li>
-      <li>Support multi‐genre overlaps: e.g., “tracks tagged both ‘Electronic’ and ‘House’.”</li>
-      <li>Allow “special” playlists:  
-        <ul>
-          <li>High-BPM (≥ 120) using the <code>BPM</code> tag once it’s filled.</li>
-          <li>Holiday songs (by scanning <code>Holidays/</code> or genre “Holiday”).</li>
-        </ul>
-      </li>
-    </ul>
-  </li>
-
-  <li><del><strong>GUI Integration (completed)</strong></del></li>
 
   <li><strong>Performance & Caching</strong>
     <ul>
