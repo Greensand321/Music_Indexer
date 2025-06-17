@@ -2,7 +2,7 @@ import threading  # used for asynchronous operations
 import os, json
 import queue
 import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox, ttk, Text, Scrollbar
 from tkinter.scrolledtext import ScrolledText
 
 from validator import validate_soundvault_structure
@@ -283,22 +283,60 @@ class SoundVaultImporterApp(tk.Tk):
         dry_run = messagebox.askyesno(
             "Dry Run?", "Perform a dry-run preview (generate MusicIndex.html only)?"
         )
+
         output_html = os.path.join(path, "MusicIndex.html")
 
-        try:
-            summary = run_full_indexer(
-                path, output_html, dry_run_only=dry_run, log_callback=self._log
-            )
-            if dry_run:
-                messagebox.showinfo("Dry Run Complete", f"Preview written to:\n{output_html}")
-            else:
-                moved = summary.get("moved", 0)
-                messagebox.showinfo("Indexing Complete", f"Moved/renamed {moved} files.")
-            self._log(f"✓ Run Indexer finished for {path}. Dry run: {dry_run}.")
-        except Exception as e:
-            messagebox.showerror("Indexing failed", str(e))
-            self._log(f"✘ Run Indexer failed for {path}: {e}")
-        self.update_library_info()
+        dlg = tk.Toplevel(self)
+        dlg.title("Indexing…")
+        frame = ttk.Frame(dlg)
+        frame.pack(fill="both", expand=True, padx=10, pady=10)
+
+        self.pb = ttk.Progressbar(frame, length=300, mode="determinate")
+        self.pb.pack(fill="x", pady=(0, 5))
+
+        self.log = Text(frame, height=10)
+        self.log.pack(fill="both", expand=True)
+        sb = Scrollbar(frame, command=self.log.yview)
+        sb.pack(side="right", fill="y")
+        self.log.config(yscrollcommand=sb.set)
+
+        def log_line(msg):
+            def ui():
+                self.log.insert("end", msg + "\n")
+                self.log.see("end")
+            self.after(0, ui)
+
+        def progress(idx, total, path_):
+            def ui():
+                self.pb["maximum"] = total
+                self.pb["value"] = idx
+                self.log.insert("end", f"[{idx}/{total}] {path_}\n")
+                self.log.see("end")
+            self.after(0, ui)
+
+        def task():
+            try:
+                summary = run_full_indexer(
+                    path,
+                    output_html,
+                    dry_run_only=dry_run,
+                    log_callback=log_line,
+                    progress_callback=progress,
+                )
+                self.after(0, lambda: self.log.insert("end", "✔ Indexing complete\n"))
+                if dry_run:
+                    self.after(0, lambda: messagebox.showinfo("Dry Run Complete", f"Preview written to:\n{output_html}"))
+                else:
+                    self.after(0, lambda: messagebox.showinfo("Indexing Complete", f"Moved/renamed {summary.get('moved', 0)} files."))
+                self.after(0, lambda: self._log(f"✓ Run Indexer finished for {path}. Dry run: {dry_run}."))
+            except Exception as e:
+                self.after(0, lambda: messagebox.showerror("Indexing failed", str(e)))
+                self.after(0, lambda: self._log(f"✘ Run Indexer failed for {path}: {e}"))
+            finally:
+                self.after(0, dlg.destroy)
+                self.after(0, self.update_library_info)
+
+        threading.Thread(target=task, daemon=True).start()
 
     def scan_orphans(self):
         path = self.require_library()

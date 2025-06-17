@@ -553,7 +553,7 @@ def build_dry_run_html(root_path, output_html_path, log_callback=None):
 
 # ─── C. APPLY MOVES ─────────────────────────────────────────────────────
 
-def apply_indexer_moves(root_path, log_callback=None):
+def apply_indexer_moves(root_path, log_callback=None, progress_callback=None):
     """
     1) Call compute_moves_and_tag_index() to get (moves, tag_index, decision_log).
     2) Move/rename each file in `moves`.
@@ -562,9 +562,15 @@ def apply_indexer_moves(root_path, log_callback=None):
     Returns summary: {"moved": <count>, "errors": [<error strings>]}.
     """
     if log_callback is None:
-        def log_callback(msg): pass
+        def log_callback(msg):
+            pass
+    if progress_callback is None:
+        def progress_callback(current, total, path):
+            pass
 
     moves, _, _ = compute_moves_and_tag_index(root_path, log_callback)
+
+    total_moves = len(moves)
 
     MUSIC_ROOT = os.path.join(root_path, "Music") \
         if os.path.isdir(os.path.join(root_path, "Music")) \
@@ -573,7 +579,6 @@ def apply_indexer_moves(root_path, log_callback=None):
     IMAGE_EXTS     = {".jpg", ".jpeg", ".png", ".gif"}
 
     summary = {"moved": 0, "errors": []}
-    total_moves = len(moves)
 
     # Build a mapping: old_dir → set of target_dirs for audio files in that folder
     olddir_to_newdirs = defaultdict(set)
@@ -584,6 +589,8 @@ def apply_indexer_moves(root_path, log_callback=None):
 
     # Phase 5: Move audio files
     for idx, (old_path, new_path) in enumerate(moves.items(), start=1):
+        if progress_callback:
+            progress_callback(idx, total_moves, old_path)
         if idx % 50 == 0 or idx == total_moves:
             log_callback(f"   • Moving file {idx}/{total_moves}")
         os.makedirs(os.path.dirname(new_path), exist_ok=True)
@@ -650,13 +657,20 @@ def apply_indexer_moves(root_path, log_callback=None):
     try:
         from playlist_generator import generate_playlists
         log_callback("7/7: Generating safe playlists…")
+
+        def plog(msg):
+            log_callback(msg)
+            if progress_callback and msg.startswith("→ Writing playlist:"):
+                playlist_file = msg.split(":", 1)[1].strip()
+                progress_callback(total_moves, total_moves, playlist_file)
+
         generate_playlists(
             moves,
             root_path,
             output_dir=None,        # default: root_path/Playlists
             valid_exts=None,        # default extensions
             overwrite=True,
-            log_callback=log_callback,
+            log_callback=plog,
         )
         log_callback("✓ Robust playlists created.")
     except ImportError:
@@ -669,7 +683,7 @@ def apply_indexer_moves(root_path, log_callback=None):
 
 # ─── D. HIGH-LEVEL “RUN FULL INDEXER” ───────────────────────────────────
 
-def run_full_indexer(root_path, output_html_path, dry_run_only=False, log_callback=None):
+def run_full_indexer(root_path, output_html_path, dry_run_only=False, log_callback=None, progress_callback=None):
     """
     1) Call compute_moves_and_tag_index() to get (moves, tag_index, decision_log).
     2) Write a detailed log file `indexer_log.txt` under root_path.
@@ -700,7 +714,11 @@ def run_full_indexer(root_path, output_html_path, dry_run_only=False, log_callba
 
     if not dry_run_only:
         # Phase 5–6: Actually move audio files and cover images
-        actual_summary = apply_indexer_moves(root_path, log_callback)
+        actual_summary = apply_indexer_moves(
+            root_path,
+            log_callback,
+            progress_callback,
+        )
         summary = {"moved": actual_summary["moved"], "html": output_html_path, "dry_run": False}
         return summary
     else:
