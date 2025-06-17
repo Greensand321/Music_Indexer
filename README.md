@@ -1,72 +1,45 @@
-cat > README.md << 'EOF'
-# Music Indexer / SoundVault
+# Music Indexer (aka ALPHADEX)
 
-This project contains utilities and a GUI for organizing, tagging, and managing music files. Under the hood, it uses:
-
-- [`mutagen`](https://mutagen.readthedocs.io/) to read/write audio metadata
-- [`musicbrainzngs`](https://musicbrainzngs.readthedocs.io/) to query MusicBrainz for tags
-- [`pydub`](https://github.com/jiaaro/pydub) + FFmpeg for audio previewing (“Sample Song Highlight”)
-- [`pyacoustid`](https://github.com/beetbox/pyacoustid) for AcoustID-based tag fixing
-- [`librosa`](https://librosa.org/) (optional) for BPM estimation
+Scan, tag-fix, normalize, and generate playlists that preserve your original folder structures across duplicates.
 
 ## Prerequisites
 
-1. **Python 3.10 – 3.12** (Python 3.13 lacks `audioop`, so “Sample Song Highlight” will be disabled)  
-2. **FFmpeg** on your PATH (for `pydub` to work)  
-   - On Windows, you can install via:  
-     - **Winget**:  
-       ```powershell
-       winget install "FFmpeg (Essentials Build)"
-       ```  
-     - Or download an Essentials build from https://www.gyan.dev/ffmpeg/builds/, unzip, and add its `bin\` folder to your system PATH.  
-   - Verify with:  
-     ```bash
-     ffmpeg -version
-     ```  
-3. **Chromaprint’s `fpcalc`** on your PATH (for the tag-fixer)  
-4. **Git** (to clone/pull the repository)
+- **Python 3.11+** (use [conda](https://docs.conda.io/en/latest/miniconda.html) or `venv`)
+- **Git** command line
+  ```bash
+  git clone --recurse-submodules https://example.com/yourrepo.git
+  ```
+- **FFmpeg** installed and on your `PATH`
+- **llama.exe** command line for LLM features
 
 ## Installation
 
-Install the Python dependencies using `pip`:
+Create and activate a virtual environment then install requirements:
 
 ```bash
+python -m venv .venv
+source .venv/bin/activate  # or "Scripts\activate" on Windows
 pip install -r requirements.txt
 ```
 
-## Starting the GUI
-
-From the project folder run:
+## Quickstart
 
 ```bash
 python main_gui.py
 ```
 
-A window will open. Use **File → Open Library…** to choose the folder you want to index or import music into.
+1. **Scan** your library
+2. **Generate Playlist** (see the new *Playlists* tab)
+3. Visit the **Help** tab for tips
 
-## Recommended folder layout
+## Roadmap (Upcoming)
 
-The HTML documentation proposes collecting all tools under a single `soundvault/` directory. The structure looks like:
+- Playlist Engine
+- Tempo/Energy Bucket Generation
+- "More Like This" (Nearest-Neighbor)
+- Clustered Playlists (K-Means, HDBSCAN)
+- Deej-AI / Auto-DJ Integration
+- Metadata Plugins (Discogs, Spotify)
+- UI Polish & Theme Toggles
 
-```
-soundvault/
-  indexer/
-    music_indexer_api.py
-  html_utils/
-    folder_to_html.py
-    folder_to_html_with_genre.py
-    list_genres.py
-    generate_library_index.py
-  genre_updater.py
-  playlist_generator.py  (future)
-  soundvault.py          (CLI driver)
-  requirements.txt
-  docs/
-    project_documentation.html
-    part2_project_documentation.html (if split)
-    README.md
-    ...
-```
-
-This repository currently contains the early versions of these scripts along with the project documentation. See [`docs/project_documentation.html`](docs/project_documentation.html) for detailed information on each component.
-EOF
+See [`docs/project_documentation.html`](docs/project_documentation.html) for technical details.
