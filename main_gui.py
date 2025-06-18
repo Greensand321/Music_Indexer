@@ -1,12 +1,12 @@
-import threading  # used for asynchronous operations
-import os, json
+import os, threading, tkinter as tk
+from tkinter import ttk
+import json
 import queue
-import tkinter as tk
-from tkinter import filedialog, messagebox, ttk, Text, Scrollbar
+from tkinter import filedialog, messagebox, Text, Scrollbar
 from tkinter.scrolledtext import ScrolledText
 
 from validator import validate_soundvault_structure
-from music_indexer_api import run_full_indexer
+from music_indexer_api import run_full_indexer, find_duplicates
 from controllers.library_index_controller import generate_index
 from controllers.import_controller import import_new_files
 from controllers.genre_list_controller import list_unique_genres
@@ -336,7 +336,48 @@ class SoundVaultImporterApp(tk.Tk):
                 self.after(0, dlg.destroy)
                 self.after(0, self.update_library_info)
 
+        # 1) Detect duplicates
+        dups = find_duplicates(path, log_callback=log_line)
+        if dups:
+            if not self._confirm_duplicates(dups):
+                log_line("✗ Operation cancelled by user")
+                return
+        # 2) Proceed with threaded indexing
         threading.Thread(target=task, daemon=True).start()
+
+    def _confirm_duplicates(self, dups):
+        """
+        Show modal dialog with duplicate pairs.
+        Return True to proceed, False to cancel.
+        """
+        top = tk.Toplevel(self)
+        top.title("Confirm Duplicates")
+        top.grab_set()
+
+        cols = ("Original", "Duplicate")
+        tv = ttk.Treeview(top, columns=cols, show="headings", height=10)
+        for c in cols:
+            tv.heading(c, text=c)
+            tv.column(c, width=400, anchor="w")
+        for orig, dup in dups:
+            tv.insert("", "end", values=(orig, dup))
+        tv.pack(fill="both", expand=True, padx=10, pady=10)
+
+        btn_frame = tk.Frame(top)
+        btn_frame.pack(fill="x", pady=(0, 10))
+        proceed = tk.BooleanVar(value=False)
+        tk.Button(
+            btn_frame,
+            text="Remove Duplicates",
+            command=lambda: (proceed.set(True), top.destroy()),
+        ).pack(side="left", padx=20)
+        tk.Button(
+            btn_frame,
+            text="Cancel",
+            command=lambda: top.destroy(),
+        ).pack(side="right", padx=20)
+        top.wait_window()
+        return proceed.get()
 
     def scan_orphans(self):
         path = self.require_library()
