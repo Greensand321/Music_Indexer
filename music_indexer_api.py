@@ -770,3 +770,18 @@ def run_full_indexer(root_path, output_html_path, dry_run_only=False, log_callba
         return summary
     else:
         return {"moved": 0, "html": output_html_path, "dry_run": True}
+
+
+# ─── E. DUPLICATE DETECTION HELPER ─────────────────────────────────────
+
+def find_duplicates(root_path, log_callback=None):
+    """Return list of (original_path, duplicate_path) that would be marked as
+    duplicates by the indexer."""
+
+    moves, _, _ = compute_moves_and_tag_index(root_path, log_callback)
+    dup_indicator = os.path.join("Duplicates", "")
+    return [
+        (old, new)
+        for old, new in moves.items()
+        if dup_indicator in new
+    ]
