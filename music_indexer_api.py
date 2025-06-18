@@ -2,7 +2,7 @@
 
 import os
 import re
-import shutil
+import shutil  # used for relocating special folders
 import hashlib
 from collections import defaultdict
 from mutagen import File as MutagenFile
@@ -379,7 +379,7 @@ def compute_moves_and_tag_index(root_path, log_callback=None):
             # Only force into By Artist if both remix-count AND artist-count thresholds are met
             if rcount >= REMIX_FOLDER_THRESHOLD and count_now >= COMMON_ARTIST_THRESHOLD:
                 # Promote primary to remixer (first part of raw_artist before “/”)
-                main_artist = raw_artist.split("/", 1)[0].upper()
+                main_artist = raw_artist.split("/", 1)[0]
                 p_lower = main_artist.lower()
                 decision_log.append(
                     f"  → Enough remixes ({rcount} ≥ {REMIX_FOLDER_THRESHOLD}) "
@@ -420,7 +420,7 @@ def compute_moves_and_tag_index(root_path, log_callback=None):
         counts = {artist: global_counts.get(artist.lower(), 0) for artist in all_candidates}
         best_artist = max(counts, key=lambda a: counts[a])
         decision_log.append(f"  Candidates: {all_candidates}, counts: {counts}")
-        primary = best_artist.upper()
+        primary = best_artist
         p_lower = primary.lower()
         decision_log.append(f"  → After ranking, primary = '{primary}'")
 
@@ -568,7 +568,30 @@ def apply_indexer_moves(root_path, log_callback=None, progress_callback=None):
         def progress_callback(current, total, path):
             pass
 
+    # ─── Phase 0: Relocate Holidays & Soundtracks to root ────────────────
+    for special in ("Holidays", "Soundtracks"):
+        dest = os.path.join(root_path, special)
+        for dirpath, _, _ in os.walk(root_path):
+            if os.path.basename(dirpath) == special and os.path.abspath(dirpath) != os.path.abspath(dest):
+                os.makedirs(root_path, exist_ok=True)
+                try:
+                    shutil.move(dirpath, dest)
+                    log_callback(f"✓ Moved {special} to root: {dest}")
+                except Exception as e:
+                    log_callback(f"! Could not move {special}: {e}")
+                break
+
     moves, _, _ = compute_moves_and_tag_index(root_path, log_callback)
+
+    # ─── Phase 5: Exclude Holidays & Soundtracks from indexing ───────────
+    filtered = {}
+    for old, new in moves.items():
+        first = os.path.relpath(old, root_path).split(os.sep, 1)[0]
+        if first in ("Holidays", "Soundtracks"):
+            log_callback(f"⚠ Skipping in {first}: {old}")
+            continue
+        filtered[old] = new
+    moves = filtered
 
     total_moves = len(moves)
 
