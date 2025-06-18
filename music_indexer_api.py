@@ -4,6 +4,7 @@ import os
 import re
 import shutil  # used for relocating special folders
 import hashlib
+import sqlite3
 from collections import defaultdict
 from mutagen import File as MutagenFile
 from mutagen.id3 import ID3NoHeaderError
@@ -163,7 +164,7 @@ def compute_moves_and_tag_index(root_path, log_callback=None):
     """
     1) Determine MUSIC_ROOT: if root_path/Music exists, use that; otherwise root_path itself.
     2) Scan for all audio files under MUSIC_ROOT.
-    3) Deduplicate by (primary, title, album) and delete lower-priority duplicates.
+    3) Deduplicate by (primary, title, album, fingerprint) and delete lower-priority duplicates.
     4) Read metadata into `songs` dict, build:
        - album_counts: how many genuine (non-remix) tracks per (artist, album)
        - remix_counts: how many remix‐tagged tracks per (artist, album)
@@ -185,6 +186,18 @@ def compute_moves_and_tag_index(root_path, log_callback=None):
 
     SUPPORTED_EXTS = {".flac", ".m4a", ".aac", ".mp3", ".wav", ".ogg"}
 
+    db_path = os.path.join(root_path, ".soundvault.db")
+    db = sqlite3.connect(db_path)
+    db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS fingerprints (
+          path TEXT PRIMARY KEY,
+          duration INT,
+          fingerprint TEXT
+        );
+        """
+    )
+
     # --- Phase 0: Pre-scan entire vault (under MUSIC_ROOT) ---
     global_counts = build_primary_counts(MUSIC_ROOT)
     log_callback(f"   → Pre-scan: found {len(global_counts)} unique artists")
@@ -201,8 +214,8 @@ def compute_moves_and_tag_index(root_path, log_callback=None):
     total_audio = len(all_audio)
     log_callback(f"   → Found {total_audio} audio files.")
 
-    # ─── Phase 2: Deduplicate by (primary, title, album) ────────────────────────
-    log_callback("2/6: Deduplicating by (primary, title, album)…")
+    # ─── Phase 2: Deduplicate by (primary, title, album, fingerprint) ────────────────────────
+    log_callback("2/6: Deduplicating by (primary, title, album, fingerprint)…")
     dup_groups = defaultdict(list)
     for idx, fullpath in enumerate(all_audio, start=1):
         if idx % 50 == 0 or idx == total_audio:
@@ -213,7 +226,12 @@ def compute_moves_and_tag_index(root_path, log_callback=None):
         title  = data["title"]  or os.path.splitext(os.path.basename(fullpath))[0]
         album  = data["album"]  or ""
         primary, _ = extract_primary_and_collabs(raw_artist)
-        key = (primary.lower(), title.lower(), album.lower())
+        row = db.execute(
+            "SELECT fingerprint FROM fingerprints WHERE path=?",
+            (fullpath,),
+        ).fetchone()
+        fp = row[0] if row else None
+        key = (primary.lower(), title.lower(), album.lower(), fp or "")
         dup_groups[key].append(fullpath)
 
     kept_files = set()
@@ -487,6 +505,7 @@ def compute_moves_and_tag_index(root_path, log_callback=None):
         }
 
     log_callback("   → Destination paths determined for all files.")
+    db.close()
     return moves, tag_index, decision_log
 
 
@@ -580,6 +599,11 @@ def apply_indexer_moves(root_path, log_callback=None, progress_callback=None):
                 except Exception as e:
                     log_callback(f"! Could not move {special}: {e}")
                 break
+
+    # ─── Phase 0.5: Compute and cache fingerprints ─────────────────
+    db_path = os.path.join(root_path, ".soundvault.db")
+    from fingerprint_generator import compute_fingerprints
+    compute_fingerprints(root_path, db_path, log_callback)
 
     moves, _, _ = compute_moves_and_tag_index(root_path, log_callback)
 

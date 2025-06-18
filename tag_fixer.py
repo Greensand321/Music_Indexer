@@ -31,6 +31,15 @@ def init_db(path: str):
         """
     )
     c.execute("CREATE INDEX IF NOT EXISTS idx_status ON files(status);")
+    c.execute(
+        """
+      CREATE TABLE IF NOT EXISTS fingerprints (
+        path TEXT PRIMARY KEY,
+        duration INT,
+        fingerprint TEXT
+      );
+        """
+    )
     conn.commit()
     conn.close()
 
