@@ -187,6 +187,8 @@ def compute_moves_and_tag_index(root_path, log_callback=None):
     SUPPORTED_EXTS = {".flac", ".m4a", ".aac", ".mp3", ".wav", ".ogg"}
 
     db_path = os.path.join(root_path, ".soundvault.db")
+    db_folder = os.path.dirname(db_path)
+    os.makedirs(db_folder, exist_ok=True)
     db = sqlite3.connect(db_path)
     db.execute(
         """

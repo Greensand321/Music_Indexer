@@ -12,6 +12,8 @@ def compute_fingerprints(root_path: str, db_path: str, log_callback: Callable[[s
         def log_callback(msg: str) -> None:
             pass
 
+    db_folder = os.path.dirname(db_path)
+    os.makedirs(db_folder, exist_ok=True)
     conn = sqlite3.connect(db_path)
     conn.execute(
         """
