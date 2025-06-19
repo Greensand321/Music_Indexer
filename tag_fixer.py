@@ -15,6 +15,8 @@ import sqlite3
 # ─── Database Helpers ─────────────────────────────────────────────────────
 def init_db(path: str):
     """Create the SQLite database schema if needed."""
+    db_folder = os.path.dirname(path)
+    os.makedirs(db_folder, exist_ok=True)
     conn = sqlite3.connect(path)
     c = conn.cursor()
     c.execute(
@@ -305,6 +307,8 @@ def fix_tags(target, log_callback=None, interactive=False):
     )
     init_db(db_path)
 
+    db_folder = os.path.dirname(db_path)
+    os.makedirs(db_folder, exist_ok=True)
     db_conn = sqlite3.connect(db_path)
     records = build_file_records(
         target,
@@ -334,6 +338,8 @@ def fix_tags(target, log_callback=None, interactive=False):
         log_callback=log_callback,
     )
 
+    db_folder = os.path.dirname(db_path)
+    os.makedirs(db_folder, exist_ok=True)
     db_conn = sqlite3.connect(db_path)
     selected_set = {rec.path for rec in selected}
     for rec in records:

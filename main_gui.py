@@ -330,8 +330,10 @@ class SoundVaultImporterApp(tk.Tk):
                     self.after(0, lambda: messagebox.showinfo("Indexing Complete", f"Moved/renamed {summary.get('moved', 0)} files."))
                 self.after(0, lambda: self._log(f"✓ Run Indexer finished for {path}. Dry run: {dry_run}."))
             except Exception as e:
-                self.after(0, lambda: messagebox.showerror("Indexing failed", str(e)))
-                self.after(0, lambda: self._log(f"✘ Run Indexer failed for {path}: {e}"))
+                err = str(e)
+                msg = f"✘ Run Indexer failed for {path}: {err}"
+                self.after(0, lambda m=err: messagebox.showerror("Indexing failed", m))
+                self.after(0, lambda m=msg: self._log(m))
             finally:
                 self.after(0, dlg.destroy)
                 self.after(0, self.update_library_info)

@@ -29,6 +29,8 @@ def discover_files(folder: str) -> List[str]:
 
 def gather_records(folder: str, db_path: str, show_all: bool, progress_callback: Callable[[int], None] | None) -> List[FileRecord]:
     """Build FileRecord objects for ``folder``."""
+    db_folder = os.path.dirname(db_path)
+    os.makedirs(db_folder, exist_ok=True)
     conn = sqlite3.connect(db_path)
     records = build_file_records(
         folder,
@@ -46,6 +48,8 @@ def apply_proposals(selected: List[FileRecord], all_records: List[FileRecord], d
     """Apply tag proposals and update DB."""
     count = apply_tag_proposals(selected, fields=fields, log_callback=log_callback)
     selected_paths = {rec.path for rec in selected}
+    db_folder = os.path.dirname(db_path)
+    os.makedirs(db_folder, exist_ok=True)
     conn = sqlite3.connect(db_path)
     for rec in all_records:
         if rec.path in selected_paths:
