@@ -657,13 +657,21 @@ def apply_indexer_moves(root_path, log_callback=None, progress_callback=None):
     os.makedirs(TRASH_ROOT, exist_ok=True)
 
     for dirpath, dirnames, filenames in os.walk(MUSIC_ROOT, topdown=False):
+        # 1) Don’t recurse into the Trash folder
+        dirnames[:] = [d for d in dirnames if d.lower() != "trash"]
+
         target_dirs = olddir_to_newdirs.get(dirpath, set())
 
         for fname in filenames:
             full = os.path.join(dirpath, fname)
             ext = os.path.splitext(fname)[1].lower()
 
-            # 6.1) If this was not an audio file (ext not in SUPPORTED_EXTS)
+            # 2) Never trash database files
+            if ext == ".db":
+                continue
+
+            # 3) Move any other non-audio leftovers into Trash or to the
+            #    appropriate album folder when possible
             if full not in moves and ext not in SUPPORTED_EXTS:
                 # 6.1.a) If it’s an image and all audio from this folder went to one album folder,
                 #       move the image into that album folder so the cover stays with that album.
