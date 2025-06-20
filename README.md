@@ -1,6 +1,6 @@
-# Music Indexer (aka ALPHADEX)
+# SoundVault Music Indexer
 
-Scan, tag-fix, normalize, and generate playlists that preserve your original folder structures across duplicates.
+SoundVault organizes large music libraries. It deduplicates tracks, fixes tags via AcoustID, normalizes genres, and generates playlists while keeping your folder structure intact.
 
 ## Prerequisites
 
@@ -28,15 +28,19 @@ pip install -r requirements.txt
 python main_gui.py
 ```
 
-1. **Scan** your library
-2. **Generate Playlist** (see the new *Playlists* tab)
-3. Visit the **Help** tab for tips
+1. **Open** your library folder
+2. **Run Indexer** to dedupe and move files
+3. **Fix Tags** via the AcoustID menu
+4. **Generate Playlists** from your folder structure
+5. Use the **Help** tab for inline assistance
 
-## Roadmap (Upcoming)
+## Roadmap (Upcoming Features)
 
-- Playlist Engine
-- Tempo/Energy Bucket Generation
-- "More Like This" (Nearest-Neighbor)
+These items are currently under development and not yet part of the stable release.
+
+- Smarter Playlist Engine
+- Tempo/Energy Buckets
+- "More Like This" suggestions
 - Clustered Playlists (K-Means, HDBSCAN)
 - Deej-AI / Auto-DJ Integration
 - Metadata Plugins (Discogs, Spotify)

@@ -119,186 +119,39 @@ def run_full_indexer(root_path, output_html_path, dry_run_only=False, log_callba
 
 <hr>
 
-<h3>2.2 Folder Tree HTML Generator (<code>folder_to_html.py</code>)</h3>
-<p>Generates a simple HTML representation of a folder’s file structure (folders in blue, files in green), without reading any metadata. Useful for a quick visual scan:</p>
+<h3>2.2 Fingerprint Generator (<code>fingerprint_generator.py</code>)</h3>
+<p>Walks a folder tree and stores AcoustID fingerprints for each audio file in a SQLite database.</p>
 
 <pre><code>
-#!/usr/bin/env python3
-"""
-folder_to_html.py
-
-Recursively scan a directory and produce tree.html showing the folder/file hierarchy.
-"""
-
-import os
-import sys
-import tkinter as tk
-from tkinter import filedialog
-
-def sanitize(text: str) -> str:
-    # Escape HTML: &lt;, &gt;, &amp;
-    pass
-
-def build_folder_tree_html(root_path: str) -> str:
-    # Walk os.walk(root_path), collect folders/files.
-    # Sort lexicographically. Indent by depth (count of os.sep).
-    # Wrap folders in <span class="folder">, files in <span class="file">.
-    pass
-
-def write_html(root_path: str, output_filename: str = "tree.html"):
-    html_body = build_folder_tree_html(root_path)
-    html_content = """<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <title>Folder Tree</title>
-  <style>
-    body { background: #2e3440; color: #d8dee9; font-family: monospace; }
-    .folder { color: #81a1c1; }
-    .file   { color: #a3be8c; }
-  </style>
-</head>
-<body>
-<pre>
-""" + html_body + """
-</pre>
-</body>
-</html>"""
-    with open(os.path.join(root_path, output_filename), "w", encoding="utf-8") as f:
-        f.write(html_content)
-
-def main():
-    root = tk.Tk()
-    root.withdraw()
-    folder_selected = filedialog.askdirectory(title="Select Folder to Visualize")
-    if not folder_selected:
-        sys.exit(0)
-    write_html(folder_selected)
-
-if __name__ == "__main__":
-    main()
-</code></pre>
-
-<hr>
-
-<h3>2.3 Folder Tree + Genre Annotator (<code>folder_to_html_with_genre.py</code>)</h3>
-<p>Extends <code>folder_to_html.py</code> by reading each audio file’s <code>genre</code> tag (using Mutagen) and displaying it in the HTML. This helps you quickly see which raw genre tags exist:</p>
-
-<pre><code>
-#!/usr/bin/env python3
-"""
-folder_to_html_with_genre.py
-
-Similar to folder_to_html, but also extracts and displays each audio file’s <genre> tag.
-"""
-
-import os
-import sys
-import tkinter as tk
-from tkinter import filedialog
-from mutagen import File as MutagenFile
+import os, sqlite3
+import acoustid
 
 SUPPORTED_EXTS = {".flac", ".m4a", ".aac", ".mp3", ".wav", ".ogg"}
 
-def sanitize(text: str) -> str:
-    # Escape HTML: &lt;, &gt;, &amp;
-    pass
-
-def get_genre(filepath: str) -> str:
-    """
-    Use Mutagen with easy=True to read the 'genre' tag.
-    Return the first genre string, or None if missing.
-    """
-    try:
-        audio = MutagenFile(filepath, easy=True)
-        if not audio or not audio.tags:
-            return None
-        raw = audio.tags.get("genre", [None])[0]
-        if raw:
-            return raw.strip()
-        return None
-    except Exception:
-        return None
-
-def build_folder_tree_html(root_path: str) -> str:
-    lines = []
-    root_name = os.path.basename(root_path) or root_path
-    lines.append(f"<span class=\"folder\">{sanitize(root_name)}/</span>")
-    lines.append("")
-    nodes = set()
-    for dirpath, dirnames, filenames in os.walk(root_path):
-        nodes.add(dirpath)
-        for fname in filenames:
-            nodes.add(os.path.join(dirpath, fname))
-    sorted_nodes = sorted(nodes, key=lambda p: os.path.relpath(p, root_path))
-    for node in sorted_nodes:
-        rel = os.path.relpath(node, root_path)
-        if rel == ".":
-            continue
-        depth = rel.count(os.sep)
-        indent = "    " * depth
-        if os.path.isdir(node):
-            name = sanitize(os.path.basename(node)) + "/"
-            lines.append(f"{indent}<span class=\"folder\">{name}</span>")
-        else:
-            name = sanitize(os.path.basename(node))
-            ext = os.path.splitext(node)[1].lower()
-            if ext in SUPPORTED_EXTS:
-                genre = get_genre(node)
-                if genre:
-                    lines.append(f"{indent}<span class=\"file\">{name}</span>  <span class=\"genre\">[{sanitize(genre)}]</span>")
-                else:
-                    lines.append(f"{indent}<span class=\"file\">{name}</span>")
-            else:
-                lines.append(f"{indent}<span class=\"file\">{name}</span>")
-    return "\n".join(lines)
-
-def write_html(root_path: str, output_filename: str = "index.html"):
-    html_body = build_folder_tree_html(root_path)
-    html_content = f"""<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <title>Folder Tree + Genres</title>
-  <style>
-    body {{ background: #2e3440; color: #d8dee9; font-family: monospace; }}
-    .folder {{ color: #81a1c1; }}
-    .file   {{ color: #a3be8c; }}
-    .genre  {{ color: #88c0d0; font-size: 12px; margin-left: 1em; }}
-  </style>
-</head>
-<body>
-<pre>
-{html_body}
-</pre>
-</body>
-</html>"""
-    with open(os.path.join(root_path, output_filename), "w", encoding="utf-8") as f:
-        f.write(html_content)
-
-def main():
-    root = tk.Tk()
-    root.withdraw()
-    folder_selected = filedialog.askdirectory(title="Select Folder to Visualize")
-    if not folder_selected:
-        sys.exit(0)
-    write_html(folder_selected)
-
-if __name__ == "__main__":
-    main()
+def compute_fingerprints(root_path, db_path, log_callback=None):
+    if log_callback is None:
+        log_callback = lambda msg: None
+    os.makedirs(os.path.dirname(db_path), exist_ok=True)
+    conn = sqlite3.connect(db_path)
+    conn.execute("""CREATE TABLE IF NOT EXISTS fingerprints(
+      path TEXT PRIMARY KEY,
+      duration INT,
+      fingerprint TEXT
+    );""")
+    ...
 </code></pre>
 
 <hr>
 
-<h3>2.4 Unique Genre Lister (<code>list_genres.py</code>)</h3>
+<h3>2.3 Unique Genre Lister (<code>genre_list_controller.py</code>)</h3>
 <p>Scans a folder for audio files and builds a deduplicated, sorted list of all <code>genre</code> tags found. Writes <code>genres.html</code> so you can review every raw genre:</p>
 
 <pre><code>
 #!/usr/bin/env python3
 """
-list_genres.py
+genre_list_controller.py
 
-Folder picker → scan audio files → extract genre tags → dedupe → output genres.html.
+Scan audio files, extract their genre tags, deduplicate them and output genres.html.
 """
 
 import os
@@ -590,17 +443,17 @@ if __name__ == "__main__":
 </ul>
 
 
-<h3>2.6 Library Index Generator (<code>generate_library_table_contents.py</code>)</h3>
+<h3>2.5 Library Index Generator (<code>library_index_controller.py</code>)</h3>
 <p>Scans a folder (including <code>.ogg</code>) for audio files, extracts tags (artist, title, album, year, track, genres), and writes a single HTML table (<code>library_index.html</code>) for rapid review and reference. You can re-run it after adding new files to see only updated entries.</p>
 
 <pre><code>
 #!/usr/bin/env python3
 """
-generate_library_table_contents.py
+library_index_controller.py
 
-Folder picker → scan audio files (.mp3, .flac, .ogg, etc.) via Mutagen → build table:
+Scan audio files (.mp3, .flac, .ogg, etc.) via Mutagen and build:
 Path | Artist | Title | Album | Year | Track | Genres
-Outputs: library_index.html
+Output: library_index.html
 """
 
 import os
@@ -715,10 +568,14 @@ def main():
 if __name__ == "__main__":
     main()
 </code></pre>
-<h3>2.7 Normalize Genres (<code>normalize_controller.py</code>)</h3>
+<h3>2.6 Normalize Genres (<code>normalize_controller.py</code>)</h3>
 <p>Maps raw genre tags to canonical genres using a JSON mapping file. Updated tags are written back to each track.</p>
 
-<h3>2.8 Playlist Engine</h3>
+<h3>2.7 Playlist Generator (<code>playlist_generator.py</code>)</h3>
+<p>Creates simple M3U playlists mirroring your folder structure.</p>
+
+<h3>2.8 Playlist Engine <em>(in development)</em></h3>
+<p>Planned advanced playlist features:</p>
 <ul>
   <li><strong>Tempo Buckets</strong>: group tracks by BPM.</li>
   <li><strong>Nearest-Neighbor Playlists</strong>: “More Like This” suggestions.</li>
@@ -742,20 +599,16 @@ if __name__ == "__main__":
 <h2>3. Current Progress</h2>
 <ul>
   <li><strong>Indexer</strong>: Fully implemented as <code>music_indexer_api.py</code>, tested on sample folders. It correctly reorganizes by artist, year, album, singles, and remixes, preserving cover-art groups.</li>
-  <li><strong>Folder HTML Generators</strong>:
-    <ul>
-      <li><code>folder_to_html.py</code>: Produces a plain tree view of any directory.</li>
-      <li><code>folder_to_html_with_genre.py</code>: Produces a tree view that also shows each audio file’s raw genre tag.</li>
-    </ul>
-  </li>
-  <li><strong>Unique Genre Lister</strong>: <code>list_genres.py</code> creates <code>genres.html</code> showing all distinct raw genre tags in one place.</li>
+  <li><strong>Fingerprint Generator</strong>: <code>fingerprint_generator.py</code> stores AcoustID hashes for each track.</li>
+  <li><strong>Unique Genre Lister</strong>: <code>genre_list_controller.py</code> creates <code>genres.html</code> showing all distinct raw genre tags in one place.</li>
   <li><strong>Genre Updater</strong>: <code>update_genres.py</code> connects to MusicBrainz, pulls top 3 tags per track, and writes them into files—skipping files that already have ≥ 2 genres.</li>
-  <li><strong>Library Index</strong>: <code>generate_library_table_contents.py</code> builds <code>library_index.html</code>, a table listing path, artist, title, album, year, track, and genre(s) for every audio file. Useful for quick review.</li>
+  <li><strong>Library Index</strong>: <code>library_index_controller.py</code> builds <code>library_index.html</code>, a table listing path, artist, title, album, year, track, and genre(s) for every audio file. Useful for quick review.</li>
 </ul>
 
 <hr>
 
 <h2>4. Future Roadmap</h2>
+<p>The following items are planned enhancements still in development.</p>
 
 <ol>
 
@@ -771,7 +624,7 @@ if __name__ == "__main__":
     <ul>
       <li>Implement a <code>last_indexed.txt</code> timestamp or a simple SQLite/JSON database to track which files have already been processed. Then:
         <ul>
-          <li><code>generate_library_table_contents.py</code> will only scan new/modified files.</li>
+          <li><code>library_index_controller.py</code> will only scan new/modified files.</li>
           <li><code>update_genres.py</code> will only query MusicBrainz for the new/modified subset.</li>
         </ul>
       </li>
@@ -843,26 +696,26 @@ librosa      # optional, for BPM estimation</code></pre>
 soundvault/
   gui/
     main_gui.py
-  indexer/
-    music_indexer_api.py
-  html_utils/
-    folder_to_html.py
-    folder_to_html_with_genre.py
-    list_genres.py
-    generate_library_table_contents.py
-    tag_fixer.py
-    sample_highlight.py
-  tools/
-    ffmpeg/  ← note: requirement for Chromaprint’s fpcalc.exe
-  genre_updater.py
-  playlist_generator.py  (future)
-  soundvault.py         (CLI driver)
+  controllers/
+    genre_list_controller.py
+    library_index_controller.py
+    import_controller.py
+    tagfix_controller.py
+    highlight_controller.py
+    normalize_controller.py
+  music_indexer_api.py
+  playlist_generator.py
+  fingerprint_generator.py
+  tag_fixer.py
+  update_genres.py
+  gui/
+    main_gui.py
+  plugins/
+    assistant_plugin.py
   requirements.txt
   docs/
     project_documentation.html
-    part2_project_documentation.html (if split)
     README.md
-    ...
     </code></pre>
   </li>
 </ul>
