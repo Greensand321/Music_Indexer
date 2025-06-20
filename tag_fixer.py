@@ -301,10 +301,10 @@ def fix_tags(target, log_callback=None, interactive=False):
         log_callback("No audio files found.")
         return {"processed": 0, "updated": 0}
 
-    db_path = os.path.join(
-        target if os.path.isdir(target) else os.path.dirname(target),
-        ".soundvault.db",
-    )
+    base_folder = target if os.path.isdir(target) else os.path.dirname(target)
+    docs_dir = os.path.join(base_folder, "Docs")
+    os.makedirs(docs_dir, exist_ok=True)
+    db_path = os.path.join(docs_dir, ".soundvault.db")
     init_db(db_path)
 
     db_folder = os.path.dirname(db_path)

@@ -284,7 +284,9 @@ class SoundVaultImporterApp(tk.Tk):
             "Dry Run?", "Perform a dry-run preview (generate MusicIndex.html only)?"
         )
 
-        output_html = os.path.join(path, "MusicIndex.html")
+        docs_dir = os.path.join(path, "Docs")
+        os.makedirs(docs_dir, exist_ok=True)
+        output_html = os.path.join(docs_dir, "MusicIndex.html")
 
         dlg = tk.Toplevel(self)
         dlg.title("Indexing…")
@@ -876,7 +878,8 @@ class SoundVaultImporterApp(tk.Tk):
             return
         if not messagebox.askyesno("Reset Log", "This will erase all history of prior scans. Continue?"):
             return
-        db_path = os.path.join(folder, ".soundvault.db")
+        docs_dir = os.path.join(folder, "Docs")
+        db_path = os.path.join(docs_dir, ".soundvault.db")
         if os.path.exists(db_path):
             os.remove(db_path)
         messagebox.showinfo("Reset", "Tag-fix log cleared.")

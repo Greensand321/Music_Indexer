@@ -186,7 +186,9 @@ def compute_moves_and_tag_index(root_path, log_callback=None):
 
     SUPPORTED_EXTS = {".flac", ".m4a", ".aac", ".mp3", ".wav", ".ogg"}
 
-    db_path = os.path.join(root_path, ".soundvault.db")
+    docs_dir = os.path.join(root_path, "Docs")
+    os.makedirs(docs_dir, exist_ok=True)
+    db_path = os.path.join(docs_dir, ".soundvault.db")
     db_folder = os.path.dirname(db_path)
     os.makedirs(db_folder, exist_ok=True)
     db = sqlite3.connect(db_path)
@@ -603,7 +605,9 @@ def apply_indexer_moves(root_path, log_callback=None, progress_callback=None):
                 break
 
     # ─── Phase 0.5: Compute and cache fingerprints ─────────────────
-    db_path = os.path.join(root_path, ".soundvault.db")
+    docs_dir = os.path.join(root_path, "Docs")
+    os.makedirs(docs_dir, exist_ok=True)
+    db_path = os.path.join(docs_dir, ".soundvault.db")
     from fingerprint_generator import compute_fingerprints
     compute_fingerprints(root_path, db_path, log_callback)
 
@@ -653,28 +657,32 @@ def apply_indexer_moves(root_path, log_callback=None, progress_callback=None):
             log_callback(f"   ! {err}")
 
     # Phase 6: Handle non-audio leftovers…
-    TRASH_ROOT = os.path.join(root_path, "Trash")
-    os.makedirs(TRASH_ROOT, exist_ok=True)
+    docs_dir = os.path.join(root_path, "Docs")
+    trash_dir = os.path.join(root_path, "Trash")
+    os.makedirs(docs_dir, exist_ok=True)
+    os.makedirs(trash_dir, exist_ok=True)
 
     for dirpath, dirnames, filenames in os.walk(MUSIC_ROOT, topdown=False):
-        # 1) Don’t recurse back into Trash/
-        dirnames[:] = [d for d in dirnames if d.lower() != "trash"]
+        # 1) Don’t recurse back into Trash/ or Docs/
+        dirnames[:] = [d for d in dirnames if d.lower() not in ("trash", "docs")]
 
         for fname in filenames:
             full = os.path.join(dirpath, fname)
             ext  = os.path.splitext(fname)[1].lower()
 
-            # 2) Never trash your database(s)
-            if ext == ".db":
+            # 2) Skip files already moved or valid audio
+            if full in moves or ext in SUPPORTED_EXTS:
                 continue
 
-            # 3) Never trash your own indexer log
-            if fname.lower() == "indexer_log.txt":
-                continue
-
-            # 4) All other non-audio leftovers go to Trash
-            if full not in moves and ext not in SUPPORTED_EXTS:
-                shutil.move(full, os.path.join(TRASH_ROOT, fname))
+            target = docs_dir if ext in (".txt", ".html", ".db") else trash_dir
+            if target is docs_dir:
+                log_callback(f"Moving doc to Docs/: {full}")
+            else:
+                log_callback(f"Moving to Trash/: {full}")
+            try:
+                shutil.move(full, os.path.join(target, fname))
+            except Exception as e:
+                log_callback(f"   ! Failed to move leftover {full}: {e}")
 
     # ─── Phase 7: Generate Playlists with edge-case handling ────────────
     try:
@@ -721,7 +729,9 @@ def run_full_indexer(root_path, output_html_path, dry_run_only=False, log_callba
     moves, tag_index, decision_log = compute_moves_and_tag_index(root_path, log_callback)
 
     # Write the detailed log file
-    log_path = os.path.join(root_path, "indexer_log.txt")
+    docs_dir = os.path.join(root_path, "Docs")
+    os.makedirs(docs_dir, exist_ok=True)
+    log_path = os.path.join(docs_dir, "indexer_log.txt")
     with open(log_path, "w", encoding="utf-8") as lf:
         lf.write("Indexing Decision Log\n")
         lf.write("======================\n")

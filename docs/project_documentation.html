@@ -45,8 +45,8 @@
     </ul>
   </li>
   <li>Generates a “dry-run” HTML preview of the proposed reorganization (color-coded).</li>
-  <li>Applies the final moves: creates new folders, renames/moves audio files, archives leftovers into <code>Trash/</code>, and deletes empty folders.</li>
-  <li>Writes <code>indexer_log.txt</code> detailing exactly how each file was classified and moved.</li>
+  <li>Applies the final moves: creates new folders, renames/moves audio files, archives docs into <code>Docs/</code> and other leftovers into <code>Trash/</code>, then deletes empty folders.</li>
+  <li>Writes <code>Docs/indexer_log.txt</code> detailing exactly how each file was classified and moved.</li>
 </ul>
 
 <p><strong>Skeleton of <code>music_indexer_api.py</code> (comments only):</strong></p>
@@ -103,15 +103,15 @@ def apply_indexer_moves(root_path, log_callback=None):
     # Actually performs the file moves:
     # 1. Creates new directories as needed.
     # 2. Moves and renames audio files.
-    # 3. Moves any non-audio leftovers into a "Trash/" subfolder.
+    # 3. Moves docs (*.txt, *.html, *.db) into "Docs/" and other leftovers into "Trash/".
     # 4. Deletes empty source folders.
-    # 5. Writes indexer_log.txt summarizing each file’s action.
+    # 5. Writes Docs/indexer_log.txt summarizing each file’s action.
     pass
 
 def run_full_indexer(root_path, output_html_path, dry_run_only=False, log_callback=None):
     # High-level driver:
     #   1. Compute moves + tag_index
-    #   2. Write indexer_log.txt
+    #   2. Write Docs/indexer_log.txt
     #   3. build_dry_run_html(...)
     #   4. If not dry_run_only, call apply_indexer_moves(...)
     pass
