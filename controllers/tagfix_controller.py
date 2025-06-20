@@ -8,7 +8,9 @@ from tag_fixer import build_file_records, init_db, find_files, apply_tag_proposa
 
 def prepare_library(folder: str) -> tuple[str, dict]:
     """Initialize DB and load saved genre mapping."""
-    db_path = os.path.join(folder, ".soundvault.db")
+    docs_dir = os.path.join(folder, "Docs")
+    os.makedirs(docs_dir, exist_ok=True)
+    db_path = os.path.join(docs_dir, ".soundvault.db")
     init_db(db_path)
 
     mapping_path = os.path.join(folder, ".genre_mapping.json")
