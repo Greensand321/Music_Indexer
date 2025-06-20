@@ -652,63 +652,29 @@ def apply_indexer_moves(root_path, log_callback=None, progress_callback=None):
             summary["errors"].append(err)
             log_callback(f"   ! {err}")
 
-    # Phase 6: Handle non-audio leftovers and album covers
+    # Phase 6: Handle non-audio leftovers…
     TRASH_ROOT = os.path.join(root_path, "Trash")
     os.makedirs(TRASH_ROOT, exist_ok=True)
 
     for dirpath, dirnames, filenames in os.walk(MUSIC_ROOT, topdown=False):
-        # 1) Don’t recurse into the Trash folder
+        # 1) Don’t recurse back into Trash/
         dirnames[:] = [d for d in dirnames if d.lower() != "trash"]
-
-        target_dirs = olddir_to_newdirs.get(dirpath, set())
 
         for fname in filenames:
             full = os.path.join(dirpath, fname)
-            ext = os.path.splitext(fname)[1].lower()
+            ext  = os.path.splitext(fname)[1].lower()
 
-            # 2) Never trash database files
+            # 2) Never trash your database(s)
             if ext == ".db":
                 continue
 
-            # 3) Move any other non-audio leftovers into Trash or to the
-            #    appropriate album folder when possible
-            if full not in moves and ext not in SUPPORTED_EXTS:
-                # 6.1.a) If it’s an image and all audio from this folder went to one album folder,
-                #       move the image into that album folder so the cover stays with that album.
-                if ext in IMAGE_EXTS and len(target_dirs) == 1:
-                    dest_folder = next(iter(target_dirs))
-                    try:
-                        shutil.move(full, os.path.join(dest_folder, fname))
-                    except Exception:
-                        try:
-                            shutil.move(full, os.path.join(TRASH_ROOT, fname))
-                        except Exception:
-                            base, ext2 = os.path.splitext(fname)
-                            count = 1
-                            newname = f"{base}_{count}{ext2}"
-                            while os.path.exists(os.path.join(TRASH_ROOT, newname)):
-                                count += 1
-                                newname = f"{base}_{count}{ext2}"
-                            shutil.move(full, os.path.join(TRASH_ROOT, newname))
-                else:
-                    # 6.1.b) Otherwise, send it to Trash
-                    try:
-                        shutil.move(full, os.path.join(TRASH_ROOT, fname))
-                    except Exception:
-                        base, ext2 = os.path.splitext(fname)
-                        count = 1
-                        newname = f"{base}_{count}{ext2}"
-                        while os.path.exists(os.path.join(TRASH_ROOT, newname)):
-                            count += 1
-                            newname = f"{base}_{count}{ext2}"
-                        shutil.move(full, os.path.join(TRASH_ROOT, newname))
+            # 3) Never trash your own indexer log
+            if fname.lower() == "indexer_log.txt":
+                continue
 
-        # 6.2) Remove empty directory if it is now empty
-        if not os.listdir(dirpath):
-            try:
-                os.rmdir(dirpath)
-            except Exception:
-                pass
+            # 4) All other non-audio leftovers go to Trash
+            if full not in moves and ext not in SUPPORTED_EXTS:
+                shutil.move(full, os.path.join(TRASH_ROOT, fname))
 
     # ─── Phase 7: Generate Playlists with edge-case handling ────────────
     try:
