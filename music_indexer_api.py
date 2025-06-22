@@ -591,12 +591,19 @@ def apply_indexer_moves(root_path, log_callback=None, progress_callback=None):
         def progress_callback(current, total, path):
             pass
 
+    # Determine where your actual music lives
+    music_root = os.path.join(root_path, "Music")
+    if not os.path.isdir(music_root):
+        music_root = root_path
+
     # ─── Phase 0: Relocate Holidays & Soundtracks to root ────────────────
     for special in ("Holidays", "Soundtracks"):
         dest = os.path.join(root_path, special)
-        for dirpath, _, _ in os.walk(root_path):
-            if os.path.basename(dirpath) == special and os.path.abspath(dirpath) != os.path.abspath(dest):
-                os.makedirs(root_path, exist_ok=True)
+        # if already moved, skip
+        if os.path.isdir(dest):
+            continue
+        for dirpath, dirnames, _ in os.walk(music_root):
+            if os.path.basename(dirpath) == special:
                 try:
                     shutil.move(dirpath, dest)
                     log_callback(f"✓ Moved {special} to root: {dest}")
