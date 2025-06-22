@@ -29,7 +29,7 @@ python main_gui.py
 ```
 
 1. **Open** your library folder
-2. **Run Indexer** to dedupe and move files
+2. Use the **Indexer** tab to dedupe and move files
 3. **Fix Tags** via the AcoustID menu
 4. **Generate Playlists** from your folder structure
 5. Use the **Help** tab for inline assistance

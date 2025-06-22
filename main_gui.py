@@ -112,7 +112,6 @@ class SoundVaultImporterApp(tk.Tk):
         file_menu.add_command(label="Open Library…", command=self.select_library)
         file_menu.add_command(label="Validate Library", command=self.validate_library)
         file_menu.add_command(label="Import New Songs", command=self.import_songs)
-        file_menu.add_command(label="Run Indexer", command=self.run_indexer)
         file_menu.add_command(label="Scan for Orphans", command=self.scan_orphans)
         file_menu.add_command(label="Compare Libraries", command=self.compare_libraries)
         file_menu.add_command(label="Show All Files", command=self._on_show_all)
@@ -161,6 +160,27 @@ class SoundVaultImporterApp(tk.Tk):
         self.output = tk.Text(log_frame, wrap="word", state="disabled", height=15)
         self.output.pack(fill="both", expand=True)
 
+        # ─── Indexer Tab ────────────────────────────────────────────────────
+        self.indexer_tab = ttk.Frame(self.notebook)
+        self.notebook.add(self.indexer_tab, text="Indexer")
+
+        ttk.Label(self.indexer_tab, text="Library Folder:").grid(row=0, column=0, sticky="w")
+        self.folder_entry = ttk.Entry(self.indexer_tab, width=40)
+        self.folder_entry.grid(row=0, column=1, padx=5, sticky="ew")
+        ttk.Button(self.indexer_tab, text="Browse...", command=self.browse_folder).grid(row=0, column=2)
+
+        self.dry_run_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(self.indexer_tab, text="Dry Run", variable=self.dry_run_var).grid(row=1, column=0, columnspan=2, sticky="w")
+
+        ttk.Button(self.indexer_tab, text="Start Indexer", command=self.run_indexer).grid(row=2, column=0, pady=10)
+
+        self.pb = ttk.Progressbar(self.indexer_tab, length=300, mode="determinate")
+        self.pb.grid(row=3, column=0, columnspan=3, pady=5, sticky="ew")
+        self.log = Text(self.indexer_tab, height=10)
+        self.log.grid(row=4, column=0, columnspan=3, sticky="nsew", pady=5)
+        self.indexer_tab.rowconfigure(4, weight=1)
+        self.indexer_tab.columnconfigure((0,1,2), weight=1)
+
         # after your other tabs
         help_frame = ttk.Frame(self.notebook)
         self.notebook.add(help_frame, text="Help")
@@ -201,6 +221,9 @@ class SoundVaultImporterApp(tk.Tk):
         self.library_path_var.set(info["path"])
         self.mapping_path = os.path.join(self.library_path, ".genre_mapping.json")
         self._load_genre_mapping()
+        if hasattr(self, "folder_entry"):
+            self.folder_entry.delete(0, tk.END)
+            self.folder_entry.insert(0, info["path"])
         self.update_library_info()
 
     def update_library_info(self):
@@ -217,6 +240,16 @@ class SoundVaultImporterApp(tk.Tk):
             messagebox.showwarning("No Library", "Please select a library first.")
             return None
         return self.library_path
+
+    def browse_folder(self):
+        """Choose folder for the indexer tab."""
+        initial = load_last_path()
+        chosen = filedialog.askdirectory(title="Select SoundVault Root", initialdir=initial)
+        if not chosen:
+            return
+        save_last_path(chosen)
+        self.folder_entry.delete(0, tk.END)
+        self.folder_entry.insert(0, chosen)
 
     def validate_library(self):
         path = self.require_library()
@@ -276,31 +309,20 @@ class SoundVaultImporterApp(tk.Tk):
             self._log(f"✘ Import failed for {import_folder}: {e}")
 
     def run_indexer(self):
-        path = self.require_library()
+        path = self.folder_entry.get().strip()
         if not path:
+            messagebox.showwarning("No Folder", "Please choose a library folder.")
             return
 
-        dry_run = messagebox.askyesno(
-            "Dry Run?", "Perform a dry-run preview (generate MusicIndex.html only)?"
-        )
+        dry_run = self.dry_run_var.get()
 
         docs_dir = os.path.join(path, "Docs")
         os.makedirs(docs_dir, exist_ok=True)
         output_html = os.path.join(docs_dir, "MusicIndex.html")
 
-        dlg = tk.Toplevel(self)
-        dlg.title("Indexing…")
-        frame = ttk.Frame(dlg)
-        frame.pack(fill="both", expand=True, padx=10, pady=10)
-
-        self.pb = ttk.Progressbar(frame, length=300, mode="determinate")
-        self.pb.pack(fill="x", pady=(0, 5))
-
-        self.log = Text(frame, height=10)
-        self.log.pack(fill="both", expand=True)
-        sb = Scrollbar(frame, command=self.log.yview)
-        sb.pack(side="right", fill="y")
-        self.log.config(yscrollcommand=sb.set)
+        self.pb["maximum"] = 0
+        self.pb["value"] = 0
+        self.log.delete("1.0", "end")
 
         def log_line(msg):
             def ui():
@@ -337,7 +359,6 @@ class SoundVaultImporterApp(tk.Tk):
                 self.after(0, lambda m=err_msg: messagebox.showerror("Indexing failed", m))
                 self.after(0, lambda m=err_msg: self._log(f"✘ Run Indexer failed for {path}:\n{m}"))
             finally:
-                self.after(0, dlg.destroy)
                 self.after(0, self.update_library_info)
 
         # 1) Detect duplicates
