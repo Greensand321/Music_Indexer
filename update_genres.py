@@ -20,6 +20,17 @@ Prerequisites:
 import os
 import sys
 import time
+
+if sys.platform == "win32":
+    try:
+        import ctypes
+        ctypes.windll.shcore.SetProcessDpiAwareness(1)
+    except Exception:
+        try:
+            ctypes.windll.user32.SetProcessDPIAware()
+        except Exception:
+            pass
+
 import tkinter as tk
 from tkinter import filedialog
 
@@ -192,6 +203,10 @@ def process_file(filepath, logfile):
 
 def main():
     root = tk.Tk()
+    try:
+        root.tk.call('tk', 'scaling', 1.5)
+    except Exception:
+        pass
     root.withdraw()
     folder = filedialog.askdirectory(title="Select Music Folder to Update Genres")
     if not folder:

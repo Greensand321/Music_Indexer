@@ -1,9 +1,24 @@
-import os, threading, tkinter as tk
+import os
+import threading
+import sys
+
+if sys.platform == "win32":
+    try:
+        # For Windows 8.1+
+        import ctypes
+        ctypes.windll.shcore.SetProcessDpiAwareness(1)  # SYSTEM_DPI_AWARE
+    except Exception:
+        try:
+            # Fallback for older Windows
+            ctypes.windll.user32.SetProcessDPIAware()
+        except Exception:
+            pass
+
+import tkinter as tk
 from tkinter import ttk
 import json
 import queue
 import subprocess
-import sys
 from tkinter import filedialog, messagebox, Text, Scrollbar
 from tkinter.scrolledtext import ScrolledText
 
@@ -91,6 +106,10 @@ class ProgressDialog(tk.Toplevel):
 class SoundVaultImporterApp(tk.Tk):
     def __init__(self):
         super().__init__()
+        try:
+            self.tk.call('tk', 'scaling', 1.5)
+        except Exception:
+            pass
         self.title("SoundVault Importer")
         self.geometry("700x500")
 
