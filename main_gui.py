@@ -110,10 +110,10 @@ class ProgressDialog(tk.Toplevel):
 class SoundVaultImporterApp(tk.Tk):
     def __init__(self):
         super().__init__()
-        try:
-            self.tk.call('tk', 'scaling', 1.5)
-        except Exception:
-            pass
+        # Auto-detect and apply default DPI scaling
+        width, height = self.winfo_screenwidth(), self.winfo_screenheight()
+        default_scale = 1.5 if (width >= 1920 and height >= 1080) else 1.25
+        self.tk.call('tk', 'scaling', default_scale)
         self.title("SoundVault Importer")
         self.geometry("700x500")
 
@@ -190,6 +190,17 @@ class SoundVaultImporterApp(tk.Tk):
             "<<ComboboxSelected>>",
             lambda e: self.style.theme_use(self.theme_var.get()),
         )
+        scale_choices = ["1.25", "1.5", "1.75", "2.0", "2.25"]
+        self.scale_var = tk.StringVar(value=str(default_scale))
+        cb_scale = ttk.Combobox(
+            top,
+            textvariable=self.scale_var,
+            values=scale_choices,
+            state="readonly",
+            width=5,
+        )
+        cb_scale.pack(side="right", padx=5)
+        cb_scale.bind("<<ComboboxSelected>>", self.on_scale_change)
         tk.Label(self, textvariable=self.library_path_var, anchor="w").pack(fill="x", padx=10)
         tk.Label(self, textvariable=self.library_stats_var, justify="left").pack(anchor="w", padx=10, pady=(0, 10))
 
@@ -240,6 +251,14 @@ class SoundVaultImporterApp(tk.Tk):
         self.chat_input.pack(side="left", fill="x", expand=True)
         send_btn = ttk.Button(entry_frame, text="Send", command=self._send_help_query)
         send_btn.pack(side="right", padx=(5,0))
+
+    def on_scale_change(self, event=None):
+        """Apply user-selected UI scaling at runtime."""
+        try:
+            scale = float(self.scale_var.get())
+            self.tk.call('tk', 'scaling', scale)
+        except ValueError:
+            pass
 
 
     def _load_genre_mapping(self):
