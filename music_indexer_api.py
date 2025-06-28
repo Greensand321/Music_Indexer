@@ -596,20 +596,6 @@ def apply_indexer_moves(root_path, log_callback=None, progress_callback=None):
     if not os.path.isdir(music_root):
         music_root = root_path
 
-    # ─── Phase 0: Relocate Holidays & Soundtracks to root ────────────────
-    for special in ("Holidays", "Soundtracks"):
-        dest = os.path.join(root_path, special)
-        # if already moved, skip
-        if os.path.isdir(dest):
-            continue
-        for dirpath, dirnames, _ in os.walk(music_root):
-            if os.path.basename(dirpath) == special:
-                try:
-                    shutil.move(dirpath, dest)
-                    log_callback(f"✓ Moved {special} to root: {dest}")
-                except Exception as e:
-                    log_callback(f"! Could not move {special}: {e}")
-                break
 
     # ─── Phase 0.5: Compute and cache fingerprints ─────────────────
     docs_dir = os.path.join(root_path, "Docs")
@@ -620,15 +606,7 @@ def apply_indexer_moves(root_path, log_callback=None, progress_callback=None):
 
     moves, _, _ = compute_moves_and_tag_index(root_path, log_callback)
 
-    # ─── Phase 5: Exclude Holidays & Soundtracks from indexing ───────────
-    filtered = {}
-    for old, new in moves.items():
-        first = os.path.relpath(old, root_path).split(os.sep, 1)[0]
-        if first in ("Holidays", "Soundtracks"):
-            log_callback(f"⚠ Skipping in {first}: {old}")
-            continue
-        filtered[old] = new
-    moves = filtered
+
 
     total_moves = len(moves)
 
