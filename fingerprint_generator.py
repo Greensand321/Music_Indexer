@@ -27,6 +27,9 @@ def compute_fingerprints(root_path: str, db_path: str, log_callback: Callable[[s
 
     audio_files = []
     for dirpath, _, files in os.walk(root_path):
+        rel_dir = os.path.relpath(dirpath, root_path)
+        if "Not Sorted" in rel_dir.split(os.sep):
+            continue
         for fname in files:
             ext = os.path.splitext(fname)[1].lower()
             if ext in SUPPORTED_EXTS:

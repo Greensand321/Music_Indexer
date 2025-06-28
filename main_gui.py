@@ -2,6 +2,8 @@ import os, threading, tkinter as tk
 from tkinter import ttk
 import json
 import queue
+import subprocess
+import sys
 from tkinter import filedialog, messagebox, Text, Scrollbar
 from tkinter.scrolledtext import ScrolledText
 
@@ -173,6 +175,7 @@ class SoundVaultImporterApp(tk.Tk):
         ttk.Checkbutton(self.indexer_tab, text="Dry Run", variable=self.dry_run_var).grid(row=1, column=0, columnspan=2, sticky="w")
 
         ttk.Button(self.indexer_tab, text="Start Indexer", command=self.run_indexer).grid(row=2, column=0, pady=10)
+        ttk.Button(self.indexer_tab, text="Open 'Not Sorted' Folder", command=self.open_not_sorted_folder).grid(row=2, column=1, pady=10)
 
         self.pb = ttk.Progressbar(self.indexer_tab, length=300, mode="determinate")
         self.pb.grid(row=3, column=0, columnspan=3, pady=5, sticky="ew")
@@ -367,8 +370,30 @@ class SoundVaultImporterApp(tk.Tk):
             if not self._confirm_duplicates(dups):
                 log_line("✗ Operation cancelled by user")
                 return
+        if dry_run:
+            messagebox.showinfo(
+                "Not Sorted",
+                "You can move any folders you want to keep untouched into the 'Not Sorted' folder before proceeding.",
+            )
         # 2) Proceed with threaded indexing
         threading.Thread(target=task, daemon=True).start()
+
+    def open_not_sorted_folder(self):
+        path = self.folder_entry.get().strip()
+        if not path:
+            messagebox.showwarning("No Folder", "Please choose a library folder.")
+            return
+        not_sorted = os.path.join(path, "Not Sorted")
+        os.makedirs(not_sorted, exist_ok=True)
+        try:
+            if os.name == "nt":
+                os.startfile(not_sorted)
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", not_sorted])
+            else:
+                subprocess.Popen(["xdg-open", not_sorted])
+        except Exception as e:
+            messagebox.showerror("Open Folder Failed", str(e))
 
     def _confirm_duplicates(self, dups):
         """

@@ -23,6 +23,9 @@ def build_primary_counts(root_path):
     """
     counts = {}
     for dirpath, _, files in os.walk(root_path):
+        rel_dir = os.path.relpath(dirpath, root_path)
+        if "Not Sorted" in rel_dir.split(os.sep):
+            continue
         for fname in files:
             ext = os.path.splitext(fname)[1].lower()
             if ext not in SUPPORTED_EXTS:
@@ -211,10 +214,16 @@ def compute_moves_and_tag_index(root_path, log_callback=None):
     # --- Phase 1: Scan for audio files ---
     all_audio = []
     for dirpath, _, files in os.walk(MUSIC_ROOT):
+        rel_dir = os.path.relpath(dirpath, root_path)
+        if "Not Sorted" in rel_dir.split(os.sep):
+            continue
         for fname in files:
             ext = os.path.splitext(fname)[1].lower()
             if ext in SUPPORTED_EXTS:
-                all_audio.append(os.path.join(dirpath, fname))
+                full = os.path.join(dirpath, fname)
+                if "Not Sorted" in os.path.relpath(full, root_path).split(os.sep):
+                    continue
+                all_audio.append(full)
     total_audio = len(all_audio)
     log_callback(f"   → Found {total_audio} audio files.")
 
@@ -591,6 +600,10 @@ def apply_indexer_moves(root_path, log_callback=None, progress_callback=None):
         def progress_callback(current, total, path):
             pass
 
+    # Ensure Not Sorted directory exists for user exclusions
+    not_sorted_dir = os.path.join(root_path, "Not Sorted")
+    os.makedirs(not_sorted_dir, exist_ok=True)
+
     # Determine where your actual music lives
     music_root = os.path.join(root_path, "Music")
     if not os.path.isdir(music_root):
@@ -648,8 +661,10 @@ def apply_indexer_moves(root_path, log_callback=None, progress_callback=None):
     os.makedirs(trash_dir, exist_ok=True)
 
     for dirpath, dirnames, filenames in os.walk(MUSIC_ROOT, topdown=False):
-        # 1) Don’t recurse back into Trash/ or Docs/
-        dirnames[:] = [d for d in dirnames if d.lower() not in ("trash", "docs")]
+        # 1) Don’t recurse back into Trash/, Docs/, or Not Sorted/
+        dirnames[:] = [d for d in dirnames if d.lower() not in ("trash", "docs", "not sorted")]
+        if "Not Sorted" in os.path.relpath(dirpath, root_path).split(os.sep):
+            continue
 
         for fname in filenames:
             full = os.path.join(dirpath, fname)
@@ -709,6 +724,10 @@ def run_full_indexer(root_path, output_html_path, dry_run_only=False, log_callba
     """
     if log_callback is None:
         def log_callback(msg): pass
+
+    # Ensure Not Sorted directory exists for user exclusions
+    not_sorted_dir = os.path.join(root_path, "Not Sorted")
+    os.makedirs(not_sorted_dir, exist_ok=True)
 
     # Phase 1–4: Generate moves, tags, and collect decision log
     moves, tag_index, decision_log = compute_moves_and_tag_index(root_path, log_callback)
