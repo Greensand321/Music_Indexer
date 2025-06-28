@@ -13,3 +13,7 @@ requests
 # optional metadata helpers
 spotipy
 tidal-dl
+# optional ttk theme packs
+# ttkthemes       # +50 themes
+# ttkbootstrap    # Bootstrap-style light/dark themes
+# sv-ttk          # Windows-11 "Sun Valley" look

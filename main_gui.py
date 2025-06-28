@@ -16,6 +16,10 @@ if sys.platform == "win32":
 
 import tkinter as tk
 from tkinter import ttk
+Style = ttk.Style  # Default built-in themes
+# Optional theme packs:
+# from ttkthemes import ThemedStyle as Style
+# import ttkbootstrap as tb; Style = tb.Style
 import json
 import queue
 import subprocess
@@ -125,6 +129,12 @@ class SoundVaultImporterApp(tk.Tk):
         # assume ffmpeg is available without performing checks
         self.ffmpeg_available = True
 
+        # ─── Theme Selector ─────────────────────────────────────────
+        self.style = Style(self)
+        themes = self.style.theme_names()
+        current = self.style.theme_use()
+        self.theme_var = tk.StringVar(value=current)
+
         # ─── Menu Bar ─────────────────────────────────────────────────────────
         menubar = tk.Menu(self)
         self.config(menu=menubar)
@@ -168,6 +178,18 @@ class SoundVaultImporterApp(tk.Tk):
         top.pack(fill="x", padx=10, pady=(10, 0))
         tk.Button(top, text="Choose Library…", command=self.select_library).pack(side="left")
         tk.Label(top, textvariable=self.library_name_var, anchor="w").pack(side="left", padx=(5, 0))
+        cb = ttk.Combobox(
+            top,
+            textvariable=self.theme_var,
+            values=themes,
+            state="readonly",
+            width=20,
+        )
+        cb.pack(side="right", padx=5)
+        cb.bind(
+            "<<ComboboxSelected>>",
+            lambda e: self.style.theme_use(self.theme_var.get()),
+        )
         tk.Label(self, textvariable=self.library_path_var, anchor="w").pack(fill="x", padx=10)
         tk.Label(self, textvariable=self.library_stats_var, justify="left").pack(anchor="w", padx=10, pady=(0, 10))
 
