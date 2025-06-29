@@ -54,3 +54,14 @@ class AcoustIDPlugin(MetadataPlugin):
             "genres": genres,
             "score": best_score,
         }
+
+    @staticmethod
+    def check_connection() -> bool:
+        """Return True if AcoustID web service is reachable."""
+        try:
+            acoustid.match(ACOUSTID_API_KEY, b"")
+        except acoustid.WebServiceError:
+            return False
+        except Exception:
+            return False
+        return True
