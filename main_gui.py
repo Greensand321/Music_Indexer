@@ -136,7 +136,9 @@ class SoundVaultImporterApp(tk.Tk):
 
         # theme and scale variables used across rebuilds
         self.style = Style(self)
-        self.theme_var = tk.StringVar(value=self.style.theme_use())
+        default_theme = cfg.get("ui_theme") or self.style.theme_use()
+        self.style.theme_use(default_theme)
+        self.theme_var = tk.StringVar(value=default_theme)
         self.scale_var = tk.StringVar(value=str(self.current_scale))
 
         # Build initial UI
@@ -198,10 +200,7 @@ class SoundVaultImporterApp(tk.Tk):
             width=20,
         )
         cb.pack(side="right", padx=5)
-        cb.bind(
-            "<<ComboboxSelected>>",
-            lambda e: self.style.theme_use(self.theme_var.get()),
-        )
+        cb.bind("<<ComboboxSelected>>", self.on_theme_change)
         scale_choices = ["1.25", "1.5", "1.75", "2.0", "2.25"]
         cb_scale = ttk.Combobox(
             top,
@@ -262,6 +261,14 @@ class SoundVaultImporterApp(tk.Tk):
         self.chat_input.pack(side="left", fill="x", expand=True)
         send_btn = ttk.Button(entry_frame, text="Send", command=self._send_help_query)
         send_btn.pack(side="right", padx=(5, 0))
+
+    def on_theme_change(self, event=None):
+        """Apply the selected theme and persist to config."""
+        theme = self.theme_var.get()
+        self.style.theme_use(theme)
+        cfg = load_config()
+        cfg["ui_theme"] = theme
+        save_config(cfg)
 
     def on_scale_change(self, event=None):
         """Rebuild UI under the new scaling factor."""
