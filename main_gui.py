@@ -54,6 +54,7 @@ from controllers.normalize_controller import (
     scan_raw_genres,
 )
 from plugins.assistant_plugin import AssistantPlugin
+from config import load_config, save_config
 
 FilterFn = Callable[[FileRecord], bool]
 _cached_filters = None
@@ -111,9 +112,13 @@ class SoundVaultImporterApp(tk.Tk):
     def __init__(self):
         super().__init__()
         # Auto-detect and apply default DPI scaling
+        cfg = load_config()
         width, height = self.winfo_screenwidth(), self.winfo_screenheight()
-        self.current_scale = 1.5 if (width >= 1920 and height >= 1080) else 1.25
-        self.tk.call('tk', 'scaling', self.current_scale)
+        default_scale = cfg.get("ui_scale") or (
+            1.5 if (width >= 1920 and height >= 1080) else 1.25
+        )
+        self.current_scale = default_scale
+        self.tk.call("tk", "scaling", self.current_scale)
         self.title("SoundVault Importer")
         self.geometry("700x500")
 
@@ -262,10 +267,13 @@ class SoundVaultImporterApp(tk.Tk):
         """Rebuild UI under the new scaling factor."""
         try:
             scale = float(self.scale_var.get())
-            self.tk.call('tk', 'scaling', scale)
+            self.tk.call("tk", "scaling", scale)
             self.current_scale = scale
         except ValueError:
             return
+        cfg = load_config()
+        cfg["ui_scale"] = scale
+        save_config(cfg)
         for widget in self.winfo_children():
             widget.destroy()
         self.build_ui()
