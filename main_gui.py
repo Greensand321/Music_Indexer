@@ -112,8 +112,8 @@ class SoundVaultImporterApp(tk.Tk):
         super().__init__()
         # Auto-detect and apply default DPI scaling
         width, height = self.winfo_screenwidth(), self.winfo_screenheight()
-        default_scale = 1.5 if (width >= 1920 and height >= 1080) else 1.25
-        self.tk.call('tk', 'scaling', default_scale)
+        self.current_scale = 1.5 if (width >= 1920 and height >= 1080) else 1.25
+        self.tk.call('tk', 'scaling', self.current_scale)
         self.title("SoundVault Importer")
         self.geometry("700x500")
 
@@ -129,13 +129,20 @@ class SoundVaultImporterApp(tk.Tk):
         # assume ffmpeg is available without performing checks
         self.ffmpeg_available = True
 
-        # ─── Theme Selector ─────────────────────────────────────────
+        # theme and scale variables used across rebuilds
         self.style = Style(self)
-        themes = self.style.theme_names()
-        current = self.style.theme_use()
-        self.theme_var = tk.StringVar(value=current)
+        self.theme_var = tk.StringVar(value=self.style.theme_use())
+        self.scale_var = tk.StringVar(value=str(self.current_scale))
 
-        # ─── Menu Bar ─────────────────────────────────────────────────────────
+        # Build initial UI
+        self.build_ui()
+
+    def build_ui(self):
+        """Create all menus, frames, and widgets."""
+        # Theme selector setup
+        themes = self.style.theme_names()
+
+        # ─── Menu Bar ───────────────────────────────────────────────────────
         menubar = tk.Menu(self)
         self.config(menu=menubar)
 
@@ -173,7 +180,7 @@ class SoundVaultImporterApp(tk.Tk):
         tools_menu.add_command(label="Reset Tag-Fix Log", command=self.reset_tagfix_log)
         menubar.add_cascade(label="Tools", menu=tools_menu)
 
-        # ─── Library Info ─────────────────────────────────────────────────────
+        # ─── Library Info ───────────────────────────────────────────────────
         top = tk.Frame(self)
         top.pack(fill="x", padx=10, pady=(10, 0))
         tk.Button(top, text="Choose Library…", command=self.select_library).pack(side="left")
@@ -191,7 +198,6 @@ class SoundVaultImporterApp(tk.Tk):
             lambda e: self.style.theme_use(self.theme_var.get()),
         )
         scale_choices = ["1.25", "1.5", "1.75", "2.0", "2.25"]
-        self.scale_var = tk.StringVar(value=str(default_scale))
         cb_scale = ttk.Combobox(
             top,
             textvariable=self.scale_var,
@@ -204,7 +210,7 @@ class SoundVaultImporterApp(tk.Tk):
         tk.Label(self, textvariable=self.library_path_var, anchor="w").pack(fill="x", padx=10)
         tk.Label(self, textvariable=self.library_stats_var, justify="left").pack(anchor="w", padx=10, pady=(0, 10))
 
-        # ─── Output + Help Notebook ──────────────────────────────────────────
+        # ─── Output + Help Notebook ─────────────────────────────────────────
         self.notebook = ttk.Notebook(self)
         self.notebook.pack(fill="both", expand=True, padx=10, pady=(0, 10))
 
@@ -214,7 +220,7 @@ class SoundVaultImporterApp(tk.Tk):
         self.output = tk.Text(log_frame, wrap="word", state="disabled", height=15)
         self.output.pack(fill="both", expand=True)
 
-        # ─── Indexer Tab ────────────────────────────────────────────────────
+        # ─── Indexer Tab ──────────────────────────────────────────────────
         self.indexer_tab = ttk.Frame(self.notebook)
         self.notebook.add(self.indexer_tab, text="Indexer")
 
@@ -234,7 +240,7 @@ class SoundVaultImporterApp(tk.Tk):
         self.log = Text(self.indexer_tab, height=10)
         self.log.grid(row=4, column=0, columnspan=3, sticky="nsew", pady=5)
         self.indexer_tab.rowconfigure(4, weight=1)
-        self.indexer_tab.columnconfigure((0,1,2), weight=1)
+        self.indexer_tab.columnconfigure((0, 1, 2), weight=1)
 
         # after your other tabs
         help_frame = ttk.Frame(self.notebook)
@@ -242,23 +248,27 @@ class SoundVaultImporterApp(tk.Tk):
 
         # Chat history display
         self.chat_history = ScrolledText(help_frame, height=15, state="disabled", wrap="word")
-        self.chat_history.pack(fill="both", expand=True, padx=10, pady=(10,5))
+        self.chat_history.pack(fill="both", expand=True, padx=10, pady=(10, 5))
 
         # Entry + send button
         entry_frame = ttk.Frame(help_frame)
-        entry_frame.pack(fill="x", padx=10, pady=(0,10))
+        entry_frame.pack(fill="x", padx=10, pady=(0, 10))
         self.chat_input = ttk.Entry(entry_frame)
         self.chat_input.pack(side="left", fill="x", expand=True)
         send_btn = ttk.Button(entry_frame, text="Send", command=self._send_help_query)
-        send_btn.pack(side="right", padx=(5,0))
+        send_btn.pack(side="right", padx=(5, 0))
 
     def on_scale_change(self, event=None):
-        """Apply user-selected UI scaling at runtime."""
+        """Rebuild UI under the new scaling factor."""
         try:
             scale = float(self.scale_var.get())
             self.tk.call('tk', 'scaling', scale)
+            self.current_scale = scale
         except ValueError:
-            pass
+            return
+        for widget in self.winfo_children():
+            widget.destroy()
+        self.build_ui()
 
 
     def _load_genre_mapping(self):
