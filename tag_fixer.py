@@ -176,6 +176,16 @@ def build_file_records(
 
     records: List[FileRecord] = []
 
+    for plugin in PLUGINS:
+        checker = getattr(plugin, "check_connection", None)
+        if callable(checker):
+            try:
+                if not checker():
+                    log_callback("⚠ Cannot reach AcoustID service \u2013 genre lookups will be skipped")
+            except Exception:
+                log_callback("⚠ Cannot reach AcoustID service \u2013 genre lookups will be skipped")
+            break
+
     existing_status = dict(db_conn.execute("SELECT path, status FROM files"))
 
     files = find_files(root)
