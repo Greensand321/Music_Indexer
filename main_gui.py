@@ -54,8 +54,7 @@ from controllers.normalize_controller import (
     scan_raw_genres,
 )
 from plugins.assistant_plugin import AssistantPlugin
-from playlist_generator import DEFAULT_EXTS
-from clustered_playlists import generate_clustered_playlists
+from controllers.cluster_controller import cluster_library
 from config import load_config, save_config
 
 FilterFn = Callable[[FileRecord], bool]
@@ -96,18 +95,11 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
 
         def on_generate():
             try:
-                n = int(var.get())
+                int(var.get())
             except ValueError:
                 messagebox.showerror("Invalid", f"“{var.get()}” is not a number")
                 return
-            path = app.require_library()
-            if not path:
-                return
-            threading.Thread(
-                target=app._run_cluster_generation,
-                args=(path, "kmeans", n),
-                daemon=True,
-            ).start()
+            app._start_cluster_playlists("kmeans", var.get(), None)
 
         ttk.Button(frame, text="Generate Playlists", command=on_generate).pack(
             padx=10, pady=(0, 10)
@@ -624,7 +616,8 @@ class SoundVaultImporterApp(tk.Tk):
         ).pack(pady=(5, 10))
 
     def _start_cluster_playlists(self, method: str, value: str, dlg):
-        dlg.destroy()
+        if dlg is not None:
+            dlg.destroy()
         path = self.require_library()
         if not path:
             return
@@ -640,14 +633,7 @@ class SoundVaultImporterApp(tk.Tk):
         ).start()
 
     def _run_cluster_generation(self, path: str, method: str, num: int):
-        music_root = os.path.join(path, "Music") if os.path.isdir(os.path.join(path, "Music")) else path
-        tracks = []
-        for dirpath, _, files in os.walk(music_root):
-            for fname in files:
-                if os.path.splitext(fname)[1].lower() in DEFAULT_EXTS:
-                    tracks.append(os.path.join(dirpath, fname))
-        params = {"n_clusters": num} if method == "kmeans" else {"min_cluster_size": num}
-        generate_clustered_playlists(tracks, path, method, params, self._log)
+        cluster_library(path, method, num, self._log)
         self.after(0, lambda: messagebox.showinfo("Clustered Playlists", "Generation complete"))
 
     def _tagfix_filter_dialog(self):
