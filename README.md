@@ -44,6 +44,6 @@ These items are currently under development and not yet part of the stable relea
 - Clustered Playlists (K-Means, HDBSCAN)
 - Deej-AI / Auto-DJ Integration
 - Metadata Plugins (Discogs, Spotify)
-- UI Polish & Theme Toggles
+- UI Polish & Theme Toggles (Completed)
 
 See [`docs/project_documentation.html`](docs/project_documentation.html) for technical details.
