@@ -9,6 +9,7 @@ scipy
 numpy
 scikit-learn
 hdbscan
+matplotlib
 requests
 # optional metadata helpers
 spotipy

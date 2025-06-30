@@ -87,26 +87,41 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
     """Return a UI panel for the given playlist plugin."""
     frame = ttk.Frame(parent)
 
-    if name == "Clustered Playlists – KMeans":
-        var = tk.StringVar(value="5")
-        ttk.Label(frame, text="Number of Clusters:").pack(padx=10, pady=(10, 0))
-        spin = ttk.Spinbox(frame, from_=2, to=50, textvariable=var, width=5)
-        spin.pack(padx=10, pady=(0, 10))
+    from cluster_graph_panel import ClusterGraphPanel
+    tracks, features = getattr(app, "cluster_data", (None, None))
 
-        def on_generate():
-            try:
-                int(var.get())
-            except ValueError:
-                messagebox.showerror("Invalid", f"“{var.get()}” is not a number")
-                return
-            app._start_cluster_playlists("kmeans", var.get(), None)
+    if name == "Interactive – KMeans":
+        from sklearn.cluster import KMeans
 
-        ttk.Button(frame, text="Generate Playlists", command=on_generate).pack(
-            padx=10, pady=(0, 10)
-        )
+        def km_func(X, p):
+            return KMeans(n_clusters=p["n_clusters"]).fit_predict(X)
+
+        params = {"n_clusters": 5, "method": "kmeans"}
+    elif name == "Interactive – HDBSCAN":
+        from hdbscan import HDBSCAN
+
+        def km_func(X, p):
+            return HDBSCAN(min_cluster_size=p["min_cluster_size"]).fit_predict(X)
+
+        params = {"min_cluster_size": 5, "method": "hdbscan"}
+    else:
+        ttk.Label(frame, text=f"{name} panel coming soon…").pack(padx=10, pady=10)
         return frame
 
-    ttk.Label(frame, text=f"{name} panel coming soon…").pack(padx=10, pady=10)
+    if tracks is None:
+        ttk.Label(frame, text="Run clustering once first").pack(padx=10, pady=10)
+        return frame
+
+    panel = ClusterGraphPanel(
+        frame,
+        tracks,
+        features,
+        cluster_func=km_func,
+        cluster_params=params,
+        library_path=app.library_path,
+        log_callback=app._log,
+    )
+    panel.pack(fill="both", expand=True)
     return frame
 
 
@@ -158,6 +173,9 @@ class SoundVaultImporterApp(tk.Tk):
         self.genre_mapping = {}
         self.mapping_path = ""
         self.assistant_plugin = AssistantPlugin()
+
+        # Cached tracks and feature vectors for interactive clustering
+        self.cluster_data = None
 
         # assume ffmpeg is available without performing checks
         self.ffmpeg_available = True
@@ -287,8 +305,8 @@ class SoundVaultImporterApp(tk.Tk):
         self.plugin_list = tk.Listbox(self.playlist_tab, width=30, exportselection=False)
         self.plugin_list.grid(row=0, column=0, sticky="ns")
         for name in [
-            "Clustered Playlists – KMeans",
-            "Clustered Playlists – HDBSCAN",
+            "Interactive – KMeans",
+            "Interactive – HDBSCAN",
             "Sort by Genre",
             "BPM Range",
             "Metadata",
@@ -377,6 +395,8 @@ class SoundVaultImporterApp(tk.Tk):
         self.library_path_var.set(info["path"])
         self.mapping_path = os.path.join(self.library_path, ".genre_mapping.json")
         self._load_genre_mapping()
+        # Clear any cached clustering data when switching libraries
+        self.cluster_data = None
         self.update_library_info()
 
     def update_library_info(self):
@@ -633,7 +653,8 @@ class SoundVaultImporterApp(tk.Tk):
         ).start()
 
     def _run_cluster_generation(self, path: str, method: str, num: int):
-        cluster_library(path, method, num, self._log)
+        tracks, feats = cluster_library(path, method, num, self._log)
+        self.cluster_data = (tracks, feats)
         self.after(0, lambda: messagebox.showinfo("Clustered Playlists", "Generation complete"))
 
     def _tagfix_filter_dialog(self):
