@@ -87,3 +87,13 @@ def generate_playlists(
         except Exception as e:
             log_callback(f"\u2717 Failed to write {playlist_file}: {e}")
 
+
+def write_playlist(tracks, outfile):
+    """Write a simple M3U playlist from ``tracks`` to ``outfile``."""
+    os.makedirs(os.path.dirname(outfile), exist_ok=True)
+    try:
+        with open(outfile, "w", encoding="utf-8") as f:
+            for p in tracks:
+                f.write(os.path.relpath(p, os.path.dirname(outfile)) + "\n")
+    except Exception as e:
+        raise RuntimeError(f"Failed to write playlist {outfile}: {e}")

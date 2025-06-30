@@ -20,8 +20,8 @@ def gather_tracks(library_path: str) -> list[str]:
     return tracks
 
 
-def cluster_library(library_path: str, method: str, num: int, log_callback) -> None:
-    """Generate clustered playlists for ``library_path``."""
+def cluster_library(library_path: str, method: str, num: int, log_callback):
+    """Generate clustered playlists for ``library_path`` and return features."""
     tracks = gather_tracks(library_path)
     log_path = os.path.join(library_path, f"{method}_log.txt")
 
@@ -35,4 +35,6 @@ def cluster_library(library_path: str, method: str, num: int, log_callback) -> N
 
     log(f"Found {len(tracks)} audio files")
     params = {"n_clusters": num} if method == "kmeans" else {"min_cluster_size": num}
-    generate_clustered_playlists(tracks, library_path, method, params, log)
+    feats = generate_clustered_playlists(tracks, library_path, method, params, log)
+    return tracks, feats
+
