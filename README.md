@@ -32,8 +32,8 @@ python main_gui.py
 2. Use the **Indexer** tab to dedupe and move files
 3. **Fix Tags** via the AcoustID menu
 4. **Generate Playlists** from your folder structure
-5. **Clustered Playlists** via the Tools ▸ Clustered Playlists menu
-6. Use the **Help** tab for inline assistance
+5. **Clustered Playlists** (interactive K-Means/HDBSCAN) via the Tools ▸ Clustered Playlists menu
+6. Use the **Theme** dropdown and **Help** tab for assistance
 
 Cluster generation writes progress into `<method>_log.txt` inside your library so you can review the steps later.
 
@@ -44,9 +44,7 @@ These items are currently under development and not yet part of the stable relea
 - Smarter Playlist Engine
 - Tempo/Energy Buckets
 - "More Like This" suggestions
-- Clustered Playlists (K-Means, HDBSCAN)
 - Deej-AI / Auto-DJ Integration
 - Metadata Plugins (Discogs, Spotify)
-- UI Polish & Theme Toggles (Completed)
 
 See [`docs/project_documentation.html`](docs/project_documentation.html) for technical details.
