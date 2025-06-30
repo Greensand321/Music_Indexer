@@ -126,7 +126,14 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
         return frame
 
     if tracks is None:
-        ttk.Label(frame, text="Run clustering once first").pack(padx=10, pady=10)
+        msg = ttk.Frame(frame)
+        msg.pack(padx=10, pady=10)
+        ttk.Label(msg, text="Run clustering once first").pack()
+        ttk.Button(
+            msg,
+            text="Run Clustering",
+            command=lambda: app.cluster_playlists_dialog(params["method"]),
+        ).pack(pady=(5, 0))
         return frame
 
     panel = ClusterGraphPanel(
@@ -672,7 +679,25 @@ class SoundVaultImporterApp(tk.Tk):
     def _run_cluster_generation(self, path: str, method: str, num: int):
         tracks, feats = cluster_library(path, method, num, self._log)
         self.cluster_data = (tracks, feats)
-        self.after(0, lambda: messagebox.showinfo("Clustered Playlists", "Generation complete"))
+        def done():
+            messagebox.showinfo("Clustered Playlists", "Generation complete")
+            self._refresh_plugin_panel()
+
+        self.after(0, done)
+
+    def _refresh_plugin_panel(self):
+        """Rebuild the current plugin panel if a plugin is selected."""
+        if not hasattr(self, "plugin_list") or not hasattr(self, "plugin_panel"):
+            return
+        try:
+            sel = self.plugin_list.get(self.plugin_list.curselection())
+        except tk.TclError:
+            return
+        for w in self.plugin_panel.winfo_children():
+            w.destroy()
+        panel = create_panel_for_plugin(self, sel, parent=self.plugin_panel)
+        if panel:
+            panel.pack(fill="both", expand=True)
 
     def _tagfix_filter_dialog(self):
         dlg = tk.Toplevel(self)
