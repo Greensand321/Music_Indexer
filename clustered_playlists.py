@@ -7,6 +7,14 @@ import hdbscan
 from playlist_generator import DEFAULT_EXTS
 
 
+def _ensure_1d(a):
+    """Return ``a`` flattened to 1-D for feature stacking."""
+    a = np.asarray(a)
+    if a.ndim > 1:
+        a = a.ravel()
+    return a
+
+
 def extract_audio_features(file_path: str, log_callback=None) -> np.ndarray:
     """Return a simple feature vector for ``file_path`` using librosa."""
     if log_callback is None:
@@ -17,34 +25,41 @@ def extract_audio_features(file_path: str, log_callback=None) -> np.ndarray:
     # Log raw MFCC shape for debugging
     log_callback(f"   \u00b7 MFCC shape for {os.path.basename(file_path)}: {mfcc.shape}")
     tempo, _ = librosa.beat.beat_track(y=y, sr=sr)
-    vec = np.hstack([
-        np.mean(mfcc, axis=1),
-        np.std(mfcc, axis=1),
-        [tempo],
-    ])
-    vec = vec.astype(np.float32)
-    # Ensure consistent length
+
+    mean_mfcc = _ensure_1d(np.mean(mfcc, axis=1))
+    std_mfcc = _ensure_1d(np.std(mfcc, axis=1))
+    tempo_arr = _ensure_1d(np.array([tempo], dtype=np.float32))
+
+    vec = np.hstack([mean_mfcc, std_mfcc, tempo_arr]).astype(np.float32)
+
+    # Validate length and ensure we have exactly 27 values
     if vec.shape[0] != 27:
-        log_callback(
-            f"\u26a0 Unexpected feature length {vec.shape[0]} for {file_path}; padding/truncating"
+        raise RuntimeError(
+            f"Feature vector has wrong length {vec.shape[0]}, expected 27"
         )
-        if vec.shape[0] < 27:
-            vec = np.pad(vec, (0, 27 - vec.shape[0]), mode="constant")
-        else:
-            vec = vec[:27]
     return vec
 
 
-def cluster_tracks(feature_matrix: np.ndarray, method: str = "kmeans", **kwargs) -> np.ndarray:
+def cluster_tracks(
+    feature_matrix: np.ndarray,
+    method: str = "kmeans",
+    log_callback=None,
+    **kwargs,
+) -> np.ndarray:
     """Cluster a matrix of feature vectors using KMeans or HDBSCAN."""
+    if log_callback is None:
+        log_callback = lambda msg: None
+
     if method == "kmeans":
         n_clusters = int(kwargs.get("n_clusters", 5))
-        km = KMeans(n_clusters=n_clusters, random_state=0)
-        labels = km.fit_predict(feature_matrix)
+        log_callback(f"⚙ Clustering {len(feature_matrix)} tracks into {n_clusters} groups …")
+        labels = KMeans(n_clusters=n_clusters, random_state=0).fit_predict(feature_matrix)
     else:
         min_cluster_size = int(kwargs.get("min_cluster_size", 5))
-        db = hdbscan.HDBSCAN(min_cluster_size=min_cluster_size)
-        labels = db.fit_predict(feature_matrix)
+        log_callback("⚙ Running clustering algorithm …")
+        labels = hdbscan.HDBSCAN(min_cluster_size=min_cluster_size).fit_predict(feature_matrix)
+
+    log_callback("✓ Clustering complete")
     return labels
 
 
@@ -65,13 +80,11 @@ def generate_clustered_playlists(tracks, root_path: str, method: str, params: di
 
     X = np.vstack(feats)
     X = StandardScaler().fit_transform(X)
-    if method == "kmeans":
-        n_clusters = int(params.get("n_clusters", 5))
-        log_callback(f"⚙ Clustering {len(feats)} tracks into {n_clusters} groups with K-Means…")
-    else:
-        log_callback("⚙ Running clustering algorithm…")
-    labels = cluster_tracks(X, method, **params)
-    log_callback(f"✓ Clustering complete: found {len(set([l for l in labels if l >= 0]) )} clusters")
+
+    labels = cluster_tracks(X, method, log_callback=log_callback, **params)
+    log_callback(
+        f"✓ Clustering complete: found {len(set([l for l in labels if l >= 0]) )} clusters"
+    )
 
     playlists_dir = os.path.join(root_path, "Playlists")
     os.makedirs(playlists_dir, exist_ok=True)
