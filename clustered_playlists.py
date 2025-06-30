@@ -1,25 +1,16 @@
 import os
 import numpy as np
-import librosa
+# import essentia  # disabled on Windows
 from sklearn.cluster import KMeans
 from sklearn.preprocessing import StandardScaler
 import hdbscan
 from playlist_generator import DEFAULT_EXTS
 
 
-def extract_features(file_path: str) -> np.ndarray:
-    """Return a feature vector for the given audio file."""
-    y, sr = librosa.load(file_path, sr=None, mono=True)
-    mfcc = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=13)
-    chroma = librosa.feature.chroma_stft(y=y, sr=sr)
-    tempo, _ = librosa.beat.beat_track(y=y, sr=sr)
-    vec = np.hstack([
-        np.mean(mfcc, axis=1),
-        np.std(mfcc, axis=1),
-        np.mean(chroma, axis=1),
-        [tempo],
-    ])
-    return vec.astype(np.float32)
+def extract_audio_features(file_path: str) -> np.ndarray:
+    """Essentia disabled: stub returning empty feature vector."""
+    print("\u26A0 Essentia feature extraction is disabled.")
+    return np.zeros(27, dtype=np.float32)
 
 
 def cluster_tracks(feature_matrix: np.ndarray, method: str = "kmeans", **kwargs) -> np.ndarray:
@@ -39,12 +30,13 @@ def generate_clustered_playlists(tracks, root_path: str, method: str, params: di
     """Create clustered playlists for the given tracks."""
     if log_callback is None:
         log_callback = lambda msg: None
+    log_callback("\u26A0 Essentia integration disabled: feature extraction will use lightweight fallback.")
 
     feats = []
     for idx, path in enumerate(tracks, 1):
         log_callback(f"\u2022 Extracting features {idx}/{len(tracks)}")
         try:
-            feats.append(extract_features(path))
+            feats.append(extract_audio_features(path))
         except Exception as e:
             log_callback(f"! Failed features for {path}: {e}")
             feats.append(np.zeros(27, dtype=np.float32))
