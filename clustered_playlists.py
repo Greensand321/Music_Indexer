@@ -7,24 +7,39 @@ import hdbscan
 from playlist_generator import DEFAULT_EXTS
 
 
-def extract_audio_features(file_path: str) -> np.ndarray:
+def extract_audio_features(file_path: str, log_callback=None) -> np.ndarray:
     """Return a simple feature vector for ``file_path`` using librosa."""
+    if log_callback is None:
+        log_callback = lambda msg: None
+
     y, sr = librosa.load(file_path, sr=None, mono=True)
     mfcc = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=13)
+    # Log raw MFCC shape for debugging
+    log_callback(f"   \u00b7 MFCC shape for {os.path.basename(file_path)}: {mfcc.shape}")
     tempo, _ = librosa.beat.beat_track(y=y, sr=sr)
     vec = np.hstack([
         np.mean(mfcc, axis=1),
         np.std(mfcc, axis=1),
         [tempo],
     ])
-    return vec.astype(np.float32)
+    vec = vec.astype(np.float32)
+    # Ensure consistent length
+    if vec.shape[0] != 27:
+        log_callback(
+            f"\u26a0 Unexpected feature length {vec.shape[0]} for {file_path}; padding/truncating"
+        )
+        if vec.shape[0] < 27:
+            vec = np.pad(vec, (0, 27 - vec.shape[0]), mode="constant")
+        else:
+            vec = vec[:27]
+    return vec
 
 
 def cluster_tracks(feature_matrix: np.ndarray, method: str = "kmeans", **kwargs) -> np.ndarray:
     """Cluster a matrix of feature vectors using KMeans or HDBSCAN."""
     if method == "kmeans":
         n_clusters = int(kwargs.get("n_clusters", 5))
-        km = KMeans(n_clusters=n_clusters)
+        km = KMeans(n_clusters=n_clusters, random_state=0)
         labels = km.fit_predict(feature_matrix)
     else:
         min_cluster_size = int(kwargs.get("min_cluster_size", 5))
@@ -43,16 +58,20 @@ def generate_clustered_playlists(tracks, root_path: str, method: str, params: di
     for idx, path in enumerate(tracks, 1):
         log_callback(f"\u2022 Extracting features {idx}/{len(tracks)}")
         try:
-            feats.append(extract_audio_features(path))
+            feats.append(extract_audio_features(path, log_callback))
         except Exception as e:
             log_callback(f"! Failed features for {path}: {e}")
             feats.append(np.zeros(27, dtype=np.float32))
 
     X = np.vstack(feats)
     X = StandardScaler().fit_transform(X)
-    log_callback("⚙ Running clustering algorithm…")
+    if method == "kmeans":
+        n_clusters = int(params.get("n_clusters", 5))
+        log_callback(f"⚙ Clustering {len(feats)} tracks into {n_clusters} groups with K-Means…")
+    else:
+        log_callback("⚙ Running clustering algorithm…")
     labels = cluster_tracks(X, method, **params)
-    log_callback(f"✓ Found {len(set([l for l in labels if l >= 0]) )} clusters")
+    log_callback(f"✓ Clustering complete: found {len(set([l for l in labels if l >= 0]) )} clusters")
 
     playlists_dir = os.path.join(root_path, "Playlists")
     os.makedirs(playlists_dir, exist_ok=True)
