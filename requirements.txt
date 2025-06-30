@@ -3,7 +3,7 @@ pydub
 ffmpeg-python
 pyacoustid
 musicbrainzngs
-essentia
+# essentia  # disabled on Windows
 librosa
 scipy
 numpy
