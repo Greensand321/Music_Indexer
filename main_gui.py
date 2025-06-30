@@ -82,6 +82,13 @@ def apply_filters(records: List[FileRecord], filters: List[FilterFn]) -> List[Fi
     return records
 
 
+def create_panel_for_plugin(name: str, parent: tk.Widget) -> ttk.Frame:
+    """Return a placeholder panel for the given plugin name."""
+    frame = ttk.Frame(parent)
+    ttk.Label(frame, text=f"{name} panel coming soon…").pack(padx=10, pady=10)
+    return frame
+
+
 
 class ProgressDialog(tk.Toplevel):
     def __init__(self, parent, total, title="Working…"):
@@ -242,6 +249,28 @@ class SoundVaultImporterApp(tk.Tk):
         self.indexer_tab.rowconfigure(3, weight=1)
         self.indexer_tab.columnconfigure((0, 1), weight=1)
 
+        # ─── Playlist Creator Tab ───────────────────────────────────────────
+        self.playlist_tab = ttk.Frame(self.notebook)
+        self.notebook.add(self.playlist_tab, text="Playlist Creator")
+
+        self.plugin_list = tk.Listbox(self.playlist_tab, width=30, exportselection=False)
+        self.plugin_list.grid(row=0, column=0, sticky="ns")
+        for name in [
+            "Clustered Playlists – KMeans",
+            "Clustered Playlists – HDBSCAN",
+            "Sort by Genre",
+            "BPM Range",
+            "Metadata",
+            "More Like This",
+        ]:
+            self.plugin_list.insert("end", name)
+        self.plugin_list.bind("<<ListboxSelect>>", self.on_plugin_select)
+
+        self.plugin_panel = ttk.Frame(self.playlist_tab)
+        self.plugin_panel.grid(row=0, column=1, sticky="nsew", padx=10, pady=10)
+        self.playlist_tab.columnconfigure(1, weight=1)
+        self.playlist_tab.rowconfigure(0, weight=1)
+
         # after your other tabs
         help_frame = ttk.Frame(self.notebook)
         self.notebook.add(help_frame, text="Help")
@@ -280,6 +309,18 @@ class SoundVaultImporterApp(tk.Tk):
         for widget in self.winfo_children():
             widget.destroy()
         self.build_ui()
+
+    def on_plugin_select(self, event):
+        """Swap in the UI panel for the selected playlist plugin."""
+        for w in self.plugin_panel.winfo_children():
+            w.destroy()
+        try:
+            sel = self.plugin_list.get(self.plugin_list.curselection())
+        except tk.TclError:
+            return
+        panel = create_panel_for_plugin(sel, parent=self.plugin_panel)
+        if panel:
+            panel.pack(fill="both", expand=True)
 
 
     def _load_genre_mapping(self):
