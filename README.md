@@ -37,6 +37,47 @@ python main_gui.py
 
 Cluster generation writes progress into `<method>_log.txt` inside your library so you can review the steps later.
 
+## File Overview
+
+The codebase is organized into a handful of key modules:
+
+```
+main_gui.py               - Tkinter entry point for the desktop app
+music_indexer_api.py      - Core scanning, dedupe and relocation logic
+playlist_generator.py     - `.m3u` playlist creation helpers
+clustered_playlists.py    - Feature extraction and clustering algorithms
+cluster_graph_panel.py    - Interactive scatter plot for clustered playlists
+fingerprint_generator.py  - Build AcoustID fingerprint database
+tag_fixer.py              - Tag fixing engine using plugin metadata
+update_genres.py          - Batch genre tag updater via MusicBrainz
+validator.py              - Verify SoundVault folder layout
+config.py                 - Read/write persistent configuration
+
+controllers/
+  library_controller.py        - Handle library selection and persistence
+  import_controller.py         - Import new audio files
+  tagfix_controller.py         - Apply tag proposals and update DB
+  normalize_controller.py      - AI genre normalization workflow
+  cluster_controller.py        - Gather tracks and run clustering
+  library_index_controller.py  - Build HTML index of your library
+  highlight_controller.py      - Play short audio snippets
+  genre_list_controller.py     - Scan library for unique genres
+  playlist_controller.py       - Playlist export placeholder
+
+plugins/
+  base.py               - Metadata plugin interface
+  acoustid_plugin.py    - Identify tracks via AcoustID
+  assistant_plugin.py   - LLM helper integration
+  discogs.py            - Discogs metadata stub
+  lastfm.py             - Fetch genres from Last.fm
+  spotify.py            - Spotify metadata stub
+  test_plugin.py        - Example plugin
+
+bindings/    - C++/pybind11 wrapper for llama binaries
+docs/        - Additional project documentation
+third_party/ - Prebuilt llama executables
+```
+
 ## Roadmap (Upcoming Features)
 
 These items are currently under development and not yet part of the stable release.
