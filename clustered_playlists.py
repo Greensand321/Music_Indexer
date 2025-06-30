@@ -67,16 +67,41 @@ def generate_clustered_playlists(tracks, root_path: str, method: str, params: di
     """Create clustered playlists for the given tracks."""
     if log_callback is None:
         log_callback = lambda msg: None
+
+    # ------------------------------------------------------------------
+    # Feature cache setup
+    # ------------------------------------------------------------------
+    docs = os.path.join(root_path, "Docs")
+    os.makedirs(docs, exist_ok=True)
+    cache_file = os.path.join(docs, "features.npy")
+
+    try:
+        cache = dict(np.load(cache_file, allow_pickle=True).item())
+        log_callback(f"→ Loaded {len(cache)} cached feature vectors")
+    except FileNotFoundError:
+        cache = {}
+        log_callback("→ No feature cache found; extracting all tracks")
+
     log_callback("⚙ Extracting audio features with librosa…")
 
     feats = []
+    updated = False
     for idx, path in enumerate(tracks, 1):
-        log_callback(f"\u2022 Extracting features {idx}/{len(tracks)}")
-        try:
-            feats.append(extract_audio_features(path, log_callback))
-        except Exception as e:
-            log_callback(f"! Failed features for {path}: {e}")
-            feats.append(np.zeros(27, dtype=np.float32))
+        if path in cache:
+            log_callback(f"• Using cached features for {os.path.basename(path)}")
+        else:
+            log_callback(f"• Extracting features {idx}/{len(tracks)}")
+            try:
+                cache[path] = extract_audio_features(path, log_callback)
+            except Exception as e:
+                log_callback(f"! Failed features for {path}: {e}")
+                cache[path] = np.zeros(27, dtype=np.float32)
+            updated = True
+        feats.append(cache[path])
+
+    if updated:
+        np.save(cache_file, cache)
+        log_callback(f"✓ Saved feature cache ({len(cache)} entries) to {cache_file}")
 
     X = np.vstack(feats)
     X = StandardScaler().fit_transform(X)
