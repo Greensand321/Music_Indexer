@@ -87,8 +87,25 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
     """Return a UI panel for the given playlist plugin."""
     frame = ttk.Frame(parent)
 
-    from cluster_graph_panel import ClusterGraphPanel
-    tracks, features = getattr(app, "cluster_data", (None, None))
+    try:
+        from cluster_graph_panel import ClusterGraphPanel
+    except ModuleNotFoundError as exc:
+        ttk.Label(
+            frame,
+            text=(
+                "Missing dependency for interactive clustering.\n"
+                "Install requirements with `pip install -r requirements.txt`."
+            ),
+            justify="center",
+        ).pack(padx=10, pady=10)
+        app._log(f"\u26A0 {exc}")
+        return frame
+
+    cluster_data = getattr(app, "cluster_data", None)
+    if cluster_data is None:
+        tracks = features = None
+    else:
+        tracks, features = cluster_data
 
     if name == "Interactive – KMeans":
         from sklearn.cluster import KMeans
