@@ -54,6 +54,8 @@ from controllers.normalize_controller import (
     scan_raw_genres,
 )
 from plugins.assistant_plugin import AssistantPlugin
+from playlist_generator import DEFAULT_EXTS
+from clustered_playlists import generate_clustered_playlists
 from config import load_config, save_config
 
 FilterFn = Callable[[FileRecord], bool]
@@ -192,6 +194,16 @@ class SoundVaultImporterApp(tk.Tk):
         tools_menu.add_separator()
         tools_menu.add_command(label="Genre Normalizer", command=self._open_genre_normalizer)
         tools_menu.add_command(label="Reset Tag-Fix Log", command=self.reset_tagfix_log)
+        cluster_menu = tk.Menu(tools_menu, tearoff=False)
+        cluster_menu.add_command(
+            label="K-Means…",
+            command=lambda: self.cluster_playlists_dialog("kmeans"),
+        )
+        cluster_menu.add_command(
+            label="HDBSCAN…",
+            command=lambda: self.cluster_playlists_dialog("hdbscan"),
+        )
+        tools_menu.add_cascade(label="Clustered Playlists", menu=cluster_menu)
         menubar.add_cascade(label="Tools", menu=tools_menu)
 
         # ─── Library Info ───────────────────────────────────────────────────
@@ -567,6 +579,49 @@ class SoundVaultImporterApp(tk.Tk):
         )
         self._log(f"[stub] Regenerate Playlists → {path}")
         self.update_library_info()
+
+    def cluster_playlists_dialog(self, method: str):
+        dlg = tk.Toplevel(self)
+        dlg.title(f"Clustered Playlists – {method.title()}")
+        dlg.grab_set()
+        var = tk.StringVar(value="5")
+        label = (
+            "Number of clusters:" if method == "kmeans" else "Min cluster size:"
+        )
+        tk.Label(dlg, text=label).pack(padx=10, pady=(10, 0))
+        ttk.Entry(dlg, textvariable=var, width=10).pack(padx=10, pady=5)
+        ttk.Button(
+            dlg,
+            text="Generate",
+            command=lambda: self._start_cluster_playlists(method, var.get(), dlg),
+        ).pack(pady=(5, 10))
+
+    def _start_cluster_playlists(self, method: str, value: str, dlg):
+        dlg.destroy()
+        path = self.require_library()
+        if not path:
+            return
+        try:
+            num = int(value)
+        except ValueError:
+            messagebox.showerror("Invalid Value", f"{value} is not a valid number")
+            return
+        threading.Thread(
+            target=self._run_cluster_generation,
+            args=(path, method, num),
+            daemon=True,
+        ).start()
+
+    def _run_cluster_generation(self, path: str, method: str, num: int):
+        music_root = os.path.join(path, "Music") if os.path.isdir(os.path.join(path, "Music")) else path
+        tracks = []
+        for dirpath, _, files in os.walk(music_root):
+            for fname in files:
+                if os.path.splitext(fname)[1].lower() in DEFAULT_EXTS:
+                    tracks.append(os.path.join(dirpath, fname))
+        params = {"n_clusters": num} if method == "kmeans" else {"min_cluster_size": num}
+        generate_clustered_playlists(tracks, path, method, params, self._log)
+        self.after(0, lambda: messagebox.showinfo("Clustered Playlists", "Generation complete"))
 
     def _tagfix_filter_dialog(self):
         dlg = tk.Toplevel(self)
