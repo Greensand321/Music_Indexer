@@ -1,6 +1,6 @@
 import os
 import numpy as np
-# import essentia  # disabled on Windows
+import librosa
 from sklearn.cluster import KMeans
 from sklearn.preprocessing import StandardScaler
 import hdbscan
@@ -8,9 +8,16 @@ from playlist_generator import DEFAULT_EXTS
 
 
 def extract_audio_features(file_path: str) -> np.ndarray:
-    """Essentia disabled: stub returning empty feature vector."""
-    print("\u26A0 Essentia feature extraction is disabled.")
-    return np.zeros(27, dtype=np.float32)
+    """Return a simple feature vector for ``file_path`` using librosa."""
+    y, sr = librosa.load(file_path, sr=None, mono=True)
+    mfcc = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=13)
+    tempo, _ = librosa.beat.beat_track(y=y, sr=sr)
+    vec = np.hstack([
+        np.mean(mfcc, axis=1),
+        np.std(mfcc, axis=1),
+        [tempo],
+    ])
+    return vec.astype(np.float32)
 
 
 def cluster_tracks(feature_matrix: np.ndarray, method: str = "kmeans", **kwargs) -> np.ndarray:
@@ -30,7 +37,7 @@ def generate_clustered_playlists(tracks, root_path: str, method: str, params: di
     """Create clustered playlists for the given tracks."""
     if log_callback is None:
         log_callback = lambda msg: None
-    log_callback("\u26A0 Essentia integration disabled: feature extraction will use lightweight fallback.")
+    log_callback("⚙ Extracting audio features with librosa…")
 
     feats = []
     for idx, path in enumerate(tracks, 1):
@@ -43,7 +50,9 @@ def generate_clustered_playlists(tracks, root_path: str, method: str, params: di
 
     X = np.vstack(feats)
     X = StandardScaler().fit_transform(X)
+    log_callback("⚙ Running clustering algorithm…")
     labels = cluster_tracks(X, method, **params)
+    log_callback(f"✓ Found {len(set([l for l in labels if l >= 0]) )} clusters")
 
     playlists_dir = os.path.join(root_path, "Playlists")
     os.makedirs(playlists_dir, exist_ok=True)
@@ -57,6 +66,8 @@ def generate_clustered_playlists(tracks, root_path: str, method: str, params: di
             with open(outfile, "w", encoding="utf-8") as pf:
                 for p in playlist:
                     pf.write(os.path.relpath(p, playlists_dir) + "\n")
-            log_callback(f"\u2192 Writing clustered playlist: {outfile}")
+            log_callback(f"→ Writing clustered playlist: {outfile}")
         except Exception as e:
             log_callback(f"\u2717 Failed to write {outfile}: {e}")
+
+    log_callback("✓ Clustered playlist generation finished")
