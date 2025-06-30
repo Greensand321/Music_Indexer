@@ -32,7 +32,10 @@ python main_gui.py
 2. Use the **Indexer** tab to dedupe and move files
 3. **Fix Tags** via the AcoustID menu
 4. **Generate Playlists** from your folder structure
-5. Use the **Help** tab for inline assistance
+5. **Clustered Playlists** via the Tools ▸ Clustered Playlists menu
+6. Use the **Help** tab for inline assistance
+
+Cluster generation writes progress into `<method>_log.txt` inside your library so you can review the steps later.
 
 ## Roadmap (Upcoming Features)
 
