@@ -84,9 +84,36 @@ def apply_filters(records: List[FileRecord], filters: List[FilterFn]) -> List[Fi
     return records
 
 
-def create_panel_for_plugin(name: str, parent: tk.Widget) -> ttk.Frame:
-    """Return a placeholder panel for the given plugin name."""
+def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
+    """Return a UI panel for the given playlist plugin."""
     frame = ttk.Frame(parent)
+
+    if name == "Clustered Playlists – KMeans":
+        var = tk.StringVar(value="5")
+        ttk.Label(frame, text="Number of Clusters:").pack(padx=10, pady=(10, 0))
+        spin = ttk.Spinbox(frame, from_=2, to=50, textvariable=var, width=5)
+        spin.pack(padx=10, pady=(0, 10))
+
+        def on_generate():
+            try:
+                n = int(var.get())
+            except ValueError:
+                messagebox.showerror("Invalid", f"“{var.get()}” is not a number")
+                return
+            path = app.require_library()
+            if not path:
+                return
+            threading.Thread(
+                target=app._run_cluster_generation,
+                args=(path, "kmeans", n),
+                daemon=True,
+            ).start()
+
+        ttk.Button(frame, text="Generate Playlists", command=on_generate).pack(
+            padx=10, pady=(0, 10)
+        )
+        return frame
+
     ttk.Label(frame, text=f"{name} panel coming soon…").pack(padx=10, pady=10)
     return frame
 
@@ -330,7 +357,7 @@ class SoundVaultImporterApp(tk.Tk):
             sel = self.plugin_list.get(self.plugin_list.curselection())
         except tk.TclError:
             return
-        panel = create_panel_for_plugin(sel, parent=self.plugin_panel)
+        panel = create_panel_for_plugin(self, sel, parent=self.plugin_panel)
         if panel:
             panel.pack(fill="both", expand=True)
 
