@@ -193,6 +193,21 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
     )
     auto_chk.pack(side="left", padx=(5, 0))
 
+    # ─── Hover Metadata Panel ────────────────────────────────────────────
+    hover_panel = ttk.Frame(panel, relief="solid", borderwidth=1)
+    art_lbl = tk.Label(hover_panel)
+    art_lbl.pack(side="left")
+    text_frame = ttk.Frame(hover_panel)
+    text_frame.pack(side="left", padx=5)
+    title_lbl = ttk.Label(text_frame, font=("TkDefaultFont", 10, "bold"))
+    title_lbl.pack(anchor="w")
+    artist_lbl = ttk.Label(text_frame, font=("TkDefaultFont", 8))
+    artist_lbl.pack(anchor="w")
+    hover_panel.place(relx=1.0, rely=1.0, anchor="se", x=-10, y=-10)
+    hover_panel.place_forget()
+
+    panel.setup_hover(hover_panel, art_lbl, title_lbl, artist_lbl)
+
     return frame
 
 
