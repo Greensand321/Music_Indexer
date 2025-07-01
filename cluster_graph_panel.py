@@ -11,6 +11,11 @@ from matplotlib.path import Path
 
 from playlist_generator import write_playlist
 
+from io import BytesIO
+from PIL import Image, ImageTk
+from mutagen import File as MutagenFile
+from music_indexer_api import get_tags
+
 
 class ClusterGraphPanel(ttk.Frame):
     """Interactive scatter plot with lasso selection for playlist creation."""
@@ -44,6 +49,16 @@ class ClusterGraphPanel(ttk.Frame):
         self.selected_indices: list[int] = []
         self.selected_tracks: list[str] = []
 
+        # Hover support widgets will be set later via ``setup_hover``
+        self.hover_panel = None
+        self.hover_album_label = None
+        self.hover_title_label = None
+        self.hover_artist_label = None
+        self._prev_hover_index: int | None = None
+
+        # Preload album art thumbnails for snappy hover updates
+        self.album_thumbnails = [self._load_thumbnail(p) for p in tracks]
+
     # UI widgets created externally will be assigned after instantiation
     lasso_btn: ttk.Widget
     ok_btn: ttk.Button
@@ -66,6 +81,76 @@ class ClusterGraphPanel(ttk.Frame):
         self.ok_btn.configure(state="disabled")
         self.gen_btn.configure(state="disabled")
         self.canvas.draw_idle()
+
+    # ─── Hover Metadata Panel ────────────────────────────────────────────────
+    def setup_hover(self, panel, album_label, title_label, artist_label):
+        """Register widgets used for hover display."""
+        self.hover_panel = panel
+        self.hover_album_label = album_label
+        self.hover_title_label = title_label
+        self.hover_artist_label = artist_label
+        self.canvas.mpl_connect("motion_notify_event", self._on_motion)
+
+    def _load_thumbnail(self, path: str) -> ImageTk.PhotoImage:
+        """Return a 64x64 thumbnail for ``path`` or a gray placeholder."""
+        img = None
+        try:
+            audio = MutagenFile(path)
+            img_data = None
+            if hasattr(audio, "tags") and audio.tags is not None:
+                for key in audio.tags.keys():
+                    if key.startswith("APIC"):
+                        img_data = audio.tags[key].data
+                        break
+            if img_data is None and getattr(audio, "pictures", None):
+                pics = getattr(audio, "pictures", [])
+                if pics:
+                    img_data = pics[0].data
+            if img_data:
+                img = Image.open(BytesIO(img_data))
+        except Exception:
+            img = None
+
+        if img is None:
+            img = Image.new("RGB", (64, 64), "#777777")
+
+        img.thumbnail((64, 64))
+        return ImageTk.PhotoImage(img)
+
+    def _on_motion(self, event):
+        if not self.hover_panel:
+            return
+        if event.inaxes != self.ax:
+            self._hide_hover()
+            return
+
+        cont, details = self.scatter.contains(event)
+        if not cont or not details.get("ind"):
+            self._hide_hover()
+            return
+
+        idx = details["ind"][0]
+        if self._prev_hover_index == idx:
+            return
+
+        self._prev_hover_index = idx
+        track = self.tracks[idx]
+        tags = get_tags(track)
+        title = tags.get("title") or os.path.basename(track)
+        artist = tags.get("artist") or "Unknown"
+
+        thumb = self.album_thumbnails[idx]
+        self.hover_album_label.configure(image=thumb)
+        self.hover_album_label.image = thumb
+        self.hover_title_label.configure(text=title)
+        self.hover_artist_label.configure(text=artist)
+        self.hover_panel.place(relx=1.0, rely=1.0, anchor="se", x=-10, y=-10)
+
+    def _hide_hover(self):
+        if self._prev_hover_index is not None:
+            self._prev_hover_index = None
+            if self.hover_panel:
+                self.hover_panel.place_forget()
 
     def _on_lasso_select(self, verts):
         path = Path(verts)
