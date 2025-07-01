@@ -146,6 +146,45 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
         log_callback=app._log,
     )
     panel.pack(fill="both", expand=True)
+
+    btn_frame = ttk.Frame(frame)
+    btn_frame.pack(side="bottom", fill="x", pady=5)
+
+    panel.lasso_var = tk.BooleanVar(value=False)
+    panel.auto_var = tk.BooleanVar(value=False)
+
+    lasso_btn = ttk.Checkbutton(
+        btn_frame,
+        text="Lasso Mode",
+        variable=panel.lasso_var,
+        command=panel.toggle_lasso,
+    )
+    lasso_btn.pack(side="left")
+    panel.lasso_btn = lasso_btn
+
+    panel.ok_btn = ttk.Button(
+        btn_frame,
+        text="OK",
+        command=panel.finalize_lasso,
+        state="disabled",
+    )
+    panel.ok_btn.pack(side="left", padx=(5, 0))
+
+    panel.gen_btn = ttk.Button(
+        btn_frame,
+        text="Generate Playlist",
+        command=panel.create_playlist,
+        state="disabled",
+    )
+    panel.gen_btn.pack(side="left", padx=(5, 0))
+
+    auto_chk = ttk.Checkbutton(
+        btn_frame,
+        text="Auto-Create",
+        variable=panel.auto_var,
+    )
+    auto_chk.pack(side="left", padx=(5, 0))
+
     return frame
 
 
