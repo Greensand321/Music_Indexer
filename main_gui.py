@@ -136,8 +136,14 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
         ).pack(pady=(5, 0))
         return frame
 
+    # Container ensures the graph resizes while keeping controls visible
+    container = ttk.Frame(frame)
+    container.pack(fill="both", expand=True)
+    container.rowconfigure(0, weight=1)
+    container.columnconfigure(0, weight=1)
+
     panel = ClusterGraphPanel(
-        frame,
+        container,
         tracks,
         features,
         cluster_func=km_func,
@@ -145,10 +151,12 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
         library_path=app.library_path,
         log_callback=app._log,
     )
-    panel.pack(fill="both", expand=True)
+    panel.grid(row=0, column=0, sticky="nsew", pady=(0, 5))
 
-    btn_frame = ttk.Frame(frame)
-    btn_frame.pack(side="bottom", fill="x", pady=5)
+    ttk.Separator(container, orient="horizontal").grid(row=1, column=0, sticky="ew")
+
+    btn_frame = ttk.Frame(container)
+    btn_frame.grid(row=2, column=0, sticky="ew", pady=5)
 
     panel.lasso_var = tk.BooleanVar(value=False)
     panel.auto_var = tk.BooleanVar(value=False)
