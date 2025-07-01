@@ -35,11 +35,24 @@ class ClusterGraphPanel(ttk.Frame):
         self.X2 = PCA(n_components=2).fit_transform(X)
 
         labels = cluster_func(X, cluster_params)
-        colors = [f"C{l}" for l in labels]
+
+        from matplotlib import cm
+        from matplotlib.colors import ListedColormap
+
+        k = len(set(labels))
+        base_cmap = cm.get_cmap("tab20")
+        colors = base_cmap(np.linspace(0, 1, k))
+        cmap = ListedColormap(colors)
 
         fig = Figure(figsize=(5, 5))
         self.ax = fig.add_subplot(111)
-        self.scatter = self.ax.scatter(self.X2[:, 0], self.X2[:, 1], c=colors, s=20)
+        self.scatter = self.ax.scatter(
+            self.X2[:, 0],
+            self.X2[:, 1],
+            c=labels,
+            cmap=cmap,
+            s=20,
+        )
         self.ax.set_title("Lasso to select & generate playlist")
         self.canvas = FigureCanvasTkAgg(fig, master=self)
         self.canvas.get_tk_widget().pack(fill="both", expand=True)
