@@ -289,8 +289,15 @@ class SoundVaultImporterApp(tk.Tk):
         self.theme_var = tk.StringVar(value=default_theme)
         self.scale_var = tk.StringVar(value=str(self.current_scale))
 
+        self._configure_treeview_style()
+
         # Build initial UI
         self.build_ui()
+
+    def _configure_treeview_style(self):
+        """Adjust Treeview row height based on current UI scale."""
+        base = 20
+        self.style.configure("Treeview", rowheight=int(base * self.current_scale))
 
     def build_ui(self):
         """Create all menus, frames, and widgets."""
@@ -457,6 +464,7 @@ class SoundVaultImporterApp(tk.Tk):
         cfg = load_config()
         cfg["ui_scale"] = scale
         save_config(cfg)
+        self._configure_treeview_style()
         for widget in self.winfo_children():
             widget.destroy()
         self.build_ui()
@@ -734,7 +742,7 @@ class SoundVaultImporterApp(tk.Tk):
         ttk.Button(
             dlg,
             text="Filter Folders",
-            command=lambda: self.open_folder_filter_dialog(method, var.get()),
+            command=self.open_folder_filter_dialog,
         ).pack(pady=(0, 5))
         ttk.Button(
             dlg,
@@ -833,8 +841,8 @@ class SoundVaultImporterApp(tk.Tk):
         finally:
             self.show_all = False
 
-    def open_folder_filter_dialog(self, method: str, value: str):
-        """Display folder include/exclude selector and run clustering on apply."""
+    def open_folder_filter_dialog(self):
+        """Display folder include/exclude selector and store the result."""
         if not self.library_path:
             messagebox.showwarning("No Library", "Please select a library first.")
             return
@@ -910,7 +918,7 @@ class SoundVaultImporterApp(tk.Tk):
         for p in self.folder_filter.get("exclude", []):
             exc_list.insert("end", p)
 
-        apply_btn = ttk.Button(dlg, text="Apply", state="disabled")
+        apply_btn = ttk.Button(dlg, text="Confirm", state="disabled")
         cancel_btn = ttk.Button(dlg, text="Cancel", command=dlg.destroy)
         btns = ttk.Frame(dlg)
         btns.pack(pady=(0, 10))
@@ -918,10 +926,7 @@ class SoundVaultImporterApp(tk.Tk):
         cancel_btn.pack(in_=btns, side="left", padx=5)
 
         def update_apply_state():
-            if inc_list.size() or exc_list.size():
-                apply_btn["state"] = "normal"
-            else:
-                apply_btn["state"] = "disabled"
+            apply_btn["state"] = "normal"
 
         def apply():
             self.folder_filter = {
@@ -930,9 +935,9 @@ class SoundVaultImporterApp(tk.Tk):
                 "exclude": list(exc_list.get(0, "end")),
             }
             dlg.destroy()
-            self._start_cluster_playlists(method, value, dlg=None)
 
         apply_btn.config(command=apply)
+        update_apply_state()
 
         dlg.wait_window()
 
