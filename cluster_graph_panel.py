@@ -3,7 +3,7 @@ from datetime import datetime
 
 import numpy as np
 import tkinter as tk
-from tkinter import ttk
+from tkinter import ttk, messagebox
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
 from matplotlib.widgets import LassoSelector
@@ -43,28 +43,13 @@ class ClusterGraphPanel(ttk.Frame):
         X = np.vstack(features)
         self.X2 = PCA(n_components=2).fit_transform(X)
 
-        labels = cluster_func(X, cluster_params)
-
-        from matplotlib import cm
-
-        uniq = sorted([l for l in set(labels) if l >= 0])
-        base_cmap = cm.get_cmap("tab20")
-        colors = base_cmap(np.linspace(0, 1, max(len(uniq), 1)))
-        label_colors = {l: colors[i % len(colors)] for i, l in enumerate(uniq)}
-        label_colors[-1] = (0.6, 0.6, 0.6, 0.5)
-        point_colors = [label_colors.get(l, (0.6, 0.6, 0.6, 0.5)) for l in labels]
-
         fig = Figure(figsize=(5, 5))
         self.ax = fig.add_subplot(111)
-        self.scatter = self.ax.scatter(
-            self.X2[:, 0],
-            self.X2[:, 1],
-            c=point_colors,
-            s=20,
-        )
-        self.ax.set_title("Lasso to select & generate playlist")
         self.canvas = FigureCanvasTkAgg(fig, master=self)
         self.canvas.get_tk_widget().pack(fill="both", expand=True)
+
+        self.scatter = None
+        self._draw_clusters(cluster_func(X, cluster_params))
 
         self.lasso = None
         self.sel_scatter = None
@@ -241,3 +226,82 @@ class ClusterGraphPanel(ttk.Frame):
                 s=60,
             )
         self.canvas.draw_idle()
+
+    # ─── Re-clustering Support ─────────────────────────────────────────────
+    def _compute_colors(self, labels):
+        from matplotlib import cm
+
+        uniq = sorted([l for l in set(labels) if l >= 0])
+        base_cmap = cm.get_cmap("tab20")
+        colors = base_cmap(np.linspace(0, 1, max(len(uniq), 1)))
+        label_colors = {l: colors[i % len(colors)] for i, l in enumerate(uniq)}
+        label_colors[-1] = (0.6, 0.6, 0.6, 0.5)
+        point_colors = [label_colors.get(l, (0.6, 0.6, 0.6, 0.5)) for l in labels]
+        return point_colors, label_colors
+
+    def _draw_clusters(self, labels):
+        point_colors, self.label_colors = self._compute_colors(labels)
+        self.labels = labels
+        self.ax.clear()
+        self.scatter = self.ax.scatter(
+            self.X2[:, 0],
+            self.X2[:, 1],
+            c=point_colors,
+            s=20,
+        )
+        self.ax.set_title("Lasso to select & generate playlist")
+        self.canvas.draw_idle()
+
+    def recluster(self, params: dict):
+        """Re-run clustering with new ``params`` and redraw the plot."""
+        self.cluster_params = params
+        if self.lasso is not None:
+            self.toggle_lasso()
+        self._clear_selection()
+        X = np.vstack(self.features)
+        labels = self.cluster_func(X, params)
+        self._draw_clusters(labels)
+
+    def open_param_dialog(self):
+        """Show dialog to edit HDBSCAN parameters and redraw clusters."""
+        dlg = tk.Toplevel(self)
+        dlg.title("HDBSCAN Parameters")
+        dlg.grab_set()
+
+        cs_var = tk.StringVar(value=str(self.cluster_params.get("min_cluster_size", 5)))
+        ms_var = tk.StringVar(value=str(self.cluster_params.get("min_samples", "")))
+        eps_var = tk.StringVar(value=str(self.cluster_params.get("cluster_selection_epsilon", "")))
+
+        ttk.Label(dlg, text="Min cluster size:").grid(row=0, column=0, sticky="w")
+        ttk.Entry(dlg, textvariable=cs_var, width=10).grid(row=0, column=1, sticky="w", padx=(5, 0))
+        ttk.Label(dlg, text="Min samples:").grid(row=1, column=0, sticky="w")
+        ttk.Entry(dlg, textvariable=ms_var, width=10).grid(row=1, column=1, sticky="w", padx=(5, 0))
+        ttk.Label(dlg, text="Epsilon:").grid(row=2, column=0, sticky="w")
+        ttk.Entry(dlg, textvariable=eps_var, width=10).grid(row=2, column=1, sticky="w", padx=(5, 0))
+
+        btns = ttk.Frame(dlg)
+        btns.grid(row=3, column=0, columnspan=2, pady=(10, 5))
+
+        def generate():
+            try:
+                params = {"min_cluster_size": int(cs_var.get())}
+            except ValueError:
+                messagebox.showerror("Invalid Value", f"{cs_var.get()} is not a valid number")
+                return
+            if ms_var.get().strip():
+                try:
+                    params["min_samples"] = int(ms_var.get())
+                except ValueError:
+                    messagebox.showerror("Invalid Value", f"{ms_var.get()} is not a valid number")
+                    return
+            if eps_var.get().strip():
+                try:
+                    params["cluster_selection_epsilon"] = float(eps_var.get())
+                except ValueError:
+                    messagebox.showerror("Invalid Value", f"{eps_var.get()} is not a valid number")
+                    return
+            self.recluster(params)
+            dlg.destroy()
+
+        ttk.Button(btns, text="Generate", command=generate).pack(side="left", padx=5)
+        ttk.Button(btns, text="Cancel", command=dlg.destroy).pack(side="left", padx=5)

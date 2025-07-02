@@ -128,12 +128,22 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
         from hdbscan import HDBSCAN
 
         def km_func(X, p):
-            return HDBSCAN(min_cluster_size=p["min_cluster_size"]).fit_predict(X)
+            kwargs = {"min_cluster_size": p["min_cluster_size"]}
+            if "min_samples" in p:
+                kwargs["min_samples"] = p["min_samples"]
+            if "cluster_selection_epsilon" in p:
+                kwargs["cluster_selection_epsilon"] = p["cluster_selection_epsilon"]
+            return HDBSCAN(**kwargs).fit_predict(X)
 
         min_cs = 5
+        extras = {}
         if cluster_cfg and cluster_cfg.get("method") == "hdbscan":
-            min_cs = int(cluster_cfg.get("num", 5))
-        params = {"min_cluster_size": min_cs, "method": "hdbscan"}
+            min_cs = int(cluster_cfg.get("min_cluster_size", cluster_cfg.get("num", 5)))
+            if "min_samples" in cluster_cfg:
+                extras["min_samples"] = int(cluster_cfg["min_samples"])
+            if "cluster_selection_epsilon" in cluster_cfg:
+                extras["cluster_selection_epsilon"] = float(cluster_cfg["cluster_selection_epsilon"])
+        params = {"min_cluster_size": min_cs, "method": "hdbscan", **extras}
     else:
         ttk.Label(frame, text=f"{name} panel coming soon…").pack(padx=10, pady=10)
         return frame
@@ -211,6 +221,10 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
 
     auto_btn = ttk.Button(btn_frame, text="Auto-Create", command=_auto_create_all)
     auto_btn.pack(side="left", padx=(5, 0))
+
+    if name == "Interactive – HDBSCAN":
+        redo_btn = ttk.Button(btn_frame, text="Redo Values", command=panel.open_param_dialog)
+        redo_btn.pack(side="left", padx=(5, 0))
 
     # ─── Hover Metadata Panel ────────────────────────────────────────────
     hover_panel = ttk.Frame(panel, relief="solid", borderwidth=1)
