@@ -6,6 +6,7 @@ if sys.platform == "win32":
     try:
         # For Windows 8.1+
         import ctypes
+
         ctypes.windll.shcore.SetProcessDpiAwareness(1)  # SYSTEM_DPI_AWARE
     except Exception:
         try:
@@ -16,6 +17,7 @@ if sys.platform == "win32":
 
 import tkinter as tk
 from tkinter import ttk
+
 Style = ttk.Style  # Default built-in themes
 # Optional theme packs:
 # from ttkthemes import ThemedStyle as Style
@@ -60,6 +62,7 @@ from config import load_config, save_config
 FilterFn = Callable[[FileRecord], bool]
 _cached_filters = None
 
+
 def make_filters(ex_no_diff: bool, ex_skipped: bool, show_all: bool) -> List[FilterFn]:
     global _cached_filters
     key = (ex_no_diff, ex_skipped, show_all)
@@ -68,16 +71,19 @@ def make_filters(ex_no_diff: bool, ex_skipped: bool, show_all: bool) -> List[Fil
 
     fns: List[FilterFn] = []
     if not show_all:
-        fns.append(lambda r: r.status != 'applied')
+        fns.append(lambda r: r.status != "applied")
         if ex_no_diff:
-            fns.append(lambda r: r.status != 'no_diff')
+            fns.append(lambda r: r.status != "no_diff")
         if ex_skipped:
-            fns.append(lambda r: r.status != 'skipped')
+            fns.append(lambda r: r.status != "skipped")
 
     _cached_filters = (key, fns)
     return fns
 
-def apply_filters(records: List[FileRecord], filters: List[FilterFn]) -> List[FileRecord]:
+
+def apply_filters(
+    records: List[FileRecord], filters: List[FilterFn]
+) -> List[FileRecord]:
     for fn in filters:
         records = [r for r in records if fn(r)]
     return records
@@ -98,7 +104,7 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
             ),
             justify="center",
         ).pack(padx=10, pady=10)
-        app._log(f"\u26A0 {exc}")
+        app._log(f"\u26a0 {exc}")
         return frame
 
     cluster_data = getattr(app, "cluster_data", None)
@@ -194,14 +200,12 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
 
     def _auto_create_all():
         method = panel.cluster_params.get("method")
-        num = panel.cluster_params.get("n_clusters") or panel.cluster_params.get(
-            "min_cluster_size"
-        )
-        if num is None:
+        params = {k: v for k, v in panel.cluster_params.items() if k != "method"}
+        if not params:
             return
         threading.Thread(
             target=app._run_cluster_generation,
-            args=(app.library_path, method, int(num)),
+            args=(app.library_path, method, params),
             daemon=True,
         ).start()
 
@@ -224,7 +228,6 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
     panel.setup_hover(hover_panel, art_lbl, title_lbl, artist_lbl)
 
     return frame
-
 
 
 class ProgressDialog(tk.Toplevel):
@@ -320,7 +323,9 @@ class SoundVaultImporterApp(tk.Tk):
         menubar.add_cascade(label="File", menu=file_menu)
 
         tools_menu = tk.Menu(menubar, tearoff=False)
-        tools_menu.add_command(label="Regenerate Playlists", command=self.regenerate_playlists)
+        tools_menu.add_command(
+            label="Regenerate Playlists", command=self.regenerate_playlists
+        )
         tools_menu.add_command(label="Fix Tags via AcoustID", command=self.fix_tags_gui)
         tools_menu.add_command(
             label="Generate Library Index…",
@@ -331,14 +336,17 @@ class SoundVaultImporterApp(tk.Tk):
             command=lambda: list_unique_genres(self.require_library()),
         )
         if PYDUB_AVAILABLE and self.ffmpeg_available:
-            tools_menu.add_command(label="Play Highlight…", command=self.sample_song_highlight)
+            tools_menu.add_command(
+                label="Play Highlight…", command=self.sample_song_highlight
+            )
         else:
             tools_menu.add_command(
-                label="Play Highlight… (requires pydub & ffmpeg)",
-                state="disabled"
+                label="Play Highlight… (requires pydub & ffmpeg)", state="disabled"
             )
         tools_menu.add_separator()
-        tools_menu.add_command(label="Genre Normalizer", command=self._open_genre_normalizer)
+        tools_menu.add_command(
+            label="Genre Normalizer", command=self._open_genre_normalizer
+        )
         tools_menu.add_command(label="Reset Tag-Fix Log", command=self.reset_tagfix_log)
         cluster_menu = tk.Menu(tools_menu, tearoff=False)
         cluster_menu.add_command(
@@ -355,8 +363,12 @@ class SoundVaultImporterApp(tk.Tk):
         # ─── Library Info ───────────────────────────────────────────────────
         top = tk.Frame(self)
         top.pack(fill="x", padx=10, pady=(10, 0))
-        tk.Button(top, text="Choose Library…", command=self.select_library).pack(side="left")
-        tk.Label(top, textvariable=self.library_name_var, anchor="w").pack(side="left", padx=(5, 0))
+        tk.Button(top, text="Choose Library…", command=self.select_library).pack(
+            side="left"
+        )
+        tk.Label(top, textvariable=self.library_name_var, anchor="w").pack(
+            side="left", padx=(5, 0)
+        )
         cb = ttk.Combobox(
             top,
             textvariable=self.theme_var,
@@ -376,8 +388,12 @@ class SoundVaultImporterApp(tk.Tk):
         )
         cb_scale.pack(side="right", padx=5)
         cb_scale.bind("<<ComboboxSelected>>", self.on_scale_change)
-        tk.Label(self, textvariable=self.library_path_var, anchor="w").pack(fill="x", padx=10)
-        tk.Label(self, textvariable=self.library_stats_var, justify="left").pack(anchor="w", padx=10, pady=(0, 10))
+        tk.Label(self, textvariable=self.library_path_var, anchor="w").pack(
+            fill="x", padx=10
+        )
+        tk.Label(self, textvariable=self.library_stats_var, justify="left").pack(
+            anchor="w", padx=10, pady=(0, 10)
+        )
 
         # ─── Output + Help Notebook ─────────────────────────────────────────
         self.notebook = ttk.Notebook(self)
@@ -395,10 +411,18 @@ class SoundVaultImporterApp(tk.Tk):
 
         # (Library path now selected via Choose Library… in the main toolbar)
         self.dry_run_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(self.indexer_tab, text="Dry Run", variable=self.dry_run_var).grid(row=0, column=0, columnspan=2, sticky="w")
+        ttk.Checkbutton(
+            self.indexer_tab, text="Dry Run", variable=self.dry_run_var
+        ).grid(row=0, column=0, columnspan=2, sticky="w")
 
-        ttk.Button(self.indexer_tab, text="Start Indexer", command=self.run_indexer).grid(row=1, column=0, pady=10)
-        ttk.Button(self.indexer_tab, text="Open 'Not Sorted' Folder", command=self.open_not_sorted_folder).grid(row=1, column=1, pady=10)
+        ttk.Button(
+            self.indexer_tab, text="Start Indexer", command=self.run_indexer
+        ).grid(row=1, column=0, pady=10)
+        ttk.Button(
+            self.indexer_tab,
+            text="Open 'Not Sorted' Folder",
+            command=self.open_not_sorted_folder,
+        ).grid(row=1, column=1, pady=10)
 
         self.pb = ttk.Progressbar(self.indexer_tab, length=300, mode="determinate")
         self.pb.grid(row=2, column=0, columnspan=2, pady=5, sticky="ew")
@@ -411,7 +435,9 @@ class SoundVaultImporterApp(tk.Tk):
         self.playlist_tab = ttk.Frame(self.notebook)
         self.notebook.add(self.playlist_tab, text="Playlist Creator")
 
-        self.plugin_list = tk.Listbox(self.playlist_tab, width=30, exportselection=False)
+        self.plugin_list = tk.Listbox(
+            self.playlist_tab, width=30, exportselection=False
+        )
         self.plugin_list.grid(row=0, column=0, sticky="ns")
         for name in [
             "Interactive – KMeans",
@@ -434,7 +460,9 @@ class SoundVaultImporterApp(tk.Tk):
         self.notebook.add(help_frame, text="Help")
 
         # Chat history display
-        self.chat_history = ScrolledText(help_frame, height=15, state="disabled", wrap="word")
+        self.chat_history = ScrolledText(
+            help_frame, height=15, state="disabled", wrap="word"
+        )
         self.chat_history.pack(fill="both", expand=True, padx=10, pady=(10, 5))
 
         # Entry + send button
@@ -480,7 +508,6 @@ class SoundVaultImporterApp(tk.Tk):
         panel = create_panel_for_plugin(self, sel, parent=self.plugin_panel)
         if panel:
             panel.pack(fill="both", expand=True)
-
 
     def _load_genre_mapping(self):
         """Load genre mapping from ``self.mapping_path`` if possible."""
@@ -540,7 +567,9 @@ class SoundVaultImporterApp(tk.Tk):
 
     def import_songs(self):
         initial = load_last_path()
-        vault = filedialog.askdirectory(title="Select SoundVault Root", initialdir=initial)
+        vault = filedialog.askdirectory(
+            title="Select SoundVault Root", initialdir=initial
+        )
         if not vault:
             return
 
@@ -552,12 +581,16 @@ class SoundVaultImporterApp(tk.Tk):
             self._log(f"✘ Invalid SoundVault: {vault}\n" + "\n".join(errors))
             return
 
-        import_folder = filedialog.askdirectory(title="Select Folder of New Songs", initialdir=vault)
+        import_folder = filedialog.askdirectory(
+            title="Select Folder of New Songs", initialdir=vault
+        )
         if not import_folder:
             return
 
         dry_run = messagebox.askyesno("Dry Run?", "Perform a dry-run preview only?")
-        estimate = messagebox.askyesno("Estimate BPM?", "Attempt BPM estimation for missing values?")
+        estimate = messagebox.askyesno(
+            "Estimate BPM?", "Attempt BPM estimation for missing values?"
+        )
 
         try:
             summary = import_new_files(
@@ -568,15 +601,22 @@ class SoundVaultImporterApp(tk.Tk):
                 log_callback=self._log,
             )
             if summary["dry_run"]:
-                messagebox.showinfo("Dry Run Complete", f"Preview written to:\n{summary['html']}")
+                messagebox.showinfo(
+                    "Dry Run Complete", f"Preview written to:\n{summary['html']}"
+                )
             else:
                 moved = summary.get("moved", 0)
-                messagebox.showinfo("Import Complete", f"Imported {moved} files. Preview:\n{summary['html']}")
+                messagebox.showinfo(
+                    "Import Complete",
+                    f"Imported {moved} files. Preview:\n{summary['html']}",
+                )
 
             if summary.get("errors"):
                 self._log("! Some files failed to import. Check log for details.")
 
-            self._log(f"✓ Import finished for {import_folder} → {vault}. Dry run: {dry_run}. BPM: {estimate}.")
+            self._log(
+                f"✓ Import finished for {import_folder} → {vault}. Dry run: {dry_run}. BPM: {estimate}."
+            )
         except Exception as e:
             messagebox.showerror("Import failed", str(e))
             self._log(f"✘ Import failed for {import_folder}: {e}")
@@ -600,6 +640,7 @@ class SoundVaultImporterApp(tk.Tk):
             def ui():
                 self.log.insert("end", msg + "\n")
                 self.log.see("end")
+
             self.after(0, ui)
 
         def progress(idx, total, path_):
@@ -608,6 +649,7 @@ class SoundVaultImporterApp(tk.Tk):
                 self.pb["value"] = idx
                 self.log.insert("end", f"[{idx}/{total}] {path_}\n")
                 self.log.see("end")
+
             self.after(0, ui)
 
         def task():
@@ -621,15 +663,39 @@ class SoundVaultImporterApp(tk.Tk):
                 )
                 self.after(0, lambda: self.log.insert("end", "✔ Indexing complete\n"))
                 if dry_run:
-                    self.after(0, lambda: messagebox.showinfo("Dry Run Complete", f"Preview written to:\n{output_html}"))
+                    self.after(
+                        0,
+                        lambda: messagebox.showinfo(
+                            "Dry Run Complete", f"Preview written to:\n{output_html}"
+                        ),
+                    )
                 else:
-                    self.after(0, lambda: messagebox.showinfo("Indexing Complete", f"Moved/renamed {summary.get('moved', 0)} files."))
-                self.after(0, lambda: self._log(f"✓ Run Indexer finished for {path}. Dry run: {dry_run}."))
+                    self.after(
+                        0,
+                        lambda: messagebox.showinfo(
+                            "Indexing Complete",
+                            f"Moved/renamed {summary.get('moved', 0)} files.",
+                        ),
+                    )
+                self.after(
+                    0,
+                    lambda: self._log(
+                        f"✓ Run Indexer finished for {path}. Dry run: {dry_run}."
+                    ),
+                )
             except Exception:
                 import traceback
+
                 err_msg = traceback.format_exc().strip()
-                self.after(0, lambda m=err_msg: messagebox.showerror("Indexing failed", m))
-                self.after(0, lambda m=err_msg: self._log(f"✘ Run Indexer failed for {path}:\n{m}"))
+                self.after(
+                    0, lambda m=err_msg: messagebox.showerror("Indexing failed", m)
+                )
+                self.after(
+                    0,
+                    lambda m=err_msg: self._log(
+                        f"✘ Run Indexer failed for {path}:\n{m}"
+                    ),
+                )
             finally:
                 self.after(0, self.update_library_info)
 
@@ -707,7 +773,9 @@ class SoundVaultImporterApp(tk.Tk):
         path = self.require_library()
         if not path:
             return
-        messagebox.showinfo("Scan for Orphans", f"[stub] Would scan for orphans in:\n{path}")
+        messagebox.showinfo(
+            "Scan for Orphans", f"[stub] Would scan for orphans in:\n{path}"
+        )
         self._log(f"[stub] Scan for Orphans → {path}")
         self.update_library_info()
 
@@ -715,12 +783,15 @@ class SoundVaultImporterApp(tk.Tk):
         master = self.require_library()
         if not master:
             return
-        device = filedialog.askdirectory(title="Select Device Library Root", initialdir=master)
+        device = filedialog.askdirectory(
+            title="Select Device Library Root", initialdir=master
+        )
         if not device:
             return
         save_last_path(device)
         messagebox.showinfo(
-            "Compare Libraries", f"[stub] Would compare:\nMaster: {master}\nDevice: {device}"
+            "Compare Libraries",
+            f"[stub] Would compare:\nMaster: {master}\nDevice: {device}",
         )
         self._log(f"[stub] Compare Libraries → Master: {master}, Device: {device}")
         self.update_library_info()
@@ -735,25 +806,76 @@ class SoundVaultImporterApp(tk.Tk):
         self._log(f"[stub] Regenerate Playlists → {path}")
         self.update_library_info()
 
-    def cluster_playlists_dialog(self, method: str):
+    def cluster_playlists_dialog(self, method: str = "kmeans"):
         path = self.require_library()
         if not path:
             return
 
         dlg = tk.Toplevel(self)
-        dlg.title(f"Clustered Playlists – {method.title()}")
+        dlg.title("Clustered Playlists")
         dlg.grab_set()
         dlg.resizable(True, True)
 
-        var = tk.StringVar(value="5")
-        label = (
-            "Number of clusters:" if method == "kmeans" else "Min cluster size:"
-        )
+        method_var = tk.StringVar(value=method)
 
         top = ttk.Frame(dlg)
         top.pack(fill="x", padx=10, pady=(10, 0))
-        tk.Label(top, text=label).pack(side="left")
-        ttk.Entry(top, textvariable=var, width=10).pack(side="left", padx=(5, 0))
+
+        def _update_fields(*args):
+            if method_var.get() == "kmeans":
+                hdb_frame.pack_forget()
+                km_frame.pack(fill="x")
+            else:
+                km_frame.pack_forget()
+                hdb_frame.pack(fill="x")
+
+        rb_km = ttk.Radiobutton(
+            top,
+            text="KMeans",
+            variable=method_var,
+            value="kmeans",
+            command=_update_fields,
+        )
+        rb_hdb = ttk.Radiobutton(
+            top,
+            text="HDBSCAN",
+            variable=method_var,
+            value="hdbscan",
+            command=_update_fields,
+        )
+        rb_km.pack(side="left")
+        rb_hdb.pack(side="left", padx=(5, 0))
+
+        params_frame = ttk.Frame(dlg)
+        params_frame.pack(fill="x", padx=10, pady=(5, 0))
+
+        # KMeans params
+        km_frame = ttk.Frame(params_frame)
+        km_var = tk.StringVar(value="5")
+        ttk.Label(km_frame, text="Number of clusters:").pack(side="left")
+        ttk.Entry(km_frame, textvariable=km_var, width=10).pack(
+            side="left", padx=(5, 0)
+        )
+
+        # HDBSCAN params
+        hdb_frame = ttk.Frame(params_frame)
+        min_size_var = tk.StringVar(value="5")
+        ttk.Label(hdb_frame, text="Min cluster size:").grid(row=0, column=0, sticky="w")
+        ttk.Entry(hdb_frame, textvariable=min_size_var, width=10).grid(
+            row=0, column=1, sticky="w", padx=(5, 0)
+        )
+        ttk.Label(hdb_frame, text="Min samples:").grid(row=1, column=0, sticky="w")
+        min_samples_var = tk.StringVar(value="")
+        ttk.Entry(hdb_frame, textvariable=min_samples_var, width=10).grid(
+            row=1, column=1, sticky="w", padx=(5, 0)
+        )
+        ttk.Label(hdb_frame, text="Epsilon:").grid(row=2, column=0, sticky="w")
+        epsilon_var = tk.StringVar(value="")
+        ttk.Entry(hdb_frame, textvariable=epsilon_var, width=10).grid(
+            row=2, column=1, sticky="w", padx=(5, 0)
+        )
+
+        _update_fields()
 
         # ─── Folder Filter UI ────────────────────────────────────────────
         music_root = (
@@ -806,14 +928,21 @@ class SoundVaultImporterApp(tk.Tk):
 
         btn_inc = ttk.Frame(lists)
         btn_inc.grid(row=2, column=0, pady=(5, 0))
-        ttk.Button(btn_inc, text="Add ➕", command=lambda: add_to(inc_list)).pack(side="left")
-        ttk.Button(btn_inc, text="Remove ➖", command=lambda: remove_from(inc_list)).pack(side="left")
+        ttk.Button(btn_inc, text="Add ➕", command=lambda: add_to(inc_list)).pack(
+            side="left"
+        )
+        ttk.Button(
+            btn_inc, text="Remove ➖", command=lambda: remove_from(inc_list)
+        ).pack(side="left")
 
         btn_exc = ttk.Frame(lists)
         btn_exc.grid(row=2, column=1, pady=(5, 0))
-        ttk.Button(btn_exc, text="Add ➕", command=lambda: add_to(exc_list)).pack(side="left")
-        ttk.Button(btn_exc, text="Remove ➖", command=lambda: remove_from(exc_list)).pack(side="left")
-
+        ttk.Button(btn_exc, text="Add ➕", command=lambda: add_to(exc_list)).pack(
+            side="left"
+        )
+        ttk.Button(
+            btn_exc, text="Remove ➖", command=lambda: remove_from(exc_list)
+        ).pack(side="left")
 
         for p in self.folder_filter.get("include", []):
             inc_list.insert("end", p)
@@ -828,32 +957,67 @@ class SoundVaultImporterApp(tk.Tk):
                 "include": list(inc_list.get(0, "end")),
                 "exclude": list(exc_list.get(0, "end")),
             }
-            self._start_cluster_playlists(method, var.get(), dlg)
+
+            m = method_var.get()
+            params = {}
+            if m == "kmeans":
+                try:
+                    params["n_clusters"] = int(km_var.get())
+                except ValueError:
+                    messagebox.showerror(
+                        "Invalid Value", f"{km_var.get()} is not a valid number"
+                    )
+                    return
+            else:
+                try:
+                    params["min_cluster_size"] = int(min_size_var.get())
+                except ValueError:
+                    messagebox.showerror(
+                        "Invalid Value", f"{min_size_var.get()} is not a valid number"
+                    )
+                    return
+                if min_samples_var.get().strip():
+                    try:
+                        params["min_samples"] = int(min_samples_var.get())
+                    except ValueError:
+                        messagebox.showerror(
+                            "Invalid Value",
+                            f"{min_samples_var.get()} is not a valid number",
+                        )
+                        return
+                if epsilon_var.get().strip():
+                    try:
+                        params["cluster_selection_epsilon"] = float(epsilon_var.get())
+                    except ValueError:
+                        messagebox.showerror(
+                            "Invalid Value",
+                            f"{epsilon_var.get()} is not a valid number",
+                        )
+                        return
+            self._start_cluster_playlists(m, params, dlg)
 
         ttk.Button(btns, text="Generate", command=generate).pack(side="left", padx=5)
         ttk.Button(btns, text="Cancel", command=dlg.destroy).pack(side="left", padx=5)
 
-    def _start_cluster_playlists(self, method: str, value: str, dlg):
+    def _start_cluster_playlists(self, method: str, params: dict, dlg):
         if dlg is not None:
             dlg.destroy()
         path = self.require_library()
         if not path:
             return
-        try:
-            num = int(value)
-        except ValueError:
-            messagebox.showerror("Invalid Value", f"{value} is not a valid number")
-            return
         threading.Thread(
             target=self._run_cluster_generation,
-            args=(path, method, num),
+            args=(path, method, params),
             daemon=True,
         ).start()
 
-    def _run_cluster_generation(self, path: str, method: str, num: int):
-        tracks, feats = cluster_library(path, method, num, self._log, self.folder_filter)
+    def _run_cluster_generation(self, path: str, method: str, params: dict):
+        tracks, feats = cluster_library(
+            path, method, params, self._log, self.folder_filter
+        )
         self.cluster_data = (tracks, feats)
-        self.cluster_params = {"method": method, "num": num}
+        self.cluster_params = {"method": method, **params}
+
         def done():
             messagebox.showinfo("Clustered Playlists", "Generation complete")
             self._refresh_plugin_panel()
@@ -912,7 +1076,9 @@ class SoundVaultImporterApp(tk.Tk):
 
         tk.Button(btn, text="OK", command=ok).pack(side="left", padx=5)
         tk.Button(btn, text="Cancel", command=cancel).pack(side="left", padx=5)
-        tk.Button(btn, text="Show All Songs", command=on_show_all).pack(side="left", padx=5)
+        tk.Button(btn, text="Show All Songs", command=on_show_all).pack(
+            side="left", padx=5
+        )
         dlg.wait_window()
         return result["proceed"], var_no_diff.get(), var_skipped.get(), show_all
 
@@ -923,7 +1089,6 @@ class SoundVaultImporterApp(tk.Tk):
             self.fix_tags_gui()
         finally:
             self.show_all = False
-
 
     def fix_tags_gui(self):
         folder = filedialog.askdirectory(title="Select Folder to Fix Tags")
@@ -975,22 +1140,29 @@ class SoundVaultImporterApp(tk.Tk):
 
                         # Apply genre normalization before filtering
                         for rec in self.all_records:
-                            rec.old_genres = normalize_genres(rec.old_genres, self.genre_mapping)
-                            rec.new_genres = normalize_genres(rec.new_genres, self.genre_mapping)
+                            rec.old_genres = normalize_genres(
+                                rec.old_genres, self.genre_mapping
+                            )
+                            rec.new_genres = normalize_genres(
+                                rec.new_genres, self.genre_mapping
+                            )
 
                         filters = make_filters(ex_no_diff, ex_skipped, show_all)
                         records = apply_filters(all_records, filters)
 
                         records = sorted(
                             records,
-                            key=lambda r: (r.score is not None, r.score if r.score is not None else 0),
+                            key=lambda r: (
+                                r.score is not None,
+                                r.score if r.score is not None else 0,
+                            ),
                             reverse=True,
                         )
                         self.filtered_records = records
 
                         if not records:
                             messagebox.showinfo(
-                                'No proposals', 'No missing tags above threshold.'
+                                "No proposals", "No missing tags above threshold."
                             )
                             return
 
@@ -1005,7 +1177,7 @@ class SoundVaultImporterApp(tk.Tk):
                                 fields,
                                 log_callback=self._log,
                             )
-                            messagebox.showinfo('Done', f'Updated {count} files.')
+                            messagebox.showinfo("Done", f"Updated {count} files.")
                         return
             except queue.Empty:
                 pass
@@ -1034,9 +1206,10 @@ class SoundVaultImporterApp(tk.Tk):
             (self.apply_album, "Album"),
             (self.apply_genres, "Genres"),
         ):
-            ttk.Checkbutton(chk_frame, text=label, variable=var).pack(side="left", padx=5)
+            ttk.Checkbutton(chk_frame, text=label, variable=var).pack(
+                side="left", padx=5
+            )
         chk_frame.pack(pady=5)
-
 
         cols = (
             "File",
@@ -1047,8 +1220,8 @@ class SoundVaultImporterApp(tk.Tk):
             "New Title",
             "Old Album",
             "New Album",
-            "Genres",            # existing embedded genres
-            "Suggested Genre",   # fetched from MusicBrainz
+            "Genres",  # existing embedded genres
+            "Suggested Genre",  # fetched from MusicBrainz
         )
 
         container = tk.Frame(dlg)
@@ -1085,7 +1258,9 @@ class SoundVaultImporterApp(tk.Tk):
             tv.heading(col, command=lambda: treeview_sort_column(tv, col, not reverse))
 
         for c in cols:
-            tv.heading(c, text=c, command=lambda _c=c: treeview_sort_column(tv, _c, False))
+            tv.heading(
+                c, text=c, command=lambda _c=c: treeview_sort_column(tv, _c, False)
+            )
             width = 100
             if c == "File":
                 width = 300
@@ -1134,8 +1309,12 @@ class SoundVaultImporterApp(tk.Tk):
             setattr(self, "_proceed", True)
 
         btn_frame = tk.Frame(dlg)
-        tk.Button(btn_frame, text="Apply Selection", command=on_apply).pack(side="left", padx=5)
-        tk.Button(btn_frame, text="Cancel", command=dlg.destroy).pack(side="left", padx=5)
+        tk.Button(btn_frame, text="Apply Selection", command=on_apply).pack(
+            side="left", padx=5
+        )
+        tk.Button(btn_frame, text="Cancel", command=dlg.destroy).pack(
+            side="left", padx=5
+        )
         btn_frame.pack(pady=10)
 
         update_selection_count()
@@ -1148,33 +1327,33 @@ class SoundVaultImporterApp(tk.Tk):
         tv = self._prop_tv
         tv.delete(*tv.get_children())
         for rec in records:
-            if rec.status == 'unmatched' or (
+            if rec.status == "unmatched" or (
                 rec.score is not None and rec.score < MIN_INTERACTIVE_SCORE
             ):
-                tag = 'lowconf'
+                tag = "lowconf"
             elif (
                 rec.old_artist == rec.new_artist
                 and rec.old_title == rec.new_title
                 and rec.old_album == rec.new_album
                 and sorted(rec.old_genres) == sorted(rec.new_genres)
             ):
-                tag = 'perfect'
+                tag = "perfect"
             else:
-                tag = 'changed'
+                tag = "changed"
             tv.insert(
-                '',
-                'end',
+                "",
+                "end",
                 values=(
                     str(rec.path),
-                    f"{rec.score:.2f}" if rec.score is not None else '',
-                    rec.old_artist or '',
-                    rec.new_artist or '',
-                    rec.old_title or '',
-                    rec.new_title or '',
-                    rec.old_album or '',
-                    rec.new_album or '',
-                    '; '.join(rec.old_genres),
-                    '; '.join(rec.new_genres),
+                    f"{rec.score:.2f}" if rec.score is not None else "",
+                    rec.old_artist or "",
+                    rec.new_artist or "",
+                    rec.old_title or "",
+                    rec.new_title or "",
+                    rec.old_album or "",
+                    rec.new_album or "",
+                    "; ".join(rec.old_genres),
+                    "; ".join(rec.new_genres),
                 ),
                 tags=(tag,),
             )
@@ -1243,7 +1422,9 @@ class SoundVaultImporterApp(tk.Tk):
         win.grab_set()
 
         # 1) LLM Prompt
-        tk.Label(win, text="LLM Prompt Template:").pack(anchor="w", padx=10, pady=(10,0))
+        tk.Label(win, text="LLM Prompt Template:").pack(
+            anchor="w", padx=10, pady=(10, 0)
+        )
         self.text_prompt = ScrolledText(win, height=8, wrap="word")
         self.text_prompt.pack(fill="both", padx=10)
         self.text_prompt.insert("1.0", PROMPT_TEMPLATE.strip())
@@ -1252,24 +1433,24 @@ class SoundVaultImporterApp(tk.Tk):
             win,
             text="Copy Prompt",
             command=lambda: self.clipboard_append(PROMPT_TEMPLATE.strip()),
-        ).pack(anchor="e", padx=10, pady=(0,10))
+        ).pack(anchor="e", padx=10, pady=(0, 10))
 
         # 2) Raw Genre List
         tk.Label(win, text="Raw Genre List:").pack(anchor="w", padx=10)
         self.text_raw = ScrolledText(win, width=50, height=15)
-        self.text_raw.pack(fill="both", padx=10, pady=(0,10))
+        self.text_raw.pack(fill="both", padx=10, pady=(0, 10))
         self.text_raw.insert("1.0", "\n".join(self.raw_genre_list))
         self.text_raw.configure(state="disabled")
         ttk.Button(
             win,
             text="Copy Raw List",
             command=lambda: self.clipboard_append("\n".join(self.raw_genre_list)),
-        ).pack(anchor="e", padx=10, pady=(0,10))
+        ).pack(anchor="e", padx=10, pady=(0, 10))
 
         # 3) Mapping JSON Input
         tk.Label(win, text="Paste JSON Mapping Here:").pack(anchor="w", padx=10)
         self.text_map = ScrolledText(win, width=50, height=10)
-        self.text_map.pack(fill="both", padx=10, pady=(0,10))
+        self.text_map.pack(fill="both", padx=10, pady=(0, 10))
         # pre-load existing mapping
         try:
             with open(self.mapping_path, "r", encoding="utf-8") as f:
@@ -1280,9 +1461,13 @@ class SoundVaultImporterApp(tk.Tk):
 
         # Buttons: Apply Mapping & Close
         btn_frame = ttk.Frame(win)
-        btn_frame.pack(fill="x", padx=10, pady=(0,10))
-        ttk.Button(btn_frame, text="Apply Mapping", command=self.apply_mapping).pack(side="right")
-        ttk.Button(btn_frame, text="Close", command=win.destroy).pack(side="right", padx=(0,5))
+        btn_frame.pack(fill="x", padx=10, pady=(0, 10))
+        ttk.Button(btn_frame, text="Apply Mapping", command=self.apply_mapping).pack(
+            side="right"
+        )
+        ttk.Button(btn_frame, text="Close", command=win.destroy).pack(
+            side="right", padx=(0, 5)
+        )
 
     def apply_mapping(self):
         """Persist mapping JSON from text box and apply normalization."""
@@ -1299,7 +1484,9 @@ class SoundVaultImporterApp(tk.Tk):
             messagebox.showerror("Invalid JSON", str(e))
             return
 
-        conflicts = [k for k, v in new_map.items() if k in existing_map and existing_map[k] != v]
+        conflicts = [
+            k for k, v in new_map.items() if k in existing_map and existing_map[k] != v
+        ]
         if conflicts:
             msg = (
                 "You’re about to change existing mappings for:\n\n"
@@ -1324,7 +1511,7 @@ class SoundVaultImporterApp(tk.Tk):
         # Confirm success and close the normalization dialog
         messagebox.showinfo(
             "Mapping Applied",
-            "Your genre mapping has been successfully saved and applied to the library."
+            "Your genre mapping has been successfully saved and applied to the library.",
         )
         try:
             self.text_map.winfo_toplevel().destroy()
@@ -1333,10 +1520,14 @@ class SoundVaultImporterApp(tk.Tk):
 
     def reset_tagfix_log(self):
         initial = self.library_path or load_last_path()
-        folder = filedialog.askdirectory(title="Select Library Root", initialdir=initial)
+        folder = filedialog.askdirectory(
+            title="Select Library Root", initialdir=initial
+        )
         if not folder:
             return
-        if not messagebox.askyesno("Reset Log", "This will erase all history of prior scans. Continue?"):
+        if not messagebox.askyesno(
+            "Reset Log", "This will erase all history of prior scans. Continue?"
+        ):
             return
         docs_dir = os.path.join(folder, "Docs")
         db_path = os.path.join(docs_dir, ".soundvault.db")
@@ -1344,7 +1535,6 @@ class SoundVaultImporterApp(tk.Tk):
             os.remove(db_path)
         messagebox.showinfo("Reset", "Tag-fix log cleared.")
         self._log(f"Reset tag-fix log for {folder}")
-
 
     def _send_help_query(self):
         threading.Thread(target=self._do_help_query, daemon=True).start()
