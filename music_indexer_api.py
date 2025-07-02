@@ -6,6 +6,7 @@ import shutil  # used for relocating special folders
 import hashlib
 import sqlite3
 from collections import defaultdict
+from typing import Dict, List
 from mutagen import File as MutagenFile
 from mutagen.id3 import ID3NoHeaderError
 
@@ -13,6 +14,7 @@ from mutagen.id3 import ID3NoHeaderError
 COMMON_ARTIST_THRESHOLD = 10
 REMIX_FOLDER_THRESHOLD  = 3
 SUPPORTED_EXTS          = {".flac", ".m4a", ".aac", ".mp3", ".wav", ".ogg"}
+FUZZY_FP_THRESHOLD      = 0.1  # allowed fingerprint difference ratio
 
 # ─── Helper: build primary_counts for the entire vault ─────────────────────
 def build_primary_counts(root_path):
@@ -161,6 +163,22 @@ def derive_tags_from_path(filepath: str, music_root: str):
     return set(parts)
 
 
+def fingerprint_distance(fp1: str | None, fp2: str | None) -> float:
+    """Return normalized Hamming distance between two fingerprint strings."""
+    if not fp1 or not fp2:
+        return 1.0
+    try:
+        arr1 = [int(x) for x in fp1.split()]
+        arr2 = [int(x) for x in fp2.split()]
+    except Exception:
+        return 1.0
+    n = min(len(arr1), len(arr2))
+    if n == 0:
+        return 1.0
+    diff = sum(a != b for a, b in zip(arr1[:n], arr2[:n]))
+    return diff / n
+
+
 # ─── A. HELPER: COMPUTE MOVES & TAG INDEX ───────────────────────────────
 
 def compute_moves_and_tag_index(root_path, log_callback=None):
@@ -227,45 +245,92 @@ def compute_moves_and_tag_index(root_path, log_callback=None):
     total_audio = len(all_audio)
     log_callback(f"   → Found {total_audio} audio files.")
 
-    # ─── Phase 2: Deduplicate by (primary, title, album, fingerprint) ────────────────────────
-    log_callback("2/6: Deduplicating by (primary, title, album, fingerprint)…")
-    dup_groups = defaultdict(list)
+    # ─── Phase 2: Deduplicate using hybrid fingerprint + metadata ─────────────
+    log_callback("2/6: Deduplicating by fingerprint and metadata…")
+    EXT_PRIORITY = {".flac": 0, ".m4a": 1, ".aac": 1, ".mp3": 2, ".wav": 3, ".ogg": 4}
+
+    file_infos: Dict[str, Dict[str, str | None]] = {}
     for idx, fullpath in enumerate(all_audio, start=1):
         if idx % 50 == 0 or idx == total_audio:
             log_callback(f"   • Processing file {idx}/{total_audio} for dedupe")
         data = get_tags(fullpath)
         raw_artist = data["artist"] or os.path.splitext(os.path.basename(fullpath))[0]
         raw_artist = collapse_repeats(raw_artist)
-        title  = data["title"]  or os.path.splitext(os.path.basename(fullpath))[0]
-        album  = data["album"]  or ""
+        title = data["title"] or os.path.splitext(os.path.basename(fullpath))[0]
+        album = data["album"] or ""
         primary, _ = extract_primary_and_collabs(raw_artist)
         row = db.execute(
             "SELECT fingerprint FROM fingerprints WHERE path=?",
             (fullpath,),
         ).fetchone()
         fp = row[0] if row else None
-        key = (primary.lower(), title.lower(), album.lower(), fp or "")
-        dup_groups[key].append(fullpath)
+        file_infos[fullpath] = {
+            "primary": primary.lower(),
+            "title": title.lower(),
+            "album": album.lower(),
+            "fp": fp,
+        }
 
-    kept_files = set()
-    EXT_PRIORITY = {".flac": 0, ".m4a": 1, ".aac": 1, ".mp3": 2, ".wav": 3, ".ogg": 4}
+    to_delete: Dict[str, str] = {}
+    fp_groups: Dict[str, List[str]] = defaultdict(list)
+    for path, info in file_infos.items():
+        if info["fp"]:
+            fp_groups[info["fp"]].append(path)
 
-    for key, paths in dup_groups.items():
-        if len(paths) == 1:
-            kept_files.add(paths[0])
-        else:
-            paths_sorted = sorted(
-                paths,
-                key=lambda p: EXT_PRIORITY.get(os.path.splitext(p)[1].lower(), 999)
-            )
-            best = paths_sorted[0]
-            kept_files.add(best)
-            for loser in paths_sorted[1:]:
-                try:
-                    os.remove(loser)
-                    log_callback(f"   - Deleted duplicate: {loser}")
-                except Exception as e:
-                    log_callback(f"   ! Failed to delete {loser}: {e}")
+    kept_files = set(file_infos.keys())
+
+    for fp, paths in fp_groups.items():
+        if len(paths) <= 1:
+            continue
+        paths_sorted = sorted(paths, key=lambda p: EXT_PRIORITY.get(os.path.splitext(p)[1].lower(), 999))
+        best = paths_sorted[0]
+        for loser in paths_sorted[1:]:
+            if loser not in to_delete:
+                to_delete[loser] = "Exact FP match"
+                kept_files.discard(loser)
+
+    meta_groups: Dict[tuple, List[str]] = defaultdict(list)
+    for path in kept_files:
+        info = file_infos[path]
+        key = (info["primary"], info["title"], info["album"])
+        meta_groups[key].append(path)
+
+    candidate_groups: List[List[str]] = []
+    for key, paths in meta_groups.items():
+        if len(paths) > 1:
+            paths_sorted = sorted(paths, key=lambda p: EXT_PRIORITY.get(os.path.splitext(p)[1].lower(), 999))
+            candidate_groups.append(paths_sorted)
+
+    for group in candidate_groups:
+        if len(group) > 10:
+            base = group[0]
+            for other in group[1:]:
+                if other not in to_delete:
+                    to_delete[other] = "Metadata group"
+                    kept_files.discard(other)
+            continue
+
+        base = group[0]
+        base_fp = file_infos[base]["fp"]
+        for other in group[1:]:
+            if other in to_delete:
+                continue
+            other_fp = file_infos[other]["fp"]
+            if base_fp and other_fp:
+                dist = fingerprint_distance(base_fp, other_fp)
+                if dist <= FUZZY_FP_THRESHOLD:
+                    to_delete[other] = "Fuzzy FP match"
+                    kept_files.discard(other)
+            else:
+                to_delete[other] = "Metadata group"
+                kept_files.discard(other)
+
+    for loser, reason in to_delete.items():
+        try:
+            os.remove(loser)
+            log_callback(f"   - Deleted duplicate ({reason}): {loser}")
+        except Exception as e:
+            log_callback(f"   ! Failed to delete {loser}: {e}")
 
     # ─── Phase 3: Read metadata & build counters ─────────────────────────────────
     log_callback("3/6: Reading metadata and building counters…")
