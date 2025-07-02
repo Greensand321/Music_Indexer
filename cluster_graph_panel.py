@@ -77,7 +77,6 @@ class ClusterGraphPanel(ttk.Frame):
     lasso_btn: ttk.Widget
     ok_btn: ttk.Button
     gen_btn: ttk.Button
-    auto_var: 'tk.BooleanVar'
 
     # ─── Lasso Handling ─────────────────────────────────────────────────────
     def toggle_lasso(self):
@@ -178,17 +177,14 @@ class ClusterGraphPanel(ttk.Frame):
             self.ok_btn.configure(state="disabled")
 
     def finalize_lasso(self):
-        """Lock selection and optionally auto-create playlist."""
+        """Lock selection and enable playlist creation."""
         if not self.selected_indices:
             self.log("\u26A0 No points selected; please try again.")
             self.gen_btn.configure(state="disabled")
             return
 
         self.selected_tracks = [self.tracks[i] for i in self.selected_indices]
-        if self.auto_var.get():
-            self.create_playlist()
-        else:
-            self.gen_btn.configure(state="normal")
+        self.gen_btn.configure(state="normal")
 
     # ─── Playlist Creation ──────────────────────────────────────────────────
     def create_playlist(self):

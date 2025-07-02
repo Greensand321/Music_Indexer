@@ -166,7 +166,6 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
     btn_frame.grid(row=2, column=0, sticky="ew", pady=5)
 
     panel.lasso_var = tk.BooleanVar(value=False)
-    panel.auto_var = tk.BooleanVar(value=False)
 
     lasso_btn = ttk.Checkbutton(
         btn_frame,
@@ -193,12 +192,21 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
     )
     panel.gen_btn.pack(side="left", padx=(5, 0))
 
-    auto_chk = ttk.Checkbutton(
-        btn_frame,
-        text="Auto-Create",
-        variable=panel.auto_var,
-    )
-    auto_chk.pack(side="left", padx=(5, 0))
+    def _auto_create_all():
+        method = panel.cluster_params.get("method")
+        num = panel.cluster_params.get("n_clusters") or panel.cluster_params.get(
+            "min_cluster_size"
+        )
+        if num is None:
+            return
+        threading.Thread(
+            target=app._run_cluster_generation,
+            args=(app.library_path, method, int(num)),
+            daemon=True,
+        ).start()
+
+    auto_btn = ttk.Button(btn_frame, text="Auto-Create", command=_auto_create_all)
+    auto_btn.pack(side="left", padx=(5, 0))
 
     # ─── Hover Metadata Panel ────────────────────────────────────────────
     hover_panel = ttk.Frame(panel, relief="solid", borderwidth=1)
