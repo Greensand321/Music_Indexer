@@ -102,6 +102,7 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
         return frame
 
     cluster_data = getattr(app, "cluster_data", None)
+    cluster_cfg = getattr(app, "cluster_params", None)
     if cluster_data is None:
         tracks = features = None
     else:
@@ -113,14 +114,20 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
         def km_func(X, p):
             return KMeans(n_clusters=p["n_clusters"]).fit_predict(X)
 
-        params = {"n_clusters": 5, "method": "kmeans"}
+        n_clusters = 5
+        if cluster_cfg and cluster_cfg.get("method") == "kmeans":
+            n_clusters = int(cluster_cfg.get("num", 5))
+        params = {"n_clusters": n_clusters, "method": "kmeans"}
     elif name == "Interactive – HDBSCAN":
         from hdbscan import HDBSCAN
 
         def km_func(X, p):
             return HDBSCAN(min_cluster_size=p["min_cluster_size"]).fit_predict(X)
 
-        params = {"min_cluster_size": 5, "method": "hdbscan"}
+        min_cs = 5
+        if cluster_cfg and cluster_cfg.get("method") == "hdbscan":
+            min_cs = int(cluster_cfg.get("num", 5))
+        params = {"min_cluster_size": min_cs, "method": "hdbscan"}
     else:
         ttk.Label(frame, text=f"{name} panel coming soon…").pack(padx=10, pady=10)
         return frame
@@ -741,6 +748,7 @@ class SoundVaultImporterApp(tk.Tk):
     def _run_cluster_generation(self, path: str, method: str, num: int):
         tracks, feats = cluster_library(path, method, num, self._log)
         self.cluster_data = (tracks, feats)
+        self.cluster_params = {"method": method, "num": num}
         def done():
             messagebox.showinfo("Clustered Playlists", "Generation complete")
             self._refresh_plugin_panel()

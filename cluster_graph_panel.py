@@ -39,9 +39,10 @@ class ClusterGraphPanel(ttk.Frame):
         from matplotlib import cm
         from matplotlib.colors import ListedColormap
 
-        k = len(set(labels))
+        uniq = [l for l in set(labels) if l >= 0]
+        k = len(uniq)
         base_cmap = cm.get_cmap("tab20")
-        colors = base_cmap(np.linspace(0, 1, k))
+        colors = base_cmap(np.linspace(0, 1, max(k, 1)))
         cmap = ListedColormap(colors)
 
         fig = Figure(figsize=(5, 5))
