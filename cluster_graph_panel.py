@@ -20,7 +20,16 @@ from music_indexer_api import get_tags
 class ClusterGraphPanel(ttk.Frame):
     """Interactive scatter plot with lasso selection for playlist creation."""
 
-    def __init__(self, parent, tracks, features, cluster_func, cluster_params, library_path, log_callback):
+    def __init__(
+        self,
+        parent,
+        tracks,
+        features,
+        cluster_func,
+        cluster_params,
+        library_path,
+        log_callback,
+    ):
         super().__init__(parent)
         self.tracks = tracks
         self.features = features
@@ -37,21 +46,20 @@ class ClusterGraphPanel(ttk.Frame):
         labels = cluster_func(X, cluster_params)
 
         from matplotlib import cm
-        from matplotlib.colors import ListedColormap
 
-        uniq = [l for l in set(labels) if l >= 0]
-        k = len(uniq)
+        uniq = sorted([l for l in set(labels) if l >= 0])
         base_cmap = cm.get_cmap("tab20")
-        colors = base_cmap(np.linspace(0, 1, max(k, 1)))
-        cmap = ListedColormap(colors)
+        colors = base_cmap(np.linspace(0, 1, max(len(uniq), 1)))
+        label_colors = {l: colors[i % len(colors)] for i, l in enumerate(uniq)}
+        label_colors[-1] = (0.6, 0.6, 0.6, 0.5)
+        point_colors = [label_colors.get(l, (0.6, 0.6, 0.6, 0.5)) for l in labels]
 
         fig = Figure(figsize=(5, 5))
         self.ax = fig.add_subplot(111)
         self.scatter = self.ax.scatter(
             self.X2[:, 0],
             self.X2[:, 1],
-            c=labels,
-            cmap=cmap,
+            c=point_colors,
             s=20,
         )
         self.ax.set_title("Lasso to select & generate playlist")
@@ -179,7 +187,7 @@ class ClusterGraphPanel(ttk.Frame):
     def finalize_lasso(self):
         """Lock selection and enable playlist creation."""
         if not self.selected_indices:
-            self.log("\u26A0 No points selected; please try again.")
+            self.log("\u26a0 No points selected; please try again.")
             self.gen_btn.configure(state="disabled")
             return
 
@@ -189,7 +197,7 @@ class ClusterGraphPanel(ttk.Frame):
     # ─── Playlist Creation ──────────────────────────────────────────────────
     def create_playlist(self):
         if not self.selected_tracks:
-            self.log("\u26A0 No songs selected")
+            self.log("\u26a0 No songs selected")
             return
 
         playlists_dir = os.path.join(self.library_path, "Playlists")
@@ -233,4 +241,3 @@ class ClusterGraphPanel(ttk.Frame):
                 s=60,
             )
         self.canvas.draw_idle()
-
