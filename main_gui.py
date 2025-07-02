@@ -639,11 +639,17 @@ class SoundVaultImporterApp(tk.Tk):
             if not self._confirm_duplicates(dups):
                 log_line("✗ Operation cancelled by user")
                 return
-        if dry_run:
-            messagebox.showinfo(
-                "Not Sorted",
-                "You can move any folders you want to keep untouched into the 'Not Sorted' folder before proceeding.",
-            )
+        # Give the user a chance to exclude files by moving them into the
+        # "Not Sorted" folder before any changes are made.
+        not_sorted = os.path.join(path, "Not Sorted")
+        os.makedirs(not_sorted, exist_ok=True)
+        messagebox.showinfo(
+            "Not Sorted",
+            (
+                "Move any folders you want the indexer to skip into the "
+                "'Not Sorted' folder, then press OK to continue."
+            ),
+        )
         # 2) Proceed with threaded indexing
         threading.Thread(target=task, daemon=True).start()
 
