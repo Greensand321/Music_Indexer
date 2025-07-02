@@ -614,8 +614,8 @@ def apply_indexer_moves(root_path, log_callback=None, progress_callback=None):
     docs_dir = os.path.join(root_path, "Docs")
     os.makedirs(docs_dir, exist_ok=True)
     db_path = os.path.join(docs_dir, ".soundvault.db")
-    from fingerprint_generator import compute_fingerprints
-    compute_fingerprints(root_path, db_path, log_callback)
+    from fingerprint_generator import compute_fingerprints_parallel
+    compute_fingerprints_parallel(root_path, db_path, log_callback)
 
     moves, _, _ = compute_moves_and_tag_index(root_path, log_callback)
 

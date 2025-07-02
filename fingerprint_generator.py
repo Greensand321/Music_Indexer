@@ -1,16 +1,35 @@
 import os
 import sqlite3
-from typing import Callable
+from typing import Callable, Tuple
+from concurrent.futures import ProcessPoolExecutor
 import acoustid
 
 SUPPORTED_EXTS = {".flac", ".m4a", ".aac", ".mp3", ".wav", ".ogg"}
 
 
-def compute_fingerprints(root_path: str, db_path: str, log_callback: Callable[[str], None] | None = None) -> None:
-    """Walk ``root_path`` and compute fingerprints for all audio files."""
+def compute_fingerprint_for_file(args: Tuple[str, str]) -> Tuple[str, int | None, str | None, str | None]:
+    """Compute fingerprint for a single file. Returns (path, duration, fp, error)."""
+    path, _db_path = args
+    try:
+        duration, fp_hash = acoustid.fingerprint_file(path)
+        return path, duration, fp_hash, None
+    except Exception as e:  # pragma: no cover - just to be safe
+        return path, None, None, str(e)
+
+
+def compute_fingerprints_parallel(
+    root_path: str,
+    db_path: str,
+    log_callback: Callable[[str], None] | None = None,
+    max_workers: int | None = None,
+) -> None:
+    """Walk ``root_path`` and compute fingerprints using multiple processes."""
     if log_callback is None:
         def log_callback(msg: str) -> None:
             pass
+
+    if max_workers is None:
+        max_workers = os.cpu_count() or 1
 
     db_folder = os.path.dirname(db_path)
     os.makedirs(db_folder, exist_ok=True)
@@ -36,18 +55,32 @@ def compute_fingerprints(root_path: str, db_path: str, log_callback: Callable[[s
                 audio_files.append(os.path.join(dirpath, fname))
 
     total = len(audio_files)
-    for idx, path in enumerate(audio_files, start=1):
-        if idx % 50 == 0 or idx == total:
-            log_callback(f"   • Fingerprinting {idx}/{total}")
-        try:
-            duration, fp_hash = acoustid.fingerprint_file(path)
+    work_items = [(p, db_path) for p in audio_files]
+
+    with ProcessPoolExecutor(max_workers=max_workers) as exe:
+        for idx, (path, duration, fp_hash, err) in enumerate(exe.map(compute_fingerprint_for_file, work_items), start=1):
+            if err:
+                log_callback(f"   ! Failed fingerprint {path}: {err}")
+                continue
             conn.execute(
                 "INSERT OR REPLACE INTO fingerprints (path, duration, fingerprint) VALUES (?, ?, ?)",
                 (path, duration, fp_hash),
             )
-        except Exception as e:
-            log_callback(f"   ! Failed fingerprint {path}: {e}")
+            log_callback(f"Fingerprinted {path}")
+            if idx % 50 == 0 or idx == total:
+                log_callback(f"   • Fingerprinting {idx}/{total}")
 
     conn.commit()
     conn.close()
+
+
+
+def compute_fingerprints(
+    root_path: str,
+    db_path: str,
+    log_callback: Callable[[str], None] | None = None,
+    max_workers: int | None = None,
+) -> None:
+    """Backward-compatible wrapper around :func:`compute_fingerprints_parallel`."""
+    compute_fingerprints_parallel(root_path, db_path, log_callback, max_workers)
 
