@@ -23,7 +23,9 @@ def extract_audio_features(file_path: str, log_callback=None) -> np.ndarray:
     y, sr = librosa.load(file_path, sr=None, mono=True)
     mfcc = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=13)
     # Log raw MFCC shape for debugging
-    log_callback(f"   \u00b7 MFCC shape for {os.path.basename(file_path)}: {mfcc.shape}")
+    log_callback(
+        f"   \u00b7 MFCC shape for {os.path.basename(file_path)}: {mfcc.shape}"
+    )
     tempo, _ = librosa.beat.beat_track(y=y, sr=sr)
 
     mean_mfcc = _ensure_1d(np.mean(mfcc, axis=1))
@@ -52,18 +54,33 @@ def cluster_tracks(
 
     if method == "kmeans":
         n_clusters = int(kwargs.get("n_clusters", 5))
-        log_callback(f"⚙ Clustering {len(feature_matrix)} tracks into {n_clusters} groups …")
-        labels = KMeans(n_clusters=n_clusters, random_state=0).fit_predict(feature_matrix)
+        log_callback(
+            f"⚙ Clustering {len(feature_matrix)} tracks into {n_clusters} groups …"
+        )
+        labels = KMeans(n_clusters=n_clusters, random_state=0).fit_predict(
+            feature_matrix
+        )
     else:
         min_cluster_size = int(kwargs.get("min_cluster_size", 5))
+        extra: dict = {}
+        if "min_samples" in kwargs:
+            extra["min_samples"] = int(kwargs["min_samples"])
+        if "cluster_selection_epsilon" in kwargs:
+            extra["cluster_selection_epsilon"] = float(
+                kwargs["cluster_selection_epsilon"]
+            )
         log_callback("⚙ Running clustering algorithm …")
-        labels = hdbscan.HDBSCAN(min_cluster_size=min_cluster_size).fit_predict(feature_matrix)
+        labels = hdbscan.HDBSCAN(
+            min_cluster_size=min_cluster_size, **extra
+        ).fit_predict(feature_matrix)
 
     log_callback("✓ Clustering complete")
     return labels
 
 
-def generate_clustered_playlists(tracks, root_path: str, method: str, params: dict, log_callback=None) -> None:
+def generate_clustered_playlists(
+    tracks, root_path: str, method: str, params: dict, log_callback=None
+) -> None:
     """Create clustered playlists for the given tracks."""
     if log_callback is None:
         log_callback = lambda msg: None
