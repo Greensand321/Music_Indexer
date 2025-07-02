@@ -277,7 +277,7 @@ class SoundVaultImporterApp(tk.Tk):
 
         # Cached tracks and feature vectors for interactive clustering
         self.cluster_data = None
-        self.folder_filter = {"mode": "include", "include": [], "exclude": []}
+        self.folder_filter = {"include": [], "exclude": []}
 
         # assume ffmpeg is available without performing checks
         self.ffmpeg_available = True
@@ -814,11 +814,6 @@ class SoundVaultImporterApp(tk.Tk):
         ttk.Button(btn_exc, text="Add ➕", command=lambda: add_to(exc_list)).pack(side="left")
         ttk.Button(btn_exc, text="Remove ➖", command=lambda: remove_from(exc_list)).pack(side="left")
 
-        mode_var = tk.StringVar(value=self.folder_filter.get("mode", "include"))
-        mode_frame = ttk.Frame(dlg)
-        mode_frame.pack(fill="x")
-        ttk.Radiobutton(mode_frame, text="Include mode", variable=mode_var, value="include").pack(side="left", padx=5)
-        ttk.Radiobutton(mode_frame, text="Exclude mode", variable=mode_var, value="exclude").pack(side="left", padx=5)
 
         for p in self.folder_filter.get("include", []):
             inc_list.insert("end", p)
@@ -830,7 +825,6 @@ class SoundVaultImporterApp(tk.Tk):
 
         def generate():
             self.folder_filter = {
-                "mode": mode_var.get(),
                 "include": list(inc_list.get(0, "end")),
                 "exclude": list(exc_list.get(0, "end")),
             }
