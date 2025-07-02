@@ -7,6 +7,7 @@ import hashlib
 import sqlite3
 from collections import defaultdict
 from typing import Dict, List
+from config import load_config
 from mutagen import File as MutagenFile
 from mutagen.id3 import ID3NoHeaderError
 
@@ -14,7 +15,7 @@ from mutagen.id3 import ID3NoHeaderError
 COMMON_ARTIST_THRESHOLD = 10
 REMIX_FOLDER_THRESHOLD  = 3
 SUPPORTED_EXTS          = {".flac", ".m4a", ".aac", ".mp3", ".wav", ".ogg"}
-FUZZY_FP_THRESHOLD      = 0.1  # allowed fingerprint difference ratio
+DEFAULT_FUZZY_FP_THRESHOLD = 0.1  # allowed fingerprint difference ratio
 
 # ─── Helper: build primary_counts for the entire vault ─────────────────────
 def build_primary_counts(root_path):
@@ -200,6 +201,9 @@ def compute_moves_and_tag_index(root_path, log_callback=None):
     if log_callback is None:
         def log_callback(msg): pass
 
+    cfg = load_config()
+    fuzzy_fp_threshold = float(cfg.get("fuzzy_fp_threshold", DEFAULT_FUZZY_FP_THRESHOLD))
+
     # ─── 1) Determine MUSIC_ROOT ──────────────────────────────────────────────
     MUSIC_ROOT = os.path.join(root_path, "Music") \
         if os.path.isdir(os.path.join(root_path, "Music")) \
@@ -318,7 +322,7 @@ def compute_moves_and_tag_index(root_path, log_callback=None):
             other_fp = file_infos[other]["fp"]
             if base_fp and other_fp:
                 dist = fingerprint_distance(base_fp, other_fp)
-                if dist <= FUZZY_FP_THRESHOLD:
+                if dist <= fuzzy_fp_threshold:
                     to_delete[other] = "Fuzzy FP match"
                     kept_files.discard(other)
             else:

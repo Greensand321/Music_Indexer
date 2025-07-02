@@ -37,6 +37,19 @@ python main_gui.py
 
 Cluster generation writes progress into `<method>_log.txt` inside your library so you can review the steps later.
 
+## Configuration
+
+User settings are stored in `~/.soundvault_config.json`. To tweak the fuzzy fingerprint
+threshold used during deduplication, add a value like:
+
+```json
+{
+  "fuzzy_fp_threshold": 0.1
+}
+```
+
+Lower values require more similar fingerprints.
+
 ## File Overview
 
 The codebase is organized into a handful of key modules:
