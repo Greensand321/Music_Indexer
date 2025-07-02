@@ -5,24 +5,55 @@ from playlist_generator import DEFAULT_EXTS
 from clustered_playlists import generate_clustered_playlists
 
 
-def gather_tracks(library_path: str) -> list[str]:
-    """Return list of audio file paths under ``library_path``."""
+def gather_tracks(library_path: str, folder_filter: dict | None = None) -> list[str]:
+    """Return list of audio file paths under ``library_path`` respecting ``folder_filter``."""
+
     music_root = (
         os.path.join(library_path, "Music")
         if os.path.isdir(os.path.join(library_path, "Music"))
         else library_path
     )
-    tracks: list[str] = []
-    for dirpath, _, files in os.walk(music_root):
-        for fname in files:
-            if os.path.splitext(fname)[1].lower() in DEFAULT_EXTS:
-                tracks.append(os.path.join(dirpath, fname))
-    return tracks
+
+    mode = None
+    include: list[str] = []
+    exclude: list[str] = []
+    if folder_filter:
+        mode = folder_filter.get("mode")
+        include = [os.path.abspath(p) for p in folder_filter.get("include", [])]
+        exclude = [os.path.abspath(p) for p in folder_filter.get("exclude", [])]
+
+    def iter_dirs() -> list[str]:
+        if mode == "include" and include:
+            for root in include:
+                if os.path.isdir(root):
+                    yield from [root]
+        else:
+            yield music_root
+
+    tracks_set: set[str] = set()
+    for start in iter_dirs():
+        for dirpath, dirs, files in os.walk(start):
+            abs_dir = os.path.abspath(dirpath)
+            if mode == "exclude" and any(abs_dir.startswith(e) for e in exclude):
+                dirs[:] = []
+                continue
+            for fname in files:
+                if os.path.splitext(fname)[1].lower() in DEFAULT_EXTS:
+                    tracks_set.add(os.path.join(dirpath, fname))
+
+    return sorted(tracks_set)
 
 
-def cluster_library(library_path: str, method: str, num: int, log_callback):
+def cluster_library(
+    library_path: str,
+    method: str,
+    num: int,
+    log_callback,
+    folder_filter: dict | None = None,
+) -> tuple[list[str], list]:
     """Generate clustered playlists for ``library_path`` and return features."""
-    tracks = gather_tracks(library_path)
+
+    tracks = gather_tracks(library_path, folder_filter)
     log_path = os.path.join(library_path, f"{method}_log.txt")
 
     def log(msg: str) -> None:
