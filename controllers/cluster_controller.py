@@ -14,16 +14,14 @@ def gather_tracks(library_path: str, folder_filter: dict | None = None) -> list[
         else library_path
     )
 
-    mode = None
     include: list[str] = []
     exclude: list[str] = []
     if folder_filter:
-        mode = folder_filter.get("mode")
         include = [os.path.abspath(p) for p in folder_filter.get("include", [])]
         exclude = [os.path.abspath(p) for p in folder_filter.get("exclude", [])]
 
     def iter_dirs() -> list[str]:
-        if mode == "include" and include:
+        if include:
             for root in include:
                 if os.path.isdir(root):
                     yield from [root]
@@ -34,7 +32,7 @@ def gather_tracks(library_path: str, folder_filter: dict | None = None) -> list[
     for start in iter_dirs():
         for dirpath, dirs, files in os.walk(start):
             abs_dir = os.path.abspath(dirpath)
-            if mode == "exclude" and any(abs_dir.startswith(e) for e in exclude):
+            if any(abs_dir.startswith(e) for e in exclude):
                 dirs[:] = []
                 continue
             for fname in files:
