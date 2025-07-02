@@ -277,6 +277,7 @@ class SoundVaultImporterApp(tk.Tk):
 
         # Cached tracks and feature vectors for interactive clustering
         self.cluster_data = None
+        self.folder_filter = {"mode": "include", "include": [], "exclude": []}
 
         # assume ffmpeg is available without performing checks
         self.ffmpeg_available = True
@@ -732,6 +733,11 @@ class SoundVaultImporterApp(tk.Tk):
         ttk.Entry(dlg, textvariable=var, width=10).pack(padx=10, pady=5)
         ttk.Button(
             dlg,
+            text="Filter Folders",
+            command=lambda: self.open_folder_filter_dialog(method, var.get()),
+        ).pack(pady=(0, 5))
+        ttk.Button(
+            dlg,
             text="Generate",
             command=lambda: self._start_cluster_playlists(method, var.get(), dlg),
         ).pack(pady=(5, 10))
@@ -754,7 +760,7 @@ class SoundVaultImporterApp(tk.Tk):
         ).start()
 
     def _run_cluster_generation(self, path: str, method: str, num: int):
-        tracks, feats = cluster_library(path, method, num, self._log)
+        tracks, feats = cluster_library(path, method, num, self._log, self.folder_filter)
         self.cluster_data = (tracks, feats)
         self.cluster_params = {"method": method, "num": num}
         def done():
@@ -826,6 +832,109 @@ class SoundVaultImporterApp(tk.Tk):
             self.fix_tags_gui()
         finally:
             self.show_all = False
+
+    def open_folder_filter_dialog(self, method: str, value: str):
+        """Display folder include/exclude selector and run clustering on apply."""
+        if not self.library_path:
+            messagebox.showwarning("No Library", "Please select a library first.")
+            return
+
+        dlg = tk.Toplevel(self)
+        dlg.title("Filter Folders")
+        dlg.grab_set()
+        dlg.resizable(True, True)
+
+        music_root = (
+            os.path.join(self.library_path, "Music")
+            if os.path.isdir(os.path.join(self.library_path, "Music"))
+            else self.library_path
+        )
+
+        tree = ttk.Treeview(dlg, selectmode="extended")
+        tree.heading("#0", text="Library Folders")
+        tree.pack(side="left", fill="both", expand=True, padx=(10, 5), pady=10)
+
+        def insert_dir(parent: str, path: str):
+            node = tree.insert(parent, "end", iid=path, text=os.path.basename(path) or path)
+            try:
+                for name in sorted(os.listdir(path)):
+                    p = os.path.join(path, name)
+                    if os.path.isdir(p):
+                        insert_dir(node, p)
+            except PermissionError:
+                pass
+
+        insert_dir("", music_root)
+
+        lists = ttk.Frame(dlg)
+        lists.pack(side="right", fill="both", expand=True, padx=(5, 10), pady=10)
+        lists.columnconfigure((0, 1), weight=1)
+        lists.rowconfigure(1, weight=1)
+
+        ttk.Label(lists, text="Include List").grid(row=0, column=0)
+        ttk.Label(lists, text="Exclude List").grid(row=0, column=1)
+        inc_list = tk.Listbox(lists, selectmode="extended")
+        inc_list.grid(row=1, column=0, sticky="nsew", padx=(0, 5))
+        exc_list = tk.Listbox(lists, selectmode="extended")
+        exc_list.grid(row=1, column=1, sticky="nsew", padx=(5, 0))
+
+        def add_to(lb: tk.Listbox):
+            for sel in tree.selection():
+                if sel not in lb.get(0, "end"):
+                    lb.insert("end", sel)
+            update_apply_state()
+
+        def remove_from(lb: tk.Listbox):
+            for idx in reversed(lb.curselection()):
+                lb.delete(idx)
+            update_apply_state()
+
+        btn_inc = ttk.Frame(lists)
+        btn_inc.grid(row=2, column=0, pady=(5, 0))
+        ttk.Button(btn_inc, text="Add ➕", command=lambda: add_to(inc_list)).pack(side="left")
+        ttk.Button(btn_inc, text="Remove ➖", command=lambda: remove_from(inc_list)).pack(side="left")
+
+        btn_exc = ttk.Frame(lists)
+        btn_exc.grid(row=2, column=1, pady=(5, 0))
+        ttk.Button(btn_exc, text="Add ➕", command=lambda: add_to(exc_list)).pack(side="left")
+        ttk.Button(btn_exc, text="Remove ➖", command=lambda: remove_from(exc_list)).pack(side="left")
+
+        mode_var = tk.StringVar(value=self.folder_filter.get("mode", "include"))
+        mode_frame = ttk.Frame(dlg)
+        mode_frame.pack(fill="x")
+        ttk.Radiobutton(mode_frame, text="Include mode", variable=mode_var, value="include").pack(side="left", padx=5)
+        ttk.Radiobutton(mode_frame, text="Exclude mode", variable=mode_var, value="exclude").pack(side="left", padx=5)
+
+        for p in self.folder_filter.get("include", []):
+            inc_list.insert("end", p)
+        for p in self.folder_filter.get("exclude", []):
+            exc_list.insert("end", p)
+
+        apply_btn = ttk.Button(dlg, text="Apply", state="disabled")
+        cancel_btn = ttk.Button(dlg, text="Cancel", command=dlg.destroy)
+        btns = ttk.Frame(dlg)
+        btns.pack(pady=(0, 10))
+        apply_btn.pack(in_=btns, side="left", padx=5)
+        cancel_btn.pack(in_=btns, side="left", padx=5)
+
+        def update_apply_state():
+            if inc_list.size() or exc_list.size():
+                apply_btn["state"] = "normal"
+            else:
+                apply_btn["state"] = "disabled"
+
+        def apply():
+            self.folder_filter = {
+                "mode": mode_var.get(),
+                "include": list(inc_list.get(0, "end")),
+                "exclude": list(exc_list.get(0, "end")),
+            }
+            dlg.destroy()
+            self._start_cluster_playlists(method, value, dlg=None)
+
+        apply_btn.config(command=apply)
+
+        dlg.wait_window()
 
     def fix_tags_gui(self):
         folder = filedialog.askdirectory(title="Select Folder to Fix Tags")
