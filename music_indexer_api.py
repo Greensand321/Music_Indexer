@@ -16,6 +16,7 @@ COMMON_ARTIST_THRESHOLD = 10
 REMIX_FOLDER_THRESHOLD  = 3
 SUPPORTED_EXTS          = {".flac", ".m4a", ".aac", ".mp3", ".wav", ".ogg"}
 DEFAULT_FUZZY_FP_THRESHOLD = 0.1  # allowed fingerprint difference ratio
+DEDUP_KEEP_DELTA_THRESHOLD = 50  # score difference to auto-delete duplicates
 
 # ─── Helper: build primary_counts for the entire vault ─────────────────────
 def build_primary_counts(root_path):
@@ -180,6 +181,16 @@ def fingerprint_distance(fp1: str | None, fp2: str | None) -> float:
     return diff / n
 
 
+def _keep_score(path: str, info: dict, ext_priority: dict) -> float:
+    """Compute keep score for a file based on extension, metadata and filename."""
+    ext = os.path.splitext(path)[1].lower()
+    pri = ext_priority.get(ext, 99)
+    ext_score = 1000.0 / (pri + 1)
+    meta_score = info.get("meta_count", 0) * 10
+    fname_score = len(os.path.splitext(os.path.basename(path))[0])
+    return ext_score + meta_score + fname_score
+
+
 # ─── A. HELPER: COMPUTE MOVES & TAG INDEX ───────────────────────────────
 
 def compute_moves_and_tag_index(root_path, log_callback=None):
@@ -262,6 +273,7 @@ def compute_moves_and_tag_index(root_path, log_callback=None):
         raw_artist = collapse_repeats(raw_artist)
         title = data["title"] or os.path.splitext(os.path.basename(fullpath))[0]
         album = data["album"] or ""
+        meta_count = sum(1 for t in [data.get("artist"), data.get("title"), data.get("album"), data.get("track"), data.get("year"), data.get("genre")] if t)
         primary, _ = extract_primary_and_collabs(raw_artist)
         row = db.execute(
             "SELECT fingerprint FROM fingerprints WHERE path=?",
@@ -273,6 +285,7 @@ def compute_moves_and_tag_index(root_path, log_callback=None):
             "title": title.lower(),
             "album": album.lower(),
             "fp": fp,
+            "meta_count": meta_count,
         }
 
     to_delete: Dict[str, str] = {}
@@ -282,16 +295,40 @@ def compute_moves_and_tag_index(root_path, log_callback=None):
             fp_groups[info["fp"]].append(path)
 
     kept_files = set(file_infos.keys())
+    review_root = os.path.join(root_path, "Manual Review")
+    os.makedirs(review_root, exist_ok=True)
 
     for fp, paths in fp_groups.items():
         if len(paths) <= 1:
             continue
-        paths_sorted = sorted(paths, key=lambda p: EXT_PRIORITY.get(os.path.splitext(p)[1].lower(), 999))
-        best = paths_sorted[0]
-        for loser in paths_sorted[1:]:
-            if loser not in to_delete:
-                to_delete[loser] = "Exact FP match"
-                kept_files.discard(loser)
+        scored = sorted(paths, key=lambda p: _keep_score(p, file_infos[p], EXT_PRIORITY), reverse=True)
+        if len(scored) < 2:
+            continue
+        delta = _keep_score(scored[0], file_infos[scored[0]], EXT_PRIORITY) - _keep_score(scored[1], file_infos[scored[1]], EXT_PRIORITY)
+        if delta >= DEDUP_KEEP_DELTA_THRESHOLD:
+            for loser in scored[1:]:
+                if loser not in to_delete:
+                    to_delete[loser] = "Exact FP match"
+                    kept_files.discard(loser)
+        else:
+            folder = os.path.join(review_root, fp[:16])
+            os.makedirs(folder, exist_ok=True)
+            for p in scored:
+                dest = os.path.join(folder, os.path.basename(p))
+                if os.path.exists(dest):
+                    base, ext = os.path.splitext(os.path.basename(p))
+                    i = 1
+                    new_dest = dest
+                    while os.path.exists(new_dest):
+                        new_dest = os.path.join(folder, f"{base}_{i}{ext}")
+                        i += 1
+                    dest = new_dest
+                try:
+                    shutil.move(p, dest)
+                except Exception as e:
+                    log_callback(f"   ! Failed to move {p} to manual review: {e}")
+                kept_files.discard(p)
+            log_callback(f"Ambiguous duplicates for fingerprint {fp} moved to {folder}—please review.")
 
     meta_groups: Dict[tuple, List[str]] = defaultdict(list)
     for path in kept_files:
@@ -299,35 +336,55 @@ def compute_moves_and_tag_index(root_path, log_callback=None):
         key = (info["primary"], info["title"], info["album"])
         meta_groups[key].append(path)
 
-    candidate_groups: List[List[str]] = []
+    group_index = 0
     for key, paths in meta_groups.items():
-        if len(paths) > 1:
-            paths_sorted = sorted(paths, key=lambda p: EXT_PRIORITY.get(os.path.splitext(p)[1].lower(), 999))
-            candidate_groups.append(paths_sorted)
-
-    for group in candidate_groups:
-        if len(group) > 10:
-            base = group[0]
-            for other in group[1:]:
+        if len(paths) <= 1:
+            continue
+        scored = sorted(paths, key=lambda p: _keep_score(p, file_infos[p], EXT_PRIORITY), reverse=True)
+        if len(scored) > 10:
+            keep = scored[0]
+            for other in scored[1:]:
                 if other not in to_delete:
                     to_delete[other] = "Metadata group"
                     kept_files.discard(other)
             continue
 
-        base = group[0]
-        base_fp = file_infos[base]["fp"]
-        for other in group[1:]:
-            if other in to_delete:
-                continue
-            other_fp = file_infos[other]["fp"]
-            if base_fp and other_fp:
-                dist = fingerprint_distance(base_fp, other_fp)
-                if dist <= fuzzy_fp_threshold:
-                    to_delete[other] = "Fuzzy FP match"
+        delta = _keep_score(scored[0], file_infos[scored[0]], EXT_PRIORITY) - _keep_score(scored[1], file_infos[scored[1]], EXT_PRIORITY)
+        if delta >= DEDUP_KEEP_DELTA_THRESHOLD:
+            best = scored[0]
+            best_fp = file_infos[best]["fp"]
+            for other in scored[1:]:
+                if other in to_delete:
+                    continue
+                other_fp = file_infos[other]["fp"]
+                if best_fp and other_fp:
+                    dist = fingerprint_distance(best_fp, other_fp)
+                    if dist <= fuzzy_fp_threshold:
+                        to_delete[other] = "Fuzzy FP match"
+                        kept_files.discard(other)
+                else:
+                    to_delete[other] = "Metadata group"
                     kept_files.discard(other)
-            else:
-                to_delete[other] = "Metadata group"
-                kept_files.discard(other)
+        else:
+            folder = os.path.join(review_root, f"meta_{group_index}")
+            group_index += 1
+            os.makedirs(folder, exist_ok=True)
+            for p in scored:
+                dest = os.path.join(folder, os.path.basename(p))
+                if os.path.exists(dest):
+                    base, ext = os.path.splitext(os.path.basename(p))
+                    i = 1
+                    new_dest = dest
+                    while os.path.exists(new_dest):
+                        new_dest = os.path.join(folder, f"{base}_{i}{ext}")
+                        i += 1
+                    dest = new_dest
+                try:
+                    shutil.move(p, dest)
+                except Exception as e:
+                    log_callback(f"   ! Failed to move {p} to manual review: {e}")
+                kept_files.discard(p)
+            log_callback(f"Ambiguous duplicates for metadata group {group_index - 1} moved to {folder}—please review.")
 
     for loser, reason in to_delete.items():
         try:
