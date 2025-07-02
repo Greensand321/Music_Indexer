@@ -45,7 +45,7 @@ def gather_tracks(library_path: str, folder_filter: dict | None = None) -> list[
 def cluster_library(
     library_path: str,
     method: str,
-    num: int,
+    cluster_params: dict,
     log_callback,
     folder_filter: dict | None = None,
 ) -> tuple[list[str], list]:
@@ -63,7 +63,11 @@ def cluster_library(
             pass
 
     log(f"Found {len(tracks)} audio files")
-    params = {"n_clusters": num} if method == "kmeans" else {"min_cluster_size": num}
-    feats = generate_clustered_playlists(tracks, library_path, method, params, log)
+    feats = generate_clustered_playlists(
+        tracks,
+        library_path,
+        method,
+        cluster_params,
+        log,
+    )
     return tracks, feats
-
