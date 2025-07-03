@@ -25,8 +25,16 @@ def _read_tags(path: str) -> Dict[str, str | None]:
         return {"artist": None, "title": None, "album": None}
 
 
+SUBPAR_DELIM = " \u2013 "
+
+
 def scan_library_quality(library_root: str, outfile: str) -> int:
-    """Scan ``library_root`` for non-FLAC files and write them to ``outfile``."""
+    """Scan ``library_root`` for non-FLAC files and write them to ``outfile``.
+
+    The resulting file contains one line per track in the form::
+
+        Artist \u2013 Title \u2013 Album \u2013 FullPath
+    """
     items: List[Tuple[str, str, str, str]] = []
     for dirpath, _, files in os.walk(library_root):
         for fname in files:
@@ -38,16 +46,21 @@ def scan_library_quality(library_root: str, outfile: str) -> int:
     os.makedirs(os.path.dirname(outfile), exist_ok=True)
     with open(outfile, "w", encoding="utf-8") as f:
         for artist, title, album, path in items:
-            f.write(f"{artist}\t{title}\t{album}\t{path}\n")
+            f.write(
+                f"{artist}{SUBPAR_DELIM}{title}{SUBPAR_DELIM}{album}{SUBPAR_DELIM}{path}\n"
+            )
     return len(items)
 
 
 def load_subpar_list(path: str) -> List[Dict[str, str]]:
-    """Read a txt list produced by :func:`scan_library_quality`."""
+    """Read a txt list produced by :func:`scan_library_quality`.
+
+    Each line is formatted as ``Artist – Title – Album – FullPath``.
+    """
     out: List[Dict[str, str]] = []
     with open(path, "r", encoding="utf-8") as f:
         for line in f:
-            parts = line.rstrip("\n").split("\t")
+            parts = line.rstrip("\n").split(SUBPAR_DELIM)
             if len(parts) != 4:
                 continue
             artist, title, album, fpath = parts
