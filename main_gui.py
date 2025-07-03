@@ -304,6 +304,7 @@ class SoundVaultImporterApp(tk.Tk):
         self.subpar_list = []
         self.downloads_list = []
         self.matches = []
+        self.fp_threshold_var = tk.DoubleVar(value=0.3)
 
         # assume ffmpeg is available without performing checks
         self.ffmpeg_available = True
@@ -504,11 +505,14 @@ class SoundVaultImporterApp(tk.Tk):
             row=1, column=1, sticky="w", pady=(5, 0)
         )
 
+        ttk.Label(sync, text="FP Threshold:").grid(row=2, column=0, sticky="w", pady=(5, 0))
+        ttk.Entry(sync, textvariable=self.fp_threshold_var, width=5).grid(row=2, column=1, sticky="w", pady=(5, 0))
+
         ttk.Button(
             sync, text="Match & Compare", command=self.build_comparison_table
-        ).grid(row=2, column=0, sticky="w", pady=(5, 0))
+        ).grid(row=3, column=0, sticky="w", pady=(5, 0))
         ttk.Label(sync, textvariable=self.sync_status_var).grid(
-            row=2, column=1, sticky="w", pady=(5, 0)
+            row=3, column=1, sticky="w", pady=(5, 0)
         )
 
         self.compare_frame = ttk.Frame(self.quality_tab)
@@ -1641,7 +1645,8 @@ class SoundVaultImporterApp(tk.Tk):
             self.build_comparison_table()
 
     def build_comparison_table(self):
-        self.matches = tidal_sync.match_downloads(self.subpar_list, self.downloads_list)
+        thr = float(self.fp_threshold_var.get() or 0.3)
+        self.matches = tidal_sync.match_downloads(self.subpar_list, self.downloads_list, threshold=thr)
         num_tag = sum(1 for m in self.matches if m.get("method") == "Tag")
         num_fp = sum(1 for m in self.matches if m.get("method") == "Fingerprint")
         num_none = sum(1 for m in self.matches if m.get("download") is None)
