@@ -29,7 +29,7 @@ def scan_library_quality(library_root: str, outfile: str) -> int:
     """Scan ``library_root`` for non-FLAC files and write them to ``outfile``.
 
     The output is a plain text file with one entry per line formatted as
-    ``"Artist \u2013 Title"``.
+    ``"Artist – Title"``.
     """
     items: List[Tuple[str, str]] = []
     for dirpath, _, files in os.walk(library_root):
@@ -41,14 +41,14 @@ def scan_library_quality(library_root: str, outfile: str) -> int:
     os.makedirs(os.path.dirname(outfile), exist_ok=True)
     with open(outfile, "w", encoding="utf-8") as f:
         for artist, title in items:
-            f.write(f"{artist} \u2013 {title}\n")
+            f.write(f"{artist} – {title}\n")
     return len(items)
 
 
 def load_subpar_list(path: str) -> List[Dict[str, str]]:
     """Read a list produced by :func:`scan_library_quality`.
 
-    Each line should contain ``"Artist \u2013 Title"``.
+    Each line should contain ``"Artist – Title"``.
     """
     out: List[Dict[str, str]] = []
     with open(path, "r", encoding="utf-8") as f:
@@ -56,8 +56,8 @@ def load_subpar_list(path: str) -> List[Dict[str, str]]:
             line = line.strip()
             if not line:
                 continue
-            if "\u2013" in line:
-                artist, title = [p.strip() for p in line.split("\u2013", 1)]
+            if "–" in line:
+                artist, title = [p.strip() for p in line.split("–", 1)]
             elif "-" in line:
                 artist, title = [p.strip() for p in line.split("-", 1)]
             else:
