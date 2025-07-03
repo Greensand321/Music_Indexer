@@ -6,7 +6,7 @@ from typing import List, Dict, Tuple, Optional
 from mutagen import File as MutagenFile
 import acoustid
 
-from music_indexer_api import fingerprint_distance
+from music_indexer_api import fingerprint_distance, get_tags, sanitize
 
 
 AUDIO_EXTS = {".flac", ".m4a", ".aac", ".mp3", ".wav", ".ogg"}
@@ -29,10 +29,41 @@ def _read_tags(path: str) -> Dict[str, str | None]:
 SUBPAR_DELIM = " \u2013 "
 
 
+def _rename_with_sanitize(path: str) -> str:
+    """Rename ``path`` to a sanitized ``Artist_XX_Title.ext`` pattern.
+
+    Returns the new path (or original if rename failed)."""
+    tags = get_tags(path)
+    artist = sanitize(tags.get("artist"))
+    title = sanitize(tags.get("title"))
+    track = tags.get("track")
+    track_str = f"{track:02d}" if track is not None else "00"
+    ext = os.path.splitext(path)[1].lower()
+    base = f"{artist}_{track_str}_{title}{ext}"
+    dirpath = os.path.dirname(path)
+    candidate = os.path.join(dirpath, base)
+
+    root, ext_only = os.path.splitext(candidate)
+    idx = 1
+    while os.path.exists(candidate) and os.path.abspath(candidate) != os.path.abspath(path):
+        candidate = f"{root}_{idx}{ext_only}"
+        idx += 1
+
+    if candidate == path:
+        return path
+
+    try:
+        os.rename(path, candidate)
+        return candidate
+    except Exception:
+        return path
+
+
 def scan_library_quality(library_root: str, outfile: str) -> int:
     """Scan ``library_root`` for non-FLAC files and write them to ``outfile``.
 
-    The resulting file contains one line per track in the form::
+    Any flagged file is renamed immediately using the ``Artist_XX_Title.ext``
+    pattern. The resulting text file contains one line per track in the form::
 
         Artist \u2013 Title \u2013 Album \u2013 FullPath
     """
@@ -42,8 +73,16 @@ def scan_library_quality(library_root: str, outfile: str) -> int:
             ext = os.path.splitext(fname)[1].lower()
             if ext in AUDIO_EXTS and ext != ".flac":
                 path = os.path.join(dirpath, fname)
-                tags = _read_tags(path)
-                items.append((tags.get("artist") or "", tags.get("title") or "", tags.get("album") or "", path))
+                new_path = _rename_with_sanitize(path)
+                tags = get_tags(new_path)
+                items.append(
+                    (
+                        tags.get("artist") or "",
+                        tags.get("title") or "",
+                        tags.get("album") or "",
+                        new_path,
+                    )
+                )
     os.makedirs(os.path.dirname(outfile), exist_ok=True)
     with open(outfile, "w", encoding="utf-8") as f:
         for artist, title, album, path in items:
@@ -56,16 +95,29 @@ def scan_library_quality(library_root: str, outfile: str) -> int:
 def load_subpar_list(path: str) -> List[Dict[str, str]]:
     """Read a txt list produced by :func:`scan_library_quality`.
 
-    Each line is formatted as ``Artist – Title – Album – FullPath``.
+    Supports both legacy ``Artist – Title – Album – FullPath`` lines and
+    simplified ``Artist – Title`` entries.
     """
     out: List[Dict[str, str]] = []
     with open(path, "r", encoding="utf-8") as f:
         for line in f:
-            parts = line.rstrip("\n").split(SUBPAR_DELIM)
-            if len(parts) != 4:
+            text = line.strip()
+            if not text:
                 continue
-            artist, title, album, fpath = parts
-            out.append({"artist": artist, "title": title, "album": album, "path": fpath})
+            parts = text.split(SUBPAR_DELIM)
+            if len(parts) == 4:
+                artist, title, album, fpath = parts
+                out.append(
+                    {"artist": artist, "title": title, "album": album, "path": fpath}
+                )
+                continue
+
+            parts = re.split(r"\s+[–-]\s+", text, maxsplit=1)
+            if len(parts) == 2:
+                artist, title = parts
+                out.append(
+                    {"artist": artist, "title": title, "album": None, "path": None}
+                )
     return out
 
 
