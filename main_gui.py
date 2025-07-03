@@ -36,6 +36,7 @@ from controllers.genre_list_controller import list_unique_genres
 from controllers.highlight_controller import play_snippet, PYDUB_AVAILABLE
 from tag_fixer import MIN_INTERACTIVE_SCORE, FileRecord
 from typing import Callable, List
+import tidal_sync
 
 from controllers.library_controller import (
     load_last_path,
@@ -296,6 +297,13 @@ class SoundVaultImporterApp(tk.Tk):
         self.cluster_data = None
         self.folder_filter = {"include": [], "exclude": []}
 
+        # tidal-dl sync state
+        self.subpar_path_var = tk.StringVar(value="")
+        self.downloads_path_var = tk.StringVar(value="")
+        self.subpar_list = []
+        self.downloads_list = []
+        self.matches = []
+
         # assume ffmpeg is available without performing checks
         self.ffmpeg_available = True
 
@@ -468,6 +476,41 @@ class SoundVaultImporterApp(tk.Tk):
         self.plugin_panel.grid(row=0, column=1, sticky="nsew", padx=10, pady=10)
         self.playlist_tab.columnconfigure(1, weight=1)
         self.playlist_tab.rowconfigure(0, weight=1)
+
+        # ─── Library Quality Tab ───────────────────────────────────────────
+        self.quality_tab = ttk.Frame(self.notebook)
+        self.notebook.add(self.quality_tab, text="Library Quality")
+
+        ttk.Button(
+            self.quality_tab, text="Scan Quality", command=self.scan_quality
+        ).pack(pady=5)
+
+        sync = ttk.LabelFrame(self.quality_tab, text="Tidal-dl Sync")
+        sync.pack(fill="x", padx=10, pady=10)
+
+        ttk.Button(
+            sync, text="Load Subpar List", command=self.load_subpar_list
+        ).grid(row=0, column=0, sticky="w")
+        ttk.Label(sync, textvariable=self.subpar_path_var).grid(
+            row=0, column=1, sticky="w"
+        )
+        ttk.Button(
+            sync,
+            text="Select Downloads Folder",
+            command=self.select_downloads_folder,
+        ).grid(row=1, column=0, sticky="w", pady=(5, 0))
+        ttk.Label(sync, textvariable=self.downloads_path_var).grid(
+            row=1, column=1, sticky="w", pady=(5, 0)
+        )
+
+        self.compare_frame = ttk.Frame(self.quality_tab)
+        self.compare_frame.pack(fill="both", expand=True, padx=10, pady=10)
+        self.quality_tab.rowconfigure(1, weight=1)
+        self.quality_tab.columnconfigure(0, weight=1)
+
+        ttk.Button(
+            self.quality_tab, text="Apply Changes", command=self.apply_replacements
+        ).pack(pady=(0, 10))
 
         # after your other tabs
         help_frame = ttk.Frame(self.notebook)
@@ -1549,6 +1592,85 @@ class SoundVaultImporterApp(tk.Tk):
             os.remove(db_path)
         messagebox.showinfo("Reset", "Tag-fix log cleared.")
         self._log(f"Reset tag-fix log for {folder}")
+
+    # ─── Tidal-dl Sync Methods ──────────────────────────────────────────
+
+    def scan_quality(self):
+        path = self.require_library()
+        if not path:
+            return
+        out = filedialog.asksaveasfilename(
+            title="Save Subpar List",
+            defaultextension=".txt",
+            filetypes=[("Text", "*.txt")],
+        )
+        if not out:
+            return
+        count = tidal_sync.scan_library_quality(path, out)
+        messagebox.showinfo("Quality Scan", f"Saved {count} entries to {out}")
+        self._log(f"Scan Quality written to {out}")
+
+    def load_subpar_list(self):
+        path = filedialog.askopenfilename(
+            title="Select Subpar List", filetypes=[("Text", "*.txt")]
+        )
+        if not path:
+            return
+        self.subpar_path_var.set(path)
+        self.subpar_list = tidal_sync.load_subpar_list(path)
+        if self.downloads_path_var.get():
+            self.build_comparison_table()
+
+    def select_downloads_folder(self):
+        folder = filedialog.askdirectory(title="Select tidal-dl Output Folder")
+        if not folder:
+            return
+        self.downloads_path_var.set(folder)
+        self.downloads_list = tidal_sync.scan_downloads(folder)
+        if self.subpar_path_var.get():
+            self.build_comparison_table()
+
+    def build_comparison_table(self):
+        self.matches = tidal_sync.match_downloads(self.subpar_list, self.downloads_list)
+        self._render_comparison_table()
+
+    def _render_comparison_table(self):
+        for w in self.compare_frame.winfo_children():
+            w.destroy()
+        cols = ("download", "score")
+        tv = ttk.Treeview(
+            self.compare_frame,
+            columns=cols,
+            show="headings",
+            selectmode="extended",
+        )
+        tv.heading("download", text="Downloaded")
+        tv.heading("score", text="Match")
+        tv.column("download", width=200)
+        tv.column("score", width=80, anchor="e")
+        for m in self.matches:
+            score = "" if m["score"] is None else f"{m['score']:.2f}"
+            tv.insert("", "end", iid=m["original"], values=(m.get("download") or "", score))
+        tv.pack(fill="both", expand=True)
+        self.match_tree = tv
+
+    def apply_replacements(self):
+        if not hasattr(self, "match_tree"):
+            return
+        sels = self.match_tree.selection()
+        if not sels:
+            return
+        replaced = 0
+        for iid in sels:
+            match = next((m for m in self.matches if m["original"] == iid), None)
+            if match and match.get("download"):
+                try:
+                    tidal_sync.replace_file(match["original"], match["download"])
+                    replaced += 1
+                except Exception as e:
+                    self._log(f"Failed to replace {match['original']}: {e}")
+        messagebox.showinfo("Apply Changes", f"Replaced {replaced} files")
+        self._log(f"Applied {replaced} replacements")
 
     def _send_help_query(self):
         threading.Thread(target=self._do_help_query, daemon=True).start()
