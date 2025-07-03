@@ -1,6 +1,6 @@
 import os
 import shutil
-from typing import List, Dict, Tuple
+from typing import List, Dict, Tuple, Optional
 
 from mutagen import File as MutagenFile
 import acoustid
@@ -56,7 +56,7 @@ def load_subpar_list(path: str) -> List[Dict[str, str]]:
 
 
 def scan_downloads(folder: str) -> List[Dict[str, str]]:
-    """Return metadata for all audio files under ``folder``."""
+    """Return metadata and cached fingerprints for all audio files under ``folder``."""
     items: List[Dict[str, str]] = []
     for dirpath, _, files in os.walk(folder):
         for fname in files:
@@ -64,7 +64,14 @@ def scan_downloads(folder: str) -> List[Dict[str, str]]:
             if ext in AUDIO_EXTS:
                 path = os.path.join(dirpath, fname)
                 tags = _read_tags(path)
-                items.append({"artist": tags.get("artist"), "title": tags.get("title"), "album": tags.get("album"), "path": path})
+                fp = _fingerprint(path)
+                items.append({
+                    "artist": tags.get("artist"),
+                    "title": tags.get("title"),
+                    "album": tags.get("album"),
+                    "path": path,
+                    "fingerprint": fp,
+                })
     return items
 
 
@@ -76,7 +83,36 @@ def _fingerprint(path: str) -> str | None:
         return None
 
 
-def match_downloads(subpar: List[Dict[str, str]], downloads: List[Dict[str, str]]) -> List[Dict[str, object]]:
+def _find_best_fp_match(
+    orig_fp: Optional[str],
+    cands: List[Dict[str, str]],
+    threshold: float,
+) -> Tuple[Optional[Dict[str, str]], float, bool]:
+    """Return best candidate by fingerprint distance.
+
+    Returns (candidate, distance, ambiguous). Candidate is ``None`` if no
+    distance below ``threshold``.
+    """
+    best: Optional[Dict[str, str]] = None
+    best_dist = 1.0
+    distances: List[float] = []
+    for c in cands:
+        dist = fingerprint_distance(orig_fp, c.get("fingerprint"))
+        distances.append(dist)
+        if dist < best_dist:
+            best_dist = dist
+            best = c
+    if best is None or best_dist >= threshold:
+        return None, best_dist, False
+    ambiguous = sum(1 for d in distances if d <= best_dist + 0.05) > 1
+    return best, best_dist, ambiguous
+
+
+def match_downloads(
+    subpar: List[Dict[str, str]],
+    downloads: List[Dict[str, str]],
+    threshold: float = 0.3,
+) -> List[Dict[str, object]]:
     """Match subpar tracks with potential replacements in downloads."""
     matches: List[Dict[str, object]] = []
     dl_map: Dict[Tuple[str, str, str], List[Dict[str, str]]] = {}
@@ -94,20 +130,41 @@ def match_downloads(subpar: List[Dict[str, str]], downloads: List[Dict[str, str]
             (sp.get("title") or "").lower(),
             (sp.get("album") or "").lower(),
         )
-        cand = dl_map.get(key)
-        if not cand:
-            matches.append({"original": sp["path"], "download": None, "score": None, "tags": sp})
-            continue
-        best = None
-        best_score = 1.0
         orig_fp = _fingerprint(sp["path"])
-        for c in cand:
-            dl_fp = _fingerprint(c["path"])
-            score = fingerprint_distance(orig_fp, dl_fp)
-            if score < best_score:
-                best = c
-                best_score = score
-        matches.append({"original": sp["path"], "download": best["path"], "score": 1 - best_score, "tags": sp})
+        note = None
+        method = "None"
+        best = None
+        best_dist = 1.0
+
+        cand = dl_map.get(key)
+        if cand:
+            best, best_dist, ambiguous = _find_best_fp_match(orig_fp, cand, threshold)
+            if best is not None:
+                method = "Tag"
+                if ambiguous:
+                    note = "Ambiguous – manual review"
+
+        if best is None:
+            best, best_dist, ambiguous = _find_best_fp_match(orig_fp, downloads, threshold)
+            if best is not None:
+                method = "Fingerprint"
+                if ambiguous:
+                    note = "Ambiguous – manual review"
+
+        if orig_fp is None:
+            note = "Error – see log"
+
+        score = None if best is None else 1 - best_dist
+        matches.append(
+            {
+                "original": sp["path"],
+                "download": None if best is None else best["path"],
+                "score": score,
+                "method": method,
+                "tags": sp,
+                "note": note,
+            }
+        )
     return matches
 
 

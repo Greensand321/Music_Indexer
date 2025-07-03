@@ -300,6 +300,7 @@ class SoundVaultImporterApp(tk.Tk):
         # tidal-dl sync state
         self.subpar_path_var = tk.StringVar(value="")
         self.downloads_path_var = tk.StringVar(value="")
+        self.sync_status_var = tk.StringVar(value="")
         self.subpar_list = []
         self.downloads_list = []
         self.matches = []
@@ -501,6 +502,13 @@ class SoundVaultImporterApp(tk.Tk):
         ).grid(row=1, column=0, sticky="w", pady=(5, 0))
         ttk.Label(sync, textvariable=self.downloads_path_var).grid(
             row=1, column=1, sticky="w", pady=(5, 0)
+        )
+
+        ttk.Button(
+            sync, text="Match & Compare", command=self.build_comparison_table
+        ).grid(row=2, column=0, sticky="w", pady=(5, 0))
+        ttk.Label(sync, textvariable=self.sync_status_var).grid(
+            row=2, column=1, sticky="w", pady=(5, 0)
         )
 
         self.compare_frame = ttk.Frame(self.quality_tab)
@@ -1618,6 +1626,7 @@ class SoundVaultImporterApp(tk.Tk):
             return
         self.subpar_path_var.set(path)
         self.subpar_list = tidal_sync.load_subpar_list(path)
+        self.sync_status_var.set(f"Loaded {len(self.subpar_list)} subpar tracks.")
         if self.downloads_path_var.get():
             self.build_comparison_table()
 
@@ -1627,17 +1636,24 @@ class SoundVaultImporterApp(tk.Tk):
             return
         self.downloads_path_var.set(folder)
         self.downloads_list = tidal_sync.scan_downloads(folder)
+        self.sync_status_var.set(f"Scanned {len(self.downloads_list)} downloaded tracks.")
         if self.subpar_path_var.get():
             self.build_comparison_table()
 
     def build_comparison_table(self):
         self.matches = tidal_sync.match_downloads(self.subpar_list, self.downloads_list)
+        num_tag = sum(1 for m in self.matches if m.get("method") == "Tag")
+        num_fp = sum(1 for m in self.matches if m.get("method") == "Fingerprint")
+        num_none = sum(1 for m in self.matches if m.get("download") is None)
+        self.sync_status_var.set(
+            f"{num_tag} tag matches, {num_fp} fingerprint matches, {num_none} no matches"
+        )
         self._render_comparison_table()
 
     def _render_comparison_table(self):
         for w in self.compare_frame.winfo_children():
             w.destroy()
-        cols = ("download", "score")
+        cols = ("download", "method", "confidence", "note")
         tv = ttk.Treeview(
             self.compare_frame,
             columns=cols,
@@ -1645,12 +1661,42 @@ class SoundVaultImporterApp(tk.Tk):
             selectmode="extended",
         )
         tv.heading("download", text="Downloaded")
-        tv.heading("score", text="Match")
-        tv.column("download", width=200)
-        tv.column("score", width=80, anchor="e")
+        tv.heading("method", text="Match Method")
+        tv.heading("confidence", text="Confidence")
+        tv.heading("note", text="Note")
+        tv.column("download", width=220)
+        tv.column("method", width=80, anchor="center")
+        tv.column("confidence", width=80, anchor="e")
+        tv.column("note", width=150, anchor="w")
+        tv.tag_configure("hi", background="#d4edda")
+        tv.tag_configure("med", background="#fff8c6")
+        tv.tag_configure("low", background="#f8d7da")
+        tv.tag_configure("nomatch", background="#f8d7da")
+        tv.tag_configure("ambig", background="#ffe5b4")
+        tv.tag_configure("error", background="#f8d7da")
         for m in self.matches:
             score = "" if m["score"] is None else f"{m['score']:.2f}"
-            tv.insert("", "end", iid=m["original"], values=(m.get("download") or "", score))
+            method = m.get("method", "")
+            note = m.get("note", "") or ""
+            if m.get("download") is None:
+                tag = "nomatch"
+            elif "Ambiguous" in note:
+                tag = "ambig"
+            elif "Error" in note:
+                tag = "error"
+            elif m["score"] is not None and m["score"] >= 0.8:
+                tag = "hi"
+            elif m["score"] is not None and m["score"] >= 0.5:
+                tag = "med"
+            else:
+                tag = "low"
+            tv.insert(
+                "",
+                "end",
+                iid=m["original"],
+                values=(m.get("download") or "", method, score, note),
+                tags=(tag,),
+            )
         tv.pack(fill="both", expand=True)
         self.match_tree = tv
 
@@ -1663,7 +1709,11 @@ class SoundVaultImporterApp(tk.Tk):
         replaced = 0
         for iid in sels:
             match = next((m for m in self.matches if m["original"] == iid), None)
-            if match and match.get("download"):
+            if match and match.get("download") and not (
+                match.get("note") and "Ambiguous" in match.get("note")
+            ) and not (
+                match.get("note") and "Error" in match.get("note")
+            ):
                 try:
                     tidal_sync.replace_file(match["original"], match["download"])
                     replaced += 1
