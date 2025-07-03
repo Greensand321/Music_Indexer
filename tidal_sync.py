@@ -26,32 +26,43 @@ def _read_tags(path: str) -> Dict[str, str | None]:
 
 
 def scan_library_quality(library_root: str, outfile: str) -> int:
-    """Scan ``library_root`` for non-FLAC files and write them to ``outfile``."""
-    items: List[Tuple[str, str, str, str]] = []
+    """Scan ``library_root`` for non-FLAC files and write them to ``outfile``.
+
+    The output is a plain text file with one entry per line formatted as
+    ``"Artist \u2013 Title"``.
+    """
+    items: List[Tuple[str, str]] = []
     for dirpath, _, files in os.walk(library_root):
         for fname in files:
             ext = os.path.splitext(fname)[1].lower()
             if ext in AUDIO_EXTS and ext != ".flac":
-                path = os.path.join(dirpath, fname)
-                tags = _read_tags(path)
-                items.append((tags.get("artist") or "", tags.get("title") or "", tags.get("album") or "", path))
+                tags = _read_tags(os.path.join(dirpath, fname))
+                items.append((tags.get("artist") or "", tags.get("title") or ""))
     os.makedirs(os.path.dirname(outfile), exist_ok=True)
     with open(outfile, "w", encoding="utf-8") as f:
-        for artist, title, album, path in items:
-            f.write(f"{artist}\t{title}\t{album}\t{path}\n")
+        for artist, title in items:
+            f.write(f"{artist} \u2013 {title}\n")
     return len(items)
 
 
 def load_subpar_list(path: str) -> List[Dict[str, str]]:
-    """Read a txt list produced by :func:`scan_library_quality`."""
+    """Read a list produced by :func:`scan_library_quality`.
+
+    Each line should contain ``"Artist \u2013 Title"``.
+    """
     out: List[Dict[str, str]] = []
     with open(path, "r", encoding="utf-8") as f:
         for line in f:
-            parts = line.rstrip("\n").split("\t")
-            if len(parts) != 4:
+            line = line.strip()
+            if not line:
                 continue
-            artist, title, album, fpath = parts
-            out.append({"artist": artist, "title": title, "album": album, "path": fpath})
+            if "\u2013" in line:
+                artist, title = [p.strip() for p in line.split("\u2013", 1)]
+            elif "-" in line:
+                artist, title = [p.strip() for p in line.split("-", 1)]
+            else:
+                continue
+            out.append({"artist": artist, "title": title})
     return out
 
 
@@ -79,12 +90,11 @@ def _fingerprint(path: str) -> str | None:
 def match_downloads(subpar: List[Dict[str, str]], downloads: List[Dict[str, str]]) -> List[Dict[str, object]]:
     """Match subpar tracks with potential replacements in downloads."""
     matches: List[Dict[str, object]] = []
-    dl_map: Dict[Tuple[str, str, str], List[Dict[str, str]]] = {}
+    dl_map: Dict[Tuple[str, str], List[Dict[str, str]]] = {}
     for item in downloads:
         key = (
             (item.get("artist") or "").lower(),
             (item.get("title") or "").lower(),
-            (item.get("album") or "").lower(),
         )
         dl_map.setdefault(key, []).append(item)
 
@@ -92,22 +102,13 @@ def match_downloads(subpar: List[Dict[str, str]], downloads: List[Dict[str, str]
         key = (
             (sp.get("artist") or "").lower(),
             (sp.get("title") or "").lower(),
-            (sp.get("album") or "").lower(),
         )
         cand = dl_map.get(key)
         if not cand:
-            matches.append({"original": sp["path"], "download": None, "score": None, "tags": sp})
+            matches.append({"original": None, "download": None, "score": None, "tags": sp})
             continue
-        best = None
-        best_score = 1.0
-        orig_fp = _fingerprint(sp["path"])
-        for c in cand:
-            dl_fp = _fingerprint(c["path"])
-            score = fingerprint_distance(orig_fp, dl_fp)
-            if score < best_score:
-                best = c
-                best_score = score
-        matches.append({"original": sp["path"], "download": best["path"], "score": 1 - best_score, "tags": sp})
+        best = cand[0]
+        matches.append({"original": None, "download": best["path"], "score": None, "tags": sp})
     return matches
 
 

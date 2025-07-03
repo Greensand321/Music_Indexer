@@ -1648,9 +1648,11 @@ class SoundVaultImporterApp(tk.Tk):
         tv.heading("score", text="Match")
         tv.column("download", width=200)
         tv.column("score", width=80, anchor="e")
-        for m in self.matches:
+        for idx, m in enumerate(self.matches):
             score = "" if m["score"] is None else f"{m['score']:.2f}"
-            tv.insert("", "end", iid=m["original"], values=(m.get("download") or "", score))
+            iid = f"{m['tags'].get('artist', '')} - {m['tags'].get('title', '')}-{idx}"
+            m['iid'] = iid
+            tv.insert("", "end", iid=iid, values=(m.get("download") or "", score))
         tv.pack(fill="both", expand=True)
         self.match_tree = tv
 
@@ -1662,13 +1664,13 @@ class SoundVaultImporterApp(tk.Tk):
             return
         replaced = 0
         for iid in sels:
-            match = next((m for m in self.matches if m["original"] == iid), None)
-            if match and match.get("download"):
+            match = next((m for m in self.matches if m.get("iid") == iid), None)
+            if match and match.get("download") and match.get("original"):
                 try:
                     tidal_sync.replace_file(match["original"], match["download"])
                     replaced += 1
                 except Exception as e:
-                    self._log(f"Failed to replace {match['original']}: {e}")
+                    self._log(f"Failed to replace {match.get('original')}: {e}")
         messagebox.showinfo("Apply Changes", f"Replaced {replaced} files")
         self._log(f"Applied {replaced} replacements")
 

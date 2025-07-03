@@ -91,6 +91,18 @@ docs/        - Additional project documentation
 third_party/ - Prebuilt llama executables
 ```
 
+## Library Quality & Subpar List
+
+Use the **Scan Quality** button to generate a list of lossy tracks. The output
+file contains one entry per line in the form:
+
+```
+The Beatles – Hey Jude
+Beyoncé – Formation
+```
+
+Each line simply stores the artist and title of a track.
+
 ## Roadmap (Upcoming Features)
 
 These items are currently under development and not yet part of the stable release.
