@@ -19,13 +19,22 @@ DEFAULT_FUZZY_FP_THRESHOLD = 0.1  # allowed fingerprint difference ratio
 DEDUP_KEEP_DELTA_THRESHOLD = 50  # score difference to auto-delete duplicates
 
 # ─── Helper: build primary_counts for the entire vault ─────────────────────
-def build_primary_counts(root_path):
+def build_primary_counts(root_path, progress_callback=None):
     """
     Walk the entire vault (By Artist, By Year, Incoming, etc.) and
     return a dict mapping each lowercase-normalized artist → total file count.
     Falls back to filename if metadata “artist” is missing.
+
+    ``progress_callback`` will be invoked every 100 files with
+    ``(count, 0, path)`` allowing callers to show progress without
+    a separate pre-scan.
     """
+    if progress_callback is None:
+        def progress_callback(_c, _t, _m):
+            pass
+
     counts = {}
+    idx = 0
     for dirpath, _, files in os.walk(root_path):
         rel_dir = os.path.relpath(dirpath, root_path)
         if "Not Sorted" in rel_dir.split(os.sep):
@@ -37,6 +46,10 @@ def build_primary_counts(root_path):
 
             path = os.path.join(dirpath, fname)
             tags = get_tags(path)
+
+            idx += 1
+            if idx % 100 == 0:
+                progress_callback(idx, 0, os.path.relpath(path, root_path))
 
             # Normalize artist identically to Phase 4
             raw = (tags.get("artist") or "").strip()
@@ -245,20 +258,13 @@ def compute_moves_and_tag_index(root_path, log_callback=None, progress_callback=
     )
 
     # --- Phase 0: Pre-scan entire vault (under MUSIC_ROOT) ---
-    global_counts = build_primary_counts(MUSIC_ROOT)
+    global_counts = build_primary_counts(MUSIC_ROOT, progress_callback)
     log_callback(f"   → Pre-scan: found {len(global_counts)} unique artists")
     log_callback(f"   → DEBUG: MUSIC_ROOT = {MUSIC_ROOT}")
     log_callback(f"   → DEBUG: droeloe count = {global_counts.get('droeloe', 0)}")
 
     # --- Phase 1: Scan for audio files ---
     log_callback("1/6: Discovering audio files…")
-    total_audio = sum(
-        1
-        for dirpath, _, files in os.walk(MUSIC_ROOT)
-        for fname in files
-        if os.path.splitext(fname)[1].lower() in SUPPORTED_EXTS
-        and "Not Sorted" not in os.path.relpath(os.path.join(dirpath, fname), root_path).split(os.sep)
-    )
     all_audio = []
     idx = 0
     for dirpath, _, files in os.walk(MUSIC_ROOT):
@@ -271,9 +277,10 @@ def compute_moves_and_tag_index(root_path, log_callback=None, progress_callback=
                 full = os.path.join(dirpath, fname)
                 if "Not Sorted" in os.path.relpath(full, root_path).split(os.sep):
                     continue
-                idx += 1
-                progress_callback(idx, total_audio, f"Scanning {os.path.relpath(full, root_path)}")
                 all_audio.append(full)
+                idx += 1
+                progress_callback(idx, 0, f"Scanning {os.path.relpath(full, root_path)}")
+    total_audio = idx
     log_callback(f"   → Found {total_audio} audio files.")
 
     # ─── Phase 2: Deduplicate using fingerprints ─────────────────────────────
