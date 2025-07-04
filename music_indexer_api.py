@@ -350,6 +350,16 @@ def compute_moves_and_tag_index(root_path, log_callback=None, progress_callback=
             log_callback(f"Ambiguous duplicates for fingerprint {fp} moved to {folder}—please review.")
 
 
+    # --- Near-duplicate detection -------------------------------------------------
+    from near_duplicate_detector import find_near_duplicates
+    log_callback("   • Detecting near-duplicates…")
+    near_dupes = find_near_duplicates({p: file_infos[p] for p in kept_files}, EXT_PRIORITY, fuzzy_fp_threshold, log_callback)
+    for loser, reason in near_dupes.items():
+        if loser not in to_delete:
+            to_delete[loser] = reason
+            kept_files.discard(loser)
+
+
     for loser, reason in to_delete.items():
         if dry_run:
             log_callback(f"   ? (dry-run) Would delete duplicate {loser} ({reason})")
@@ -695,6 +705,9 @@ def apply_indexer_moves(root_path, log_callback=None, progress_callback=None):
         def progress_callback(current, total, path):
             pass
 
+    cfg = load_config()
+    trim_silence = bool(cfg.get("trim_silence", False))
+
     # Ensure Not Sorted directory exists for user exclusions
     not_sorted_dir = os.path.join(root_path, "Not Sorted")
     os.makedirs(not_sorted_dir, exist_ok=True)
@@ -710,7 +723,7 @@ def apply_indexer_moves(root_path, log_callback=None, progress_callback=None):
     os.makedirs(docs_dir, exist_ok=True)
     db_path = os.path.join(docs_dir, ".soundvault.db")
     from fingerprint_generator import compute_fingerprints_parallel
-    compute_fingerprints_parallel(root_path, db_path, log_callback, progress_callback)
+    compute_fingerprints_parallel(root_path, db_path, log_callback, progress_callback, None, trim_silence)
 
     moves, _, _ = compute_moves_and_tag_index(root_path, log_callback, progress_callback, dry_run=False)
 

@@ -1,19 +1,52 @@
 import os
 import sqlite3
 from typing import Callable, Tuple
+import tempfile
+from pydub import AudioSegment, silence
 from concurrent.futures import ProcessPoolExecutor
 import acoustid
 
 SUPPORTED_EXTS = {".flac", ".m4a", ".aac", ".mp3", ".wav", ".ogg"}
 
 
-def compute_fingerprint_for_file(args: Tuple[str, str]) -> Tuple[str, int | None, str | None, str | None]:
-    """Compute fingerprint for a single file. Returns (path, duration, fp, error)."""
-    path, _db_path = args
+def _trim_silence(path: str) -> str:
+    """Return path to temporary file with leading/trailing silence removed."""
     try:
-        duration, fp_hash = acoustid.fingerprint_file(path)
+        ext = os.path.splitext(path)[1].lower().lstrip(".") or "wav"
+        audio = AudioSegment.from_file(path)
+        segs = silence.detect_nonsilent(audio, min_silence_len=500, silence_thresh=-50)
+        if not segs:
+            return path
+        start = segs[0][0]
+        end = segs[-1][1]
+        trimmed = audio[start:end]
+        fd, tmp = tempfile.mkstemp(suffix=f".{ext}")
+        os.close(fd)
+        trimmed.export(tmp, format=ext)
+        return tmp
+    except Exception:
+        return path
+
+
+def compute_fingerprint_for_file(args: Tuple[str, str, bool]) -> Tuple[str, int | None, str | None, str | None]:
+    """Compute fingerprint for a single file. Returns (path, duration, fp, error)."""
+    path, _db_path, trim = args
+    tmp = None
+    try:
+        target = path
+        if trim:
+            tmp = _trim_silence(path)
+            target = tmp
+        duration, fp_hash = acoustid.fingerprint_file(target)
+        if tmp and tmp != path:
+            os.remove(tmp)
         return path, duration, fp_hash, None
     except Exception as e:  # pragma: no cover - just to be safe
+        if tmp and tmp != path:
+            try:
+                os.remove(tmp)
+            except Exception:
+                pass
         return path, None, None, str(e)
 
 
@@ -23,6 +56,7 @@ def compute_fingerprints_parallel(
     log_callback: Callable[[str], None] | None = None,
     progress_callback: Callable[[int, int, str], None] | None = None,
     max_workers: int | None = None,
+    trim_silence: bool = False,
 ) -> None:
     """Walk ``root_path`` and compute fingerprints using multiple processes."""
     if log_callback is None:
@@ -61,7 +95,7 @@ def compute_fingerprints_parallel(
 
     total = len(audio_files)
     progress_callback(0, total, "Fingerprinting")
-    work_items = [(p, db_path) for p in audio_files]
+    work_items = [(p, db_path, trim_silence) for p in audio_files]
 
     with ProcessPoolExecutor(max_workers=max_workers) as exe:
         for idx, (path, duration, fp_hash, err) in enumerate(exe.map(compute_fingerprint_for_file, work_items), start=1):
@@ -88,7 +122,8 @@ def compute_fingerprints(
     log_callback: Callable[[str], None] | None = None,
     progress_callback: Callable[[int, int, str], None] | None = None,
     max_workers: int | None = None,
+    trim_silence: bool = False,
 ) -> None:
     """Backward-compatible wrapper around :func:`compute_fingerprints_parallel`."""
-    compute_fingerprints_parallel(root_path, db_path, log_callback, progress_callback, max_workers)
+    compute_fingerprints_parallel(root_path, db_path, log_callback, progress_callback, max_workers, trim_silence)
 
