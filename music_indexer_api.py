@@ -303,6 +303,13 @@ def compute_moves_and_tag_index(root_path, log_callback=None, progress_callback=
             (fullpath,),
         ).fetchone()
         fp = row[0] if row else None
+        if dry_run and not fp:
+            try:
+                import acoustid  # local import to avoid dependency when unused
+                _, fp_hash = acoustid.fingerprint_file(fullpath)
+                fp = fp_hash
+            except Exception:
+                fp = None
         file_infos[fullpath] = {
             "primary": primary.lower(),
             "title": title.lower(),

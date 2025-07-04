@@ -5,6 +5,9 @@ from __future__ import annotations
 import os
 from collections import defaultdict
 from typing import Dict, Set, List
+import logging
+
+logger = logging.getLogger(__name__)
 
 from music_indexer_api import _keep_score
 
@@ -52,10 +55,14 @@ def find_near_duplicates(
     for i, p in enumerate(paths):
         for q in paths[i + 1:]:
             dist = fingerprint_distance(file_infos[p]['fp'], file_infos[q]['fp'])
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(
+                    f"Dry-run: {p} vs {q}: Hamming distance = {dist}")
             if dist <= threshold:
                 adj[p].add(q)
                 adj[q].add(p)
-                log_callback(f"   → near-dup {os.path.basename(p)} vs {os.path.basename(q)} dist={dist:.3f}")
+                log_callback(
+                    f"   → near-dup {os.path.basename(p)} vs {os.path.basename(q)} dist={dist:.3f}")
 
     # Compute connected components
     visited: Set[str] = set()
