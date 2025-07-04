@@ -197,7 +197,7 @@ def compute_moves_and_tag_index(root_path, log_callback=None, progress_callback=
     """
     1) Determine MUSIC_ROOT: if root_path/Music exists, use that; otherwise root_path itself.
     2) Scan for all audio files under MUSIC_ROOT.
-    3) Deduplicate by (primary, title, album, fingerprint) and delete lower-priority duplicates.
+    3) Deduplicate tracks by fingerprint only and delete lower-priority duplicates.
        If ``dry_run`` is True, deduplication actions are simulated only and no
        files are modified.
     4) Read metadata into `songs` dict, build:
@@ -276,8 +276,8 @@ def compute_moves_and_tag_index(root_path, log_callback=None, progress_callback=
                 all_audio.append(full)
     log_callback(f"   → Found {total_audio} audio files.")
 
-    # ─── Phase 2: Deduplicate using hybrid fingerprint + metadata ─────────────
-    log_callback("2/6: Deduplicating by fingerprint and metadata…")
+    # ─── Phase 2: Deduplicate using fingerprints ─────────────────────────────
+    log_callback("2/6: Deduplicating by fingerprint…")
     EXT_PRIORITY = {".flac": 0, ".m4a": 1, ".aac": 1, ".mp3": 2, ".wav": 3, ".ogg": 4}
 
     file_infos: Dict[str, Dict[str, str | None]] = {}
@@ -349,64 +349,6 @@ def compute_moves_and_tag_index(root_path, log_callback=None, progress_callback=
                 kept_files.discard(p)
             log_callback(f"Ambiguous duplicates for fingerprint {fp} moved to {folder}—please review.")
 
-    meta_groups: Dict[tuple, List[str]] = defaultdict(list)
-    for path in kept_files:
-        info = file_infos[path]
-        key = (info["primary"], info["title"], info["album"])
-        meta_groups[key].append(path)
-
-    group_index = 0
-    for key, paths in meta_groups.items():
-        if len(paths) <= 1:
-            continue
-        scored = sorted(paths, key=lambda p: _keep_score(p, file_infos[p], EXT_PRIORITY), reverse=True)
-        if len(scored) > 10:
-            keep = scored[0]
-            for other in scored[1:]:
-                if other not in to_delete:
-                    to_delete[other] = "Metadata group"
-                    kept_files.discard(other)
-            continue
-
-        delta = _keep_score(scored[0], file_infos[scored[0]], EXT_PRIORITY) - _keep_score(scored[1], file_infos[scored[1]], EXT_PRIORITY)
-        if delta >= DEDUP_KEEP_DELTA_THRESHOLD:
-            best = scored[0]
-            best_fp = file_infos[best]["fp"]
-            for other in scored[1:]:
-                if other in to_delete:
-                    continue
-                other_fp = file_infos[other]["fp"]
-                if best_fp and other_fp:
-                    dist = fingerprint_distance(best_fp, other_fp)
-                    if dist <= fuzzy_fp_threshold:
-                        to_delete[other] = "Fuzzy FP match"
-                        kept_files.discard(other)
-                else:
-                    to_delete[other] = "Metadata group"
-                    kept_files.discard(other)
-        else:
-            folder = os.path.join(review_root, f"meta_{group_index}")
-            group_index += 1
-            os.makedirs(folder, exist_ok=True)
-            for p in scored:
-                dest = os.path.join(folder, os.path.basename(p))
-                if os.path.exists(dest):
-                    base, ext = os.path.splitext(os.path.basename(p))
-                    i = 1
-                    new_dest = dest
-                    while os.path.exists(new_dest):
-                        new_dest = os.path.join(folder, f"{base}_{i}{ext}")
-                        i += 1
-                    dest = new_dest
-                if dry_run:
-                    log_callback(f"   ? (dry-run) Would move {p} → {dest}")
-                else:
-                    try:
-                        shutil.move(p, dest)
-                    except Exception as e:
-                        log_callback(f"   ! Failed to move {p} to manual review: {e}")
-                kept_files.discard(p)
-            log_callback(f"Ambiguous duplicates for metadata group {group_index - 1} moved to {folder}—please review.")
 
     for loser, reason in to_delete.items():
         if dry_run:
