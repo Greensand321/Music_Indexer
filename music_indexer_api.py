@@ -193,11 +193,13 @@ def _keep_score(path: str, info: dict, ext_priority: dict) -> float:
 
 # ─── A. HELPER: COMPUTE MOVES & TAG INDEX ───────────────────────────────
 
-def compute_moves_and_tag_index(root_path, log_callback=None, progress_callback=None):
+def compute_moves_and_tag_index(root_path, log_callback=None, progress_callback=None, dry_run=False):
     """
     1) Determine MUSIC_ROOT: if root_path/Music exists, use that; otherwise root_path itself.
     2) Scan for all audio files under MUSIC_ROOT.
     3) Deduplicate by (primary, title, album, fingerprint) and delete lower-priority duplicates.
+       If ``dry_run`` is True, deduplication actions are simulated only and no
+       files are modified.
     4) Read metadata into `songs` dict, build:
        - album_counts: how many genuine (non-remix) tracks per (artist, album)
        - remix_counts: how many remix‐tagged tracks per (artist, album)
@@ -337,10 +339,13 @@ def compute_moves_and_tag_index(root_path, log_callback=None, progress_callback=
                         new_dest = os.path.join(folder, f"{base}_{i}{ext}")
                         i += 1
                     dest = new_dest
-                try:
-                    shutil.move(p, dest)
-                except Exception as e:
-                    log_callback(f"   ! Failed to move {p} to manual review: {e}")
+                if dry_run:
+                    log_callback(f"   ? (dry-run) Would move {p} → {dest}")
+                else:
+                    try:
+                        shutil.move(p, dest)
+                    except Exception as e:
+                        log_callback(f"   ! Failed to move {p} to manual review: {e}")
                 kept_files.discard(p)
             log_callback(f"Ambiguous duplicates for fingerprint {fp} moved to {folder}—please review.")
 
@@ -393,19 +398,25 @@ def compute_moves_and_tag_index(root_path, log_callback=None, progress_callback=
                         new_dest = os.path.join(folder, f"{base}_{i}{ext}")
                         i += 1
                     dest = new_dest
-                try:
-                    shutil.move(p, dest)
-                except Exception as e:
-                    log_callback(f"   ! Failed to move {p} to manual review: {e}")
+                if dry_run:
+                    log_callback(f"   ? (dry-run) Would move {p} → {dest}")
+                else:
+                    try:
+                        shutil.move(p, dest)
+                    except Exception as e:
+                        log_callback(f"   ! Failed to move {p} to manual review: {e}")
                 kept_files.discard(p)
             log_callback(f"Ambiguous duplicates for metadata group {group_index - 1} moved to {folder}—please review.")
 
     for loser, reason in to_delete.items():
-        try:
-            os.remove(loser)
-            log_callback(f"   - Deleted duplicate ({reason}): {loser}")
-        except Exception as e:
-            log_callback(f"   ! Failed to delete {loser}: {e}")
+        if dry_run:
+            log_callback(f"   ? (dry-run) Would delete duplicate {loser} ({reason})")
+        else:
+            try:
+                os.remove(loser)
+                log_callback(f"   - Deleted duplicate ({reason}): {loser}")
+            except Exception as e:
+                log_callback(f"   ! Failed to delete {loser}: {e}")
 
     # ─── Phase 3: Read metadata & build counters ─────────────────────────────────
     log_callback("3/6: Reading metadata and building counters…")
@@ -675,7 +686,7 @@ def build_dry_run_html(root_path, output_html_path, log_callback=None):
     if log_callback is None:
         def log_callback(msg): pass
 
-    moves, tag_index, _ = compute_moves_and_tag_index(root_path, log_callback)
+    moves, tag_index, _ = compute_moves_and_tag_index(root_path, log_callback, None, dry_run=True)
 
     log_callback("5/6: Writing dry-run HTML…")
     with open(output_html_path, "w", encoding="utf-8") as out:
@@ -759,7 +770,7 @@ def apply_indexer_moves(root_path, log_callback=None, progress_callback=None):
     from fingerprint_generator import compute_fingerprints_parallel
     compute_fingerprints_parallel(root_path, db_path, log_callback, progress_callback)
 
-    moves, _, _ = compute_moves_and_tag_index(root_path, log_callback, progress_callback)
+    moves, _, _ = compute_moves_and_tag_index(root_path, log_callback, progress_callback, dry_run=False)
 
 
 
@@ -872,7 +883,12 @@ def run_full_indexer(root_path, output_html_path, dry_run_only=False, log_callba
     os.makedirs(not_sorted_dir, exist_ok=True)
 
     # Phase 1–4: Generate moves, tags, and collect decision log
-    moves, tag_index, decision_log = compute_moves_and_tag_index(root_path, log_callback, progress_callback)
+    moves, tag_index, decision_log = compute_moves_and_tag_index(
+        root_path,
+        log_callback,
+        progress_callback,
+        dry_run=dry_run_only,
+    )
 
     # Write the detailed log file
     docs_dir = os.path.join(root_path, "Docs")
@@ -910,7 +926,7 @@ def find_duplicates(root_path, log_callback=None):
     """Return list of (original_path, duplicate_path) that would be marked as
     duplicates by the indexer."""
 
-    moves, _, _ = compute_moves_and_tag_index(root_path, log_callback)
+    moves, _, _ = compute_moves_and_tag_index(root_path, log_callback, None, dry_run=True)
     dup_indicator = os.path.join("Duplicates", "")
     return [
         (old, new)
