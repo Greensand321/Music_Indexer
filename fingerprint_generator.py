@@ -21,11 +21,16 @@ def compute_fingerprints_parallel(
     root_path: str,
     db_path: str,
     log_callback: Callable[[str], None] | None = None,
+    progress_callback: Callable[[int, int, str], None] | None = None,
     max_workers: int | None = None,
 ) -> None:
     """Walk ``root_path`` and compute fingerprints using multiple processes."""
     if log_callback is None:
         def log_callback(msg: str) -> None:
+            pass
+
+    if progress_callback is None:
+        def progress_callback(current: int, total: int, msg: str) -> None:
             pass
 
     if max_workers is None:
@@ -55,6 +60,7 @@ def compute_fingerprints_parallel(
                 audio_files.append(os.path.join(dirpath, fname))
 
     total = len(audio_files)
+    progress_callback(0, total, "Fingerprinting")
     work_items = [(p, db_path) for p in audio_files]
 
     with ProcessPoolExecutor(max_workers=max_workers) as exe:
@@ -67,6 +73,7 @@ def compute_fingerprints_parallel(
                 (path, duration, fp_hash),
             )
             log_callback(f"Fingerprinted {path}")
+            progress_callback(idx, total, path)
             if idx % 50 == 0 or idx == total:
                 log_callback(f"   • Fingerprinting {idx}/{total}")
 
@@ -79,8 +86,9 @@ def compute_fingerprints(
     root_path: str,
     db_path: str,
     log_callback: Callable[[str], None] | None = None,
+    progress_callback: Callable[[int, int, str], None] | None = None,
     max_workers: int | None = None,
 ) -> None:
     """Backward-compatible wrapper around :func:`compute_fingerprints_parallel`."""
-    compute_fingerprints_parallel(root_path, db_path, log_callback, max_workers)
+    compute_fingerprints_parallel(root_path, db_path, log_callback, progress_callback, max_workers)
 

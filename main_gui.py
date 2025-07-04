@@ -440,21 +440,36 @@ class SoundVaultImporterApp(tk.Tk):
             self.indexer_tab, text="Dry Run", variable=self.dry_run_var
         ).grid(row=0, column=0, columnspan=2, sticky="w")
 
-        ttk.Button(
+        self.start_indexer_btn = ttk.Button(
             self.indexer_tab, text="Start Indexer", command=self.run_indexer
-        ).grid(row=1, column=0, pady=10)
-        ttk.Button(
+        )
+        self.start_indexer_btn.grid(row=1, column=0, pady=10)
+        self.open_not_sorted_btn = ttk.Button(
             self.indexer_tab,
             text="Open 'Not Sorted' Folder",
             command=self.open_not_sorted_folder,
-        ).grid(row=1, column=1, pady=10)
+        )
+        self.open_not_sorted_btn.grid(row=1, column=1, pady=10)
 
-        self.pb = ttk.Progressbar(self.indexer_tab, length=300, mode="determinate")
-        self.pb.grid(row=2, column=0, columnspan=2, pady=5, sticky="ew")
-        self.log = Text(self.indexer_tab, height=10)
-        self.log.grid(row=3, column=0, columnspan=2, sticky="nsew", pady=5)
+        progress_frame = ttk.Frame(self.indexer_tab)
+        progress_frame.grid(row=0, column=2, rowspan=3, padx=10, sticky="ns")
+        self.pb = ttk.Progressbar(
+            progress_frame, length=200, mode="determinate", orient="vertical"
+        )
+        self.pb.pack(side="left", fill="y")
+        self.pb_label = ttk.Label(progress_frame, text="0%", width=5)
+        self.pb_label.pack(side="left", padx=(5, 0))
+
+        self.status_var = tk.StringVar(value="")
+        self.status_label = ttk.Label(
+            self.indexer_tab, textvariable=self.status_var, wraplength=400, anchor="w"
+        )
+        self.status_label.grid(row=2, column=0, columnspan=2, sticky="ew")
+
+        self.log = ScrolledText(self.indexer_tab, height=10, wrap="word")
+        self.log.grid(row=3, column=0, columnspan=3, sticky="nsew", pady=5)
         self.indexer_tab.rowconfigure(3, weight=1)
-        self.indexer_tab.columnconfigure((0, 1), weight=1)
+        self.indexer_tab.columnconfigure((0, 1, 2), weight=1)
 
         # ─── Playlist Creator Tab ───────────────────────────────────────────
         self.playlist_tab = ttk.Frame(self.notebook)
@@ -707,14 +722,19 @@ class SoundVaultImporterApp(tk.Tk):
         os.makedirs(docs_dir, exist_ok=True)
         output_html = os.path.join(docs_dir, "MusicIndex.html")
 
-        self.pb["maximum"] = 0
+        self.pb["maximum"] = 1
         self.pb["value"] = 0
+        self.pb_label.config(text="0%")
+        self.status_var.set("")
         self.log.delete("1.0", "end")
+        self.start_indexer_btn["state"] = "disabled"
+        self.open_not_sorted_btn["state"] = "disabled"
 
         def log_line(msg):
             def ui():
                 self.log.insert("end", msg + "\n")
                 self.log.see("end")
+                self.status_var.set(msg)
 
             self.after(0, ui)
 
@@ -722,6 +742,9 @@ class SoundVaultImporterApp(tk.Tk):
             def ui():
                 self.pb["maximum"] = total
                 self.pb["value"] = idx
+                pct = int(idx / total * 100) if total else 0
+                self.pb_label.config(text=f"{pct}%")
+                self.status_var.set(path_)
                 self.log.insert("end", f"[{idx}/{total}] {path_}\n")
                 self.log.see("end")
 
@@ -773,6 +796,8 @@ class SoundVaultImporterApp(tk.Tk):
                 )
             finally:
                 self.after(0, self.update_library_info)
+                self.after(0, lambda: self.start_indexer_btn.config(state="normal"))
+                self.after(0, lambda: self.open_not_sorted_btn.config(state="normal"))
 
         # 1) Detect duplicates
         dups = find_duplicates(path, log_callback=log_line)

@@ -193,7 +193,7 @@ def _keep_score(path: str, info: dict, ext_priority: dict) -> float:
 
 # ─── A. HELPER: COMPUTE MOVES & TAG INDEX ───────────────────────────────
 
-def compute_moves_and_tag_index(root_path, log_callback=None):
+def compute_moves_and_tag_index(root_path, log_callback=None, progress_callback=None):
     """
     1) Determine MUSIC_ROOT: if root_path/Music exists, use that; otherwise root_path itself.
     2) Scan for all audio files under MUSIC_ROOT.
@@ -210,7 +210,11 @@ def compute_moves_and_tag_index(root_path, log_callback=None):
       - decision_log: list of strings explaining each track’s decision
     """
     if log_callback is None:
-        def log_callback(msg): pass
+        def log_callback(msg):
+            pass
+    if progress_callback is None:
+        def progress_callback(current, total, message):
+            pass
 
     cfg = load_config()
     fuzzy_fp_threshold = float(cfg.get("fuzzy_fp_threshold", DEFAULT_FUZZY_FP_THRESHOLD))
@@ -245,7 +249,16 @@ def compute_moves_and_tag_index(root_path, log_callback=None):
     log_callback(f"   → DEBUG: droeloe count = {global_counts.get('droeloe', 0)}")
 
     # --- Phase 1: Scan for audio files ---
+    log_callback("1/6: Discovering audio files…")
+    total_audio = sum(
+        1
+        for dirpath, _, files in os.walk(MUSIC_ROOT)
+        for fname in files
+        if os.path.splitext(fname)[1].lower() in SUPPORTED_EXTS
+        and "Not Sorted" not in os.path.relpath(os.path.join(dirpath, fname), root_path).split(os.sep)
+    )
     all_audio = []
+    idx = 0
     for dirpath, _, files in os.walk(MUSIC_ROOT):
         rel_dir = os.path.relpath(dirpath, root_path)
         if "Not Sorted" in rel_dir.split(os.sep):
@@ -256,8 +269,9 @@ def compute_moves_and_tag_index(root_path, log_callback=None):
                 full = os.path.join(dirpath, fname)
                 if "Not Sorted" in os.path.relpath(full, root_path).split(os.sep):
                     continue
+                idx += 1
+                progress_callback(idx, total_audio, f"Scanning {os.path.relpath(full, root_path)}")
                 all_audio.append(full)
-    total_audio = len(all_audio)
     log_callback(f"   → Found {total_audio} audio files.")
 
     # ─── Phase 2: Deduplicate using hybrid fingerprint + metadata ─────────────
@@ -400,10 +414,12 @@ def compute_moves_and_tag_index(root_path, log_callback=None):
     remix_counts   = defaultdict(int)
     cover_counts   = defaultdict(int)
     total_kept = len(kept_files)
+    progress_callback(0, total_kept, "Reading metadata")
 
     for idx, fullpath in enumerate(kept_files, start=1):
         if idx % 50 == 0 or idx == total_kept:
             log_callback(f"   • Reading metadata {idx}/{total_kept}")
+        progress_callback(idx, total_kept, f"Metadata {os.path.relpath(fullpath, root_path)}")
 
         data = get_tags(fullpath)
         raw_artist = data["artist"] or os.path.splitext(os.path.basename(fullpath))[0]
@@ -659,7 +675,7 @@ def build_dry_run_html(root_path, output_html_path, log_callback=None):
     if log_callback is None:
         def log_callback(msg): pass
 
-    moves, tag_index, _ = compute_moves_and_tag_index(root_path, log_callback)
+    moves, tag_index, _ = compute_moves_and_tag_index(root_path, log_callback, progress_callback)
 
     log_callback("5/6: Writing dry-run HTML…")
     with open(output_html_path, "w", encoding="utf-8") as out:
@@ -741,9 +757,9 @@ def apply_indexer_moves(root_path, log_callback=None, progress_callback=None):
     os.makedirs(docs_dir, exist_ok=True)
     db_path = os.path.join(docs_dir, ".soundvault.db")
     from fingerprint_generator import compute_fingerprints_parallel
-    compute_fingerprints_parallel(root_path, db_path, log_callback)
+    compute_fingerprints_parallel(root_path, db_path, log_callback, progress_callback)
 
-    moves, _, _ = compute_moves_and_tag_index(root_path, log_callback)
+    moves, _, _ = compute_moves_and_tag_index(root_path, log_callback, progress_callback)
 
 
 
@@ -856,7 +872,7 @@ def run_full_indexer(root_path, output_html_path, dry_run_only=False, log_callba
     os.makedirs(not_sorted_dir, exist_ok=True)
 
     # Phase 1–4: Generate moves, tags, and collect decision log
-    moves, tag_index, decision_log = compute_moves_and_tag_index(root_path, log_callback)
+    moves, tag_index, decision_log = compute_moves_and_tag_index(root_path, log_callback, progress_callback)
 
     # Write the detailed log file
     docs_dir = os.path.join(root_path, "Docs")
