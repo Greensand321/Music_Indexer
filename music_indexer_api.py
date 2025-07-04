@@ -675,7 +675,7 @@ def build_dry_run_html(root_path, output_html_path, log_callback=None):
     if log_callback is None:
         def log_callback(msg): pass
 
-    moves, tag_index, _ = compute_moves_and_tag_index(root_path, log_callback, progress_callback)
+    moves, tag_index, _ = compute_moves_and_tag_index(root_path, log_callback)
 
     log_callback("5/6: Writing dry-run HTML…")
     with open(output_html_path, "w", encoding="utf-8") as out:
