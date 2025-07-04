@@ -84,6 +84,7 @@ def compute_fingerprints_parallel(
     )
 
     audio_files = []
+    idx = 0
     for dirpath, _, files in os.walk(root_path):
         rel_dir = os.path.relpath(dirpath, root_path)
         if "Not Sorted" in rel_dir.split(os.sep):
@@ -91,7 +92,10 @@ def compute_fingerprints_parallel(
         for fname in files:
             ext = os.path.splitext(fname)[1].lower()
             if ext in SUPPORTED_EXTS:
-                audio_files.append(os.path.join(dirpath, fname))
+                full = os.path.join(dirpath, fname)
+                audio_files.append(full)
+                idx += 1
+                progress_callback(idx, 0, os.path.relpath(full, root_path))
 
     total = len(audio_files)
     progress_callback(0, total, "Fingerprinting")
