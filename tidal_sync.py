@@ -1,15 +1,54 @@
 import os
 import re
 import shutil
-from typing import List, Dict, Tuple, Optional
+from typing import List, Dict, Tuple, Optional, Callable
 
 from mutagen import File as MutagenFile
 import acoustid
+import logging
 
 from music_indexer_api import fingerprint_distance, get_tags, sanitize
 
 
 AUDIO_EXTS = {".flac", ".m4a", ".aac", ".mp3", ".wav", ".ogg"}
+
+# Debug configuration
+debug: bool = False
+_logger = logging.getLogger(__name__)
+_logger.propagate = False
+_logger.addHandler(logging.NullHandler())
+_file_handler: Optional[logging.Handler] = None
+
+
+def set_debug(enabled: bool, log_root: str | None = None) -> None:
+    """Enable or disable verbose debug logging."""
+    global debug, _file_handler
+    debug = enabled
+    if not enabled:
+        if _file_handler:
+            _logger.removeHandler(_file_handler)
+            _file_handler.close()
+            _file_handler = None
+        return
+
+    _logger.setLevel(logging.DEBUG)
+    if log_root:
+        os.makedirs(log_root, exist_ok=True)
+        log_path = os.path.join(log_root, "tidal_sync_debug.log")
+        if _file_handler:
+            _logger.removeHandler(_file_handler)
+            _file_handler.close()
+        _file_handler = logging.FileHandler(log_path, encoding="utf-8")
+        _file_handler.setFormatter(logging.Formatter("%(message)s"))
+        _logger.addHandler(_file_handler)
+
+
+def _dlog(msg: str, log_callback: Callable[[str], None] | None = None) -> None:
+    if not debug:
+        return
+    if log_callback:
+        log_callback(msg)
+    _logger.debug(msg)
 
 
 def _read_tags(path: str) -> Dict[str, str | None]:
@@ -121,7 +160,7 @@ def load_subpar_list(path: str) -> List[Dict[str, str]]:
     return out
 
 
-def scan_downloads(folder: str) -> List[Dict[str, str]]:
+def scan_downloads(folder: str, log_callback: Callable[[str], None] | None = None) -> List[Dict[str, str]]:
     """Return metadata and cached fingerprints for all audio files under ``folder``."""
     items: List[Dict[str, str]] = []
     for dirpath, _, files in os.walk(folder):
@@ -130,7 +169,7 @@ def scan_downloads(folder: str) -> List[Dict[str, str]]:
             if ext in AUDIO_EXTS:
                 path = os.path.join(dirpath, fname)
                 tags = _read_tags(path)
-                fp = _fingerprint(path)
+                fp = _fingerprint(path, log_callback)
                 items.append({
                     "artist": tags.get("artist"),
                     "title": tags.get("title"),
@@ -141,9 +180,10 @@ def scan_downloads(folder: str) -> List[Dict[str, str]]:
     return items
 
 
-def _fingerprint(path: str) -> str | None:
+def _fingerprint(path: str, log_callback: Callable[[str], None] | None = None) -> str | None:
     try:
         _, fp = acoustid.fingerprint_file(path)
+        _dlog(f"DEBUG: Fingerprinting file: {path}; fp prefix={fp[:16]!r}", log_callback)
         return fp
     except Exception:
         return None
@@ -173,6 +213,8 @@ def _find_best_fp_match(
     orig_fp: Optional[str],
     cands: List[Dict[str, str]],
     threshold: float,
+    orig_path: str = "",
+    log_callback: Callable[[str], None] | None = None,
 ) -> Tuple[Optional[Dict[str, str]], float, bool]:
     """Return best candidate by fingerprint distance.
 
@@ -185,6 +227,14 @@ def _find_best_fp_match(
     for c in cands:
         dist = fingerprint_distance(orig_fp, c.get("fingerprint"))
         distances.append(dist)
+        _dlog(
+            f"DEBUG: Distance between {orig_path} and {c.get('path')}: {dist:.4f}",
+            log_callback,
+        )
+        _dlog(
+            f"DEBUG: Threshold check ({threshold:.4f}): {'passed' if dist < threshold else 'failed'}",
+            log_callback,
+        )
         if dist < best_dist:
             best_dist = dist
             best = c
@@ -198,6 +248,7 @@ def match_downloads(
     subpar: List[Dict[str, str]],
     downloads: List[Dict[str, str]],
     threshold: float = 0.3,
+    log_callback: Callable[[str], None] | None = None,
 ) -> List[Dict[str, object]]:
     """Match subpar tracks with potential replacements in downloads."""
     matches: List[Dict[str, object]] = []
@@ -220,13 +271,16 @@ def match_downloads(
         for k in (_fuzzy_key(item, False), _fuzzy_key(item, True)):
             fuzzy_map.setdefault(k, []).append(item)
 
+    if log_callback is None:
+        log_callback = lambda msg: None
+
     for sp in subpar:
         key_exact = (
             (sp.get("artist") or "").lower(),
             (sp.get("title") or "").lower(),
             (sp.get("album") or "").lower(),
         )
-        orig_fp = _fingerprint(sp["path"])
+        orig_fp = _fingerprint(sp["path"], log_callback)
         note = None
         method = "None"
         best = None
@@ -240,7 +294,9 @@ def match_downloads(
 
         if best is None:
             # fingerprint-first matching
-            cand, best_dist, ambiguous = _find_best_fp_match(orig_fp, downloads, threshold)
+            cand, best_dist, ambiguous = _find_best_fp_match(
+                orig_fp, downloads, threshold, sp.get("path", ""), log_callback
+            )
             if cand is not None:
                 best = cand
                 method = "Fingerprint"
@@ -248,9 +304,20 @@ def match_downloads(
                     note = "Ambiguous – manual review"
 
         if best is None:
+            _dlog(
+                f"DEBUG: Looking up tag key: {key_exact!r}; candidates found: {len(dl_map.get(key_exact, []))}",
+                log_callback,
+            )
             cand = dl_map.get(key_exact)
             if cand:
-                best, best_dist, ambiguous = _find_best_fp_match(orig_fp, cand, threshold)
+                for candidate in cand:
+                    _dlog(
+                        f"DEBUG: Candidate path={candidate['path']}; artist={candidate.get('artist')!r}, title={candidate.get('title')!r}, album={candidate.get('album')!r}",
+                        log_callback,
+                    )
+                best, best_dist, ambiguous = _find_best_fp_match(
+                    orig_fp, cand, threshold, sp.get("path", ""), log_callback
+                )
                 if best is not None:
                     method = "Tag"
                     if ambiguous:
@@ -268,7 +335,9 @@ def match_downloads(
                     seen.add(id(c))
 
             if unique_cands:
-                cand, best_dist, ambiguous = _find_best_fp_match(orig_fp, unique_cands, threshold)
+                cand, best_dist, ambiguous = _find_best_fp_match(
+                    orig_fp, unique_cands, threshold, sp.get("path", ""), log_callback
+                )
                 if cand is not None:
                     best = cand
                     method = "Fuzzy"
@@ -283,6 +352,10 @@ def match_downloads(
             note = "No fingerprint"
 
         score = None if best is None else 1 - best_dist
+        _dlog(
+            f"DEBUG: Best match: {best['path'] if best else None} with score={score if score is not None else float('nan'):.4f}",
+            log_callback,
+        )
         matches.append(
             {
                 "original": sp["path"],

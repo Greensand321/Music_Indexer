@@ -305,6 +305,7 @@ class SoundVaultImporterApp(tk.Tk):
         self.downloads_list = []
         self.matches = []
         self.fp_threshold_var = tk.DoubleVar(value=0.3)
+        self.sync_debug_var = tk.BooleanVar(value=False)
 
         # assume ffmpeg is available without performing checks
         self.ffmpeg_available = True
@@ -507,6 +508,11 @@ class SoundVaultImporterApp(tk.Tk):
 
         ttk.Label(sync, text="FP Threshold:").grid(row=2, column=0, sticky="w", pady=(5, 0))
         ttk.Entry(sync, textvariable=self.fp_threshold_var, width=5).grid(row=2, column=1, sticky="w", pady=(5, 0))
+        ttk.Checkbutton(
+            sync,
+            text="Verbose Debug",
+            variable=self.sync_debug_var,
+        ).grid(row=2, column=2, sticky="w", pady=(5, 0))
 
         ttk.Button(
             sync, text="Match & Compare", command=self.build_comparison_table
@@ -1639,14 +1645,21 @@ class SoundVaultImporterApp(tk.Tk):
         if not folder:
             return
         self.downloads_path_var.set(folder)
-        self.downloads_list = tidal_sync.scan_downloads(folder)
+        tidal_sync.set_debug(self.sync_debug_var.get(), self.library_path or ".")
+        self.downloads_list = tidal_sync.scan_downloads(folder, log_callback=self._log)
         self.sync_status_var.set(f"Scanned {len(self.downloads_list)} downloaded tracks.")
         if self.subpar_path_var.get():
             self.build_comparison_table()
 
     def build_comparison_table(self):
         thr = float(self.fp_threshold_var.get() or 0.3)
-        self.matches = tidal_sync.match_downloads(self.subpar_list, self.downloads_list, threshold=thr)
+        tidal_sync.set_debug(self.sync_debug_var.get(), self.library_path or ".")
+        self.matches = tidal_sync.match_downloads(
+            self.subpar_list,
+            self.downloads_list,
+            threshold=thr,
+            log_callback=self._log,
+        )
         num_tag = sum(1 for m in self.matches if m.get("method") == "Tag")
         num_fp = sum(1 for m in self.matches if m.get("method") == "Fingerprint")
         num_none = sum(1 for m in self.matches if m.get("download") is None)
