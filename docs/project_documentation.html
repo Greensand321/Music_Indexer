@@ -34,7 +34,7 @@
 <ul>
   <li>Scans folders recursively for audio files.</li>
   <li>Reads metadata: artist, title, album, year, track number, embedded cover art.</li>
-  <li>Deduplicates by (artist, title, album), preferring FLAC &gt; M4A &gt; MP3.</li>
+  <li>Deduplicates tracks by fingerprint, preferring FLAC &gt; M4A &gt; MP3.</li>
   <li><strong>Phase 0</strong>: Pre-scan the vault under MUSIC_ROOT to build a global artist-count map via <code>build_primary_counts()</code>.</li>
   <li>Implements grouping rules:
     <ul>
