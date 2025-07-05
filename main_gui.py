@@ -26,6 +26,7 @@ import json
 import queue
 import subprocess
 from tkinter import filedialog, messagebox, Text, Scrollbar
+from unsorted_popup import UnsortedPopup
 from tkinter.scrolledtext import ScrolledText
 
 from validator import validate_soundvault_structure
@@ -442,7 +443,7 @@ class SoundVaultImporterApp(tk.Tk):
         ttk.Checkbutton(options, text="Dry Run", variable=self.dry_run_var).pack(side="left")
 
         self.phase_c_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(options, text="Enable Cross-Album Scan", variable=self.phase_c_var).pack(side="left", padx=(5,0))
+        ttk.Checkbutton(options, text="Enable Cross-Album Scan (Phase 3)", variable=self.phase_c_var).pack(side="left", padx=(5,0))
 
         self.flush_cache_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(options, text="Flush Cache", variable=self.flush_cache_var).pack(side="left", padx=(5,0))
@@ -463,13 +464,26 @@ class SoundVaultImporterApp(tk.Tk):
         self.open_not_sorted_btn.grid(row=1, column=1, pady=10)
 
         progress_frame = ttk.Frame(self.indexer_tab)
-        progress_frame.grid(row=0, column=2, rowspan=3, padx=10, sticky="ns")
-        self.pb = ttk.Progressbar(
-            progress_frame, length=200, mode="determinate", orient="vertical"
+        progress_frame.grid(row=0, column=2, rowspan=3, padx=10, sticky="nsew")
+        progress_frame.columnconfigure(1, weight=1)
+
+        ttk.Label(progress_frame, text="Phase A").grid(row=0, column=0, sticky="e")
+        self.phase_a_bar = ttk.Progressbar(
+            progress_frame, length=160, mode="determinate", orient="horizontal"
         )
-        self.pb.pack(side="left", fill="y")
-        self.pb_label = ttk.Label(progress_frame, text="0%", width=5)
-        self.pb_label.pack(side="left", padx=(5, 0))
+        self.phase_a_bar.grid(row=0, column=1, sticky="ew", pady=2)
+
+        ttk.Label(progress_frame, text="Phase B").grid(row=1, column=0, sticky="e")
+        self.phase_b_bar = ttk.Progressbar(
+            progress_frame, length=160, mode="determinate", orient="horizontal"
+        )
+        self.phase_b_bar.grid(row=1, column=1, sticky="ew", pady=2)
+
+        ttk.Label(progress_frame, text="Phase C").grid(row=2, column=0, sticky="e")
+        self.phase_c_bar = ttk.Progressbar(
+            progress_frame, length=160, mode="determinate", orient="horizontal"
+        )
+        self.phase_c_bar.grid(row=2, column=1, sticky="ew", pady=2)
 
         self.status_var = tk.StringVar(value="")
         self.status_label = ttk.Label(
@@ -733,9 +747,9 @@ class SoundVaultImporterApp(tk.Tk):
         os.makedirs(docs_dir, exist_ok=True)
         output_html = os.path.join(docs_dir, "MusicIndex.html")
 
-        self.pb["maximum"] = 1
-        self.pb["value"] = 0
-        self.pb_label.config(text="0%")
+        for bar in (self.phase_a_bar, self.phase_b_bar, self.phase_c_bar):
+            bar.config(mode="determinate", maximum=1, value=0)
+            bar.stop()
         self.status_var.set("")
         self.log.delete("1.0", "end")
         self.start_indexer_btn["state"] = "disabled"
@@ -751,19 +765,24 @@ class SoundVaultImporterApp(tk.Tk):
 
         def progress(idx, total, path_):
             def ui():
-                if total:
-                    if self.pb["mode"] != "determinate":
-                        self.pb.stop()
-                        self.pb.config(mode="determinate")
-                    self.pb["maximum"] = total
-                    self.pb["value"] = idx
-                    pct = int(idx / total * 100)
-                    self.pb_label.config(text=f"{pct}%")
+                msg = path_.lower()
+                if "metadata" in msg:
+                    bar = self.phase_b_bar
+                elif "moving" in msg or "apply" in msg:
+                    bar = self.phase_c_bar
                 else:
-                    if self.pb["mode"] != "indeterminate":
-                        self.pb.config(mode="indeterminate", maximum=100)
-                        self.pb.start(10)
-                    self.pb_label.config(text="…")
+                    bar = self.phase_a_bar
+
+                if total:
+                    if bar["mode"] != "determinate":
+                        bar.stop()
+                        bar.config(mode="determinate")
+                    bar["maximum"] = total
+                    bar["value"] = idx
+                else:
+                    if bar["mode"] != "indeterminate":
+                        bar.config(mode="indeterminate", maximum=100)
+                        bar.start(10)
 
                 self.status_var.set(path_)
                 self.log.insert("end", f"[{idx}/{total}] {path_}\n")
@@ -824,7 +843,8 @@ class SoundVaultImporterApp(tk.Tk):
                 self.after(0, self.update_library_info)
                 self.after(0, lambda: self.start_indexer_btn.config(state="normal"))
                 self.after(0, lambda: self.open_not_sorted_btn.config(state="normal"))
-                self.after(0, self.pb.stop)
+                for bar in (self.phase_a_bar, self.phase_b_bar, self.phase_c_bar):
+                    self.after(0, bar.stop)
 
         # 1) Detect duplicates
         dups = find_duplicates(path, log_callback=log_line)
@@ -836,13 +856,8 @@ class SoundVaultImporterApp(tk.Tk):
         # "Not Sorted" folder before any changes are made.
         not_sorted = os.path.join(path, "Not Sorted")
         os.makedirs(not_sorted, exist_ok=True)
-        messagebox.showinfo(
-            "Not Sorted",
-            (
-                "Move any folders you want the indexer to skip into the "
-                "'Not Sorted' folder, then press OK to continue."
-            ),
-        )
+        dlg = UnsortedPopup(self, not_sorted)
+        self.wait_window(dlg)
         # 2) Proceed with threaded indexing
         threading.Thread(target=task, daemon=True).start()
 
