@@ -4,10 +4,8 @@ import os
 import re
 import shutil  # used for relocating special folders
 import hashlib
-import sqlite3
 from collections import defaultdict
 from typing import Dict, List
-from concurrent.futures import ProcessPoolExecutor, as_completed, TimeoutError
 from config import load_config
 from mutagen import File as MutagenFile
 from mutagen.id3 import ID3NoHeaderError
@@ -206,52 +204,6 @@ def _keep_score(path: str, info: dict, ext_priority: dict) -> float:
     return ext_score + meta_score + fname_score
 
 
-def _fingerprint_worker(path: str) -> tuple[str, str | None]:
-    """Return (path, fingerprint) computed via acoustid or ``None`` on error."""
-    try:
-        import acoustid  # local import to avoid dependency when unused
-        _, fp_hash = acoustid.fingerprint_file(path)
-        return path, fp_hash
-    except Exception:
-        return path, None
-
-
-def _compute_missing_fingerprints(
-    paths: List[str],
-    root_path: str,
-    log_callback,
-    progress_callback,
-    db,
-    max_workers: int | None = None,
-) -> Dict[str, str | None]:
-    """Compute fingerprints in parallel with per-task timeouts."""
-    results: Dict[str, str | None] = {}
-    total = len(paths)
-    log_callback(f"   → Computing {total} fingerprints in parallel…")
-    progress_callback(0, total, "Fingerprinting")
-    with ProcessPoolExecutor(max_workers=max_workers) as exe:
-        future_map = {exe.submit(_fingerprint_worker, p): p for p in paths}
-        for idx, fut in enumerate(as_completed(future_map), start=1):
-            p = future_map[fut]
-            try:
-                _path, fp = fut.result(timeout=FINGERPRINT_TIMEOUT)
-            except Exception as e:
-                log_callback(f"   ! Fingerprint failed for {os.path.basename(p)}: {e}")
-                fp = None
-            results[p] = fp
-            progress_callback(idx, total, os.path.relpath(p, root_path))
-            if idx % 50 == 0 or idx == total:
-                log_callback(f"   • Fingerprinting {idx}/{total}")
-    for path, fp in results.items():
-        if fp is None:
-            continue
-        mtime = os.path.getmtime(path)
-        db.execute(
-            "INSERT OR REPLACE INTO fingerprints (path, mtime, duration, fingerprint) VALUES (?, ?, NULL, ?)",
-            (path, mtime, fp),
-        )
-    db.commit()
-    return results
 
 
 # ─── A. HELPER: COMPUTE MOVES & TAG INDEX ───────────────────────────────
@@ -302,31 +254,9 @@ def compute_moves_and_tag_index(
     docs_dir = os.path.join(root_path, "Docs")
     os.makedirs(docs_dir, exist_ok=True)
     db_path = os.path.join(docs_dir, ".soundvault.db")
-    db_folder = os.path.dirname(db_path)
-    os.makedirs(db_folder, exist_ok=True)
-    db = sqlite3.connect(db_path)
-    db.execute(
-        """
-        CREATE TABLE IF NOT EXISTS fingerprints (
-          path TEXT PRIMARY KEY,
-          mtime REAL,
-          duration INT,
-          fingerprint TEXT
-        );
-        """
-    )
     if flush_cache:
-        db.execute("DELETE FROM fingerprints")
-        db.commit()
-    db.execute(
-        """
-        CREATE TABLE IF NOT EXISTS fingerprints (
-          path TEXT PRIMARY KEY,
-          duration INT,
-          fingerprint TEXT
-        );
-        """
-    )
+        from fingerprint_cache import flush_cache as _flush
+        _flush(db_path)
 
     # --- Phase 0: Pre-scan entire vault (under MUSIC_ROOT) ---
     global_counts = build_primary_counts(MUSIC_ROOT, progress_callback)
@@ -359,41 +289,22 @@ def compute_moves_and_tag_index(
     EXT_PRIORITY = {".flac": 0, ".m4a": 1, ".aac": 1, ".mp3": 2, ".wav": 3, ".ogg": 4}
 
     path_fps: Dict[str, str | None] = {}
-    for p in all_audio:
-        cur_mtime = os.path.getmtime(p)
-        row = db.execute(
-            "SELECT mtime, fingerprint FROM fingerprints WHERE path=?",
-            (p,),
-        ).fetchone()
-        if row and abs(row[0] - cur_mtime) < 1e-6:
-            fp_val = row[1]
-            if isinstance(fp_val, (bytes, bytearray)):
-                try:
-                    fp_val = fp_val.decode("utf-8")
-                except Exception:
-                    fp_val = fp_val.decode("latin1", errors="ignore")
-            path_fps[p] = fp_val
-        else:
-            path_fps[p] = None
+    from fingerprint_cache import get_fingerprint
 
-    if dry_run:
-        to_fp = [p for p, fp in path_fps.items() if fp is None]
-        if to_fp:
-            computed = _compute_missing_fingerprints(
-                to_fp,
-                root_path,
-                log_callback,
-                progress_callback,
-                db,
-                max_workers,
-            )
-            for p, fp_val in computed.items():
-                if isinstance(fp_val, (bytes, bytearray)):
-                    try:
-                        fp_val = fp_val.decode("utf-8")
-                    except Exception:
-                        fp_val = fp_val.decode("latin1", errors="ignore")
-                path_fps[p] = fp_val
+    def _compute(path: str) -> tuple[int | None, str | None]:
+        try:
+            import acoustid
+            return acoustid.fingerprint_file(path)
+        except Exception:
+            return None, None
+
+    progress_callback(0, len(all_audio), "Fingerprinting")
+    for idx, p in enumerate(all_audio, start=1):
+        fp_val = get_fingerprint(p, db_path, _compute)
+        path_fps[p] = fp_val
+        progress_callback(idx, len(all_audio), os.path.relpath(p, root_path))
+        if idx % 50 == 0 or idx == len(all_audio):
+            log_callback(f"   • Fingerprinting {idx}/{len(all_audio)}")
 
     file_infos: Dict[str, Dict[str, str | None]] = {}
     for idx, fullpath in enumerate(all_audio, start=1):
@@ -755,7 +666,6 @@ def compute_moves_and_tag_index(
         }
 
     log_callback("   → Destination paths determined for all files.")
-    db.close()
     return moves, tag_index, decision_log
 
 
@@ -768,7 +678,7 @@ def build_dry_run_html(
     enable_phase_c=False,
     flush_cache=False,
     max_workers=None,
-):
+): 
     """
     1) Call compute_moves_and_tag_index() to get (moves, tag_index, decision_log).
     2) Write a dry-run HTML to output_html_path showing the proposed tree.
@@ -788,48 +698,56 @@ def build_dry_run_html(
     )
 
     log_callback("5/6: Writing dry-run HTML…")
-    with open(output_html_path, "w", encoding="utf-8") as out:
-        out.write(f"""<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <title>Music Index (Dry Run) – {sanitize(os.path.basename(root_path))}</title>
-  <style>
-    body {{ background:#2e3440; color:#d8dee9; font-family:'Courier New', monospace; }}
-    pre  {{ font-size:14px; }}
-    .folder {{ color:#81a1c1; }}
-    .song   {{ color:#a3be8c; }}
-    .tags   {{ color:#88c0d0; font-size:12px; margin-left:1em; }}
-  </style>
-</head>
-<body>
-<pre>
-""")
-        out.write(f"<span class=\"folder\">{sanitize(os.path.basename(root_path))}/</span>\n\n")
+
+    def build_exact_metadata_section() -> str:
+        lines = ["<h2>Phase A – Exact Metadata</h2>", "<pre>"]
+        lines.append(f"<span class=\"folder\">{sanitize(os.path.basename(root_path))}/</span>")
         tree_nodes = set()
         for new_path in moves.values():
             parts = os.path.relpath(new_path, root_path).split(os.sep)
             for i in range(1, len(parts) + 1):
                 subtree = os.path.join(root_path, *parts[:i])
                 tree_nodes.add(subtree)
-
         for node in sorted(tree_nodes, key=lambda p: os.path.relpath(p, root_path)):
             rel = os.path.relpath(node, root_path)
             depth = rel.count(os.sep)
             indent = "    " * depth
             _, ext = os.path.splitext(node)
             if os.path.isdir(node) or ext.lower() not in {".flac", ".m4a", ".aac", ".mp3", ".wav", ".ogg"}:
-                out.write(f"{indent}<span class=\"folder\">{sanitize(os.path.basename(node))}/</span>\n")
+                lines.append(f"{indent}<span class=\"folder\">{sanitize(os.path.basename(node))}/</span>")
             else:
                 fname = os.path.basename(node)
                 leftover = tag_index.get(node, {}).get("leftover_tags", [])
                 tags_str = ", ".join(leftover) if leftover else ""
-                out.write(f"{indent}<span class=\"song\">- {sanitize(fname)}</span>")
+                line = f"{indent}<span class=\"song\">- {sanitize(fname)}</span>"
                 if tags_str:
-                    out.write(f"  <span class=\"tags\">[{sanitize(tags_str)}]</span>")
-                out.write("\n")
+                    line += f"  <span class=\"tags\">[{sanitize(tags_str)}]</span>"
+                lines.append(line)
+        lines.append("</pre>")
+        return "\n".join(lines)
 
-        out.write("</pre>\n</body>\n</html>\n")
+    def build_album_near_dupe_section() -> str:
+        return "<h2>Phase B – Album Near-Duplicates</h2>"
+
+    def build_cross_album_section() -> str:
+        if not enable_phase_c:
+            return ""
+        return "<h2>Phase C – Cross-Album</h2>"
+
+    with open(output_html_path, "w", encoding="utf-8") as out:
+        out.write(
+            "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n  <meta charset=\"UTF-8\">\n  "
+            f"<title>Music Index (Dry Run) – {sanitize(os.path.basename(root_path))}</title>\n  "
+            "<style>\n    body { background:#2e3440; color:#d8dee9; font-family:'Courier New', monospace; }\n    pre  { font-size:14px; }\n    .folder { color:#81a1c1; }\n    .song   { color:#a3be8c; }\n    .tags   { color:#88c0d0; font-size:12px; margin-left:1em; }\n  </style>\n</head>\n<body>\n"
+        )
+        out.write(build_exact_metadata_section())
+        out.write("\n")
+        out.write(build_album_near_dupe_section())
+        out.write("\n")
+        sec_c = build_cross_album_section()
+        if sec_c:
+            out.write(sec_c + "\n")
+        out.write("</body>\n</html>\n")
 
     log_callback(f"✓ Dry-run HTML written to: {output_html_path}")
     return {"moved": 0, "html": output_html_path, "dry_run": True}
@@ -977,7 +895,16 @@ def apply_indexer_moves(root_path, log_callback=None, progress_callback=None):
 
 # ─── D. HIGH-LEVEL “RUN FULL INDEXER” ───────────────────────────────────
 
-def run_full_indexer(root_path, output_html_path, dry_run_only=False, log_callback=None, progress_callback=None):
+def run_full_indexer(
+    root_path,
+    output_html_path,
+    dry_run_only: bool = False,
+    log_callback=None,
+    progress_callback=None,
+    enable_phase_c: bool = False,
+    flush_cache: bool = False,
+    max_workers: int | None = None,
+):
     """
     1) Call compute_moves_and_tag_index() to get (moves, tag_index, decision_log).
     2) Write a detailed log file `indexer_log.txt` under root_path.
@@ -998,9 +925,9 @@ def run_full_indexer(root_path, output_html_path, dry_run_only=False, log_callba
         log_callback,
         progress_callback,
         dry_run=dry_run_only,
-        enable_phase_c=False,
-        flush_cache=False,
-        max_workers=None,
+        enable_phase_c=enable_phase_c,
+        flush_cache=flush_cache,
+        max_workers=max_workers,
     )
 
     # Write the detailed log file
@@ -1018,7 +945,14 @@ def run_full_indexer(root_path, output_html_path, dry_run_only=False, log_callba
 
     # Build dry-run HTML
     log_callback("5/6: Writing dry-run HTML…")
-    build_dry_run_html(root_path, output_html_path, log_callback)
+    build_dry_run_html(
+        root_path,
+        output_html_path,
+        log_callback,
+        enable_phase_c=enable_phase_c,
+        flush_cache=flush_cache,
+        max_workers=max_workers,
+    )
 
     if not dry_run_only:
         # Phase 5–6: Actually move audio files and cover images
@@ -1054,3 +988,41 @@ def find_duplicates(root_path, log_callback=None):
         for old, new in moves.items()
         if dup_indicator in new
     ]
+
+
+def main(argv: List[str] | None = None) -> None:
+    import argparse
+
+    parser = argparse.ArgumentParser(description="SoundVault Music Indexer")
+    parser.add_argument("root", help="Library root path")
+    parser.add_argument("--dry-run", action="store_true", help="Preview only")
+    parser.add_argument("--enable-phase-c", action="store_true", help="Enable cross-album scan")
+    parser.add_argument("--flush-cache", action="store_true", help="Flush fingerprint cache")
+    parser.add_argument("--max-workers", type=int, default=None, help="Fingerprint worker count")
+    args = parser.parse_args(argv)
+
+    output = os.path.join(args.root, "Docs", "MusicIndex.html")
+    if args.dry_run:
+        build_dry_run_html(
+            args.root,
+            output,
+            print,
+            enable_phase_c=args.enable_phase_c,
+            flush_cache=args.flush_cache,
+            max_workers=args.max_workers,
+        )
+    else:
+        run_full_indexer(
+            args.root,
+            output,
+            dry_run_only=False,
+            log_callback=print,
+            progress_callback=None,
+            enable_phase_c=args.enable_phase_c,
+            flush_cache=args.flush_cache,
+            max_workers=args.max_workers,
+        )
+
+
+if __name__ == "__main__":
+    main()

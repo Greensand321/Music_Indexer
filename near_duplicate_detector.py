@@ -58,9 +58,13 @@ def find_near_duplicates(
         by_album[album].append(p)
 
     album_items = list(by_album.items())
-    for album, album_paths in album_items:
+    total_albums = len(album_items)
+    comparisons = 0
+    for i, (album, album_paths) in enumerate(album_items):
         if len(album_paths) < 2:
             continue
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(f"Phase B: scanning album {album} ({i+1}/{total_albums})")
         log_callback(f"   • Phase B album '{album or '<no album>'}' ({len(album_paths)} tracks)")
         for i, p in enumerate(album_paths):
             for q in album_paths[i + 1:]:
@@ -70,6 +74,7 @@ def find_near_duplicates(
                     adj[q].add(p)
                     log_callback(
                         f"   → near-dup {os.path.basename(p)} vs {os.path.basename(q)} dist={dist:.3f}")
+                comparisons += 1
 
     if enable_cross_album:
         all_paths = list(paths)
@@ -103,6 +108,11 @@ def find_near_duplicates(
                     stack.append(nb)
         if len(comp) > 1:
             clusters.append(comp)
+
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug(
+            f"Phase B summary: {total_albums} albums scanned, {comparisons} comparisons, {len(clusters)} clusters"
+        )
 
     to_delete: Dict[str, str] = {}
     for cluster in clusters:
