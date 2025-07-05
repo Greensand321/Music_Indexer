@@ -738,7 +738,7 @@ class SoundVaultImporterApp(tk.Tk):
 
             self.after(0, ui)
 
-       def progress(idx, total, path_):
+        def progress(idx, total, path_):
             def ui():
                 if total:
                     if self.pb["mode"] != "determinate":
