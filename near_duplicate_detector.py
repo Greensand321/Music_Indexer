@@ -41,8 +41,13 @@ def find_near_duplicates(
     threshold: float,
     log_callback=None,
     enable_cross_album: bool = False,
+    coord=None,
 ) -> Dict[str, str]:
-    """Return mapping of files to delete as near duplicates."""
+    """Return mapping of files to delete as near duplicates.
+
+    If ``coord`` is provided, each detected cluster is forwarded via
+    :meth:`DryRunCoordinator.add_near_dupe_clusters`.
+    """
     if log_callback is None:
         def log_callback(msg: str) -> None:
             pass
@@ -108,6 +113,9 @@ def find_near_duplicates(
                     stack.append(nb)
         if len(comp) > 1:
             clusters.append(comp)
+
+    if coord is not None:
+        coord.add_near_dupe_clusters([list(c) for c in clusters])
 
     if logger.isEnabledFor(logging.DEBUG):
         logger.debug(
