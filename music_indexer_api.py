@@ -7,7 +7,7 @@ import hashlib
 import sqlite3
 from collections import defaultdict
 from typing import Dict, List
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, as_completed, TimeoutError
 from config import load_config
 from mutagen import File as MutagenFile
 from mutagen.id3 import ID3NoHeaderError
@@ -18,6 +18,7 @@ REMIX_FOLDER_THRESHOLD  = 3
 SUPPORTED_EXTS          = {".flac", ".m4a", ".aac", ".mp3", ".wav", ".ogg"}
 DEFAULT_FUZZY_FP_THRESHOLD = 0.1  # allowed fingerprint difference ratio
 DEDUP_KEEP_DELTA_THRESHOLD = 50  # score difference to auto-delete duplicates
+FINGERPRINT_TIMEOUT = 30          # seconds before fingerprint worker is timed out
 
 # ─── Helper: build primary_counts for the entire vault ─────────────────────
 def build_primary_counts(root_path, progress_callback=None):
@@ -215,6 +216,34 @@ def _fingerprint_worker(path: str) -> tuple[str, str | None]:
         return path, None
 
 
+def _compute_missing_fingerprints(
+    paths: List[str],
+    root_path: str,
+    log_callback,
+    progress_callback,
+    max_workers: int | None = None,
+) -> Dict[str, str | None]:
+    """Compute fingerprints in parallel with per-task timeouts."""
+    results: Dict[str, str | None] = {}
+    total = len(paths)
+    log_callback(f"   → Computing {total} fingerprints in parallel…")
+    progress_callback(0, total, "Fingerprinting")
+    with ProcessPoolExecutor(max_workers=max_workers) as exe:
+        future_map = {exe.submit(_fingerprint_worker, p): p for p in paths}
+        for idx, fut in enumerate(as_completed(future_map), start=1):
+            p = future_map[fut]
+            try:
+                _path, fp = fut.result(timeout=FINGERPRINT_TIMEOUT)
+            except Exception as e:
+                log_callback(f"   ! Fingerprint failed for {os.path.basename(p)}: {e}")
+                fp = None
+            results[p] = fp
+            progress_callback(idx, total, os.path.relpath(p, root_path))
+            if idx % 50 == 0 or idx == total:
+                log_callback(f"   • Fingerprinting {idx}/{total}")
+    return results
+
+
 # ─── A. HELPER: COMPUTE MOVES & TAG INDEX ───────────────────────────────
 
 def compute_moves_and_tag_index(root_path, log_callback=None, progress_callback=None, dry_run=False):
@@ -309,15 +338,13 @@ def compute_moves_and_tag_index(root_path, log_callback=None, progress_callback=
     if dry_run:
         to_fp = [p for p, fp in path_fps.items() if fp is None]
         if to_fp:
-            total_fp = len(to_fp)
-            log_callback(f"   → Computing {total_fp} fingerprints in parallel…")
-            progress_callback(0, total_fp, "Fingerprinting")
-            with ProcessPoolExecutor() as exe:
-                for idx, (p, fp) in enumerate(exe.map(_fingerprint_worker, to_fp), start=1):
-                    path_fps[p] = fp
-                    progress_callback(idx, total_fp, os.path.relpath(p, root_path))
-                    if idx % 50 == 0 or idx == total_fp:
-                        log_callback(f"   • Fingerprinting {idx}/{total_fp}")
+            computed = _compute_missing_fingerprints(
+                to_fp,
+                root_path,
+                log_callback,
+                progress_callback,
+            )
+            path_fps.update(computed)
 
     file_infos: Dict[str, Dict[str, str | None]] = {}
     for idx, fullpath in enumerate(all_audio, start=1):
