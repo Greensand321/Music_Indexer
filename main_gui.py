@@ -435,10 +435,21 @@ class SoundVaultImporterApp(tk.Tk):
         self.notebook.add(self.indexer_tab, text="Indexer")
 
         # (Library path now selected via Choose Library… in the main toolbar)
+        options = ttk.Frame(self.indexer_tab)
+        options.grid(row=0, column=0, columnspan=2, sticky="w")
+
         self.dry_run_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(
-            self.indexer_tab, text="Dry Run", variable=self.dry_run_var
-        ).grid(row=0, column=0, columnspan=2, sticky="w")
+        ttk.Checkbutton(options, text="Dry Run", variable=self.dry_run_var).pack(side="left")
+
+        self.phase_c_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(options, text="Enable Cross-Album Scan", variable=self.phase_c_var).pack(side="left", padx=(5,0))
+
+        self.flush_cache_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(options, text="Flush Cache", variable=self.flush_cache_var).pack(side="left", padx=(5,0))
+
+        ttk.Label(options, text="Max Workers:").pack(side="left", padx=(5,0))
+        self.worker_var = tk.StringVar(value="")
+        ttk.Entry(options, textvariable=self.worker_var, width=4).pack(side="left")
 
         self.start_indexer_btn = ttk.Button(
             self.indexer_tab, text="Start Indexer", command=self.run_indexer
@@ -762,12 +773,17 @@ class SoundVaultImporterApp(tk.Tk):
 
         def task():
             try:
+                workers = self.worker_var.get().strip()
+                mw = int(workers) if workers else None
                 summary = run_full_indexer(
                     path,
                     output_html,
                     dry_run_only=dry_run,
                     log_callback=log_line,
                     progress_callback=progress,
+                    enable_phase_c=self.phase_c_var.get(),
+                    flush_cache=self.flush_cache_var.get(),
+                    max_workers=mw,
                 )
                 self.after(0, lambda: self.log.insert("end", "✔ Indexing complete\n"))
                 if dry_run:
