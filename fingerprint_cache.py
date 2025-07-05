@@ -16,6 +16,19 @@ def _ensure_db(db_path: str) -> sqlite3.Connection:
         );
         """
     )
+
+    # --- Handle schema upgrades -------------------------------------------
+    cols = {
+        row[1] for row in conn.execute("PRAGMA table_info(fingerprints)")
+    }
+    if "mtime" not in cols:
+        conn.execute("ALTER TABLE fingerprints ADD COLUMN mtime REAL")
+    if "duration" not in cols:
+        conn.execute("ALTER TABLE fingerprints ADD COLUMN duration INT")
+    if "fingerprint" not in cols:
+        conn.execute("ALTER TABLE fingerprints ADD COLUMN fingerprint TEXT")
+    conn.commit()
+
     return conn
 
 
