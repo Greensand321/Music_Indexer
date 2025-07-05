@@ -1,6 +1,7 @@
 import os
 import sqlite3
 from typing import Callable, Optional
+from functools import lru_cache
 
 
 def _ensure_db(db_path: str) -> sqlite3.Connection:
@@ -32,6 +33,7 @@ def _ensure_db(db_path: str) -> sqlite3.Connection:
     return conn
 
 
+@lru_cache(maxsize=128)
 def get_fingerprint(
     path: str,
     db_path: str,
@@ -66,6 +68,7 @@ def get_fingerprint(
 
 
 def flush_cache(db_path: str) -> None:
+    get_fingerprint.cache_clear()
     if not os.path.exists(db_path):
         return
     conn = sqlite3.connect(db_path)

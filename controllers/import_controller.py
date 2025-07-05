@@ -87,6 +87,19 @@ def import_new_files(
         shutil.copy2(src, temp_path)
         orig_to_temp[src] = temp_path
 
+    docs_dir = os.path.join(vault_root, "Docs")
+    db_path = os.path.join(docs_dir, ".soundvault.db")
+    from cache_prewarmer import prewarm_cache
+
+    def _compute(path: str) -> tuple[int | None, str | None]:
+        try:
+            import acoustid
+            return acoustid.fingerprint_file(path)
+        except Exception:
+            return None, None
+
+    prewarm_cache(list(orig_to_temp.values()), db_path, _compute)
+
     moves, tag_index, decision_log = idx.compute_moves_and_tag_index(vault_root, log_callback, coord=None)
 
     import_moves = {}
