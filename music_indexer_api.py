@@ -6,6 +6,7 @@ import shutil  # used for relocating special folders
 import hashlib
 from collections import defaultdict
 from typing import Dict, List
+from dry_run_coordinator import DryRunCoordinator
 from config import load_config
 from mutagen import File as MutagenFile
 from mutagen.id3 import ID3NoHeaderError
@@ -216,6 +217,7 @@ def compute_moves_and_tag_index(
     enable_phase_c=False,
     flush_cache=False,
     max_workers=None,
+    coord=None,
 ):
     """
     1) Determine MUSIC_ROOT: if root_path/Music exists, use that; otherwise root_path itself.
@@ -233,6 +235,9 @@ def compute_moves_and_tag_index(
       - moves: { old_path: new_path, ... }
       - tag_index: { new_path: { "leftover_tags": [...], "old_paths": [...] }, ... }
       - decision_log: list of strings explaining each track’s decision
+
+    ``coord`` can be provided to collect additional diagnostic data during
+    near-duplicate detection.
     """
     if log_callback is None:
         def log_callback(msg):
@@ -386,6 +391,9 @@ def compute_moves_and_tag_index(
                 kept_files.discard(p)
             log_callback(f"Ambiguous duplicates for fingerprint {fp} moved to {folder}—please review.")
 
+    if coord is not None:
+        coord.add_exact_dupes([p for p, r in to_delete.items() if r == "Exact FP match"])
+
 
     # --- Near-duplicate detection -------------------------------------------------
     from near_duplicate_detector import find_near_duplicates
@@ -396,6 +404,7 @@ def compute_moves_and_tag_index(
         fuzzy_fp_threshold,
         log_callback,
         enable_phase_c,
+        coord,
     )
     for loser, reason in near_dupes.items():
         if loser not in to_delete:
@@ -687,6 +696,7 @@ def build_dry_run_html(
     if log_callback is None:
         def log_callback(msg): pass
 
+    coord = DryRunCoordinator()
     moves, tag_index, _ = compute_moves_and_tag_index(
         root_path,
         log_callback,
@@ -695,6 +705,7 @@ def build_dry_run_html(
         enable_phase_c=enable_phase_c,
         flush_cache=flush_cache,
         max_workers=max_workers,
+        coord=coord,
     )
 
     log_callback("5/6: Writing dry-run HTML…")
@@ -734,19 +745,25 @@ def build_dry_run_html(
             return ""
         return "<h2>Phase C – Cross-Album</h2>"
 
+    sec_a = build_exact_metadata_section()
+    coord.set_html_section('A', sec_a)
+    sec_b = build_album_near_dupe_section()
+    coord.set_html_section('B', sec_b)
+    sec_c = build_cross_album_section()
+    if sec_c:
+        coord.set_html_section('C', sec_c)
+
+    html_body = coord.assemble_final_report()
+
     with open(output_html_path, "w", encoding="utf-8") as out:
         out.write(
             "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n  <meta charset=\"UTF-8\">\n  "
             f"<title>Music Index (Dry Run) – {sanitize(os.path.basename(root_path))}</title>\n  "
             "<style>\n    body { background:#2e3440; color:#d8dee9; font-family:'Courier New', monospace; }\n    pre  { font-size:14px; }\n    .folder { color:#81a1c1; }\n    .song   { color:#a3be8c; }\n    .tags   { color:#88c0d0; font-size:12px; margin-left:1em; }\n  </style>\n</head>\n<body>\n"
         )
-        out.write(build_exact_metadata_section())
-        out.write("\n")
-        out.write(build_album_near_dupe_section())
-        out.write("\n")
-        sec_c = build_cross_album_section()
-        if sec_c:
-            out.write(sec_c + "\n")
+        out.write(html_body)
+        if html_body and not html_body.endswith("\n"):
+            out.write("\n")
         out.write("</body>\n</html>\n")
 
     log_callback(f"✓ Dry-run HTML written to: {output_html_path}")
@@ -798,6 +815,7 @@ def apply_indexer_moves(root_path, log_callback=None, progress_callback=None):
         enable_phase_c=False,
         flush_cache=False,
         max_workers=None,
+        coord=None,
     )
 
 
@@ -928,6 +946,7 @@ def run_full_indexer(
         enable_phase_c=enable_phase_c,
         flush_cache=flush_cache,
         max_workers=max_workers,
+        coord=None,
     )
 
     # Write the detailed log file
@@ -981,6 +1000,7 @@ def find_duplicates(root_path, log_callback=None):
         enable_phase_c=False,
         flush_cache=False,
         max_workers=None,
+        coord=None,
     )
     dup_indicator = os.path.join("Duplicates", "")
     return [

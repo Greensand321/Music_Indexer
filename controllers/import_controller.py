@@ -86,7 +86,7 @@ def import_new_files(
         shutil.copy2(src, temp_path)
         orig_to_temp[src] = temp_path
 
-    moves, tag_index, decision_log = idx.compute_moves_and_tag_index(vault_root, log_callback)
+    moves, tag_index, decision_log = idx.compute_moves_and_tag_index(vault_root, log_callback, coord=None)
 
     import_moves = {}
     for orig, tmp in orig_to_temp.items():
