@@ -143,7 +143,13 @@ def compute_fingerprints(root_path, db_path, log_callback=None):
 
 <hr>
 
-<h3>2.3 Unique Genre Lister (<code>genre_list_controller.py</code>)</h3>
+<h3>2.3 Fingerprint Cache (<code>fingerprint_cache.py</code>)</h3>
+<p>Caches AcoustID fingerprints in a SQLite database so repeated scans run much
+faster. Schema upgrades are handled automatically.</p>
+
+<hr>
+
+<h3>2.4 Unique Genre Lister (<code>genre_list_controller.py</code>)</h3>
 <p>Scans a folder for audio files and builds a deduplicated, sorted list of all <code>genre</code> tags found. Writes <code>genres.html</code> so you can review every raw genre:</p>
 
 <pre><code>
@@ -568,13 +574,18 @@ def main():
 if __name__ == "__main__":
     main()
 </code></pre>
-<h3>2.6 Normalize Genres (<code>normalize_controller.py</code>)</h3>
+<h3>2.6 Tidal-dl Sync (<code>tidal_sync.py</code>)</h3>
+<p>Matches your library against tidal-dl downloads and replaces low-quality files
+with their FLAC counterparts. Debug logs can be written for troubleshooting.</p>
+
+<hr>
+<h3>2.7 Normalize Genres (<code>normalize_controller.py</code>)</h3>
 <p>Maps raw genre tags to canonical genres using a JSON mapping file. Updated tags are written back to each track.</p>
 
-<h3>2.7 Playlist Generator (<code>playlist_generator.py</code>)</h3>
+<h3>2.8 Playlist Generator (<code>playlist_generator.py</code>)</h3>
 <p>Creates simple M3U playlists mirroring your folder structure.</p>
 
-<h3>2.8 Playlist Engine <em>(in development)</em></h3>
+<h3>2.9 Playlist Engine <em>(in development)</em></h3>
 <p>Planned advanced playlist features:</p>
 <ul>
   <li><strong>Tempo Buckets</strong>: group tracks by BPM.</li>
@@ -600,9 +611,12 @@ if __name__ == "__main__":
 <ul>
   <li><strong>Indexer</strong>: Fully implemented as <code>music_indexer_api.py</code>, tested on sample folders. It correctly reorganizes by artist, year, album, singles, and remixes, preserving cover-art groups.</li>
   <li><strong>Fingerprint Generator</strong>: <code>fingerprint_generator.py</code> stores AcoustID hashes for each track.</li>
+  <li><strong>Fingerprint Cache</strong>: <code>fingerprint_cache.py</code> keeps computed fingerprints in SQLite.</li>
   <li><strong>Unique Genre Lister</strong>: <code>genre_list_controller.py</code> creates <code>genres.html</code> showing all distinct raw genre tags in one place.</li>
   <li><strong>Genre Updater</strong>: <code>update_genres.py</code> connects to MusicBrainz, pulls top 3 tags per track, and writes them into files—skipping files that already have ≥ 2 genres.</li>
   <li><strong>Library Index</strong>: <code>library_index_controller.py</code> builds <code>library_index.html</code>, a table listing path, artist, title, album, year, track, and genre(s) for every audio file. Useful for quick review.</li>
+  <li><strong>Tidal-dl Sync</strong>: <code>tidal_sync.py</code> upgrades MP3s to FLAC by matching downloads.</li>
+  <li><strong>Near-Duplicate Detector</strong>: integrated into <code>music_indexer_api.py</code> to remove fuzzy duplicates.</li>
   <li><strong>Clustered Playlists</strong>: interactive K-Means and HDBSCAN clustering with a graph-based panel.</li>
   <li><strong>UI Enhancements</strong>: theme selector and automatic DPI scaling.</li>
 </ul>
@@ -688,7 +702,7 @@ librosa      # optional, for BPM estimation</code></pre>
 
 <h2>5. Summary & Migration Tips</h2>
 <ul>
-  <li><strong>Splitting into Parts:</strong> If this file feels too large, you can save Part 1 (Introduction, Programs 2.1–2.4) and Part 2 (Programs 2.5–2.6, Current Progress, Future Roadmap) separately. Just cut at the &lt;em&gt;“Continue to Part 2”&lt;/em&gt; line.</li>
+  <li><strong>Splitting into Parts:</strong> If this file feels too large, you can save Part 1 (Introduction, Programs 2.1–2.4) and Part 2 (Programs 2.5–2.9, Current Progress, Future Roadmap) separately. Just cut at the &lt;em&gt;“Continue to Part 2”&lt;/em&gt; line.</li>
   <li><strong>Using Git:</strong> Keep each Python script in its own file, commit to Git. When requesting edits from ChatGPT, refer to specific function names or file paths, not the entire content.</li>
   <li><strong>Incremental Patches:</strong> In VS Code, install the ChatGPT extension. Select only the function you want to change and ask “Please update this function to do X,” which avoids reposting the entire file.</li>
   <li><strong>Deployment:</strong> After finalizing, bundle everything into a <code>soundvault</code> folder structure:

@@ -29,11 +29,12 @@ python main_gui.py
 ```
 
 1. **Open** your library folder
-2. Use the **Indexer** tab to dedupe and move files
+2. Use the **Indexer** tab to dedupe, detect near duplicates, and move files
 3. **Fix Tags** via the AcoustID menu
 4. **Generate Playlists** from your folder structure
 5. **Clustered Playlists** (interactive K-Means/HDBSCAN) via the Tools ▸ Clustered Playlists menu
-6. Use the **Theme** dropdown and **Help** tab for assistance
+6. **Tidal-dl Sync** can upgrade low-quality files to FLAC
+7. Use the **Theme** dropdown and **Help** tab for assistance
 
 Cluster generation writes progress into `<method>_log.txt` inside your library so you can review the steps later.
 
@@ -61,8 +62,11 @@ playlist_generator.py     - `.m3u` playlist creation helpers
 clustered_playlists.py    - Feature extraction and clustering algorithms
 cluster_graph_panel.py    - Interactive scatter plot for clustered playlists
 fingerprint_generator.py  - Build AcoustID fingerprint database
+fingerprint_cache.py      - Persistent fingerprint cache
+near_duplicate_detector.py - Fuzzy near-duplicate detection helpers
 tag_fixer.py              - Tag fixing engine using plugin metadata
 update_genres.py          - Batch genre tag updater via MusicBrainz
+tidal_sync.py             - Sync tidal-dl downloads to upgrade your library
 validator.py              - Verify SoundVault folder layout
 config.py                 - Read/write persistent configuration
 
