@@ -738,12 +738,22 @@ class SoundVaultImporterApp(tk.Tk):
 
             self.after(0, ui)
 
-        def progress(idx, total, path_):
+       def progress(idx, total, path_):
             def ui():
-                self.pb["maximum"] = total
-                self.pb["value"] = idx
-                pct = int(idx / total * 100) if total else 0
-                self.pb_label.config(text=f"{pct}%")
+                if total:
+                    if self.pb["mode"] != "determinate":
+                        self.pb.stop()
+                        self.pb.config(mode="determinate")
+                    self.pb["maximum"] = total
+                    self.pb["value"] = idx
+                    pct = int(idx / total * 100)
+                    self.pb_label.config(text=f"{pct}%")
+                else:
+                    if self.pb["mode"] != "indeterminate":
+                        self.pb.config(mode="indeterminate", maximum=100)
+                        self.pb.start(10)
+                    self.pb_label.config(text="…")
+
                 self.status_var.set(path_)
                 self.log.insert("end", f"[{idx}/{total}] {path_}\n")
                 self.log.see("end")
@@ -798,6 +808,7 @@ class SoundVaultImporterApp(tk.Tk):
                 self.after(0, self.update_library_info)
                 self.after(0, lambda: self.start_indexer_btn.config(state="normal"))
                 self.after(0, lambda: self.open_not_sorted_btn.config(state="normal"))
+                self.after(0, self.pb.stop)
 
         # 1) Detect duplicates
         dups = find_duplicates(path, log_callback=log_line)
