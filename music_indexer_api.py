@@ -405,6 +405,7 @@ def compute_moves_and_tag_index(
         log_callback,
         enable_phase_c,
         coord,
+        max_workers,
     )
     for loser, reason in near_dupes.items():
         if loser not in to_delete:
@@ -737,9 +738,6 @@ def build_dry_run_html(
         lines.append("</pre>")
         return "\n".join(lines)
 
-    def build_album_near_dupe_section() -> str:
-        return "<h2>Phase B – Album Near-Duplicates</h2>"
-
     def build_cross_album_section() -> str:
         if not enable_phase_c:
             return ""
@@ -747,8 +745,6 @@ def build_dry_run_html(
 
     sec_a = build_exact_metadata_section()
     coord.set_html_section('A', sec_a)
-    sec_b = build_album_near_dupe_section()
-    coord.set_html_section('B', sec_b)
     sec_c = build_cross_album_section()
     if sec_c:
         coord.set_html_section('C', sec_c)

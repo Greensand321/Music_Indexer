@@ -21,6 +21,6 @@ def test_phase_b_logging(caplog):
     with caplog.at_level(logging.DEBUG):
         find_near_duplicates(infos, {'.mp3':0}, 1.0, enable_cross_album=False)
     msgs = [r.message for r in caplog.records]
-    assert any('Phase B: scanning album A' in m for m in msgs)
+    assert any('Scanning album' in m and "'A'" in m for m in msgs)
     assert any('Phase B summary' in m for m in msgs)
 

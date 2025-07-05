@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import os
 from collections import defaultdict
-from typing import Dict, Set, List
+from typing import Dict, Set, List, Iterable
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import logging
 
 logger = logging.getLogger(__name__)
@@ -35,74 +36,37 @@ def _has_exclusion(info: Dict[str, str | None]) -> bool:
     return any(k in text for k in EXCLUSION_KEYWORDS)
 
 
-def find_near_duplicates(
+
+
+def _scan_album(
+    album: str,
+    paths: Iterable[str],
     file_infos: Dict[str, Dict[str, str | None]],
-    ext_priority: Dict[str, int],
     threshold: float,
-    log_callback=None,
-    enable_cross_album: bool = False,
-    coord=None,
-) -> Dict[str, str]:
-    """Return mapping of files to delete as near duplicates.
-
-    If ``coord`` is provided, each detected cluster is forwarded via
-    :meth:`DryRunCoordinator.add_near_dupe_clusters`.
-    """
-    if log_callback is None:
-        def log_callback(msg: str) -> None:
-            pass
-
-    # Filter out tracks with exclusion keywords or missing fingerprints
-    paths = [p for p, info in file_infos.items() if info.get('fp') and not _has_exclusion(info)]
-
-    # Build similarity graph in album partitions
+    log_callback,
+) -> tuple[str, List[Set[str]], int]:
+    """Worker helper: scan a single album for near duplicates."""
     adj: Dict[str, Set[str]] = defaultdict(set)
-    by_album: Dict[str, List[str]] = defaultdict(list)
-    for p in paths:
-        album = file_infos[p].get('album') or ''
-        by_album[album].append(p)
-
-    album_items = list(by_album.items())
-    total_albums = len(album_items)
     comparisons = 0
-    for i, (album, album_paths) in enumerate(album_items):
-        if len(album_paths) < 2:
-            continue
-        if logger.isEnabledFor(logging.DEBUG):
-            logger.debug(f"Phase B: scanning album {album} ({i+1}/{total_albums})")
-        log_callback(f"   • Phase B album '{album or '<no album>'}' ({len(album_paths)} tracks)")
-        for i, p in enumerate(album_paths):
-            for q in album_paths[i + 1:]:
-                dist = fingerprint_distance(file_infos[p]['fp'], file_infos[q]['fp'])
-                if dist <= threshold:
-                    adj[p].add(q)
-                    adj[q].add(p)
-                    log_callback(
-                        f"   → near-dup {os.path.basename(p)} vs {os.path.basename(q)} dist={dist:.3f}")
-                comparisons += 1
+    path_list = list(paths)
+    for i, p in enumerate(path_list):
+        for q in path_list[i + 1 :]:
+            dist = fingerprint_distance(file_infos[p]["fp"], file_infos[q]["fp"])
+            if dist <= threshold:
+                adj[p].add(q)
+                adj[q].add(p)
+                log_callback(
+                    f"   → near-dup {os.path.basename(p)} vs {os.path.basename(q)} dist={dist:.3f}"
+                )
+            comparisons += 1
 
-    if enable_cross_album:
-        all_paths = list(paths)
-        log_callback("   • Phase C cross-album scan…")
-        for i, p in enumerate(all_paths):
-            for q in all_paths[i + 1:]:
-                if file_infos[p].get('album') == file_infos[q].get('album'):
-                    continue
-                dist = fingerprint_distance(file_infos[p]['fp'], file_infos[q]['fp'])
-                if dist <= threshold:
-                    adj[p].add(q)
-                    adj[q].add(p)
-                    log_callback(
-                        f"   → near-dup {os.path.basename(p)} vs {os.path.basename(q)} dist={dist:.3f}")
-
-    # Compute connected components
     visited: Set[str] = set()
     clusters: List[Set[str]] = []
-    for p in paths:
+    for p in path_list:
         if p in visited:
             continue
         stack = [p]
-        comp = set([p])
+        comp = {p}
         visited.add(p)
         while stack:
             cur = stack.pop()
@@ -113,23 +77,76 @@ def find_near_duplicates(
                     stack.append(nb)
         if len(comp) > 1:
             clusters.append(comp)
+    return album, clusters, comparisons
 
+
+def find_near_duplicates(
+    file_infos: Dict[str, Dict[str, str | None]],
+    ext_priority: Dict[str, int],
+    threshold: float,
+    log_callback=None,
+    enable_cross_album: bool = False,
+    coord=None,
+    max_workers: int | None = None,
+) -> Dict[str, str]:
+    """Return mapping of files to delete as near duplicates."""
+    if log_callback is None:
+        def log_callback(msg: str) -> None:
+            pass
+
+    paths = [p for p, info in file_infos.items() if info.get("fp") and not _has_exclusion(info)]
+
+    by_album: Dict[str, List[str]] = defaultdict(list)
+    for p in paths:
+        album = file_infos[p].get("album") or ""
+        by_album[album].append(p)
+
+    album_items = sorted(by_album.items(), key=lambda x: x[0])
+    total_albums = len(album_items)
+    total_comparisons = 0
+    clusters: List[Set[str]] = []
+    html_lines = ["<h2>Phase B – Album Near-Duplicates</h2>", "<pre>"]
+
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+        futures = {}
+        for idx, (album, album_paths) in enumerate(album_items, start=1):
+            if len(album_paths) < 2:
+                continue
+            logger.debug(
+                f"Phase B: [{idx}/{total_albums}] Scanning album '{album}' ({len(album_paths)} tracks)"
+            )
+            html_lines.append(f"Album: {album or '<no album>'} ({len(album_paths)} tracks)")
+            futures[ex.submit(_scan_album, album, album_paths, file_infos, threshold, log_callback)] = album
+
+        for fut in as_completed(futures):
+            album = futures[fut]
+            try:
+                _alb, c, comps = fut.result()
+                clusters.extend(c)
+                total_comparisons += comps
+                if coord is not None and c:
+                    coord.add_near_dupe_clusters([list(s) for s in c])
+            except Exception as e:
+                logger.error(f"Phase B album '{album}' failed: {e}")
+                html_lines.append(f"Error scanning album '{album}'")
+
+    html_lines.append("</pre>")
+    html_str = "\n".join(html_lines)
     if coord is not None:
-        coord.add_near_dupe_clusters([list(c) for c in clusters])
+        coord.set_html_section("B", html_str)
 
     if logger.isEnabledFor(logging.DEBUG):
         logger.debug(
-            f"Phase B summary: {total_albums} albums scanned, {comparisons} comparisons, {len(clusters)} clusters"
+            f"Phase B summary: {total_albums} albums scanned, {total_comparisons} comparisons, {len(clusters)} clusters"
         )
 
     to_delete: Dict[str, str] = {}
     for cluster in clusters:
-        # group by album title
-        by_album: Dict[str, List[str]] = defaultdict(list)
+        by_alb: Dict[str, List[str]] = defaultdict(list)
         for path in cluster:
-            album = file_infos[path].get('album') or ''
-            by_album[album].append(path)
-        for album_paths in by_album.values():
+            album = file_infos[path].get("album") or ""
+            by_alb[album].append(path)
+        for album_paths in by_alb.values():
             if len(album_paths) <= 1:
                 continue
             scored = sorted(
