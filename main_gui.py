@@ -28,6 +28,7 @@ import subprocess
 from tkinter import filedialog, messagebox, Text, Scrollbar
 from unsorted_popup import UnsortedPopup
 from tkinter.scrolledtext import ScrolledText
+import textwrap
 
 from validator import validate_soundvault_structure
 from music_indexer_api import run_full_indexer, find_duplicates
@@ -244,6 +245,33 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
     panel.setup_hover(hover_panel, art_lbl, title_lbl, artist_lbl)
 
     return frame
+
+
+class Tooltip:
+    """Simple hover tooltip displaying dynamic text."""
+
+    def __init__(self, widget: tk.Widget, text_func: Callable[[], str]):
+        self.widget = widget
+        self.text_func = text_func
+        self.tipwindow: tk.Toplevel | None = None
+        widget.bind("<Enter>", self._show)
+        widget.bind("<Leave>", self._hide)
+
+    def _show(self, _=None) -> None:
+        text = self.text_func()
+        if self.tipwindow or not text:
+            return
+        x = self.widget.winfo_rootx() + 20
+        y = self.widget.winfo_rooty() + self.widget.winfo_height() + 1
+        self.tipwindow = tw = tk.Toplevel(self.widget)
+        tw.wm_overrideredirect(True)
+        tw.wm_geometry(f"+{x}+{y}")
+        ttk.Label(tw, text=text, background="#ffffe0", relief="solid", borderwidth=1).pack()
+
+    def _hide(self, _=None) -> None:
+        if self.tipwindow:
+            self.tipwindow.destroy()
+            self.tipwindow = None
 
 
 class ProgressDialog(tk.Toplevel):
@@ -486,10 +514,13 @@ class SoundVaultImporterApp(tk.Tk):
         self.phase_c_bar.grid(row=2, column=1, sticky="ew", pady=2)
 
         self.status_var = tk.StringVar(value="")
-        self.status_label = ttk.Label(
-            self.indexer_tab, textvariable=self.status_var, wraplength=400, anchor="w"
-        )
-        self.status_label.grid(row=2, column=0, columnspan=2, sticky="ew")
+        self._full_status = ""
+        status_frame = ttk.Frame(self.indexer_tab, width=400)
+        status_frame.grid(row=2, column=0, columnspan=2, sticky="ew")
+        status_frame.grid_propagate(False)
+        self.status_label = ttk.Label(status_frame, textvariable=self.status_var, anchor="w")
+        self.status_label.pack(fill="x")
+        Tooltip(self.status_label, lambda: self._full_status)
 
         self.log = ScrolledText(self.indexer_tab, height=10, wrap="word")
         self.log.grid(row=3, column=0, columnspan=3, sticky="nsew", pady=5)
@@ -666,6 +697,11 @@ class SoundVaultImporterApp(tk.Tk):
             return None
         return self.library_path
 
+    def _set_status(self, text: str) -> None:
+        self._full_status = text
+        short = textwrap.shorten(text, width=60, placeholder="…")
+        self.status_var.set(short)
+
     def validate_library(self):
         path = self.require_library()
         if not path:
@@ -750,7 +786,7 @@ class SoundVaultImporterApp(tk.Tk):
         for bar in (self.phase_a_bar, self.phase_b_bar, self.phase_c_bar):
             bar.config(mode="determinate", maximum=1, value=0)
             bar.stop()
-        self.status_var.set("")
+        self._set_status("")
         self.log.delete("1.0", "end")
         self.start_indexer_btn["state"] = "disabled"
         self.open_not_sorted_btn["state"] = "disabled"
@@ -759,7 +795,7 @@ class SoundVaultImporterApp(tk.Tk):
             def ui():
                 self.log.insert("end", msg + "\n")
                 self.log.see("end")
-                self.status_var.set(msg)
+                self._set_status(msg)
 
             self.after(0, ui)
 
@@ -784,7 +820,7 @@ class SoundVaultImporterApp(tk.Tk):
                         bar.config(mode="indeterminate", maximum=100)
                         bar.start(10)
 
-                self.status_var.set(path_)
+                self._set_status(path_)
                 self.log.insert("end", f"[{idx}/{total}] {path_}\n")
                 self.log.see("end")
 
@@ -845,6 +881,7 @@ class SoundVaultImporterApp(tk.Tk):
                 self.after(0, lambda: self.open_not_sorted_btn.config(state="normal"))
                 for bar in (self.phase_a_bar, self.phase_b_bar, self.phase_c_bar):
                     self.after(0, bar.stop)
+                self.after(0, lambda: self._set_status(""))
 
         # 1) Detect duplicates
         dups = find_duplicates(path, log_callback=log_line)
