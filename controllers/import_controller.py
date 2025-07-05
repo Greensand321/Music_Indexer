@@ -18,6 +18,7 @@ def import_new_files(
     dry_run: bool = False,
     estimate_bpm: bool = False,
     log_callback: Callable[[str], None] | None = None,
+    enable_phase_c: bool = False,
 ) -> Dict[str, Any]:
     """Import new audio files into a SoundVault library."""
     if log_callback is None:
@@ -96,7 +97,9 @@ def import_new_files(
     preview_html = os.path.join(import_folder, "import_preview.html")
 
     if dry_run:
-        idx.build_dry_run_html(vault_root, preview_html, log_callback)
+        idx.build_dry_run_html(
+            vault_root, preview_html, log_callback, enable_phase_c=enable_phase_c
+        )
         shutil.rmtree(temp_dir, ignore_errors=True)
         return {"moved": 0, "html": preview_html, "dry_run": True}
 
@@ -125,6 +128,8 @@ def import_new_files(
     except Exception:
         pass
 
-    idx.build_dry_run_html(vault_root, preview_html, log_callback)
+    idx.build_dry_run_html(
+        vault_root, preview_html, log_callback, enable_phase_c=enable_phase_c
+    )
 
     return {"moved": moved, "html": preview_html, "dry_run": False, "errors": errors}
