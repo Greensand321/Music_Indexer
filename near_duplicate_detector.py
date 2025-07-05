@@ -40,6 +40,7 @@ def find_near_duplicates(
     ext_priority: Dict[str, int],
     threshold: float,
     log_callback=None,
+    enable_cross_album: bool = False,
 ) -> Dict[str, str]:
     """Return mapping of files to delete as near duplicates."""
     if log_callback is None:
@@ -47,22 +48,42 @@ def find_near_duplicates(
             pass
 
     # Filter out tracks with exclusion keywords or missing fingerprints
-    paths = [p for p, info in file_infos.items()
-             if info.get('fp') and not _has_exclusion(info)]
+    paths = [p for p, info in file_infos.items() if info.get('fp') and not _has_exclusion(info)]
 
-    # Build similarity graph
+    # Build similarity graph in album partitions
     adj: Dict[str, Set[str]] = defaultdict(set)
-    for i, p in enumerate(paths):
-        for q in paths[i + 1:]:
-            dist = fingerprint_distance(file_infos[p]['fp'], file_infos[q]['fp'])
-            if logger.isEnabledFor(logging.DEBUG):
-                logger.debug(
-                    f"Dry-run: {p} vs {q}: Hamming distance = {dist}")
-            if dist <= threshold:
-                adj[p].add(q)
-                adj[q].add(p)
-                log_callback(
-                    f"   → near-dup {os.path.basename(p)} vs {os.path.basename(q)} dist={dist:.3f}")
+    by_album: Dict[str, List[str]] = defaultdict(list)
+    for p in paths:
+        album = file_infos[p].get('album') or ''
+        by_album[album].append(p)
+
+    album_items = list(by_album.items())
+    for album, album_paths in album_items:
+        if len(album_paths) < 2:
+            continue
+        log_callback(f"   • Phase B album '{album or '<no album>'}' ({len(album_paths)} tracks)")
+        for i, p in enumerate(album_paths):
+            for q in album_paths[i + 1:]:
+                dist = fingerprint_distance(file_infos[p]['fp'], file_infos[q]['fp'])
+                if dist <= threshold:
+                    adj[p].add(q)
+                    adj[q].add(p)
+                    log_callback(
+                        f"   → near-dup {os.path.basename(p)} vs {os.path.basename(q)} dist={dist:.3f}")
+
+    if enable_cross_album:
+        all_paths = list(paths)
+        log_callback("   • Phase C cross-album scan…")
+        for i, p in enumerate(all_paths):
+            for q in all_paths[i + 1:]:
+                if file_infos[p].get('album') == file_infos[q].get('album'):
+                    continue
+                dist = fingerprint_distance(file_infos[p]['fp'], file_infos[q]['fp'])
+                if dist <= threshold:
+                    adj[p].add(q)
+                    adj[q].add(p)
+                    log_callback(
+                        f"   → near-dup {os.path.basename(p)} vs {os.path.basename(q)} dist={dist:.3f}")
 
     # Compute connected components
     visited: Set[str] = set()

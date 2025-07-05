@@ -77,6 +77,7 @@ def compute_fingerprints_parallel(
         """
         CREATE TABLE IF NOT EXISTS fingerprints (
           path TEXT PRIMARY KEY,
+          mtime REAL,
           duration INT,
           fingerprint TEXT
         );
@@ -106,9 +107,10 @@ def compute_fingerprints_parallel(
             if err:
                 log_callback(f"   ! Failed fingerprint {path}: {err}")
                 continue
+            mtime = os.path.getmtime(path)
             conn.execute(
-                "INSERT OR REPLACE INTO fingerprints (path, duration, fingerprint) VALUES (?, ?, ?)",
-                (path, duration, fp_hash),
+                "INSERT OR REPLACE INTO fingerprints (path, mtime, duration, fingerprint) VALUES (?, ?, ?, ?)",
+                (path, mtime, duration, fp_hash),
             )
             log_callback(f"Fingerprinted {path}")
             progress_callback(idx, total, path)

@@ -221,6 +221,7 @@ def _compute_missing_fingerprints(
     root_path: str,
     log_callback,
     progress_callback,
+    db,
     max_workers: int | None = None,
 ) -> Dict[str, str | None]:
     """Compute fingerprints in parallel with per-task timeouts."""
@@ -241,12 +242,29 @@ def _compute_missing_fingerprints(
             progress_callback(idx, total, os.path.relpath(p, root_path))
             if idx % 50 == 0 or idx == total:
                 log_callback(f"   • Fingerprinting {idx}/{total}")
+    for path, fp in results.items():
+        if fp is None:
+            continue
+        mtime = os.path.getmtime(path)
+        db.execute(
+            "INSERT OR REPLACE INTO fingerprints (path, mtime, duration, fingerprint) VALUES (?, ?, NULL, ?)",
+            (path, mtime, fp),
+        )
+    db.commit()
     return results
 
 
 # ─── A. HELPER: COMPUTE MOVES & TAG INDEX ───────────────────────────────
 
-def compute_moves_and_tag_index(root_path, log_callback=None, progress_callback=None, dry_run=False):
+def compute_moves_and_tag_index(
+    root_path,
+    log_callback=None,
+    progress_callback=None,
+    dry_run=False,
+    enable_phase_c=False,
+    flush_cache=False,
+    max_workers=None,
+):
     """
     1) Determine MUSIC_ROOT: if root_path/Music exists, use that; otherwise root_path itself.
     2) Scan for all audio files under MUSIC_ROOT.
@@ -291,6 +309,19 @@ def compute_moves_and_tag_index(root_path, log_callback=None, progress_callback=
         """
         CREATE TABLE IF NOT EXISTS fingerprints (
           path TEXT PRIMARY KEY,
+          mtime REAL,
+          duration INT,
+          fingerprint TEXT
+        );
+        """
+    )
+    if flush_cache:
+        db.execute("DELETE FROM fingerprints")
+        db.commit()
+    db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS fingerprints (
+          path TEXT PRIMARY KEY,
           duration INT,
           fingerprint TEXT
         );
@@ -329,12 +360,13 @@ def compute_moves_and_tag_index(root_path, log_callback=None, progress_callback=
 
     path_fps: Dict[str, str | None] = {}
     for p in all_audio:
+        cur_mtime = os.path.getmtime(p)
         row = db.execute(
-            "SELECT fingerprint FROM fingerprints WHERE path=?",
+            "SELECT mtime, fingerprint FROM fingerprints WHERE path=?",
             (p,),
         ).fetchone()
-        if row:
-            fp_val = row[0]
+        if row and abs(row[0] - cur_mtime) < 1e-6:
+            fp_val = row[1]
             if isinstance(fp_val, (bytes, bytearray)):
                 try:
                     fp_val = fp_val.decode("utf-8")
@@ -352,6 +384,8 @@ def compute_moves_and_tag_index(root_path, log_callback=None, progress_callback=
                 root_path,
                 log_callback,
                 progress_callback,
+                db,
+                max_workers,
             )
             for p, fp_val in computed.items():
                 if isinstance(fp_val, (bytes, bytearray)):
@@ -445,7 +479,13 @@ def compute_moves_and_tag_index(root_path, log_callback=None, progress_callback=
     # --- Near-duplicate detection -------------------------------------------------
     from near_duplicate_detector import find_near_duplicates
     log_callback("   • Detecting near-duplicates…")
-    near_dupes = find_near_duplicates({p: file_infos[p] for p in kept_files}, EXT_PRIORITY, fuzzy_fp_threshold, log_callback)
+    near_dupes = find_near_duplicates(
+        {p: file_infos[p] for p in kept_files},
+        EXT_PRIORITY,
+        fuzzy_fp_threshold,
+        log_callback,
+        enable_phase_c,
+    )
     for loser, reason in near_dupes.items():
         if loser not in to_delete:
             to_delete[loser] = reason
@@ -721,7 +761,14 @@ def compute_moves_and_tag_index(root_path, log_callback=None, progress_callback=
 
 # ─── B. BUILD DRY-RUN HTML ─────────────────────────────────────────────
 
-def build_dry_run_html(root_path, output_html_path, log_callback=None):
+def build_dry_run_html(
+    root_path,
+    output_html_path,
+    log_callback=None,
+    enable_phase_c=False,
+    flush_cache=False,
+    max_workers=None,
+):
     """
     1) Call compute_moves_and_tag_index() to get (moves, tag_index, decision_log).
     2) Write a dry-run HTML to output_html_path showing the proposed tree.
@@ -730,7 +777,15 @@ def build_dry_run_html(root_path, output_html_path, log_callback=None):
     if log_callback is None:
         def log_callback(msg): pass
 
-    moves, tag_index, _ = compute_moves_and_tag_index(root_path, log_callback, None, dry_run=True)
+    moves, tag_index, _ = compute_moves_and_tag_index(
+        root_path,
+        log_callback,
+        None,
+        dry_run=True,
+        enable_phase_c=enable_phase_c,
+        flush_cache=flush_cache,
+        max_workers=max_workers,
+    )
 
     log_callback("5/6: Writing dry-run HTML…")
     with open(output_html_path, "w", encoding="utf-8") as out:
@@ -817,7 +872,15 @@ def apply_indexer_moves(root_path, log_callback=None, progress_callback=None):
     from fingerprint_generator import compute_fingerprints_parallel
     compute_fingerprints_parallel(root_path, db_path, log_callback, progress_callback, None, trim_silence)
 
-    moves, _, _ = compute_moves_and_tag_index(root_path, log_callback, progress_callback, dry_run=False)
+    moves, _, _ = compute_moves_and_tag_index(
+        root_path,
+        log_callback,
+        progress_callback,
+        dry_run=False,
+        enable_phase_c=False,
+        flush_cache=False,
+        max_workers=None,
+    )
 
 
 
@@ -935,6 +998,9 @@ def run_full_indexer(root_path, output_html_path, dry_run_only=False, log_callba
         log_callback,
         progress_callback,
         dry_run=dry_run_only,
+        enable_phase_c=False,
+        flush_cache=False,
+        max_workers=None,
     )
 
     # Write the detailed log file
@@ -973,7 +1039,15 @@ def find_duplicates(root_path, log_callback=None):
     """Return list of (original_path, duplicate_path) that would be marked as
     duplicates by the indexer."""
 
-    moves, _, _ = compute_moves_and_tag_index(root_path, log_callback, None, dry_run=True)
+    moves, _, _ = compute_moves_and_tag_index(
+        root_path,
+        log_callback,
+        None,
+        dry_run=True,
+        enable_phase_c=False,
+        flush_cache=False,
+        max_workers=None,
+    )
     dup_indicator = os.path.join("Duplicates", "")
     return [
         (old, new)
