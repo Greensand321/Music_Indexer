@@ -333,7 +333,16 @@ def compute_moves_and_tag_index(root_path, log_callback=None, progress_callback=
             "SELECT fingerprint FROM fingerprints WHERE path=?",
             (p,),
         ).fetchone()
-        path_fps[p] = row[0] if row else None
+        if row:
+            fp_val = row[0]
+            if isinstance(fp_val, (bytes, bytearray)):
+                try:
+                    fp_val = fp_val.decode("utf-8")
+                except Exception:
+                    fp_val = fp_val.decode("latin1", errors="ignore")
+            path_fps[p] = fp_val
+        else:
+            path_fps[p] = None
 
     if dry_run:
         to_fp = [p for p, fp in path_fps.items() if fp is None]
@@ -344,7 +353,13 @@ def compute_moves_and_tag_index(root_path, log_callback=None, progress_callback=
                 log_callback,
                 progress_callback,
             )
-            path_fps.update(computed)
+            for p, fp_val in computed.items():
+                if isinstance(fp_val, (bytes, bytearray)):
+                    try:
+                        fp_val = fp_val.decode("utf-8")
+                    except Exception:
+                        fp_val = fp_val.decode("latin1", errors="ignore")
+                path_fps[p] = fp_val
 
     file_infos: Dict[str, Dict[str, str | None]] = {}
     for idx, fullpath in enumerate(all_audio, start=1):
@@ -362,6 +377,11 @@ def compute_moves_and_tag_index(root_path, log_callback=None, progress_callback=
         )
         primary, _ = extract_primary_and_collabs(raw_artist)
         fp = path_fps.get(fullpath)
+        if isinstance(fp, (bytes, bytearray)):
+            try:
+                fp = fp.decode("utf-8")
+            except Exception:
+                fp = fp.decode("latin1", errors="ignore")
         file_infos[fullpath] = {
             "primary": primary.lower(),
             "title": title.lower(),
@@ -393,7 +413,13 @@ def compute_moves_and_tag_index(root_path, log_callback=None, progress_callback=
                     to_delete[loser] = "Exact FP match"
                     kept_files.discard(loser)
         else:
-            folder = os.path.join(review_root, fp[:16])
+            fp_folder = fp
+            if isinstance(fp_folder, (bytes, bytearray)):
+                try:
+                    fp_folder = fp_folder.decode("utf-8")
+                except Exception:
+                    fp_folder = fp_folder.decode("latin1", errors="ignore")
+            folder = os.path.join(review_root, str(fp_folder)[:16])
             os.makedirs(folder, exist_ok=True)
             for p in scored:
                 dest = os.path.join(folder, os.path.basename(p))
