@@ -7,6 +7,7 @@ import hashlib
 import sqlite3
 from collections import defaultdict
 from typing import Dict, List
+from concurrent.futures import ProcessPoolExecutor
 from config import load_config
 from mutagen import File as MutagenFile
 from mutagen.id3 import ID3NoHeaderError
@@ -204,6 +205,16 @@ def _keep_score(path: str, info: dict, ext_priority: dict) -> float:
     return ext_score + meta_score + fname_score
 
 
+def _fingerprint_worker(path: str) -> tuple[str, str | None]:
+    """Return (path, fingerprint) computed via acoustid or ``None`` on error."""
+    try:
+        import acoustid  # local import to avoid dependency when unused
+        _, fp_hash = acoustid.fingerprint_file(path)
+        return path, fp_hash
+    except Exception:
+        return path, None
+
+
 # ─── A. HELPER: COMPUTE MOVES & TAG INDEX ───────────────────────────────
 
 def compute_moves_and_tag_index(root_path, log_callback=None, progress_callback=None, dry_run=False):
@@ -287,6 +298,27 @@ def compute_moves_and_tag_index(root_path, log_callback=None, progress_callback=
     log_callback("2/6: Deduplicating by fingerprint…")
     EXT_PRIORITY = {".flac": 0, ".m4a": 1, ".aac": 1, ".mp3": 2, ".wav": 3, ".ogg": 4}
 
+    path_fps: Dict[str, str | None] = {}
+    for p in all_audio:
+        row = db.execute(
+            "SELECT fingerprint FROM fingerprints WHERE path=?",
+            (p,),
+        ).fetchone()
+        path_fps[p] = row[0] if row else None
+
+    if dry_run:
+        to_fp = [p for p, fp in path_fps.items() if fp is None]
+        if to_fp:
+            total_fp = len(to_fp)
+            log_callback(f"   → Computing {total_fp} fingerprints in parallel…")
+            progress_callback(0, total_fp, "Fingerprinting")
+            with ProcessPoolExecutor() as exe:
+                for idx, (p, fp) in enumerate(exe.map(_fingerprint_worker, to_fp), start=1):
+                    path_fps[p] = fp
+                    progress_callback(idx, total_fp, os.path.relpath(p, root_path))
+                    if idx % 50 == 0 or idx == total_fp:
+                        log_callback(f"   • Fingerprinting {idx}/{total_fp}")
+
     file_infos: Dict[str, Dict[str, str | None]] = {}
     for idx, fullpath in enumerate(all_audio, start=1):
         if idx % 50 == 0 or idx == total_audio:
@@ -296,20 +328,13 @@ def compute_moves_and_tag_index(root_path, log_callback=None, progress_callback=
         raw_artist = collapse_repeats(raw_artist)
         title = data["title"] or os.path.splitext(os.path.basename(fullpath))[0]
         album = data["album"] or ""
-        meta_count = sum(1 for t in [data.get("artist"), data.get("title"), data.get("album"), data.get("track"), data.get("year"), data.get("genre")] if t)
+        meta_count = sum(
+            1
+            for t in [data.get("artist"), data.get("title"), data.get("album"), data.get("track"), data.get("year"), data.get("genre")]
+            if t
+        )
         primary, _ = extract_primary_and_collabs(raw_artist)
-        row = db.execute(
-            "SELECT fingerprint FROM fingerprints WHERE path=?",
-            (fullpath,),
-        ).fetchone()
-        fp = row[0] if row else None
-        if dry_run and not fp:
-            try:
-                import acoustid  # local import to avoid dependency when unused
-                _, fp_hash = acoustid.fingerprint_file(fullpath)
-                fp = fp_hash
-            except Exception:
-                fp = None
+        fp = path_fps.get(fullpath)
         file_infos[fullpath] = {
             "primary": primary.lower(),
             "title": title.lower(),
