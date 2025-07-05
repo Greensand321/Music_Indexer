@@ -743,34 +743,47 @@ class SoundVaultImporterApp(tk.Tk):
             "Estimate BPM?", "Attempt BPM estimation for missing values?"
         )
 
-        try:
-            summary = import_new_files(
-                vault,
-                import_folder,
-                dry_run=dry_run,
-                estimate_bpm=estimate,
-                log_callback=self._log,
-            )
-            if summary["dry_run"]:
-                messagebox.showinfo(
-                    "Dry Run Complete", f"Preview written to:\n{summary['html']}"
-                )
-            else:
-                moved = summary.get("moved", 0)
-                messagebox.showinfo(
-                    "Import Complete",
-                    f"Imported {moved} files. Preview:\n{summary['html']}",
+        def log_line(msg: str) -> None:
+            self.after(0, lambda m=msg: self._log(m))
+
+        def task() -> None:
+            try:
+                summary = import_new_files(
+                    vault,
+                    import_folder,
+                    dry_run=dry_run,
+                    estimate_bpm=estimate,
+                    log_callback=log_line,
                 )
 
-            if summary.get("errors"):
-                self._log("! Some files failed to import. Check log for details.")
+                def ui_complete() -> None:
+                    if summary["dry_run"]:
+                        messagebox.showinfo(
+                            "Dry Run Complete", f"Preview written to:\n{summary['html']}"
+                        )
+                    else:
+                        moved = summary.get("moved", 0)
+                        messagebox.showinfo(
+                            "Import Complete",
+                            f"Imported {moved} files. Preview:\n{summary['html']}",
+                        )
 
-            self._log(
-                f"✓ Import finished for {import_folder} → {vault}. Dry run: {dry_run}. BPM: {estimate}."
-            )
-        except Exception as e:
-            messagebox.showerror("Import failed", str(e))
-            self._log(f"✘ Import failed for {import_folder}: {e}")
+                    if summary.get("errors"):
+                        self._log("! Some files failed to import. Check log for details.")
+
+                    self._log(
+                        f"✓ Import finished for {import_folder} → {vault}. Dry run: {dry_run}. BPM: {estimate}."
+                    )
+
+                self.after(0, ui_complete)
+            except Exception as e:
+                def ui_err() -> None:
+                    messagebox.showerror("Import failed", str(e))
+                    self._log(f"✘ Import failed for {import_folder}: {e}")
+
+                self.after(0, ui_err)
+
+        threading.Thread(target=task, daemon=True).start()
 
     def run_indexer(self):
         path = self.require_library()
