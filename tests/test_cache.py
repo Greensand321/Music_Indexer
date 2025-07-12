@@ -22,6 +22,32 @@ def test_get_fingerprint_cache(tmp_path):
     assert calls == [str(path), str(path)]
 
 
+def test_lru_avoids_db(tmp_path, monkeypatch):
+    db = tmp_path / "fp.db"
+    path = tmp_path / "a.mp3"
+    path.write_text("x")
+
+    def compute(_):
+        return 1, "hash"
+
+    calls = []
+    orig_connect = sqlite3.connect
+
+    def fake_connect(*args, **kwargs):
+        calls.append(args[0])
+        return orig_connect(*args, **kwargs)
+
+    monkeypatch.setattr(sqlite3, "connect", fake_connect)
+
+    get_fingerprint(str(path), str(db), compute)
+    assert len(calls) == 1
+    get_fingerprint(str(path), str(db), compute)
+    assert len(calls) == 1
+    flush_cache(str(db))
+    get_fingerprint(str(path), str(db), compute)
+    assert len(calls) == 2
+
+
 def test_prewarm_cache(tmp_path):
     db = tmp_path / "fp.db"
     p1 = tmp_path / "a.mp3"
