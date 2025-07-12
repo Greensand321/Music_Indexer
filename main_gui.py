@@ -38,6 +38,7 @@ from controllers.genre_list_controller import list_unique_genres
 from controllers.highlight_controller import play_snippet, PYDUB_AVAILABLE
 from tag_fixer import MIN_INTERACTIVE_SCORE, FileRecord
 from typing import Callable, List
+from indexer_control import cancel_event, IndexCancelled
 import tidal_sync
 
 from controllers.library_controller import (
@@ -490,6 +491,13 @@ class SoundVaultImporterApp(tk.Tk):
             command=self.open_not_sorted_folder,
         )
         self.open_not_sorted_btn.grid(row=1, column=1, pady=10)
+        self.cancel_indexer_btn = ttk.Button(
+            self.indexer_tab,
+            text="Cancel",
+            command=self.cancel_indexer,
+            state="disabled",
+        )
+        self.cancel_indexer_btn.grid(row=1, column=2, pady=10)
 
         progress_frame = ttk.Frame(self.indexer_tab)
         progress_frame.grid(row=0, column=2, rowspan=3, padx=10, sticky="nsew")
@@ -803,6 +811,8 @@ class SoundVaultImporterApp(tk.Tk):
         self.log.delete("1.0", "end")
         self.start_indexer_btn["state"] = "disabled"
         self.open_not_sorted_btn["state"] = "disabled"
+        self.cancel_indexer_btn["state"] = "normal"
+        cancel_event.clear()
 
         def log_line(msg):
             def ui():
@@ -813,6 +823,8 @@ class SoundVaultImporterApp(tk.Tk):
             self.after(0, ui)
 
         def progress(idx, total, path_):
+            if cancel_event.is_set():
+                raise IndexCancelled()
             def ui():
                 msg = path_.lower()
                 if "metadata" in msg:
@@ -841,6 +853,28 @@ class SoundVaultImporterApp(tk.Tk):
 
         def task():
             try:
+                dups = find_duplicates(path, log_callback=log_line)
+                if dups:
+                    proceed = []
+                    ev = threading.Event()
+                    def ask():
+                        proceed.append(self._confirm_duplicates(dups))
+                        ev.set()
+                    self.after(0, ask)
+                    ev.wait()
+                    if not proceed[0]:
+                        log_line("✗ Operation cancelled by user")
+                        return
+
+                not_sorted = os.path.join(path, "Not Sorted")
+                os.makedirs(not_sorted, exist_ok=True)
+                ev = threading.Event()
+                def show_popup():
+                    dlg = UnsortedPopup(self, not_sorted)
+                    dlg.bind("<Destroy>", lambda e: ev.set() if e.widget is dlg else None)
+                self.after(0, show_popup)
+                ev.wait()
+
                 workers = self.worker_var.get().strip()
                 mw = int(workers) if workers else None
                 summary = run_full_indexer(
@@ -875,13 +909,13 @@ class SoundVaultImporterApp(tk.Tk):
                         f"✓ Run Indexer finished for {path}. Dry run: {dry_run}."
                     ),
                 )
+            except IndexCancelled:
+                self.after(0, lambda: self.log.insert("end", "✘ Indexing cancelled\n"))
             except Exception:
                 import traceback
 
                 err_msg = traceback.format_exc().strip()
-                self.after(
-                    0, lambda m=err_msg: messagebox.showerror("Indexing failed", m)
-                )
+                self.after(0, lambda m=err_msg: messagebox.showerror("Indexing failed", m))
                 self.after(
                     0,
                     lambda m=err_msg: self._log(
@@ -892,23 +926,11 @@ class SoundVaultImporterApp(tk.Tk):
                 self.after(0, self.update_library_info)
                 self.after(0, lambda: self.start_indexer_btn.config(state="normal"))
                 self.after(0, lambda: self.open_not_sorted_btn.config(state="normal"))
+                self.after(0, lambda: self.cancel_indexer_btn.config(state="disabled"))
                 for bar in (self.phase_a_bar, self.phase_b_bar, self.phase_c_bar):
                     self.after(0, bar.stop)
                 self.after(0, lambda: self._set_status(""))
 
-        # 1) Detect duplicates
-        dups = find_duplicates(path, log_callback=log_line)
-        if dups:
-            if not self._confirm_duplicates(dups):
-                log_line("✗ Operation cancelled by user")
-                return
-        # Give the user a chance to exclude files by moving them into the
-        # "Not Sorted" folder before any changes are made.
-        not_sorted = os.path.join(path, "Not Sorted")
-        os.makedirs(not_sorted, exist_ok=True)
-        dlg = UnsortedPopup(self, not_sorted)
-        self.wait_window(dlg)
-        # 2) Proceed with threaded indexing
         threading.Thread(target=task, daemon=True).start()
 
     def open_not_sorted_folder(self):
@@ -926,6 +948,11 @@ class SoundVaultImporterApp(tk.Tk):
                 subprocess.Popen(["xdg-open", not_sorted])
         except Exception as e:
             messagebox.showerror("Open Folder Failed", str(e))
+
+    def cancel_indexer(self) -> None:
+        """Signal the background indexer thread to cancel."""
+        cancel_event.set()
+        self._log("✘ Cancellation requested…")
 
     def _confirm_duplicates(self, dups):
         """

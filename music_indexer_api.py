@@ -10,6 +10,7 @@ from dry_run_coordinator import DryRunCoordinator
 from config import load_config
 from mutagen import File as MutagenFile
 from mutagen.id3 import ID3NoHeaderError
+from indexer_control import check_cancelled
 
 # ─── CONFIGURATION ─────────────────────────────────────────────────────
 COMMON_ARTIST_THRESHOLD = 10
@@ -248,6 +249,7 @@ def compute_moves_and_tag_index(
 
     cfg = load_config()
     fuzzy_fp_threshold = float(cfg.get("fuzzy_fp_threshold", DEFAULT_FUZZY_FP_THRESHOLD))
+    check_cancelled()
 
     # ─── 1) Determine MUSIC_ROOT ──────────────────────────────────────────────
     MUSIC_ROOT = os.path.join(root_path, "Music") \
