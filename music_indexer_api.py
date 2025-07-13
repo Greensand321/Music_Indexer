@@ -47,7 +47,7 @@ def build_primary_counts(root_path, progress_callback=None):
     idx = 0
     for dirpath, _, files in os.walk(root_path):
         rel_dir = os.path.relpath(dirpath, root_path)
-        if "Not Sorted" in rel_dir.split(os.sep):
+        if {"not sorted", "playlists"} & {p.lower() for p in rel_dir.split(os.sep)}:
             continue
         for fname in files:
             ext = os.path.splitext(fname)[1].lower()
@@ -285,13 +285,13 @@ def compute_moves_and_tag_index(
     idx = 0
     for dirpath, _, files in os.walk(MUSIC_ROOT):
         rel_dir = os.path.relpath(dirpath, root_path)
-        if "Not Sorted" in rel_dir.split(os.sep):
+        if {"not sorted", "playlists"} & {p.lower() for p in rel_dir.split(os.sep)}:
             continue
         for fname in files:
             ext = os.path.splitext(fname)[1].lower()
             if ext in SUPPORTED_EXTS:
                 full = os.path.join(dirpath, fname)
-                if "Not Sorted" in os.path.relpath(full, root_path).split(os.sep):
+                if {"not sorted", "playlists"} & {p.lower() for p in os.path.relpath(full, root_path).split(os.sep)}:
                     continue
                 all_audio.append(full)
                 idx += 1
@@ -861,9 +861,9 @@ def apply_indexer_moves(
     os.makedirs(trash_dir, exist_ok=True)
 
     for dirpath, dirnames, filenames in os.walk(MUSIC_ROOT, topdown=False):
-        # 1) Don’t recurse back into Trash/, Docs/, or Not Sorted/
-        dirnames[:] = [d for d in dirnames if d.lower() not in ("trash", "docs", "not sorted")]
-        if "Not Sorted" in os.path.relpath(dirpath, root_path).split(os.sep):
+        # 1) Don’t recurse back into Trash/, Docs/, Playlists, or Not Sorted/
+        dirnames[:] = [d for d in dirnames if d.lower() not in ("trash", "docs", "not sorted", "playlists")]
+        if {"not sorted", "playlists"} & {p.lower() for p in os.path.relpath(dirpath, root_path).split(os.sep)}:
             continue
 
         for fname in filenames:
@@ -885,7 +885,7 @@ def apply_indexer_moves(
                 log_callback(f"   ! Failed to move leftover {full}: {e}")
 
     # Phase 6b: Remove empty directories that held moved files
-    skip_names = {"trash", "docs", "not sorted"}
+    skip_names = {"trash", "docs", "not sorted", "playlists"}
     touched_dirs = sorted(olddir_to_newdirs.keys(), key=lambda p: p.count(os.sep), reverse=True)
     for base in touched_dirs:
         if not os.path.isdir(base):
