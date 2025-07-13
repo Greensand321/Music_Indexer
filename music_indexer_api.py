@@ -29,7 +29,7 @@ DEDUP_KEEP_DELTA_THRESHOLD = 50  # score difference to auto-delete duplicates
 FINGERPRINT_TIMEOUT = 30          # seconds before fingerprint worker is timed out
 
 # ─── Helper: build primary_counts for the entire vault ─────────────────────
-def build_primary_counts(root_path, progress_callback=None):
+def build_primary_counts(root_path, progress_callback=None, phase="A"):
     """
     Walk the entire vault (By Artist, By Year, Incoming, etc.) and
     return a dict mapping each lowercase-normalized artist → total file count.
@@ -40,7 +40,7 @@ def build_primary_counts(root_path, progress_callback=None):
     a separate pre-scan.
     """
     if progress_callback is None:
-        def progress_callback(_c, _t, _m):
+        def progress_callback(_c, _t, _m, _p):
             pass
 
     counts = {}
@@ -59,7 +59,7 @@ def build_primary_counts(root_path, progress_callback=None):
 
             idx += 1
             if idx % 100 == 0:
-                progress_callback(idx, 0, os.path.relpath(path, root_path))
+                progress_callback(idx, 0, os.path.relpath(path, root_path), phase)
 
             # Normalize artist identically to Phase 4
             raw = (tags.get("artist") or "").strip()
@@ -252,7 +252,7 @@ def compute_moves_and_tag_index(
         def log_callback(msg):
             pass
     if progress_callback is None:
-        def progress_callback(current, total, message):
+        def progress_callback(current, total, message, phase):
             pass
 
     cfg = load_config()
@@ -274,7 +274,7 @@ def compute_moves_and_tag_index(
         _flush(db_path)
 
     # --- Phase 0: Pre-scan entire vault (under MUSIC_ROOT) ---
-    global_counts = build_primary_counts(MUSIC_ROOT, progress_callback)
+    global_counts = build_primary_counts(MUSIC_ROOT, progress_callback, phase="A")
     log_callback(f"   → Pre-scan: found {len(global_counts)} unique artists")
     log_callback(f"   → DEBUG: MUSIC_ROOT = {MUSIC_ROOT}")
     log_callback(f"   → DEBUG: droeloe count = {global_counts.get('droeloe', 0)}")
@@ -295,7 +295,7 @@ def compute_moves_and_tag_index(
                     continue
                 all_audio.append(full)
                 idx += 1
-                progress_callback(idx, 0, f"Scanning {os.path.relpath(full, root_path)}")
+                progress_callback(idx, 0, f"Scanning {os.path.relpath(full, root_path)}", "A")
     total_audio = idx
     log_callback(f"   → Found {total_audio} audio files.")
 
@@ -313,11 +313,11 @@ def compute_moves_and_tag_index(
         except Exception:
             return None, None
 
-    progress_callback(0, len(all_audio), "Fingerprinting")
+    progress_callback(0, len(all_audio), "Fingerprinting", "A")
     for idx, p in enumerate(all_audio, start=1):
         fp_val = get_fingerprint(p, db_path, _compute)
         path_fps[p] = fp_val
-        progress_callback(idx, len(all_audio), os.path.relpath(p, root_path))
+        progress_callback(idx, len(all_audio), os.path.relpath(p, root_path), "A")
         if idx % 50 == 0 or idx == len(all_audio):
             log_callback(f"   • Fingerprinting {idx}/{len(all_audio)}")
 
@@ -429,12 +429,12 @@ def compute_moves_and_tag_index(
     remix_counts   = defaultdict(int)
     cover_counts   = defaultdict(int)
     total_kept = len(kept_files)
-    progress_callback(0, total_kept, "Reading metadata")
+    progress_callback(0, total_kept, "Reading metadata", "B")
 
     for idx, fullpath in enumerate(kept_files, start=1):
         if idx % 50 == 0 or idx == total_kept:
             log_callback(f"   • Reading metadata {idx}/{total_kept}")
-        progress_callback(idx, total_kept, f"Metadata {os.path.relpath(fullpath, root_path)}")
+        progress_callback(idx, total_kept, f"Metadata {os.path.relpath(fullpath, root_path)}", "B")
 
         data = get_tags(fullpath)
         raw_artist = data["artist"] or os.path.splitext(os.path.basename(fullpath))[0]
@@ -785,7 +785,7 @@ def apply_indexer_moves(
         def log_callback(msg):
             pass
     if progress_callback is None:
-        def progress_callback(current, total, path):
+        def progress_callback(current, total, path, phase):
             pass
 
     cfg = load_config()
@@ -806,7 +806,15 @@ def apply_indexer_moves(
     os.makedirs(docs_dir, exist_ok=True)
     db_path = os.path.join(docs_dir, ".soundvault.db")
     from fingerprint_generator import compute_fingerprints_parallel
-    compute_fingerprints_parallel(root_path, db_path, log_callback, progress_callback, None, trim_silence)
+    compute_fingerprints_parallel(
+        root_path,
+        db_path,
+        log_callback,
+        progress_callback,
+        None,
+        trim_silence,
+        phase="A",
+    )
 
     moves, _, _ = compute_moves_and_tag_index(
         root_path,
@@ -841,7 +849,7 @@ def apply_indexer_moves(
     # Phase 5: Move audio files
     for idx, (old_path, new_path) in enumerate(moves.items(), start=1):
         if progress_callback:
-            progress_callback(idx, total_moves, old_path)
+            progress_callback(idx, total_moves, old_path, "C")
         if idx % 50 == 0 or idx == total_moves:
             log_callback(f"   • Moving file {idx}/{total_moves}")
         os.makedirs(os.path.dirname(new_path), exist_ok=True)
@@ -914,7 +922,7 @@ def apply_indexer_moves(
                 log_callback(msg)
                 if progress_callback and msg.startswith("→ Writing playlist:"):
                     playlist_file = msg.split(":", 1)[1].strip()
-                    progress_callback(total_moves, total_moves, playlist_file)
+                    progress_callback(total_moves, total_moves, playlist_file, "C")
 
             generate_playlists(
                 moves,

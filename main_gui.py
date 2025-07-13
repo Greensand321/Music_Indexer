@@ -825,17 +825,15 @@ class SoundVaultImporterApp(tk.Tk):
 
             self.after(0, ui)
 
-        def progress(idx, total, path_):
+        def progress(idx, total, path_, phase="A"):
             if cancel_event.is_set():
                 raise IndexCancelled()
             def ui():
-                msg = path_.lower()
-                if "metadata" in msg:
-                    bar = self.phase_b_bar
-                elif "moving" in msg or "apply" in msg:
-                    bar = self.phase_c_bar
-                else:
-                    bar = self.phase_a_bar
+                bar = {
+                    "A": self.phase_a_bar,
+                    "B": self.phase_b_bar,
+                    "C": self.phase_c_bar,
+                }.get(phase, self.phase_a_bar)
 
                 if total:
                     if bar["mode"] != "determinate":
