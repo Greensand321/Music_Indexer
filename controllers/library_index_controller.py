@@ -1,8 +1,25 @@
 import os
 from tkinter import messagebox
-from mutagen import File as MutagenFile
-from mutagen.easyid3 import EasyID3
-from mutagen.flac import FLAC
+try:
+    from mutagen import File as MutagenFile
+    from mutagen.easyid3 import EasyID3
+    from mutagen.flac import FLAC
+except Exception:  # pragma: no cover - optional dependency
+    class _DummyAudio:
+        def __init__(self, *a, **k):
+            self.tags = {}
+
+        def get(self, key, default=None):
+            return self.tags.get(key, default)
+
+    def MutagenFile(*_a, **_k):
+        return _DummyAudio()
+
+    class EasyID3(_DummyAudio):
+        pass
+
+    class FLAC(_DummyAudio):
+        pass
 
 SUPPORTED_EXTS = {".mp3", ".flac", ".m4a", ".aac", ".wav", ".ogg"}
 
