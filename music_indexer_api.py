@@ -8,6 +8,17 @@ from collections import defaultdict
 from typing import Dict, List
 from dry_run_coordinator import DryRunCoordinator
 from config import load_config
+
+def _verify_dependencies() -> None:
+    """Raise RuntimeError if the real mutagen library is missing."""
+    try:
+        import mutagen  # type: ignore
+        if getattr(mutagen.File, "__name__", "") == "<lambda>":
+            raise ImportError
+    except Exception:  # pragma: no cover - optional dependency
+        raise RuntimeError(
+            "Missing required library: mutagen. Install it via `pip install -r requirements.txt`."
+        )
 try:
     from mutagen import File as MutagenFile
     from mutagen.id3 import ID3NoHeaderError
@@ -248,6 +259,7 @@ def compute_moves_and_tag_index(
     ``coord`` can be provided to collect additional diagnostic data during
     near-duplicate detection.
     """
+    _verify_dependencies()
     if log_callback is None:
         def log_callback(msg):
             pass

@@ -3,7 +3,9 @@ import types
 import sys
 
 mutagen_stub = types.ModuleType('mutagen')
-mutagen_stub.File = lambda *a, **k: None
+def File(*a, **k):
+    return None
+mutagen_stub.File = File
 id3_stub = types.ModuleType('id3')
 id3_stub.ID3NoHeaderError = Exception
 mutagen_stub.id3 = id3_stub

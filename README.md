@@ -22,6 +22,9 @@ source .venv/bin/activate  # or "Scripts\activate" on Windows
 pip install -r requirements.txt
 ```
 
+The indexer will exit with an error if the real `mutagen` package is missing,
+so ensure all dependencies are installed before running.
+
 ## Quickstart
 
 ```bash
