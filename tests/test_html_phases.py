@@ -8,7 +8,9 @@ class DummyAudio:
     def __init__(self):
         self.tags = None
         self.pictures = []
-mutagen_stub.File = lambda *a, **k: DummyAudio()
+def File(*a, **k):
+    return DummyAudio()
+mutagen_stub.File = File
 id3_stub = types.ModuleType('id3')
 id3_stub.ID3NoHeaderError = Exception
 mutagen_stub.id3 = id3_stub
