@@ -477,6 +477,9 @@ class SoundVaultImporterApp(tk.Tk):
         self.flush_cache_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(options, text="Flush Cache", variable=self.flush_cache_var).pack(side="left", padx=(5,0))
 
+        self.playlists_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(options, text="Create Playlists", variable=self.playlists_var).pack(side="left", padx=(5,0))
+
         ttk.Label(options, text="Max Workers:").pack(side="left", padx=(5,0))
         self.worker_var = tk.StringVar(value="")
         ttk.Entry(options, textvariable=self.worker_var, width=4).pack(side="left")
@@ -886,6 +889,7 @@ class SoundVaultImporterApp(tk.Tk):
                     enable_phase_c=self.phase_c_var.get(),
                     flush_cache=self.flush_cache_var.get(),
                     max_workers=mw,
+                    create_playlists=self.playlists_var.get(),
                 )
                 self.after(0, lambda: self.log.insert("end", "✔ Indexing complete\n"))
                 if dry_run:
