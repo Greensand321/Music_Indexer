@@ -770,13 +770,19 @@ def build_dry_run_html(
 
 # ─── C. APPLY MOVES ─────────────────────────────────────────────────────
 
-def apply_indexer_moves(root_path, log_callback=None, progress_callback=None):
+def apply_indexer_moves(
+    root_path,
+    log_callback=None,
+    progress_callback=None,
+    create_playlists: bool = True,
+):
     """
     1) Call compute_moves_and_tag_index() to get (moves, tag_index, decision_log).
     2) Move/rename each file in `moves`.
     3) Move any leftover non-audio or album cover images into Trash or into the correct folder.
     4) Remove empty directories.
     Returns summary: {"moved": <count>, "errors": [<error strings>]}.
+    Set ``create_playlists`` to ``False`` to skip playlist generation at the end.
     """
     if log_callback is None:
         def log_callback(msg):
@@ -881,30 +887,33 @@ def apply_indexer_moves(root_path, log_callback=None, progress_callback=None):
             except Exception as e:
                 log_callback(f"   ! Failed to move leftover {full}: {e}")
 
-    # ─── Phase 7: Generate Playlists with edge-case handling ────────────
-    try:
-        from playlist_generator import generate_playlists
-        log_callback("7/7: Generating safe playlists…")
+    if create_playlists:
+        # ─── Phase 7: Generate Playlists with edge-case handling ────────────
+        try:
+            from playlist_generator import generate_playlists
+            log_callback("7/7: Generating safe playlists…")
 
-        def plog(msg):
-            log_callback(msg)
-            if progress_callback and msg.startswith("→ Writing playlist:"):
-                playlist_file = msg.split(":", 1)[1].strip()
-                progress_callback(total_moves, total_moves, playlist_file)
+            def plog(msg):
+                log_callback(msg)
+                if progress_callback and msg.startswith("→ Writing playlist:"):
+                    playlist_file = msg.split(":", 1)[1].strip()
+                    progress_callback(total_moves, total_moves, playlist_file)
 
-        generate_playlists(
-            moves,
-            root_path,
-            output_dir=None,        # default: root_path/Playlists
-            valid_exts=None,        # default extensions
-            overwrite=True,
-            log_callback=plog,
-        )
-        log_callback("✓ Robust playlists created.")
-    except ImportError:
-        log_callback("! playlist_generator.py missing; skipping playlists.")
-    except Exception as e:
-        log_callback(f"! Playlist generation error: {e}")
+            generate_playlists(
+                moves,
+                root_path,
+                output_dir=None,        # default: root_path/Playlists
+                valid_exts=None,        # default extensions
+                overwrite=True,
+                log_callback=plog,
+            )
+            log_callback("✓ Robust playlists created.")
+        except ImportError:
+            log_callback("! playlist_generator.py missing; skipping playlists.")
+        except Exception as e:
+            log_callback(f"! Playlist generation error: {e}")
+    else:
+        log_callback("• Playlist creation disabled")
 
     return summary
 
@@ -920,12 +929,14 @@ def run_full_indexer(
     enable_phase_c: bool = False,
     flush_cache: bool = False,
     max_workers: int | None = None,
+    create_playlists: bool = True,
 ):
     """
     1) Call compute_moves_and_tag_index() to get (moves, tag_index, decision_log).
     2) Write a detailed log file `indexer_log.txt` under root_path.
     3) Write dry-run HTML via build_dry_run_html().
-    4) If dry_run_only=False, call apply_indexer_moves() to move files.
+    4) If ``dry_run_only`` is False, call ``apply_indexer_moves()`` to move files.
+       Playlist generation can be skipped by passing ``create_playlists=False``.
     Returns summary: {"moved": <count>, "html": <path>, "dry_run": <True/False>}.
     """
     if log_callback is None:
@@ -977,6 +988,7 @@ def run_full_indexer(
             root_path,
             log_callback,
             progress_callback,
+            create_playlists=create_playlists,
         )
         summary = {"moved": actual_summary["moved"], "html": output_html_path, "dry_run": False}
         return summary
@@ -1017,6 +1029,7 @@ def main(argv: List[str] | None = None) -> None:
     parser.add_argument("--enable-phase-c", action="store_true", help="Enable cross-album scan")
     parser.add_argument("--flush-cache", action="store_true", help="Flush fingerprint cache")
     parser.add_argument("--max-workers", type=int, default=None, help="Fingerprint worker count")
+    parser.add_argument("--no-playlists", action="store_true", help="Skip playlist creation")
     args = parser.parse_args(argv)
 
     output = os.path.join(args.root, "Docs", "MusicIndex.html")
@@ -1039,6 +1052,7 @@ def main(argv: List[str] | None = None) -> None:
             enable_phase_c=args.enable_phase_c,
             flush_cache=args.flush_cache,
             max_workers=args.max_workers,
+            create_playlists=not args.no_playlists,
         )
 
 
