@@ -365,33 +365,22 @@ def compute_moves_and_tag_index(
                     to_delete[loser] = "Exact FP match"
                     kept_files.discard(loser)
         else:
-            fp_folder = fp
-            if isinstance(fp_folder, (bytes, bytearray)):
-                try:
-                    fp_folder = fp_folder.decode("utf-8")
-                except Exception:
-                    fp_folder = fp_folder.decode("latin1", errors="ignore")
-            folder = os.path.join(review_root, str(fp_folder)[:16])
-            os.makedirs(folder, exist_ok=True)
+            meta_counts = {p: file_infos[p].get("meta_count", 0) for p in scored}
+            max_meta = max(meta_counts.values())
+            winner = None
             for p in scored:
-                dest = os.path.join(folder, os.path.basename(p))
-                if os.path.exists(dest):
-                    base, ext = os.path.splitext(os.path.basename(p))
-                    i = 1
-                    new_dest = dest
-                    while os.path.exists(new_dest):
-                        new_dest = os.path.join(folder, f"{base}_{i}{ext}")
-                        i += 1
-                    dest = new_dest
-                if dry_run:
-                    log_callback(f"   ? (dry-run) Would move {p} → {dest}")
-                else:
-                    try:
-                        shutil.move(p, dest)
-                    except Exception as e:
-                        log_callback(f"   ! Failed to move {p} to manual review: {e}")
-                kept_files.discard(p)
-            log_callback(f"Ambiguous duplicates for fingerprint {fp} moved to {folder}—please review.")
+                if meta_counts[p] == max_meta:
+                    winner = p
+                    break
+            for p in scored:
+                if p == winner:
+                    continue
+                if p not in to_delete:
+                    to_delete[p] = "Exact FP match"
+                    kept_files.discard(p)
+            log_callback(
+                f"Ambiguous duplicates for fingerprint {fp} auto-resolved—kept {os.path.basename(winner)}."
+            )
 
     if coord is not None:
         coord.add_exact_dupes([p for p, r in to_delete.items() if r == "Exact FP match"])
