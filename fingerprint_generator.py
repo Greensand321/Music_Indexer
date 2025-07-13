@@ -88,7 +88,7 @@ def compute_fingerprints_parallel(
     idx = 0
     for dirpath, _, files in os.walk(root_path):
         rel_dir = os.path.relpath(dirpath, root_path)
-        if "Not Sorted" in rel_dir.split(os.sep):
+        if {"not sorted", "playlists"} & {p.lower() for p in rel_dir.split(os.sep)}:
             continue
         for fname in files:
             ext = os.path.splitext(fname)[1].lower()
