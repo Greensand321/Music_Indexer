@@ -71,7 +71,10 @@ def flush_cache(db_path: str) -> None:
     get_fingerprint.cache_clear()
     if not os.path.exists(db_path):
         return
-    conn = sqlite3.connect(db_path)
-    conn.execute("DROP TABLE IF EXISTS fingerprints")
-    conn.commit()
-    conn.close()
+    try:
+        os.remove(db_path)
+    except Exception:
+        conn = sqlite3.connect(db_path)
+        conn.execute("DROP TABLE IF EXISTS fingerprints")
+        conn.commit()
+        conn.close()

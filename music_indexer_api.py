@@ -8,8 +8,16 @@ from collections import defaultdict
 from typing import Dict, List
 from dry_run_coordinator import DryRunCoordinator
 from config import load_config
-from mutagen import File as MutagenFile
-from mutagen.id3 import ID3NoHeaderError
+try:
+    from mutagen import File as MutagenFile
+    from mutagen.id3 import ID3NoHeaderError
+except Exception:  # pragma: no cover - optional dependency
+    def MutagenFile(*_a, **_k):
+        return None
+
+    class ID3NoHeaderError(Exception):
+        """Fallback error when Mutagen is unavailable."""
+        pass
 from indexer_control import check_cancelled
 
 # ─── CONFIGURATION ─────────────────────────────────────────────────────
@@ -886,6 +894,26 @@ def apply_indexer_moves(
                 shutil.move(full, os.path.join(target, fname))
             except Exception as e:
                 log_callback(f"   ! Failed to move leftover {full}: {e}")
+
+    # Phase 6b: Remove empty directories that held moved files
+    skip_names = {"trash", "docs", "not sorted"}
+    touched_dirs = sorted(olddir_to_newdirs.keys(), key=lambda p: p.count(os.sep), reverse=True)
+    for base in touched_dirs:
+        if not os.path.isdir(base):
+            continue
+        for dirpath, dirnames, filenames in os.walk(base, topdown=False):
+            rel = os.path.relpath(dirpath, root_path)
+            first = rel.split(os.sep, 1)[0].lower() if rel != "." else ""
+            if first in skip_names:
+                continue
+            if os.path.normpath(dirpath) in (root_path, MUSIC_ROOT):
+                continue
+            if not os.listdir(dirpath):
+                try:
+                    os.rmdir(dirpath)
+                    log_callback(f"Removed empty folder: {dirpath}")
+                except OSError:
+                    pass
 
     if create_playlists:
         # ─── Phase 7: Generate Playlists with edge-case handling ────────────
