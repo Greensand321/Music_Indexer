@@ -74,11 +74,12 @@ def flush_cache(db_path: str) -> None:
     try:
         os.remove(db_path)
     except Exception:
-        try:
-            conn = sqlite3.connect(db_path)
-            conn.execute("DROP TABLE IF EXISTS fingerprints")
-            conn.commit()
-            conn.close()
-            os.remove(db_path)
-        except Exception:
-            pass
+try:
+    conn = sqlite3.connect(db_path)
+    conn.execute("DROP TABLE IF EXISTS fingerprints")
+    conn.commit()
+    conn.close()
+    os.remove(db_path)
+except Exception as e:
+    print(f"Error cleaning up database: {e}")
+
