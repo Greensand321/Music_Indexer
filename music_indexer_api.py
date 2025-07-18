@@ -789,7 +789,8 @@ def apply_indexer_moves(
     1) Call compute_moves_and_tag_index() to get (moves, tag_index, decision_log).
     2) Move/rename each file in `moves`.
     3) Move any leftover non-audio or album cover images into Trash or into the correct folder.
-    4) Remove empty directories.
+    4) Remove empty directories in two passes: first those that held moved
+       files, then a library-wide sweep for any remaining empty folders.
     Returns summary: {"moved": <count>, "errors": [<error strings>]}.
     Set ``create_playlists`` to ``False`` to skip playlist generation at the end.
     """
@@ -923,6 +924,22 @@ def apply_indexer_moves(
                     log_callback(f"Removed empty folder: {dirpath}")
                 except OSError:
                     pass
+
+    # Phase 6c: Second pass to remove any remaining empty directories
+    for dirpath, dirnames, filenames in os.walk(root_path, topdown=False):
+        dirnames[:] = [d for d in dirnames if d.lower() not in skip_names]
+        if os.path.normpath(dirpath) in (root_path, MUSIC_ROOT):
+            continue
+        rel = os.path.relpath(dirpath, root_path)
+        first = rel.split(os.sep, 1)[0].lower() if rel != "." else ""
+        if first in skip_names:
+            continue
+        if not os.listdir(dirpath):
+            try:
+                os.rmdir(dirpath)
+                log_callback(f"Removed empty folder: {dirpath}")
+            except OSError:
+                pass
 
     if create_playlists:
         # ─── Phase 7: Generate Playlists with edge-case handling ────────────
