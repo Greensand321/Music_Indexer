@@ -612,6 +612,15 @@ class SoundVaultImporterApp(tk.Tk):
             self.quality_tab, text="Apply Changes", command=self.apply_replacements
         ).pack(pady=(0, 10))
 
+        # ─── Tag Fixer Tab ────────────────────────────────────────────────
+        self.tagfix_tab = ttk.Frame(self.notebook)
+        self.notebook.add(self.tagfix_tab, text="Tag Fixer")
+        ttk.Button(
+            self.tagfix_tab,
+            text="Run Tag Fixer…",
+            command=self.fix_tags_gui,
+        ).pack(pady=10)
+
         # after your other tabs
         help_frame = ttk.Frame(self.notebook)
         self.notebook.add(help_frame, text="Help")
