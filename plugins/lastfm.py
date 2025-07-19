@@ -16,7 +16,10 @@ class LastfmPlugin(MetadataPlugin):
     def identify(self, file_path: str) -> dict:
         if not API_KEY:
             return {}
-        audio = MutagenFile(ensure_long_path(file_path), easy=True)
+        try:
+            audio = MutagenFile(ensure_long_path(file_path), easy=True)
+        except Exception:
+            return {}
         artist = (audio.tags.get("artist") or [None])[0] if audio and audio.tags else None
         title = (audio.tags.get("title") or [None])[0] if audio and audio.tags else None
         if not artist or not title:
