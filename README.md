@@ -72,6 +72,7 @@ update_genres.py          - Batch genre tag updater via MusicBrainz
 tidal_sync.py             - Sync tidal-dl downloads to upgrade your library
 validator.py              - Verify SoundVault folder layout
 config.py                 - Read/write persistent configuration
+mutagen_stub/             - Minimal fallback used by the tests
 
 controllers/
   library_controller.py        - Handle library selection and persistence
