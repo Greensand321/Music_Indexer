@@ -337,6 +337,17 @@ class SoundVaultImporterApp(tk.Tk):
         self.fp_threshold_var = tk.DoubleVar(value=0.3)
         self.sync_debug_var = tk.BooleanVar(value=False)
 
+        # ── Tag Fixer state ──
+        self.tagfix_folder_var = tk.StringVar(value="")
+        self.tagfix_ex_no_diff = tk.BooleanVar(value=False)
+        self.tagfix_ex_skipped = tk.BooleanVar(value=False)
+        self.tagfix_show_all = tk.BooleanVar(value=False)
+        self.tf_apply_artist = tk.BooleanVar(value=True)
+        self.tf_apply_title = tk.BooleanVar(value=True)
+        self.tf_apply_album = tk.BooleanVar(value=False)
+        self.tf_apply_genres = tk.BooleanVar(value=False)
+        self.tagfix_db_path = ""
+
         # assume ffmpeg is available without performing checks
         self.ffmpeg_available = True
 
@@ -615,11 +626,117 @@ class SoundVaultImporterApp(tk.Tk):
         # ─── Tag Fixer Tab ────────────────────────────────────────────────
         self.tagfix_tab = ttk.Frame(self.notebook)
         self.notebook.add(self.tagfix_tab, text="Tag Fixer")
+
+        path_frame = ttk.Frame(self.tagfix_tab)
+        path_frame.pack(fill="x", padx=10, pady=(10, 5))
+        ttk.Entry(path_frame, textvariable=self.tagfix_folder_var).pack(
+            side="left", fill="x", expand=True
+        )
         ttk.Button(
-            self.tagfix_tab,
-            text="Run Tag Fixer…",
-            command=self.fix_tags_gui,
-        ).pack(pady=10)
+            path_frame, text="Browse…", command=self._browse_tagfix_folder
+        ).pack(side="left", padx=(5, 0))
+        ttk.Button(path_frame, text="Scan", command=self.fix_tags_gui).pack(
+            side="left", padx=(5, 0)
+        )
+
+        opts = ttk.Frame(self.tagfix_tab)
+        opts.pack(fill="x", padx=10)
+        ttk.Checkbutton(
+            opts,
+            text="Exclude 'no diff'",
+            variable=self.tagfix_ex_no_diff,
+            command=self._refresh_tagfix_view,
+        ).pack(side="left")
+        ttk.Checkbutton(
+            opts,
+            text="Exclude 'skipped'",
+            variable=self.tagfix_ex_skipped,
+            command=self._refresh_tagfix_view,
+        ).pack(side="left", padx=(5, 0))
+        ttk.Checkbutton(
+            opts,
+            text="Show All",
+            variable=self.tagfix_show_all,
+            command=self._refresh_tagfix_view,
+        ).pack(side="left", padx=(5, 0))
+
+        self.tagfix_progress = ttk.Progressbar(
+            self.tagfix_tab, orient="horizontal", mode="determinate"
+        )
+        self.tagfix_progress.pack(fill="x", padx=10, pady=(5, 5))
+
+        table_container = ttk.Frame(self.tagfix_tab)
+        table_container.pack(fill="both", expand=True, padx=10, pady=5)
+        vsb = ttk.Scrollbar(table_container, orient="vertical")
+        vsb.pack(side="right", fill="y")
+        hsb = ttk.Scrollbar(table_container, orient="horizontal")
+        hsb.pack(side="bottom", fill="x")
+
+        cols = (
+            "File",
+            "Score",
+            "Old Artist",
+            "New Artist",
+            "Old Title",
+            "New Title",
+            "Old Album",
+            "New Album",
+            "Genres",
+            "Suggested Genre",
+        )
+
+        self.tagfix_tree = ttk.Treeview(
+            table_container,
+            columns=cols,
+            show="headings",
+            yscrollcommand=vsb.set,
+            xscrollcommand=hsb.set,
+            selectmode="extended",
+        )
+        vsb.config(command=self.tagfix_tree.yview)
+        hsb.config(command=self.tagfix_tree.xview)
+        self.tagfix_tree.pack(fill="both", expand=True)
+        self._prop_tv = self.tagfix_tree
+
+        for c in cols:
+            self.tagfix_tree.heading(
+                c,
+                text=c,
+                command=lambda _c=c: self._sort_tagfix_column(_c, False),
+            )
+            width = 100
+            if c == "File":
+                width = 300
+            elif c in ("Old Album", "New Album"):
+                width = 120
+            elif c in ("Genres", "Suggested Genre"):
+                width = 150
+            self.tagfix_tree.column(c, width=width, anchor="w")
+
+        self.tagfix_tree.tag_configure("perfect", background="white")
+        self.tagfix_tree.tag_configure("changed", background="#fff8c6")
+        self.tagfix_tree.tag_configure("lowconf", background="#f8d7da")
+
+        self.tagfix_tree.bind("<Control-a>", lambda e: self._select_all_tagfix())
+        self.tagfix_tree.bind("<<TreeviewSelect>>", self._update_tagfix_selection)
+
+        self.tagfix_sel_label = ttk.Label(self.tagfix_tab, text="Selected: 0")
+        self.tagfix_sel_label.pack(anchor="w", padx=10)
+
+        apply_frame = ttk.Frame(self.tagfix_tab)
+        apply_frame.pack(fill="x", pady=(0, 10), padx=10)
+        for var, label in (
+            (self.tf_apply_artist, "Artist"),
+            (self.tf_apply_title, "Title"),
+            (self.tf_apply_album, "Album"),
+            (self.tf_apply_genres, "Genres"),
+        ):
+            ttk.Checkbutton(apply_frame, text=label, variable=var).pack(
+                side="left", padx=5
+            )
+        ttk.Button(
+            apply_frame, text="Apply Selected", command=self._apply_selected_tags
+        ).pack(side="right")
 
         # after your other tabs
         help_frame = ttk.Frame(self.notebook)
@@ -1314,44 +1431,43 @@ class SoundVaultImporterApp(tk.Tk):
 
     def _on_show_all(self):
         """Run tag-fix scan showing every file regardless of prior log."""
-        self.show_all = True
+        self.tagfix_show_all.set(True)
         try:
             self.fix_tags_gui()
         finally:
-            self.show_all = False
+            self.tagfix_show_all.set(False)
 
     def fix_tags_gui(self):
-        folder = filedialog.askdirectory(title="Select Folder to Fix Tags")
+        folder = self.tagfix_folder_var.get()
         if not folder:
-            return
+            folder = filedialog.askdirectory(title="Select Folder to Fix Tags")
+            if not folder:
+                return
+            self.tagfix_folder_var.set(folder)
 
-        db_path, _ = prepare_library(folder)
+        self.tagfix_db_path, _ = prepare_library(folder)
         self.mapping_path = os.path.join(folder, ".genre_mapping.json")
         self._load_genre_mapping()
 
         files = discover_files(folder)
-        print(f"[DEBUG] Total discovered files: {len(files)}")
         if not files:
             messagebox.showinfo(
                 "No audio files", "No supported audio found in that folder."
             )
             return
 
-        proceed, ex_no_diff, ex_skipped, show_all = self._tagfix_filter_dialog()
-        if not proceed:
-            return
-
-        show_all = show_all or getattr(self, "show_all", False)
+        self.tagfix_progress["maximum"] = len(files)
+        self.tagfix_progress["value"] = 0
 
         q = queue.Queue()
-        progress = ProgressDialog(self, total=len(files), title="Fingerprinting…")
+        show_all = self.tagfix_show_all.get()
 
         def worker():
             records = gather_records(
                 folder,
-                db_path,
+                self.tagfix_db_path,
                 show_all,
-                progress_callback=lambda idx: q.put(("progress", idx)),
+                progress_callback=lambda idx: q.put(idx),
             )
             q.put(("done", records))
 
@@ -1360,55 +1476,18 @@ class SoundVaultImporterApp(tk.Tk):
         def poll_queue():
             try:
                 while True:
-                    msg, payload = q.get_nowait()
-                    if msg == "progress":
-                        progress.update_progress(payload)
-                    elif msg == "done":
-                        progress.destroy()
-                        all_records = payload
-                        self.all_records = all_records
-
-                        # Apply genre normalization before filtering
+                    item = q.get_nowait()
+                    if isinstance(item, tuple):
+                        _, records = item
+                        self.all_records = records
                         for rec in self.all_records:
-                            rec.old_genres = normalize_genres(
-                                rec.old_genres, self.genre_mapping
-                            )
-                            rec.new_genres = normalize_genres(
-                                rec.new_genres, self.genre_mapping
-                            )
-
-                        filters = make_filters(ex_no_diff, ex_skipped, show_all)
-                        records = apply_filters(all_records, filters)
-
-                        records = sorted(
-                            records,
-                            key=lambda r: (
-                                r.score is not None,
-                                r.score if r.score is not None else 0,
-                            ),
-                            reverse=True,
-                        )
-                        self.filtered_records = records
-
-                        if not records:
-                            messagebox.showinfo(
-                                "No proposals", "No missing tags above threshold."
-                            )
-                            return
-
-                        result = self.show_proposals_dialog(records)
-                        if result is not None:
-                            selected, fields = result
-
-                            count = apply_proposals(
-                                selected,
-                                all_records,
-                                db_path,
-                                fields,
-                                log_callback=self._log,
-                            )
-                            messagebox.showinfo("Done", f"Updated {count} files.")
+                            rec.old_genres = normalize_genres(rec.old_genres, self.genre_mapping)
+                            rec.new_genres = normalize_genres(rec.new_genres, self.genre_mapping)
+                        self.tagfix_progress["value"] = self.tagfix_progress["maximum"]
+                        self._refresh_tagfix_view()
                         return
+                    else:
+                        self.tagfix_progress["value"] = item
             except queue.Empty:
                 pass
             self.after(100, poll_queue)
@@ -1552,6 +1631,83 @@ class SoundVaultImporterApp(tk.Tk):
         if getattr(self, "_proceed", False):
             return self._selected
         return None
+
+    # ── Tag Fixer Embedded Helpers ───────────────────────────────────────
+    def _browse_tagfix_folder(self):
+        initial = self.tagfix_folder_var.get() or load_last_path()
+        folder = filedialog.askdirectory(
+            title="Select Folder to Fix Tags", initialdir=initial
+        )
+        if folder:
+            save_last_path(folder)
+            self.tagfix_folder_var.set(folder)
+
+    def _select_all_tagfix(self):
+        self.tagfix_tree.selection_set(self.tagfix_tree.get_children(""))
+        return "break"
+
+    def _sort_tagfix_column(self, col: str, reverse: bool = False):
+        tv = self.tagfix_tree
+        data = [(tv.set(k, col), k) for k in tv.get_children("")]
+        try:
+            data = [(float(v), k) for v, k in data]
+        except ValueError:
+            pass
+        data.sort(reverse=reverse)
+        for idx, (_, k) in enumerate(data):
+            tv.move(k, "", idx)
+        tv.heading(col, command=lambda: self._sort_tagfix_column(col, not reverse))
+
+    def _update_tagfix_selection(self, event=None):
+        cnt = len(self.tagfix_tree.selection())
+        self.tagfix_sel_label.config(text=f"Selected: {cnt}")
+
+    def _refresh_tagfix_view(self, *_):
+        if not hasattr(self, "all_records"):
+            return
+        filters = make_filters(
+            self.tagfix_ex_no_diff.get(),
+            self.tagfix_ex_skipped.get(),
+            self.tagfix_show_all.get(),
+        )
+        records = apply_filters(self.all_records, filters)
+        records = sorted(
+            records,
+            key=lambda r: (r.score is not None, r.score if r.score is not None else 0),
+            reverse=True,
+        )
+        self.filtered_records = records
+        self._render_table(records)
+        self._iid_to_prop = {
+            iid: rec for iid, rec in zip(self.tagfix_tree.get_children(""), records)
+        }
+        self._update_tagfix_selection()
+
+    def _apply_selected_tags(self):
+        if not hasattr(self, "all_records") or not self.tagfix_db_path:
+            return
+        selected = [self._iid_to_prop[iid] for iid in self.tagfix_tree.selection()]
+        if not selected:
+            messagebox.showinfo("Tag Fixer", "No rows selected.")
+            return
+        fields = []
+        if self.tf_apply_artist.get():
+            fields.append("artist")
+        if self.tf_apply_title.get():
+            fields.append("title")
+        if self.tf_apply_album.get():
+            fields.append("album")
+        if self.tf_apply_genres.get():
+            fields.append("genres")
+        count = apply_proposals(
+            selected,
+            self.all_records,
+            self.tagfix_db_path,
+            fields,
+            log_callback=self._log,
+        )
+        messagebox.showinfo("Tag Fixer", f"Updated {count} files.")
+        self._refresh_tagfix_view()
 
     def _render_table(self, records: List[FileRecord]):
         tv = self._prop_tv
