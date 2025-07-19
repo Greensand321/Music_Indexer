@@ -3,6 +3,15 @@ import json
 
 CONFIG_PATH = os.path.expanduser("~/.soundvault_config.json")
 
+# List of external metadata services supported by the application.
+SUPPORTED_SERVICES = [
+    "AcoustID",
+    "Last.fm",
+    "Spotify",
+    "MusicBrainz",
+    "Gracenote",
+]
+
 
 def load_config():
     """Load configuration from ``CONFIG_PATH``.

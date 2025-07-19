@@ -33,7 +33,7 @@ python main_gui.py
 
 1. **Open** your library folder
 2. Use the **Indexer** tab to dedupe, detect near duplicates, and move files
-3. **Fix Tags** via the AcoustID menu
+3. **Fix Tags** via the AcoustID menu (now supports multiple metadata services)
 4. **Generate Playlists** from your folder structure
 5. **Clustered Playlists** (interactive K-Means/HDBSCAN) via the Tools ▸ Clustered Playlists menu
 6. **Tidal-dl Sync** can upgrade low-quality files to FLAC
@@ -57,6 +57,15 @@ threshold used during deduplication, add a value like:
 ```
 
 Lower values require more similar fingerprints.
+
+The configuration file also stores your selected metadata service and API key:
+
+```json
+{
+  "metadata_service": "AcoustID",
+  "metadata_api_key": "YOUR_KEY"
+}
+```
 
 ## File Overview
 
@@ -91,7 +100,7 @@ controllers/
 
 plugins/
   base.py               - Metadata plugin interface
-  acoustid_plugin.py    - Identify tracks via AcoustID
+  acoustid_plugin.py    - Metadata lookup via selected service
   assistant_plugin.py   - LLM helper integration
   discogs.py            - Discogs metadata stub
   lastfm.py             - Fetch genres from Last.fm
