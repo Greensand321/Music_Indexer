@@ -2,7 +2,8 @@ import acoustid
 import musicbrainzngs
 from itertools import islice
 import tkinter as tk
-from tkinter import messagebox, simpledialog
+from tkinter import messagebox, ttk
+import importlib
 
 from plugins.base import MetadataPlugin
 from utils.path_helpers import ensure_long_path
@@ -11,6 +12,8 @@ from tag_fixer import (
     ACOUSTID_APP_NAME,
     ACOUSTID_APP_VERSION,
 )
+from config import load_config, save_config, SUPPORTED_SERVICES
+from metadata_service import query_metadata
 
 musicbrainzngs.set_useragent(
     ACOUSTID_APP_NAME,
@@ -21,90 +24,80 @@ musicbrainzngs.set_useragent(
 class AcoustIDPlugin(MetadataPlugin):
     @staticmethod
     def _prompt_reconnect() -> bool:
-        """Prompt for API key update and test the AcoustID connection."""
+        """Prompt for service selection and API key update."""
+        cfg = load_config()
         root = tk.Tk()
         root.withdraw()
-        try:
-            api_key = simpledialog.askstring(
-                "AcoustID Connection Failed",
-                (
-                    "Unable to reach the AcoustID service.\n"
-                    "Update the API key and press OK to retry."
-                ),
-                initialvalue=tag_fixer.ACOUSTID_API_KEY or "",
-                parent=root,
-            )
-            if api_key is None:
-                return False
-            tag_fixer.ACOUSTID_API_KEY = api_key
+        top = tk.Toplevel(root)
+        top.title("Metadata Connection Failed")
+
+        services = []
+        for svc in SUPPORTED_SERVICES:
+            if svc == "Spotify" and importlib.util.find_spec("spotipy") is None:
+                continue
+            services.append(svc)
+
+        tk.Label(top, text="Service:").grid(row=0, column=0, sticky="e", padx=5, pady=5)
+        service_var = tk.StringVar(value=cfg.get("metadata_service", "AcoustID"))
+        ttk.Combobox(top, textvariable=service_var, values=services, state="readonly").grid(row=0, column=1, padx=5, pady=5)
+
+        tk.Label(top, text="API Key:").grid(row=1, column=0, sticky="e", padx=5, pady=5)
+        api_var = tk.StringVar(value=cfg.get("metadata_api_key", tag_fixer.ACOUSTID_API_KEY))
+        ttk.Entry(top, textvariable=api_var, width=40).grid(row=1, column=1, padx=5, pady=5)
+
+        result = {"ok": False}
+
+        def do_test() -> None:
             try:
-                acoustid.match(tag_fixer.ACOUSTID_API_KEY, b"")
+                query_metadata(service_var.get(), api_var.get(), "")
             except Exception:
-                messagebox.showerror(
-                    "AcoustID Connection",
-                    "Connection failed",
-                    parent=root,
-                )
-                return False
-            messagebox.showinfo(
-                "AcoustID Connection",
-                "Connection success",
-                parent=root,
-            )
-            return True
-        finally:
-            root.destroy()
+                messagebox.showerror("Connection", "Connection failed", parent=top)
+            else:
+                messagebox.showinfo("Connection", "Connection success", parent=top)
+
+        def do_save() -> None:
+            cfg = load_config()
+            cfg["metadata_service"] = service_var.get()
+            cfg["metadata_api_key"] = api_var.get()
+            save_config(cfg)
+            if service_var.get() == "AcoustID":
+                tag_fixer.ACOUSTID_API_KEY = api_var.get()
+            result["ok"] = True
+            top.destroy()
+
+        ttk.Button(top, text="Test Connection", command=do_test).grid(row=2, column=0, padx=5, pady=5)
+        ttk.Button(top, text="Save", command=do_save).grid(row=2, column=1, padx=5, pady=5)
+
+        top.protocol("WM_DELETE_WINDOW", top.destroy)
+        top.grab_set()
+        root.wait_window(top)
+        root.destroy()
+        return result["ok"]
 
     def identify(self, file_path: str) -> dict:
         while True:
+            cfg = load_config()
+            service = cfg.get("metadata_service", "AcoustID")
+            api_key = cfg.get("metadata_api_key", tag_fixer.ACOUSTID_API_KEY)
             try:
-                match_gen = acoustid.match(tag_fixer.ACOUSTID_API_KEY, ensure_long_path(file_path))
-                peek = list(islice(match_gen, 5))
-                if not peek:
-                    return {}
-
-                best_score, best_rid, best_title, best_artist = peek[0]
-                break
+                return query_metadata(service, api_key, file_path)
             except acoustid.NoBackendError:
                 return {}
             except acoustid.FingerprintGenerationError:
                 return {}
-            except acoustid.WebServiceError:
+            except Exception:
                 if not self._prompt_reconnect():
                     return {}
                 continue
 
-        album = None
-        genres = []
-        if best_rid:
-            try:
-                rec = musicbrainzngs.get_recording_by_id(
-                    best_rid,
-                    includes=["releases", "tags"],
-                )["recording"]
-                rels = rec.get("releases", [])
-                if rels:
-                    album = rels[0].get("title")
-                mb_tags = rec.get("tag-list", [])
-                genres = [t["name"] for t in mb_tags if "name" in t]
-            except Exception:
-                pass
-
-        return {
-            "artist": best_artist,
-            "title": best_title,
-            "album": album,
-            "genres": genres,
-            "score": best_score,
-        }
-
     @staticmethod
     def check_connection() -> bool:
-        """Return True if AcoustID web service is reachable."""
+        """Return True if the configured metadata service is reachable."""
+        cfg = load_config()
+        service = cfg.get("metadata_service", "AcoustID")
+        api_key = cfg.get("metadata_api_key", tag_fixer.ACOUSTID_API_KEY)
         try:
-            acoustid.match(tag_fixer.ACOUSTID_API_KEY, b"")
-        except acoustid.WebServiceError:
-            return AcoustIDPlugin._prompt_reconnect()
+            query_metadata(service, api_key, "")
         except Exception:
             return AcoustIDPlugin._prompt_reconnect()
         return True
