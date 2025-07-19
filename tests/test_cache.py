@@ -66,3 +66,19 @@ def test_prewarm_cache(tmp_path):
     conn.close()
     assert count == 2
 
+
+def test_long_path_support(tmp_path):
+    db = tmp_path / "fp.db"
+    base = tmp_path
+    for i in range(6):
+        base = base / ("d" * 50 + str(i))
+    base.mkdir(parents=True)
+    path = base / "a.mp3"
+    path.write_text("x")
+
+    def compute(_):
+        return 1, "hash"
+
+    fp = get_fingerprint(str(path), str(db), compute)
+    assert fp == "hash"
+

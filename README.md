@@ -41,6 +41,10 @@ python main_gui.py
 
 Cluster generation writes progress into `<method>_log.txt` inside your library so you can review the steps later.
 
+### Windows Long Paths
+
+The indexer automatically prefixes file paths with `\\?\` on Windows, allowing it to work with directories deeper than the classic 260-character limit.
+
 ## Configuration
 
 User settings are stored in `~/.soundvault_config.json`. To tweak the fuzzy fingerprint
