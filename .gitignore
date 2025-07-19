@@ -2,5 +2,7 @@ bindings/build/
 # C++ binding outputs
 llama_bindings*.pyd
 llama_bindings*.so
+__pycache__/
+*.pyc
 .*       # don’t exclude ALL dot-files; remove this
 

@@ -1,6 +1,8 @@
 import acoustid
 import musicbrainzngs
 from itertools import islice
+import tkinter as tk
+from tkinter import messagebox
 
 from plugins.base import MetadataPlugin
 from utils.path_helpers import ensure_long_path
@@ -17,20 +19,40 @@ musicbrainzngs.set_useragent(
 )
 
 class AcoustIDPlugin(MetadataPlugin):
-    def identify(self, file_path: str) -> dict:
+    @staticmethod
+    def _prompt_reconnect() -> bool:
+        """Show a retry dialog when the AcoustID service cannot be reached."""
+        root = tk.Tk()
+        root.withdraw()
         try:
-            match_gen = acoustid.match(ACOUSTID_API_KEY, ensure_long_path(file_path))
-            peek = list(islice(match_gen, 5))
-            if not peek:
-                return {}
+            return messagebox.askretrycancel(
+                "AcoustID Connection Failed",
+                (
+                    "Unable to reach the AcoustID service.\n"
+                    "Check your network connection or API key, then click Retry."
+                ),
+            )
+        finally:
+            root.destroy()
 
-            best_score, best_rid, best_title, best_artist = peek[0]
-        except acoustid.NoBackendError:
-            return {}
-        except acoustid.FingerprintGenerationError:
-            return {}
-        except acoustid.WebServiceError:
-            return {}
+    def identify(self, file_path: str) -> dict:
+        while True:
+            try:
+                match_gen = acoustid.match(ACOUSTID_API_KEY, ensure_long_path(file_path))
+                peek = list(islice(match_gen, 5))
+                if not peek:
+                    return {}
+
+                best_score, best_rid, best_title, best_artist = peek[0]
+                break
+            except acoustid.NoBackendError:
+                return {}
+            except acoustid.FingerprintGenerationError:
+                return {}
+            except acoustid.WebServiceError:
+                if not self._prompt_reconnect():
+                    return {}
+                continue
 
         album = None
         genres = []
@@ -62,7 +84,7 @@ class AcoustIDPlugin(MetadataPlugin):
         try:
             acoustid.match(ACOUSTID_API_KEY, b"")
         except acoustid.WebServiceError:
-            return False
+            return AcoustIDPlugin._prompt_reconnect()
         except Exception:
-            return False
+            return AcoustIDPlugin._prompt_reconnect()
         return True
