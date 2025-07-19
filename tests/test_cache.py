@@ -82,3 +82,16 @@ def test_long_path_support(tmp_path):
     fp = get_fingerprint(str(path), str(db), compute)
     assert fp == "hash"
 
+
+def test_missing_file_returns_none(tmp_path):
+    db = tmp_path / "fp.db"
+    path = tmp_path / "a.mp3"
+    path.write_text("x")
+    path.unlink()
+
+    def compute(_):
+        raise AssertionError("compute should not be called")
+
+    fp = get_fingerprint(str(path), str(db), compute)
+    assert fp is None
+

@@ -43,7 +43,11 @@ def get_fingerprint(
     """Return fingerprint for path using cache; compute if missing."""
     path = ensure_long_path(path)
     conn = _ensure_db(db_path)
-    mtime = os.path.getmtime(path)
+    try:
+        mtime = os.path.getmtime(path)
+    except OSError:
+        conn.close()
+        return None
     row = conn.execute(
         "SELECT mtime, fingerprint FROM fingerprints WHERE path=?",
         (path,),
