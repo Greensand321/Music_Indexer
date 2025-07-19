@@ -5,6 +5,7 @@ import tempfile
 from pydub import AudioSegment, silence
 from concurrent.futures import ProcessPoolExecutor
 import acoustid
+from utils.path_helpers import ensure_long_path
 
 SUPPORTED_EXTS = {".flac", ".m4a", ".aac", ".mp3", ".wav", ".ogg"}
 
@@ -31,6 +32,7 @@ def _trim_silence(path: str) -> str:
 def compute_fingerprint_for_file(args: Tuple[str, str, bool]) -> Tuple[str, int | None, str | None, str | None]:
     """Compute fingerprint for a single file. Returns (path, duration, fp, error)."""
     path, _db_path, trim = args
+    path = ensure_long_path(path)
     tmp = None
     try:
         target = path
@@ -108,7 +110,7 @@ def compute_fingerprints_parallel(
             if err:
                 log_callback(f"   ! Failed fingerprint {path}: {err}")
                 continue
-            mtime = os.path.getmtime(path)
+            mtime = os.path.getmtime(ensure_long_path(path))
             conn.execute(
                 "INSERT OR REPLACE INTO fingerprints (path, mtime, duration, fingerprint) VALUES (?, ?, ?, ?)",
                 (path, mtime, duration, fp_hash),

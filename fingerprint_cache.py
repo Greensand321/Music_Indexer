@@ -2,6 +2,7 @@ import os
 import sqlite3
 from typing import Callable, Optional
 from functools import lru_cache
+from utils.path_helpers import ensure_long_path
 
 
 def _ensure_db(db_path: str) -> sqlite3.Connection:
@@ -40,6 +41,7 @@ def get_fingerprint(
     compute_func: Callable[[str], tuple[int | None, str | None]]
 ) -> Optional[str]:
     """Return fingerprint for path using cache; compute if missing."""
+    path = ensure_long_path(path)
     conn = _ensure_db(db_path)
     mtime = os.path.getmtime(path)
     row = conn.execute(
