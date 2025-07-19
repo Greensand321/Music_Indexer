@@ -4,6 +4,7 @@ from typing import List
 
 import requests
 from mutagen import File as MutagenFile
+from utils.path_helpers import ensure_long_path
 
 from plugins.base import MetadataPlugin
 
@@ -15,7 +16,7 @@ class LastfmPlugin(MetadataPlugin):
     def identify(self, file_path: str) -> dict:
         if not API_KEY:
             return {}
-        audio = MutagenFile(file_path, easy=True)
+        audio = MutagenFile(ensure_long_path(file_path), easy=True)
         artist = (audio.tags.get("artist") or [None])[0] if audio and audio.tags else None
         title = (audio.tags.get("title") or [None])[0] if audio and audio.tags else None
         if not artist or not title:
