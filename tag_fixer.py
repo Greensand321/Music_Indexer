@@ -91,7 +91,10 @@ def is_remix(audio_path):
     """Return True if filename or existing title suggests a remix."""
     if "remix" in os.path.basename(audio_path).lower():
         return True
-    audio = MutagenFile(ensure_long_path(audio_path), easy=True)
+    try:
+        audio = MutagenFile(ensure_long_path(audio_path), easy=True)
+    except Exception:
+        return False
     if audio and audio.tags and "title" in audio.tags:
         title = " ".join(audio.tags["title"]).lower()
         if "remix" in title:
@@ -112,7 +115,11 @@ def find_files(root):
 
 def update_tags(path: str, proposal: FileRecord, fields: List[str], log_callback):
     """Write selected tags from ``proposal`` into ``path``. Return True if saved."""
-    audio = MutagenFile(ensure_long_path(path), easy=True)
+    try:
+        audio = MutagenFile(ensure_long_path(path), easy=True)
+    except Exception as e:
+        log_callback(f"Failed to read {path}: {e}")
+        return False
     if audio is None:
         return False
     changed = False
@@ -205,7 +212,13 @@ def build_file_records(
 
         log_callback(f"Processing {f}")
 
-        audio = MutagenFile(ensure_long_path(f), easy=True)
+        try:
+            audio = MutagenFile(ensure_long_path(f), easy=True)
+        except Exception as e:
+            log_callback(f"Failed to read {f}: {e}")
+            if progress_callback:
+                progress_callback(idx)
+            continue
         old_artist = (audio.tags.get("artist") or [None])[0] if audio and audio.tags else None
         old_title = (audio.tags.get("title") or [None])[0] if audio and audio.tags else None
         old_album = (audio.tags.get("album") or [None])[0] if audio and audio.tags else None
