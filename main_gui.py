@@ -347,6 +347,7 @@ class SoundVaultImporterApp(tk.Tk):
         self.tf_apply_album = tk.BooleanVar(value=False)
         self.tf_apply_genres = tk.BooleanVar(value=False)
         self.tagfix_db_path = ""
+        self.tagfix_debug_var = tk.BooleanVar(value=False)
 
         # assume ffmpeg is available without performing checks
         self.ffmpeg_available = True
@@ -658,6 +659,11 @@ class SoundVaultImporterApp(tk.Tk):
             text="Show All",
             variable=self.tagfix_show_all,
             command=self._refresh_tagfix_view,
+        ).pack(side="left", padx=(5, 0))
+        ttk.Checkbutton(
+            opts,
+            text="Verbose Debug",
+            variable=self.tagfix_debug_var,
         ).pack(side="left", padx=(5, 0))
 
         self.tagfix_progress = ttk.Progressbar(
@@ -1461,6 +1467,9 @@ class SoundVaultImporterApp(tk.Tk):
 
         q = queue.Queue()
         show_all = self.tagfix_show_all.get()
+        debug_enabled = self.tagfix_debug_var.get()
+        if debug_enabled:
+            self._open_tagfix_debug_window()
 
         def worker():
             records = gather_records(
@@ -1468,6 +1477,7 @@ class SoundVaultImporterApp(tk.Tk):
                 self.tagfix_db_path,
                 show_all,
                 progress_callback=lambda idx: q.put(idx),
+                log_callback=(lambda m: q.put(("log", m))) if debug_enabled else None,
             )
             q.put(("done", records))
 
@@ -1478,14 +1488,19 @@ class SoundVaultImporterApp(tk.Tk):
                 while True:
                     item = q.get_nowait()
                     if isinstance(item, tuple):
-                        _, records = item
-                        self.all_records = records
-                        for rec in self.all_records:
-                            rec.old_genres = normalize_genres(rec.old_genres, self.genre_mapping)
-                            rec.new_genres = normalize_genres(rec.new_genres, self.genre_mapping)
-                        self.tagfix_progress["value"] = self.tagfix_progress["maximum"]
-                        self._refresh_tagfix_view()
-                        return
+                        tag, payload = item
+                        if tag == "done":
+                            records = payload
+                            self.all_records = records
+                            for rec in self.all_records:
+                                rec.old_genres = normalize_genres(rec.old_genres, self.genre_mapping)
+                                rec.new_genres = normalize_genres(rec.new_genres, self.genre_mapping)
+                            self.tagfix_progress["value"] = self.tagfix_progress["maximum"]
+                            self._refresh_tagfix_view()
+                            return
+                        elif tag == "log":
+                            self._tagfix_debug(str(payload))
+                        continue
                     else:
                         self.tagfix_progress["value"] = item
             except queue.Empty:
@@ -1764,6 +1779,22 @@ class SoundVaultImporterApp(tk.Tk):
         except Exception as e:
             messagebox.showerror("Playback failed", str(e))
             self._log(f"✘ Playback failed for {path}: {e}")
+
+    def _open_tagfix_debug_window(self):
+        if getattr(self, "tagfix_debug_win", None) and self.tagfix_debug_win.winfo_exists():
+            return
+        win = tk.Toplevel(self)
+        win.title("Tag Fixer Debug")
+        text = ScrolledText(win, height=20, wrap="word")
+        text.pack(fill="both", expand=True)
+        self.tagfix_debug_win = win
+        self.tagfix_debug_text = text
+
+    def _tagfix_debug(self, msg: str):
+        widget = getattr(self, "tagfix_debug_text", None)
+        if widget:
+            widget.insert("end", msg + "\n")
+            widget.see("end")
 
     def _open_genre_normalizer(self, _show_dialog: bool = False):
         """Open a dialog to assist with genre normalization."""

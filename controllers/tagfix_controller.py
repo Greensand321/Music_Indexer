@@ -29,7 +29,13 @@ def discover_files(folder: str) -> List[str]:
     return find_files(folder)
 
 
-def gather_records(folder: str, db_path: str, show_all: bool, progress_callback: Callable[[int], None] | None) -> List[FileRecord]:
+def gather_records(
+    folder: str,
+    db_path: str,
+    show_all: bool,
+    progress_callback: Callable[[int], None] | None,
+    log_callback: Callable[[str], None] | None = None,
+) -> List[FileRecord]:
     """Build FileRecord objects for ``folder``."""
     db_folder = os.path.dirname(db_path)
     os.makedirs(db_folder, exist_ok=True)
@@ -38,7 +44,7 @@ def gather_records(folder: str, db_path: str, show_all: bool, progress_callback:
         folder,
         db_conn=conn,
         show_all=show_all,
-        log_callback=lambda m: None,
+        log_callback=log_callback or (lambda m: None),
         progress_callback=progress_callback,
     )
     conn.commit()
