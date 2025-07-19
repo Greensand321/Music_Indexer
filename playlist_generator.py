@@ -74,16 +74,26 @@ def generate_playlists(
         used.add(name)
 
         playlist_file = os.path.join(playlists_dir, f"{name}.m3u")
-        if os.path.exists(playlist_file) and not overwrite:
-            log_callback(f"\u26A0 Skipping existing playlist: {playlist_file}")
-            continue
 
-        log_callback(f"\u2192 Writing playlist: {playlist_file}")
+        rel_files = {os.path.relpath(p, playlists_dir) for p in files}
+
+        if os.path.exists(playlist_file):
+            if not overwrite:
+                try:
+                    with open(playlist_file, "r", encoding="utf-8") as f:
+                        existing = {line.strip() for line in f if line.strip()}
+                except Exception as e:
+                    log_callback(f"\u2717 Failed to read {playlist_file}: {e}")
+                    existing = set()
+                rel_files.update(existing)
+            log_callback(f"\u2192 Writing playlist: {playlist_file}")
+        else:
+            log_callback(f"\u2192 Writing playlist: {playlist_file}")
+
         try:
             with open(playlist_file, "w", encoding="utf-8") as f:
-                for p in sorted(files):
-                    relp = os.path.relpath(p, playlists_dir)
-                    f.write(relp + "\n")
+                for p in sorted(rel_files):
+                    f.write(p + "\n")
         except Exception as e:
             log_callback(f"\u2717 Failed to write {playlist_file}: {e}")
 
