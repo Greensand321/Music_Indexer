@@ -2,12 +2,12 @@ import acoustid
 import musicbrainzngs
 from itertools import islice
 import tkinter as tk
-from tkinter import messagebox
+from tkinter import messagebox, simpledialog
 
 from plugins.base import MetadataPlugin
 from utils.path_helpers import ensure_long_path
+import tag_fixer
 from tag_fixer import (
-    ACOUSTID_API_KEY,
     ACOUSTID_APP_NAME,
     ACOUSTID_APP_VERSION,
 )
@@ -21,24 +21,44 @@ musicbrainzngs.set_useragent(
 class AcoustIDPlugin(MetadataPlugin):
     @staticmethod
     def _prompt_reconnect() -> bool:
-        """Show a retry dialog when the AcoustID service cannot be reached."""
+        """Prompt for API key update and test the AcoustID connection."""
         root = tk.Tk()
         root.withdraw()
         try:
-            return messagebox.askretrycancel(
+            api_key = simpledialog.askstring(
                 "AcoustID Connection Failed",
                 (
                     "Unable to reach the AcoustID service.\n"
-                    "Check your network connection or API key, then click Retry."
+                    "Update the API key and press OK to retry."
                 ),
+                initialvalue=tag_fixer.ACOUSTID_API_KEY or "",
+                parent=root,
             )
+            if api_key is None:
+                return False
+            tag_fixer.ACOUSTID_API_KEY = api_key
+            try:
+                acoustid.match(tag_fixer.ACOUSTID_API_KEY, b"")
+            except Exception:
+                messagebox.showerror(
+                    "AcoustID Connection",
+                    "Connection failed",
+                    parent=root,
+                )
+                return False
+            messagebox.showinfo(
+                "AcoustID Connection",
+                "Connection success",
+                parent=root,
+            )
+            return True
         finally:
             root.destroy()
 
     def identify(self, file_path: str) -> dict:
         while True:
             try:
-                match_gen = acoustid.match(ACOUSTID_API_KEY, ensure_long_path(file_path))
+                match_gen = acoustid.match(tag_fixer.ACOUSTID_API_KEY, ensure_long_path(file_path))
                 peek = list(islice(match_gen, 5))
                 if not peek:
                     return {}
@@ -82,7 +102,7 @@ class AcoustIDPlugin(MetadataPlugin):
     def check_connection() -> bool:
         """Return True if AcoustID web service is reachable."""
         try:
-            acoustid.match(ACOUSTID_API_KEY, b"")
+            acoustid.match(tag_fixer.ACOUSTID_API_KEY, b"")
         except acoustid.WebServiceError:
             return AcoustIDPlugin._prompt_reconnect()
         except Exception:
