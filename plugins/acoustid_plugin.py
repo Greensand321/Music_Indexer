@@ -3,6 +3,7 @@ import musicbrainzngs
 from itertools import islice
 
 from plugins.base import MetadataPlugin
+from utils.path_helpers import ensure_long_path
 from tag_fixer import (
     ACOUSTID_API_KEY,
     ACOUSTID_APP_NAME,
@@ -18,7 +19,7 @@ musicbrainzngs.set_useragent(
 class AcoustIDPlugin(MetadataPlugin):
     def identify(self, file_path: str) -> dict:
         try:
-            match_gen = acoustid.match(ACOUSTID_API_KEY, file_path)
+            match_gen = acoustid.match(ACOUSTID_API_KEY, ensure_long_path(file_path))
             peek = list(islice(match_gen, 5))
             if not peek:
                 return {}

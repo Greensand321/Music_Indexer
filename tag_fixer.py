@@ -7,6 +7,7 @@ from typing import Iterable, Callable, List, Optional
 import pkgutil
 import importlib
 from mutagen import File as MutagenFile
+from utils.path_helpers import ensure_long_path
 
 from plugins.base import MetadataPlugin
 
@@ -90,7 +91,7 @@ def is_remix(audio_path):
     """Return True if filename or existing title suggests a remix."""
     if "remix" in os.path.basename(audio_path).lower():
         return True
-    audio = MutagenFile(audio_path, easy=True)
+    audio = MutagenFile(ensure_long_path(audio_path), easy=True)
     if audio and audio.tags and "title" in audio.tags:
         title = " ".join(audio.tags["title"]).lower()
         if "remix" in title:
@@ -111,7 +112,7 @@ def find_files(root):
 
 def update_tags(path: str, proposal: FileRecord, fields: List[str], log_callback):
     """Write selected tags from ``proposal`` into ``path``. Return True if saved."""
-    audio = MutagenFile(path, easy=True)
+    audio = MutagenFile(ensure_long_path(path), easy=True)
     if audio is None:
         return False
     changed = False
@@ -204,7 +205,7 @@ def build_file_records(
 
         log_callback(f"Processing {f}")
 
-        audio = MutagenFile(f, easy=True)
+        audio = MutagenFile(ensure_long_path(f), easy=True)
         old_artist = (audio.tags.get("artist") or [None])[0] if audio and audio.tags else None
         old_title = (audio.tags.get("title") or [None])[0] if audio and audio.tags else None
         old_album = (audio.tags.get("album") or [None])[0] if audio and audio.tags else None
