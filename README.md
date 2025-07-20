@@ -58,7 +58,8 @@ threshold used during deduplication, add a value like:
 
 Lower values require more similar fingerprints.
 
-The configuration file also stores your selected metadata service and API key:
+The configuration file also stores your selected metadata service and API key.
+You can update these via **Settings → Metadata Services** in the GUI:
 
 ```json
 {
@@ -66,8 +67,11 @@ The configuration file also stores your selected metadata service and API key:
   "metadata_api_key": "YOUR_KEY"
 }
 ```
-These values are updated whenever you use the Tag Fixer's connection dialog.
+These values are updated whenever you save the Metadata Services settings.
 Testing the connection or saving will persist your selections for future runs.
+
+MusicBrainz requests require a valid User-Agent string containing your
+application name, version and contact email.
 
 ## File Overview
 
