@@ -452,9 +452,6 @@ class SoundVaultImporterApp(tk.Tk):
         lib_root = cfg.get("library_root")
         if lib_root and os.path.isdir(lib_root):
             self.downloads_path_var.set(lib_root)
-            tidal_sync.set_debug(self.sync_debug_var.get(), self.library_path or ".")
-            self.downloads_list = tidal_sync.scan_downloads(lib_root, log_callback=self._log)
-            self.sync_status_var.set(f"Scanned {len(self.downloads_list)} downloaded tracks.")
 
     def _configure_treeview_style(self):
         """Adjust Treeview row height based on current UI scale."""
@@ -689,8 +686,11 @@ class SoundVaultImporterApp(tk.Tk):
         ttk.Label(sync, textvariable=self.subpar_path_var).grid(
             row=0, column=1, sticky="w"
         )
+        ttk.Button(
+            sync, text="Scan Downloads…", command=self.scan_downloads_folder
+        ).grid(row=1, column=0, sticky="w", pady=(5, 0))
         ttk.Label(sync, textvariable=self.downloads_path_var).grid(
-            row=1, column=0, columnspan=2, sticky="w", pady=(5, 0)
+            row=1, column=1, columnspan=2, sticky="w", pady=(5, 0)
         )
 
         ttk.Label(sync, text="Default FP Thr:").grid(row=2, column=0, sticky="w", pady=(5, 0))
@@ -2130,6 +2130,32 @@ class SoundVaultImporterApp(tk.Tk):
         self.sync_status_var.set(f"Loaded {len(self.subpar_list)} subpar tracks.")
         if self.downloads_path_var.get():
             self.build_comparison_table()
+
+    def scan_downloads_folder(self):
+        initial = self.downloads_path_var.get() or load_last_path()
+        folder = filedialog.askdirectory(title="Select Download Folder", initialdir=initial)
+        if not folder:
+            return
+        self.downloads_path_var.set(folder)
+        cfg = load_config()
+        cfg["library_root"] = folder
+        save_config(cfg)
+        self.sync_status_var.set("Scanning downloads…")
+
+        def log_line(msg: str) -> None:
+            self.after(0, lambda m=msg: self._log(m))
+
+        def task() -> None:
+            tidal_sync.set_debug(self.sync_debug_var.get(), self.library_path or ".")
+            items = tidal_sync.scan_downloads(folder, log_callback=log_line)
+
+            def ui() -> None:
+                self.downloads_list = items
+                self.sync_status_var.set(f"Scanned {len(items)} downloaded tracks.")
+
+            self.after(0, ui)
+
+        threading.Thread(target=task, daemon=True).start()
 
 
     def build_comparison_table(self):
