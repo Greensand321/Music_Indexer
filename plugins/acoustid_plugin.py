@@ -47,28 +47,36 @@ class AcoustIDPlugin(MetadataPlugin):
 
         result = {"ok": False}
 
-        def do_test() -> None:
-            try:
-                query_metadata(service_var.get(), api_var.get(), "")
-            except Exception:
-                messagebox.showerror("Connection", "Connection failed", parent=top)
-            else:
-                messagebox.showinfo("Connection", "Connection success", parent=top)
-
-        def do_save() -> None:
+        def save_current_values() -> None:
             cfg = load_config()
             cfg["metadata_service"] = service_var.get()
             cfg["metadata_api_key"] = api_var.get()
             save_config(cfg)
             if service_var.get() == "AcoustID":
                 tag_fixer.ACOUSTID_API_KEY = api_var.get()
+
+        def do_test() -> None:
+            save_current_values()
+            try:
+                if service_var.get() == "AcoustID":
+                    import requests
+                    requests.get("https://api.acoustid.org/v2/", timeout=5)
+                else:
+                    query_metadata(service_var.get(), api_var.get(), "")
+            except Exception:
+                messagebox.showerror("Connection", "Connection failed", parent=top)
+            else:
+                messagebox.showinfo("Connection", "Connection success", parent=top)
+
+        def do_save() -> None:
+            save_current_values()
             result["ok"] = True
             top.destroy()
 
         ttk.Button(top, text="Test Connection", command=do_test).grid(row=2, column=0, padx=5, pady=5)
         ttk.Button(top, text="Save", command=do_save).grid(row=2, column=1, padx=5, pady=5)
 
-        top.protocol("WM_DELETE_WINDOW", top.destroy)
+        top.protocol("WM_DELETE_WINDOW", lambda: (save_current_values(), top.destroy()))
         top.grab_set()
         root.wait_window(top)
         root.destroy()
@@ -97,7 +105,11 @@ class AcoustIDPlugin(MetadataPlugin):
         service = cfg.get("metadata_service", "AcoustID")
         api_key = cfg.get("metadata_api_key", tag_fixer.ACOUSTID_API_KEY)
         try:
-            query_metadata(service, api_key, "")
+            if service == "AcoustID":
+                import requests
+                requests.get("https://api.acoustid.org/v2/", timeout=5)
+            else:
+                query_metadata(service, api_key, "")
         except Exception:
             return AcoustIDPlugin._prompt_reconnect()
         return True
