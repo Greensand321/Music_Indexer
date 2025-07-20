@@ -195,26 +195,39 @@ def _rename_with_sanitize(path: str, library_root: str) -> str:
 
 
 def scan_library_quality(library_root: str, outfile: str) -> int:
-    """Scan ``library_root`` for non-FLAC files and write them to ``outfile``.
+    """Scan ``library_root`` for non-FLAC files and write two lists.
 
     Any flagged file is renamed immediately using the ``Artist_XX_Title.ext``
-    pattern. The resulting text file contains one line per track in the form::
+    pattern. ``outfile`` is used as the base name for two outputs::
 
-        Artist \u2013 Title
+        <base>_full.txt    Artist \u2013 Title \u2013 Album \u2013 Path
+        <base>_simple.txt  Artist \u2013 Title
     """
-    items: List[Tuple[str, str]] = []
+    items: List[Tuple[str, str, str, str]] = []
     for dirpath, _, files in os.walk(library_root):
         for fname in files:
             ext = os.path.splitext(fname)[1].lower()
             if ext in AUDIO_EXTS and ext != ".flac":
                 path = os.path.join(dirpath, fname)
                 new_path = _rename_with_sanitize(path, library_root)
-                artist, title = _read_artist_title(new_path)
-                items.append((artist, title))
-    os.makedirs(os.path.dirname(outfile), exist_ok=True)
-    with open(outfile, "w", encoding="utf-8") as f:
-        for artist, title in items:
-            f.write(f"{artist}{SUBPAR_DELIM}{title}\n")
+                tags = _read_tags(new_path)
+                artist = tags.get("artist")
+                title = tags.get("title")
+                album = tags.get("album") or ""
+                if not artist or not title:
+                    a2, t2 = _read_artist_title(new_path)
+                    artist = artist or a2
+                    title = title or t2
+                items.append((artist or "Unknown", title or "Unknown", album, new_path))
+
+    base = os.path.splitext(outfile)[0]
+    full_path = base + "_full.txt"
+    simple_path = base + "_simple.txt"
+    os.makedirs(os.path.dirname(full_path), exist_ok=True)
+    with open(full_path, "w", encoding="utf-8") as ffull, open(simple_path, "w", encoding="utf-8") as fsimple:
+        for artist, title, album, path in items:
+            ffull.write(f"{artist}{SUBPAR_DELIM}{title}{SUBPAR_DELIM}{album}{SUBPAR_DELIM}{path}\n")
+            fsimple.write(f"{artist}{SUBPAR_DELIM}{title}\n")
     return len(items)
 
 
@@ -224,8 +237,20 @@ def load_subpar_list(path: str, db_path: str | None = None) -> List[Dict[str, st
     Supports both legacy ``Artist – Title – Album – FullPath`` lines and
     simplified ``Artist – Title`` entries. If a full path is present, a
     fingerprint is computed using :func:`fingerprint_cache.get_fingerprint` and
-    cached under ``db_path``.
+    cached under ``db_path``. Relative paths are prefixed with the configured
+    ``library_root``.
     """
+    from config import load_config
+    import logging
+
+    cfg = load_config()
+    root = cfg.get("library_root", "")
+    if not os.path.exists(path) and path.endswith("subpar_full.txt"):
+        simple = path.replace("subpar_full.txt", "subpar_simple.txt")
+        if os.path.exists(simple):
+            logging.warning("subpar_full.txt not found; using simple list")
+            path = simple
+
     out: List[Dict[str, str]] = []
     if db_path is None:
         db_path = os.path.join(os.path.dirname(path), "fp.db")
@@ -243,7 +268,10 @@ def load_subpar_list(path: str, db_path: str | None = None) -> List[Dict[str, st
             parts = text.split(SUBPAR_DELIM)
             if len(parts) == 4:
                 artist, title, album, fpath = parts
-                fp = get_fingerprint(fpath, db_path, _compute_fp)
+                fpath = fpath or ""
+                if fpath and not os.path.isabs(fpath):
+                    fpath = os.path.join(root, fpath)
+                fp = get_fingerprint(fpath, db_path, _compute_fp) if fpath else None
                 out.append(
                     {
                         "artist": artist,

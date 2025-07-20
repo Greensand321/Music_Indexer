@@ -52,12 +52,14 @@ def load_config():
         cfg.setdefault("fingerprint_offset_ms", FP_OFFSET_MS)
         cfg.setdefault("fingerprint_duration_ms", FP_DURATION_MS)
         cfg.setdefault("allow_mismatched_edits", ALLOW_MISMATCHED_EDITS)
+        cfg.setdefault("library_root", "")
         return cfg
     except Exception:
         return {
             "fingerprint_offset_ms": FP_OFFSET_MS,
             "fingerprint_duration_ms": FP_DURATION_MS,
             "allow_mismatched_edits": ALLOW_MISMATCHED_EDITS,
+            "library_root": "",
         }
 
 

@@ -78,6 +78,14 @@ configured. Add a `format_fp_thresholds` section with extension keys:
 
 Values are floating point distances – lower numbers require closer matches.
 
+You can also store the path to your library for automatic scanning:
+
+```json
+{
+  "library_root": "/path/to/your/Music"
+}
+```
+
 The configuration file also stores your selected metadata service and API key.
 You can update these via **Settings → Metadata Services** in the GUI:
 
