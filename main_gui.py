@@ -399,6 +399,12 @@ class SoundVaultImporterApp(tk.Tk):
         file_menu.add_command(label="Exit", command=self.quit)
         menubar.add_cascade(label="File", menu=file_menu)
 
+        settings_menu = tk.Menu(menubar, tearoff=False)
+        settings_menu.add_command(
+            label="Metadata Services…", command=self.open_metadata_settings
+        )
+        menubar.add_cascade(label="Settings", menu=settings_menu)
+
         tools_menu = tk.Menu(menubar, tearoff=False)
         tools_menu.add_command(
             label="Regenerate Playlists", command=self.regenerate_playlists
@@ -2223,6 +2229,19 @@ class SoundVaultImporterApp(tk.Tk):
         self.chat_history.insert("end", f"Assistant: {reply}\n\n")
         self.chat_history.configure(state="disabled")
         self.chat_history.see("end")
+
+    def open_metadata_settings(self):
+        """Open a non-modal window for configuring metadata services."""
+        if getattr(self, "_metadata_win", None) and self._metadata_win.winfo_exists():
+            self._metadata_win.focus()
+            return
+        win = tk.Toplevel(self)
+        win.title("Metadata Services")
+        from plugins.acoustid_plugin import MetadataServiceConfigFrame
+
+        frame = MetadataServiceConfigFrame(win)
+        frame.pack(fill="both", expand=True, padx=10, pady=10)
+        self._metadata_win = win
 
     def _log(self, msg):
         self.output.configure(state="normal")

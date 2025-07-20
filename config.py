@@ -26,7 +26,10 @@ def load_config():
     """
     try:
         with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-            return json.load(f)
+            cfg = json.load(f)
+        if "musicbrainz_useragent" not in cfg:
+            cfg["musicbrainz_useragent"] = {"app": "", "version": "", "contact": ""}
+        return cfg
     except Exception:
         return {}
 
