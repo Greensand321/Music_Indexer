@@ -27,6 +27,11 @@ DEFAULT_FP_THRESHOLDS = {
     ".aac": 0.3,
 }
 
+# Default settings for fingerprint normalization
+FP_OFFSET_MS = 0
+FP_DURATION_MS = 120_000
+ALLOW_MISMATCHED_EDITS = True
+
 
 def load_config():
     """Load configuration from ``CONFIG_PATH``.
@@ -44,9 +49,16 @@ def load_config():
             }
         if "format_fp_thresholds" not in cfg:
             cfg["format_fp_thresholds"] = DEFAULT_FP_THRESHOLDS.copy()
+        cfg.setdefault("fingerprint_offset_ms", FP_OFFSET_MS)
+        cfg.setdefault("fingerprint_duration_ms", FP_DURATION_MS)
+        cfg.setdefault("allow_mismatched_edits", ALLOW_MISMATCHED_EDITS)
         return cfg
     except Exception:
-        return {}
+        return {
+            "fingerprint_offset_ms": FP_OFFSET_MS,
+            "fingerprint_duration_ms": FP_DURATION_MS,
+            "allow_mismatched_edits": ALLOW_MISMATCHED_EDITS,
+        }
 
 
 def save_config(cfg: dict) -> None:
