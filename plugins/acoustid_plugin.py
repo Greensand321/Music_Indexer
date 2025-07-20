@@ -47,26 +47,27 @@ class AcoustIDPlugin(MetadataPlugin):
 
         result = {"ok": False}
 
-        def save_current_values() -> None:
-            cfg = load_config()
-            cfg["metadata_service"] = service_var.get()
-            cfg["metadata_api_key"] = api_var.get()
-            save_config(cfg)
-            if service_var.get() == "AcoustID":
-                tag_fixer.ACOUSTID_API_KEY = api_var.get()
+    def save_current_values() -> None:
+        cfg = load_config()
+        cfg["metadata_service"] = service_var.get()
+        cfg["metadata_api_key"] = api_var.get()
+        save_config(cfg)
+        if service_var.get() == "AcoustID":
+            tag_fixer.ACOUSTID_API_KEY = api_var.get()
 
-        def do_test() -> None:
-            save_current_values()
-            try:
-                if service_var.get() == "AcoustID":
-                    import requests
-                    requests.get("https://api.acoustid.org/v2/", timeout=5)
-                else:
-                    query_metadata(service_var.get(), api_var.get(), "")
-            except Exception:
-                messagebox.showerror("Connection", "Connection failed", parent=top)
+    def do_test() -> None:
+        save_current_values()
+        try:
+            if service_var.get() == "AcoustID":
+                import requests
+                requests.get("https://api.acoustid.org/v2/", timeout=5)
             else:
-                messagebox.showinfo("Connection", "Connection success", parent=top)
+                query_metadata(service_var.get(), api_var.get(), "")
+        except Exception:
+            messagebox.showerror("Connection", "Connection failed", parent=top)
+        else:
+            messagebox.showinfo("Connection", "Connection success", parent=top)
+
 
         def do_save() -> None:
             save_current_values()
