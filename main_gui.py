@@ -449,7 +449,14 @@ class SoundVaultImporterApp(tk.Tk):
         # Build initial UI
         self.build_ui()
 
-        # downloads folder is selected manually in the Library Quality tab
+        # Build initial UI
+        self.build_ui()
+
+        # Default the Downloads folder to the configured library root (if any);
+        # the user can still pick a different folder later from the Library Quality tab.
+        lib_root = cfg.get("library_root")
+        if lib_root and os.path.isdir(lib_root):
+            self.downloads_path_var.set(lib_root)
 
     def _configure_treeview_style(self):
         """Adjust Treeview row height based on current UI scale."""
@@ -685,21 +692,42 @@ class SoundVaultImporterApp(tk.Tk):
         ttk.Label(sync, textvariable=self.subpar_path_var).grid(
             row=0, column=1, columnspan=2, sticky="w"
         )
-        ttk.Label(sync, text="Downloads Folder:").grid(row=1, column=0, sticky="w", pady=(5, 0))
-        ttk.Entry(sync, textvariable=self.downloads_path_var, state="readonly").grid(
-            row=1, column=1, sticky="ew", pady=(5, 0)
+             # --- Downloads-folder controls ------------------------------------------------
+        ttk.Label(sync, text="Downloads Folder:").grid(
+            row=1, column=0, sticky="w", pady=(5, 0)
         )
+
+        # read-only entry that shows the currently-selected folder
+        ttk.Entry(sync, textvariable=self.downloads_path_var, state="readonly").grid(
+            row=1, column=1, sticky="ew", padx=(5, 0), pady=(5, 0)
+        )
+
+        # lets the user pick a folder via a file-dialog
         ttk.Button(sync, text="Browse…", command=self._browse_downloads_folder).grid(
             row=1, column=2, padx=(5, 0), pady=(5, 0)
         )
 
-        ttk.Label(sync, text="Default FP Thr:").grid(row=2, column=0, sticky="w", pady=(5, 0))
-        ttk.Entry(sync, textvariable=self.fp_threshold_var, width=5).grid(row=2, column=1, sticky="w", pady=(5, 0))
+        # optional action that scans the folder for new downloads
+        ttk.Button(sync, text="Scan Downloads…", command=self.scan_downloads_folder).grid(
+            row=2, column=0, sticky="w", pady=(5, 0)
+        )
+
+        # --- Other sync-settings ------------------------------------------------------
+        ttk.Label(sync, text="Default FP Thr:").grid(
+            row=3, column=0, sticky="w", pady=(5, 0)
+        )
+        ttk.Entry(sync, textvariable=self.fp_threshold_var, width=5).grid(
+            row=3, column=1, sticky="w", pady=(5, 0)
+        )
         ttk.Checkbutton(
             sync,
             text="Verbose Debug",
             variable=self.sync_debug_var,
-        ).grid(row=2, column=2, sticky="w", pady=(5, 0))
+        ).grid(row=3, column=2, sticky="w", pady=(5, 0))
+
+        # Make the middle column expand so the path field can stretch
+        sync.columnconfigure(1, weight=1)
+
 
         ttk.Label(sync, text="FLAC Thr:").grid(row=3, column=0, sticky="w", pady=(5, 0))
         ttk.Entry(sync, textvariable=self.fp_threshold_flac_var, width=5).grid(row=3, column=1, sticky="w", pady=(5, 0))
@@ -2150,6 +2178,32 @@ class SoundVaultImporterApp(tk.Tk):
         self.sync_status_var.set(f"Loaded {len(self.subpar_list)} subpar tracks.")
         if self.downloads_path_var.get():
             self.build_comparison_table()
+
+    def scan_downloads_folder(self):
+        initial = self.downloads_path_var.get() or load_last_path()
+        folder = filedialog.askdirectory(title="Select Download Folder", initialdir=initial)
+        if not folder:
+            return
+        self.downloads_path_var.set(folder)
+        cfg = load_config()
+        cfg["library_root"] = folder
+        save_config(cfg)
+        self.sync_status_var.set("Scanning downloads…")
+
+        def log_line(msg: str) -> None:
+            self.after(0, lambda m=msg: self._log(m))
+
+        def task() -> None:
+            tidal_sync.set_debug(self.sync_debug_var.get(), self.library_path or ".")
+            items = tidal_sync.scan_downloads(folder, log_callback=log_line)
+
+            def ui() -> None:
+                self.downloads_list = items
+                self.sync_status_var.set(f"Scanned {len(items)} downloaded tracks.")
+
+            self.after(0, ui)
+
+        threading.Thread(target=task, daemon=True).start()
 
 
     def build_comparison_table(self):
