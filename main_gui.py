@@ -449,6 +449,13 @@ class SoundVaultImporterApp(tk.Tk):
         # Build initial UI
         self.build_ui()
 
+        lib_root = cfg.get("library_root")
+        if lib_root and os.path.isdir(lib_root):
+            self.downloads_path_var.set(lib_root)
+            tidal_sync.set_debug(self.sync_debug_var.get(), self.library_path or ".")
+            self.downloads_list = tidal_sync.scan_downloads(lib_root, log_callback=self._log)
+            self.sync_status_var.set(f"Scanned {len(self.downloads_list)} downloaded tracks.")
+
     def _configure_treeview_style(self):
         """Adjust Treeview row height based on current UI scale."""
         base = 20
@@ -682,13 +689,8 @@ class SoundVaultImporterApp(tk.Tk):
         ttk.Label(sync, textvariable=self.subpar_path_var).grid(
             row=0, column=1, sticky="w"
         )
-        ttk.Button(
-            sync,
-            text="Select Downloads Folder",
-            command=self.select_downloads_folder,
-        ).grid(row=1, column=0, sticky="w", pady=(5, 0))
         ttk.Label(sync, textvariable=self.downloads_path_var).grid(
-            row=1, column=1, sticky="w", pady=(5, 0)
+            row=1, column=0, columnspan=2, sticky="w", pady=(5, 0)
         )
 
         ttk.Label(sync, text="Default FP Thr:").grid(row=2, column=0, sticky="w", pady=(5, 0))
@@ -958,6 +960,9 @@ class SoundVaultImporterApp(tk.Tk):
         if not chosen:
             return
         save_last_path(chosen)
+        cfg = load_config()
+        cfg["library_root"] = chosen
+        save_config(cfg)
 
         info = open_library(chosen)
         self.library_path = info["path"]
@@ -2126,16 +2131,6 @@ class SoundVaultImporterApp(tk.Tk):
         if self.downloads_path_var.get():
             self.build_comparison_table()
 
-    def select_downloads_folder(self):
-        folder = filedialog.askdirectory(title="Select tidal-dl Output Folder")
-        if not folder:
-            return
-        self.downloads_path_var.set(folder)
-        tidal_sync.set_debug(self.sync_debug_var.get(), self.library_path or ".")
-        self.downloads_list = tidal_sync.scan_downloads(folder, log_callback=self._log)
-        self.sync_status_var.set(f"Scanned {len(self.downloads_list)} downloaded tracks.")
-        if self.subpar_path_var.get():
-            self.build_comparison_table()
 
     def build_comparison_table(self):
         thr_default = float(self.fp_threshold_var.get() or 0.3)
