@@ -324,8 +324,17 @@ def _scan_one(path: str, log_callback: Callable[[str], None] | None = None) -> D
 
 
 def _fingerprint(path: str, log_callback: Callable[[str], None] | None = None) -> str | None:
+    from config import load_config
+    from audio_norm import normalize_for_fp
+
+    cfg = load_config()
+    offset = cfg.get("fingerprint_offset_ms", 0)
+    duration = cfg.get("fingerprint_duration_ms", 120_000)
+    allow = cfg.get("allow_mismatched_edits", True)
+
     try:
-        _, fp = acoustid.fingerprint_file(path)
+        buf = normalize_for_fp(path, offset, duration, allow, log_callback)
+        _, fp = acoustid.fingerprint_file(fileobj=buf)
         _dlog(
             f"DEBUG: Fingerprinting file: {path}; fp prefix={fp[:FP_PREFIX_LEN]!r}",
             log_callback,
