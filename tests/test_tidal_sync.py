@@ -82,9 +82,16 @@ def test_match_downloads_prefix_lookup(monkeypatch):
             "fp_prefix": "1 2 3 4 5"[: ts.FP_PREFIX_LEN],
         }
     ]
-    matches = ts.match_downloads(subpar, downloads, thresholds={"default": 0.1})
+    received = []
+    matches = ts.match_downloads(
+        subpar,
+        downloads,
+        thresholds={"default": 0.1},
+        result_callback=received.append,
+    )
     assert matches[0]["download"] == "good.flac"
     assert matches[0]["candidates"] == []
+    assert received == matches
 
 
 def test_match_downloads_extension_threshold(monkeypatch):
