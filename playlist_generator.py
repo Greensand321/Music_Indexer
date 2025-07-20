@@ -107,3 +107,16 @@ def write_playlist(tracks, outfile):
                 f.write(os.path.relpath(p, os.path.dirname(outfile)) + "\n")
     except Exception as e:
         raise RuntimeError(f"Failed to write playlist {outfile}: {e}")
+
+
+def update_playlists(new_tracks):
+    """Placeholder for playlist update hook used by Library Sync."""
+    # The real implementation would update any smart playlists
+    # that should include ``new_tracks``. For now we simply call
+    # ``generate_playlists`` treating each parent folder as a playlist.
+    root = os.path.commonpath(new_tracks) if new_tracks else None
+    if not root:
+        return
+    moves = {p: p for p in new_tracks}
+    generate_playlists(moves, root, overwrite=False, log_callback=lambda m: None)
+

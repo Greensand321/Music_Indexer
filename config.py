@@ -12,6 +12,12 @@ SUPPORTED_SERVICES = [
     "Gracenote",
 ]
 
+# Threshold for considering two tracks as near-duplicates when syncing
+NEAR_DUPLICATE_THRESHOLD = 0.1
+
+# File format quality priority used during Library Sync
+FORMAT_PRIORITY = {".flac": 3, ".wav": 2, ".mp3": 1}
+
 
 def load_config():
     """Load configuration from ``CONFIG_PATH``.
