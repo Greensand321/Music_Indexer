@@ -40,6 +40,8 @@ from tag_fixer import MIN_INTERACTIVE_SCORE, FileRecord
 from typing import Callable, List
 from indexer_control import cancel_event, IndexCancelled
 import tidal_sync
+import library_sync
+import playlist_generator
 
 from controllers.library_controller import (
     load_last_path,
@@ -336,6 +338,14 @@ class SoundVaultImporterApp(tk.Tk):
         self.matches = []
         self.fp_threshold_var = tk.DoubleVar(value=0.3)
         self.sync_debug_var = tk.BooleanVar(value=False)
+
+        # Library Sync state
+        self.sync_library_var = tk.StringVar(value="")
+        self.sync_incoming_var = tk.StringVar(value="")
+        self.sync_auto_var = tk.BooleanVar(value=True)
+        self.sync_new = []
+        self.sync_existing = []
+        self.sync_improved = []
 
         # ── Tag Fixer state ──
         self.tagfix_folder_var = tk.StringVar(value="")
@@ -744,6 +754,48 @@ class SoundVaultImporterApp(tk.Tk):
             apply_frame, text="Apply Selected", command=self._apply_selected_tags
         ).pack(side="right")
 
+        # ─── Library Sync Tab ─────────────────────────────────────────────
+        self.sync_tab = ttk.Frame(self.notebook)
+        self.notebook.add(self.sync_tab, text="Library Sync")
+
+        path_row = ttk.Frame(self.sync_tab)
+        path_row.pack(fill="x", padx=10, pady=(10, 5))
+        ttk.Label(path_row, text="Library Folder:").grid(row=0, column=0, sticky="w")
+        ttk.Entry(path_row, textvariable=self.sync_library_var, state="readonly").grid(row=0, column=1, sticky="ew")
+        ttk.Button(path_row, text="Browse…", command=self._browse_sync_library).grid(row=0, column=2, padx=(5,0))
+        path_row.columnconfigure(1, weight=1)
+
+        inc_row = ttk.Frame(self.sync_tab)
+        inc_row.pack(fill="x", padx=10, pady=(0, 5))
+        ttk.Label(inc_row, text="Incoming Folder:").grid(row=0, column=0, sticky="w")
+        ttk.Entry(inc_row, textvariable=self.sync_incoming_var).grid(row=0, column=1, sticky="ew")
+        ttk.Button(inc_row, text="Browse…", command=self._browse_sync_incoming).grid(row=0, column=2, padx=(5,0))
+        inc_row.columnconfigure(1, weight=1)
+
+        ttk.Button(self.sync_tab, text="Scan", command=self._scan_library_sync).pack(pady=5)
+
+        lists = ttk.Frame(self.sync_tab)
+        lists.pack(fill="both", expand=True, padx=10, pady=5)
+        lists.columnconfigure((0,1,2), weight=1)
+
+        ttk.Label(lists, text="New Tracks").grid(row=0, column=0)
+        ttk.Label(lists, text="Existing").grid(row=0, column=1)
+        ttk.Label(lists, text="Improvement Candidates").grid(row=0, column=2)
+
+        self.sync_new_list = tk.Listbox(lists, selectmode="extended")
+        self.sync_new_list.grid(row=1, column=0, sticky="nsew")
+        self.sync_existing_list = tk.Listbox(lists, selectmode="extended")
+        self.sync_existing_list.grid(row=1, column=1, sticky="nsew")
+        self.sync_improved_list = tk.Listbox(lists, selectmode="extended")
+        self.sync_improved_list.grid(row=1, column=2, sticky="nsew")
+
+        actions = ttk.Frame(self.sync_tab)
+        actions.pack(fill="x", padx=10, pady=(0,10))
+        ttk.Checkbutton(actions, text="Auto-Update Playlists", variable=self.sync_auto_var).pack(side="left")
+        ttk.Button(actions, text="Copy New", command=self._copy_new_tracks).pack(side="left", padx=(5,0))
+        ttk.Button(actions, text="Replace Selected", command=self._replace_selected).pack(side="left", padx=(5,0))
+
+        
         # after your other tabs
         help_frame = ttk.Frame(self.notebook)
         self.notebook.add(help_frame, text="Help")
@@ -2081,6 +2133,70 @@ class SoundVaultImporterApp(tk.Tk):
                     self._log(f"Failed to replace {match['original']}: {e}")
         messagebox.showinfo("Apply Changes", f"Replaced {replaced} files")
         self._log(f"Applied {replaced} replacements")
+
+    # ── Library Sync Helpers ───────────────────────────────────────────
+    def _browse_sync_library(self):
+        initial = self.sync_library_var.get() or load_last_path()
+        folder = filedialog.askdirectory(title="Select Library Folder", initialdir=initial)
+        if folder:
+            self.sync_library_var.set(folder)
+
+    def _browse_sync_incoming(self):
+        initial = self.sync_incoming_var.get() or load_last_path()
+        folder = filedialog.askdirectory(title="Select Incoming Folder", initialdir=initial)
+        if folder:
+            self.sync_incoming_var.set(folder)
+
+    def _scan_library_sync(self):
+        lib = self.sync_library_var.get()
+        inc = self.sync_incoming_var.get()
+        if not lib or not inc:
+            messagebox.showwarning("Scan", "Please choose library and incoming folders.")
+            return
+        db = os.path.join(lib, "Docs", ".soundvault.db")
+
+        def task():
+            try:
+                res = library_sync.compare_libraries(lib, inc, db)
+                self.sync_new = res["new"]
+                self.sync_existing = res["existing"]
+                self.sync_improved = res["improved"]
+                self.after(0, self._render_sync_results)
+            except Exception as e:
+                self.after(0, lambda: messagebox.showerror("Scan Failed", str(e)))
+
+        threading.Thread(target=task, daemon=True).start()
+
+    def _render_sync_results(self):
+        self.sync_new_list.delete(0, "end")
+        self.sync_existing_list.delete(0, "end")
+        self.sync_improved_list.delete(0, "end")
+        for p in self.sync_new:
+            self.sync_new_list.insert("end", os.path.basename(p))
+        for inc, _lib in self.sync_existing:
+            self.sync_existing_list.insert("end", os.path.basename(inc))
+        for inc, _lib in self.sync_improved:
+            self.sync_improved_list.insert("end", os.path.basename(inc))
+
+    def _copy_new_tracks(self):
+        idxs = self.sync_new_list.curselection()
+        if not idxs:
+            return
+        sels = [self.sync_new[int(i)] for i in idxs]
+        dests = library_sync.copy_new_tracks(sels, self.sync_incoming_var.get(), self.sync_library_var.get())
+        if self.sync_auto_var.get():
+            playlist_generator.update_playlists(dests)
+        messagebox.showinfo("Copy New", f"Copied {len(dests)} files")
+
+    def _replace_selected(self):
+        idxs = self.sync_improved_list.curselection()
+        if not idxs:
+            return
+        sels = [self.sync_improved[int(i)] for i in idxs]
+        dests = library_sync.replace_tracks(sels)
+        if self.sync_auto_var.get():
+            playlist_generator.update_playlists(dests)
+        messagebox.showinfo("Replace", f"Replaced {len(dests)} files")
 
     def _send_help_query(self):
         threading.Thread(target=self._do_help_query, daemon=True).start()

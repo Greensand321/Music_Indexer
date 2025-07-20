@@ -90,3 +90,46 @@ def compare_libraries(
             existing.append((inc_path, best_match))
 
     return {"new": new, "existing": existing, "improved": improved}
+
+def copy_new_tracks(new_paths: List[str], incoming_root: str, library_root: str) -> List[str]:
+    """Copy each path in ``new_paths`` from ``incoming_root`` into ``library_root``.
+
+    Returns the list of destination paths created.
+    """
+    import shutil
+
+    dest_paths = []
+    for src in new_paths:
+        rel = os.path.relpath(src, incoming_root)
+        dest = os.path.join(library_root, rel)
+        base, ext = os.path.splitext(dest)
+        idx = 1
+        final = dest
+        while os.path.exists(final):
+            final = f"{base} ({idx}){ext}"
+            idx += 1
+        os.makedirs(os.path.dirname(final), exist_ok=True)
+        shutil.copy2(src, final)
+        dest_paths.append(final)
+    return dest_paths
+
+
+def replace_tracks(pairs: List[Tuple[str, str]], backup_dirname: str = "__backup__") -> List[str]:
+    """Replace library files with higher quality versions.
+
+    Each pair is ``(incoming, existing)``. The original file is moved into a
+    ``backup_dirname`` folder alongside the existing file before the incoming
+    file is moved into place.
+
+    Returns the list of replaced library paths.
+    """
+    import shutil
+
+    replaced = []
+    for inc, lib in pairs:
+        backup = os.path.join(os.path.dirname(lib), backup_dirname, os.path.basename(lib))
+        os.makedirs(os.path.dirname(backup), exist_ok=True)
+        shutil.move(lib, backup)
+        shutil.move(inc, lib)
+        replaced.append(lib)
+    return replaced
