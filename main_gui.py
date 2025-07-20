@@ -449,6 +449,11 @@ class SoundVaultImporterApp(tk.Tk):
         # Build initial UI
         self.build_ui()
 
+        # Build initial UI
+        self.build_ui()
+
+        # Default the Downloads folder to the configured library root (if any);
+        # the user can still pick a different folder later from the Library Quality tab.
         lib_root = cfg.get("library_root")
         if lib_root and os.path.isdir(lib_root):
             self.downloads_path_var.set(lib_root)
@@ -679,27 +684,50 @@ class SoundVaultImporterApp(tk.Tk):
 
         sync = ttk.LabelFrame(self.quality_tab, text="Tidal-dl Sync")
         sync.pack(fill="x", padx=10, pady=10)
+        sync.columnconfigure(1, weight=1)
 
         ttk.Button(
             sync, text="Load Subpar List", command=self.load_subpar_list
         ).grid(row=0, column=0, sticky="w")
         ttk.Label(sync, textvariable=self.subpar_path_var).grid(
-            row=0, column=1, sticky="w"
+            row=0, column=1, columnspan=2, sticky="w"
         )
-        ttk.Button(
-            sync, text="Scan Downloads…", command=self.scan_downloads_folder
-        ).grid(row=1, column=0, sticky="w", pady=(5, 0))
-        ttk.Label(sync, textvariable=self.downloads_path_var).grid(
-            row=1, column=1, columnspan=2, sticky="w", pady=(5, 0)
+             # --- Downloads-folder controls ------------------------------------------------
+        ttk.Label(sync, text="Downloads Folder:").grid(
+            row=1, column=0, sticky="w", pady=(5, 0)
         )
 
-        ttk.Label(sync, text="Default FP Thr:").grid(row=2, column=0, sticky="w", pady=(5, 0))
-        ttk.Entry(sync, textvariable=self.fp_threshold_var, width=5).grid(row=2, column=1, sticky="w", pady=(5, 0))
+        # read-only entry that shows the currently-selected folder
+        ttk.Entry(sync, textvariable=self.downloads_path_var, state="readonly").grid(
+            row=1, column=1, sticky="ew", padx=(5, 0), pady=(5, 0)
+        )
+
+        # lets the user pick a folder via a file-dialog
+        ttk.Button(sync, text="Browse…", command=self._browse_downloads_folder).grid(
+            row=1, column=2, padx=(5, 0), pady=(5, 0)
+        )
+
+        # optional action that scans the folder for new downloads
+        ttk.Button(sync, text="Scan Downloads…", command=self.scan_downloads_folder).grid(
+            row=2, column=0, sticky="w", pady=(5, 0)
+        )
+
+        # --- Other sync-settings ------------------------------------------------------
+        ttk.Label(sync, text="Default FP Thr:").grid(
+            row=3, column=0, sticky="w", pady=(5, 0)
+        )
+        ttk.Entry(sync, textvariable=self.fp_threshold_var, width=5).grid(
+            row=3, column=1, sticky="w", pady=(5, 0)
+        )
         ttk.Checkbutton(
             sync,
             text="Verbose Debug",
             variable=self.sync_debug_var,
-        ).grid(row=2, column=2, sticky="w", pady=(5, 0))
+        ).grid(row=3, column=2, sticky="w", pady=(5, 0))
+
+        # Make the middle column expand so the path field can stretch
+        sync.columnconfigure(1, weight=1)
+
 
         ttk.Label(sync, text="FLAC Thr:").grid(row=3, column=0, sticky="w", pady=(5, 0))
         ttk.Entry(sync, textvariable=self.fp_threshold_flac_var, width=5).grid(row=3, column=1, sticky="w", pady=(5, 0))
@@ -1805,6 +1833,26 @@ class SoundVaultImporterApp(tk.Tk):
         if folder:
             save_last_path(folder)
             self.tagfix_folder_var.set(folder)
+
+    # ── Library Quality Helpers ───────────────────────────────────────
+    def _browse_downloads_folder(self):
+        """Ask the user to choose the downloads folder and scan it."""
+        initial = self.downloads_path_var.get() or load_last_path()
+        folder = filedialog.askdirectory(
+            title="Select Downloads Folder", initialdir=initial
+        )
+        if folder:
+            save_last_path(folder)
+            self.downloads_path_var.set(folder)
+            tidal_sync.set_debug(self.sync_debug_var.get(), self.library_path or ".")
+            self.downloads_list = tidal_sync.scan_downloads(
+                folder, log_callback=self._log
+            )
+            self.sync_status_var.set(
+                f"Scanned {len(self.downloads_list)} downloaded tracks."
+            )
+            if self.subpar_list:
+                self.build_comparison_table()
 
     def _select_all_tagfix(self):
         self.tagfix_tree.selection_set(self.tagfix_tree.get_children(""))
