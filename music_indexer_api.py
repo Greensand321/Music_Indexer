@@ -505,7 +505,8 @@ def compute_moves_and_tag_index(
             "genre":      genre,
             "track":      track,
             "cover_hash": cover_hash,
-            "folder_tags": folder_tags
+            "folder_tags": folder_tags,
+            "missing_core": not data.get("artist") or not data.get("title"),
         }
 
     log_callback(f"   → Collected metadata for {total_kept} files.")
@@ -532,6 +533,18 @@ def compute_moves_and_tag_index(
         year       = info["year"] or "Unknown"
         track      = info["track"]
         folders    = info["folder_tags"]
+        if info.get("missing_core"):
+            candidate = os.path.join(review_root, os.path.basename(old_path))
+            root_c, ext_c = os.path.splitext(candidate)
+            idx_dup = 1
+            while os.path.exists(candidate) or candidate in moves.values():
+                candidate = f"{root_c} ({idx_dup}){ext_c}"
+                idx_dup += 1
+            moves[old_path] = candidate
+            decision_log.append(
+                f"  → Missing metadata, placed under Manual Review/{os.path.basename(candidate)}"
+            )
+            continue
 
         # Normalize again for consistent global lookup
         primary_norm, _ = extract_primary_and_collabs(raw_artist)
