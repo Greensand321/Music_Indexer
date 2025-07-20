@@ -449,9 +449,6 @@ class SoundVaultImporterApp(tk.Tk):
         # Build initial UI
         self.build_ui()
 
-        # Build initial UI
-        self.build_ui()
-
         # Default the Downloads folder to the configured library root (if any);
         # the user can still pick a different folder later from the Library Quality tab.
         lib_root = cfg.get("library_root")
@@ -729,18 +726,18 @@ class SoundVaultImporterApp(tk.Tk):
         sync.columnconfigure(1, weight=1)
 
 
-        ttk.Label(sync, text="FLAC Thr:").grid(row=3, column=0, sticky="w", pady=(5, 0))
-        ttk.Entry(sync, textvariable=self.fp_threshold_flac_var, width=5).grid(row=3, column=1, sticky="w", pady=(5, 0))
-        ttk.Label(sync, text="MP3 Thr:").grid(row=4, column=0, sticky="w", pady=(5, 0))
-        ttk.Entry(sync, textvariable=self.fp_threshold_mp3_var, width=5).grid(row=4, column=1, sticky="w", pady=(5, 0))
-        ttk.Label(sync, text="AAC Thr:").grid(row=5, column=0, sticky="w", pady=(5, 0))
-        ttk.Entry(sync, textvariable=self.fp_threshold_aac_var, width=5).grid(row=5, column=1, sticky="w", pady=(5, 0))
+        ttk.Label(sync, text="FLAC Thr:").grid(row=4, column=0, sticky="w", pady=(5, 0))
+        ttk.Entry(sync, textvariable=self.fp_threshold_flac_var, width=5).grid(row=4, column=1, sticky="w", pady=(5, 0))
+        ttk.Label(sync, text="MP3 Thr:").grid(row=5, column=0, sticky="w", pady=(5, 0))
+        ttk.Entry(sync, textvariable=self.fp_threshold_mp3_var, width=5).grid(row=5, column=1, sticky="w", pady=(5, 0))
+        ttk.Label(sync, text="AAC Thr:").grid(row=6, column=0, sticky="w", pady=(5, 0))
+        ttk.Entry(sync, textvariable=self.fp_threshold_aac_var, width=5).grid(row=6, column=1, sticky="w", pady=(5, 0))
 
         ttk.Button(
             sync, text="Match & Compare", command=self.build_comparison_table
-        ).grid(row=6, column=0, sticky="w", pady=(5, 0))
+        ).grid(row=7, column=0, sticky="w", pady=(5, 0))
         ttk.Label(sync, textvariable=self.sync_status_var).grid(
-            row=6, column=1, sticky="w", pady=(5, 0)
+            row=7, column=1, sticky="w", pady=(5, 0)
         )
 
         self.compare_frame = ttk.Frame(self.quality_tab)
