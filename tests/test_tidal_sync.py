@@ -54,7 +54,6 @@ def test_scan_downloads_prefix(tmp_path, monkeypatch):
 
 def test_match_downloads_prefix_lookup(monkeypatch):
     ts = load_module(monkeypatch)
-    monkeypatch.setattr(ts, "_fingerprint", lambda *a, **k: "1 2 3 4 5")
     downloads = [
         {
             "artist": "A",
@@ -73,6 +72,39 @@ def test_match_downloads_prefix_lookup(monkeypatch):
             "fp_prefix": "9 9 9 9 9"[: ts.FP_PREFIX_LEN],
         },
     ]
-    subpar = [{"artist": "A", "title": "T", "album": "AL", "path": "orig.mp3"}]
+    subpar = [
+        {
+            "artist": "A",
+            "title": "T",
+            "album": "AL",
+            "path": "orig.mp3",
+            "fingerprint": "1 2 3 4 5",
+            "fp_prefix": "1 2 3 4 5"[: ts.FP_PREFIX_LEN],
+        }
+    ]
     matches = ts.match_downloads(subpar, downloads, threshold=0.1)
     assert matches[0]["download"] == "good.flac"
+
+
+def test_load_subpar_list_fingerprint(tmp_path, monkeypatch):
+    ts = load_module(monkeypatch)
+
+    called = {}
+
+    def fake_get_fp(p, db, compute):
+        called['p'] = p
+        return "fp-x"
+
+    monkeypatch.setattr(ts, "get_fingerprint", fake_get_fp)
+
+    audio = tmp_path / "a.mp3"
+    audio.write_text("x")
+    list_file = tmp_path / "subpar.txt"
+    list_file.write_text(
+        f"A{ts.SUBPAR_DELIM}T{ts.SUBPAR_DELIM}AL{ts.SUBPAR_DELIM}{audio}\n"
+    )
+
+    items = ts.load_subpar_list(str(list_file))
+    assert items[0]["fingerprint"] == "fp-x"
+    assert items[0]["fp_prefix"] == "fp-x"[: ts.FP_PREFIX_LEN]
+    assert called["p"] == str(audio)
