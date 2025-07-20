@@ -407,7 +407,11 @@ class SoundVaultImporterApp(tk.Tk):
         self.subpar_list = []
         self.downloads_list = []
         self.matches = []
-        self.fp_threshold_var = tk.DoubleVar(value=0.3)
+        thr_cfg = cfg.get("format_fp_thresholds", {})
+        self.fp_threshold_var = tk.DoubleVar(value=thr_cfg.get("default", 0.3))
+        self.fp_threshold_flac_var = tk.DoubleVar(value=thr_cfg.get(".flac", 0.3))
+        self.fp_threshold_mp3_var = tk.DoubleVar(value=thr_cfg.get(".mp3", 0.3))
+        self.fp_threshold_aac_var = tk.DoubleVar(value=thr_cfg.get(".aac", 0.3))
         self.sync_debug_var = tk.BooleanVar(value=False)
 
         # Library Sync state
@@ -687,7 +691,7 @@ class SoundVaultImporterApp(tk.Tk):
             row=1, column=1, sticky="w", pady=(5, 0)
         )
 
-        ttk.Label(sync, text="FP Threshold:").grid(row=2, column=0, sticky="w", pady=(5, 0))
+        ttk.Label(sync, text="Default FP Thr:").grid(row=2, column=0, sticky="w", pady=(5, 0))
         ttk.Entry(sync, textvariable=self.fp_threshold_var, width=5).grid(row=2, column=1, sticky="w", pady=(5, 0))
         ttk.Checkbutton(
             sync,
@@ -695,11 +699,18 @@ class SoundVaultImporterApp(tk.Tk):
             variable=self.sync_debug_var,
         ).grid(row=2, column=2, sticky="w", pady=(5, 0))
 
+        ttk.Label(sync, text="FLAC Thr:").grid(row=3, column=0, sticky="w", pady=(5, 0))
+        ttk.Entry(sync, textvariable=self.fp_threshold_flac_var, width=5).grid(row=3, column=1, sticky="w", pady=(5, 0))
+        ttk.Label(sync, text="MP3 Thr:").grid(row=4, column=0, sticky="w", pady=(5, 0))
+        ttk.Entry(sync, textvariable=self.fp_threshold_mp3_var, width=5).grid(row=4, column=1, sticky="w", pady=(5, 0))
+        ttk.Label(sync, text="AAC Thr:").grid(row=5, column=0, sticky="w", pady=(5, 0))
+        ttk.Entry(sync, textvariable=self.fp_threshold_aac_var, width=5).grid(row=5, column=1, sticky="w", pady=(5, 0))
+
         ttk.Button(
             sync, text="Match & Compare", command=self.build_comparison_table
-        ).grid(row=3, column=0, sticky="w", pady=(5, 0))
+        ).grid(row=6, column=0, sticky="w", pady=(5, 0))
         ttk.Label(sync, textvariable=self.sync_status_var).grid(
-            row=3, column=1, sticky="w", pady=(5, 0)
+            row=6, column=1, sticky="w", pady=(5, 0)
         )
 
         self.compare_frame = ttk.Frame(self.quality_tab)
@@ -2127,7 +2138,16 @@ class SoundVaultImporterApp(tk.Tk):
             self.build_comparison_table()
 
     def build_comparison_table(self):
-        thr = float(self.fp_threshold_var.get() or 0.3)
+        thr_default = float(self.fp_threshold_var.get() or 0.3)
+        thresholds = {
+            "default": thr_default,
+            ".flac": float(self.fp_threshold_flac_var.get() or thr_default),
+            ".mp3": float(self.fp_threshold_mp3_var.get() or thr_default),
+            ".aac": float(self.fp_threshold_aac_var.get() or thr_default),
+        }
+        cfg = load_config()
+        cfg["format_fp_thresholds"] = thresholds
+        save_config(cfg)
         tidal_sync.set_debug(self.sync_debug_var.get(), self.library_path or ".")
         total = len(self.subpar_list)
         self.sync_status_var.set(f"Matching 0/{total}")
@@ -2140,7 +2160,7 @@ class SoundVaultImporterApp(tk.Tk):
                 matches = tidal_sync.match_downloads(
                     self.subpar_list,
                     self.downloads_list,
-                    threshold=thr,
+                    thresholds=thresholds,
                     log_callback=self._log,
                     progress_callback=progress,
                 )

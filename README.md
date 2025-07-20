@@ -62,6 +62,22 @@ threshold used during deduplication, add a value like:
 
 Lower values require more similar fingerprints.
 
+Per-format fingerprint thresholds used by the tidal-dl matcher can also be
+configured. Add a `format_fp_thresholds` section with extension keys:
+
+```json
+{
+  "format_fp_thresholds": {
+    "default": 0.3,
+    ".flac": 0.3,
+    ".mp3": 0.2,
+    ".aac": 0.25
+  }
+}
+```
+
+Values are floating point distances – lower numbers require closer matches.
+
 The configuration file also stores your selected metadata service and API key.
 You can update these via **Settings → Metadata Services** in the GUI:
 

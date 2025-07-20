@@ -358,7 +358,7 @@ def _fuzzy_key(item: Dict[str, str], use_filename: bool = False) -> Tuple[str, s
 def _find_best_fp_match(
     orig_fp: Optional[str],
     cands: List[Dict[str, str]],
-    threshold: float,
+    thresholds: Dict[str, float],
     fp_prefix_map: Dict[str, List[Dict[str, str]]] | None,
     orig_path: str = "",
     log_callback: Callable[[str], None] | None = None,
@@ -367,7 +367,7 @@ def _find_best_fp_match(
     """Return best candidate by fingerprint distance.
 
     Returns (candidate, distance, ambiguous[, candidates]). Candidate is ``None`` if
-    no distance below ``threshold``. If ``return_candidates`` is ``True`` and
+    no distance is below the threshold for the candidate's extension. If ``return_candidates`` is ``True`` and
     ``ambiguous`` is ``True``, a list of close candidate dicts is returned as the
     fourth element; otherwise ``None`` is returned in that position.
     """
@@ -383,18 +383,24 @@ def _find_best_fp_match(
     for c in cands:
         dist = fingerprint_distance(orig_fp, c.get("fingerprint"))
         distances.append(dist)
+        ext = os.path.splitext(c.get("path") or "")[1].lower()
+        thr = thresholds.get(ext, thresholds.get("default", 0.3))
         _dlog(
             f"DEBUG: Distance between {orig_path} and {c.get('path')}: {dist:.4f}",
             log_callback,
         )
         _dlog(
-            f"DEBUG: Threshold check ({threshold:.4f}): {'passed' if dist < threshold else 'failed'}",
+            f"DEBUG: Threshold check ({thr:.4f}): {'passed' if dist < thr else 'failed'}",
             log_callback,
         )
         if dist < best_dist:
             best_dist = dist
             best = c
-    if best is None or best_dist >= threshold:
+    if best is None:
+        return (None, best_dist, False, None) if return_candidates else (None, best_dist, False)
+    best_ext = os.path.splitext(best.get("path") or "")[1].lower()
+    best_thr = thresholds.get(best_ext, thresholds.get("default", 0.3))
+    if best_dist >= best_thr:
         return (None, best_dist, False, None) if return_candidates else (None, best_dist, False)
 
     ambiguous = sum(1 for d in distances if d <= best_dist + 0.05) > 1
@@ -417,11 +423,14 @@ def _find_best_fp_match(
 def match_downloads(
     subpar: List[Dict[str, str]],
     downloads: List[Dict[str, str]],
-    threshold: float = 0.3,
+    thresholds: Dict[str, float] | None = None,
     log_callback: Callable[[str], None] | None = None,
     progress_callback: Callable[[int], None] | None = None,
 ) -> List[Dict[str, object]]:
     """Match subpar tracks with potential replacements in downloads."""
+    if thresholds is None:
+        thresholds = {"default": 0.3}
+
     matches: List[Dict[str, object]] = []
     dl_map: Dict[Tuple[str, str, str], List[Dict[str, str]]] = {}
     fuzzy_map: Dict[Tuple[str, str, str], List[Dict[str, str]]] = {}
@@ -478,7 +487,7 @@ def match_downloads(
             cand, best_dist, ambiguous, cand_list = _find_best_fp_match(
                 orig_fp,
                 downloads,
-                threshold,
+                thresholds,
                 fp_prefix_map,
                 sp.get("path", ""),
                 log_callback,
@@ -505,7 +514,7 @@ def match_downloads(
                 best, best_dist, ambiguous, cand_list = _find_best_fp_match(
                     orig_fp,
                     cand,
-                    threshold,
+                    thresholds,
                     fp_prefix_map,
                     sp.get("path", ""),
                     log_callback,
@@ -531,7 +540,7 @@ def match_downloads(
                 cand, best_dist, ambiguous, cand_list = _find_best_fp_match(
                     orig_fp,
                     unique_cands,
-                    threshold,
+                    thresholds,
                     fp_prefix_map,
                     sp.get("path", ""),
                     log_callback,
