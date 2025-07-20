@@ -68,3 +68,25 @@ def test_compare_libraries(tmp_path):
 
     # cleanup cache between tests
     flush_cache(str(db))
+
+
+def test_copy_and_replace(tmp_path):
+    lib = tmp_path / 'lib'
+    inc = tmp_path / 'inc'
+    lib.mkdir()
+    inc.mkdir()
+    f_new = inc / 'new.flac'
+    f_new.write_text('x')
+    copied = library_sync.copy_new_tracks([str(f_new)], str(inc), str(lib))
+    assert len(copied) == 1
+    assert os.path.exists(copied[0])
+
+    f_old = lib / 'old.mp3'
+    f_old.write_text('old')
+    f_better = inc / 'old.flac'
+    f_better.write_text('better')
+    replaced = library_sync.replace_tracks([(str(f_better), str(f_old))])
+    assert replaced == [str(f_old)]
+    backup = lib / '__backup__' / 'old.mp3'
+    assert backup.exists()
+    assert f_old.read_text() == 'better'
