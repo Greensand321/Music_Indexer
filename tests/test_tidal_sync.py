@@ -84,6 +84,7 @@ def test_match_downloads_prefix_lookup(monkeypatch):
     ]
     matches = ts.match_downloads(subpar, downloads, threshold=0.1)
     assert matches[0]["download"] == "good.flac"
+    assert matches[0]["candidates"] == []
 
 
 def test_load_subpar_list_fingerprint(tmp_path, monkeypatch):
