@@ -13,6 +13,7 @@ from music_indexer_api import fingerprint_distance, get_tags, sanitize
 
 
 AUDIO_EXTS = {".flac", ".m4a", ".aac", ".mp3", ".wav", ".ogg"}
+FP_PREFIX_LEN = 16
 
 # Debug configuration
 debug: bool = False
@@ -254,20 +255,26 @@ def scan_downloads(folder: str, log_callback: Callable[[str], None] | None = Non
                 path = os.path.join(dirpath, fname)
                 tags = _read_tags(path)
                 fp = _fingerprint(path, log_callback)
-                items.append({
-                    "artist": tags.get("artist"),
-                    "title": tags.get("title"),
-                    "album": tags.get("album"),
-                    "path": path,
-                    "fingerprint": fp,
-                })
+                items.append(
+                    {
+                        "artist": tags.get("artist"),
+                        "title": tags.get("title"),
+                        "album": tags.get("album"),
+                        "path": path,
+                        "fingerprint": fp,
+                        "fp_prefix": fp[:FP_PREFIX_LEN] if fp else None,
+                    }
+                )
     return items
 
 
 def _fingerprint(path: str, log_callback: Callable[[str], None] | None = None) -> str | None:
     try:
         _, fp = acoustid.fingerprint_file(path)
-        _dlog(f"DEBUG: Fingerprinting file: {path}; fp prefix={fp[:16]!r}", log_callback)
+        _dlog(
+            f"DEBUG: Fingerprinting file: {path}; fp prefix={fp[:FP_PREFIX_LEN]!r}",
+            log_callback,
+        )
         return fp
     except Exception:
         return None
@@ -297,6 +304,7 @@ def _find_best_fp_match(
     orig_fp: Optional[str],
     cands: List[Dict[str, str]],
     threshold: float,
+    fp_prefix_map: Dict[str, List[Dict[str, str]]] | None,
     orig_path: str = "",
     log_callback: Callable[[str], None] | None = None,
 ) -> Tuple[Optional[Dict[str, str]], float, bool]:
@@ -305,6 +313,12 @@ def _find_best_fp_match(
     Returns (candidate, distance, ambiguous). Candidate is ``None`` if no
     distance below ``threshold``.
     """
+    if fp_prefix_map and orig_fp:
+        prefix = orig_fp[:FP_PREFIX_LEN]
+        allowed = {id(c) for c in fp_prefix_map.get(prefix, [])}
+        if allowed:
+            cands = [c for c in cands if id(c) in allowed]
+
     best: Optional[Dict[str, str]] = None
     best_dist = 1.0
     distances: List[float] = []
@@ -339,6 +353,7 @@ def match_downloads(
     dl_map: Dict[Tuple[str, str, str], List[Dict[str, str]]] = {}
     fuzzy_map: Dict[Tuple[str, str, str], List[Dict[str, str]]] = {}
     fp_map: Dict[str, List[Dict[str, str]]] = {}
+    fp_prefix_map: Dict[str, List[Dict[str, str]]] = {}
 
     for item in downloads:
         key = (
@@ -351,6 +366,9 @@ def match_downloads(
         fp = item.get("fingerprint")
         if fp:
             fp_map.setdefault(fp, []).append(item)
+            fp_prefix = item.get("fp_prefix")
+            if fp_prefix:
+                fp_prefix_map.setdefault(fp_prefix, []).append(item)
 
         for k in (_fuzzy_key(item, False), _fuzzy_key(item, True)):
             fuzzy_map.setdefault(k, []).append(item)
@@ -379,7 +397,12 @@ def match_downloads(
         if best is None:
             # fingerprint-first matching
             cand, best_dist, ambiguous = _find_best_fp_match(
-                orig_fp, downloads, threshold, sp.get("path", ""), log_callback
+                orig_fp,
+                downloads,
+                threshold,
+                fp_prefix_map,
+                sp.get("path", ""),
+                log_callback,
             )
             if cand is not None:
                 best = cand
@@ -400,7 +423,12 @@ def match_downloads(
                         log_callback,
                     )
                 best, best_dist, ambiguous = _find_best_fp_match(
-                    orig_fp, cand, threshold, sp.get("path", ""), log_callback
+                    orig_fp,
+                    cand,
+                    threshold,
+                    fp_prefix_map,
+                    sp.get("path", ""),
+                    log_callback,
                 )
                 if best is not None:
                     method = "Tag"
@@ -420,7 +448,12 @@ def match_downloads(
 
             if unique_cands:
                 cand, best_dist, ambiguous = _find_best_fp_match(
-                    orig_fp, unique_cands, threshold, sp.get("path", ""), log_callback
+                    orig_fp,
+                    unique_cands,
+                    threshold,
+                    fp_prefix_map,
+                    sp.get("path", ""),
+                    log_callback,
                 )
                 if cand is not None:
                     best = cand
