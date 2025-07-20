@@ -30,6 +30,8 @@ from unsorted_popup import UnsortedPopup
 from candidate_popup import CandidatePopup
 from tkinter.scrolledtext import ScrolledText
 import textwrap
+from PIL import Image, ImageTk
+from gui.audio_preview import play_preview
 
 from validator import validate_soundvault_structure
 from music_indexer_api import run_full_indexer, find_duplicates
@@ -301,6 +303,74 @@ class ProgressDialog(tk.Toplevel):
     def update_progress(self, value):
         self.pb["value"] = value
         self.update_idletasks()
+
+
+class ReviewReplacementsFrame(ttk.Frame):
+    """Scrollable table showing old and new track pairs with album art."""
+
+    def __init__(self, master: tk.Misc, **kwargs) -> None:
+        super().__init__(master, **kwargs)
+        self.canvas = tk.Canvas(self, highlightthickness=0)
+        self.scroll = ttk.Scrollbar(self, orient="vertical", command=self.canvas.yview)
+        self.canvas.configure(yscrollcommand=self.scroll.set)
+        self.inner = ttk.Frame(self.canvas)
+        self.canvas.create_window((0, 0), window=self.inner, anchor="nw")
+        self.inner.bind(
+            "<Configure>",
+            lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all")),
+        )
+        self.canvas.pack(side="left", fill="both", expand=True)
+        self.scroll.pack(side="right", fill="y")
+        self.thumb_map: dict[tk.Widget, str] = {}
+        self.photo_refs: list[ImageTk.PhotoImage] = []
+        # placeholder for missing art
+        ph_img = Image.new("RGB", (100, 100), "#777777")
+        self.placeholder = ImageTk.PhotoImage(ph_img)
+
+    def populate(self, matches: list[dict]) -> None:
+        for w in self.inner.winfo_children():
+            w.destroy()
+        self.thumb_map.clear()
+        self.photo_refs.clear()
+        for row, m in enumerate(matches):
+            for col, key in enumerate(("old", "new")):
+                art = m.get(f"{key}_art")
+                img = None
+                if art and os.path.exists(art):
+                    try:
+                        img = Image.open(art)
+                    except Exception:
+                        img = None
+                if img is None:
+                    img = Image.new("RGB", (100, 100), "#777777")
+                img.thumbnail((100, 100))
+                photo = ImageTk.PhotoImage(img)
+                self.photo_refs.append(photo)
+                lbl = ttk.Label(self.inner, image=photo, relief="raised")
+                lbl.grid(row=row, column=col * 2, padx=10, pady=5)
+                path = m.get(f"{key}_path")
+                if path:
+                    lbl.bind(
+                        "<Button-1>",
+                        lambda e, p=path, w=lbl: self._on_click(w, p),
+                    )
+                self.thumb_map[lbl] = path or ""
+                title = m.get(f"{key}_title", "")
+                artist = m.get(f"{key}_artist", "")
+                meta = f"{title}\n{artist}"
+                ttk.Label(self.inner, text=meta, justify="center", font=("TkDefaultFont", 8)).grid(
+                    row=row,
+                    column=col * 2 + 1,
+                    sticky="n",
+                )
+
+    def _on_click(self, widget: tk.Widget, path: str) -> None:
+        for w in self.thumb_map.keys():
+            if isinstance(w, ttk.Label):
+                w.configure(relief="raised")
+        widget.configure(relief="solid")
+        if path:
+            play_preview(path)
 
 
 class SoundVaultImporterApp(tk.Tk):
@@ -640,6 +710,10 @@ class SoundVaultImporterApp(tk.Tk):
         ttk.Button(
             self.quality_tab, text="Apply Changes", command=self.apply_replacements
         ).pack(pady=(0, 10))
+
+        # ─── Review Replacements Tab ─────────────────────────────────────
+        self.review_tab = ReviewReplacementsFrame(self.notebook)
+        self.notebook.add(self.review_tab, text="Review Replacements")
 
         # ─── Tag Fixer Tab ────────────────────────────────────────────────
         self.tagfix_tab = ttk.Frame(self.notebook)
@@ -2080,6 +2154,7 @@ class SoundVaultImporterApp(tk.Tk):
                         f"{num_tag} tag matches, {num_fp} fingerprint matches, {num_none} no matches"
                     )
                     self._render_comparison_table()
+                    self.populate_review_table(matches)
 
                 self.after(0, done)
             except Exception as e:
@@ -2152,6 +2227,13 @@ class SoundVaultImporterApp(tk.Tk):
 
         tv.bind("<Double-1>", on_double)
         self.match_tree = tv
+
+    def populate_review_table(self, matches: list[dict]) -> None:
+        """Populate the Review Replacements tab with match info."""
+        if not hasattr(self, "review_tab"):
+            return
+        self.review_tab.populate(matches)
+        self.notebook.select(self.review_tab)
 
     def apply_replacements(self):
         if not hasattr(self, "match_tree"):
