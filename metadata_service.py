@@ -85,8 +85,61 @@ def query_spotify(api_key: str, audio_file: str) -> Dict:
 
 
 def query_musicbrainz(api_key: str, audio_file: str) -> Dict:
-    """Placeholder for MusicBrainz metadata lookup using ``musicbrainzngs``."""
-    return {}
+    """Query MusicBrainz for ``audio_file`` using ``musicbrainzngs``.
+
+    The ``api_key`` argument is treated as the contact string passed to
+    ``musicbrainzngs.set_useragent``.  If ``audio_file`` is an empty string the
+    function simply performs a trivial request to verify connectivity.
+    """
+    import musicbrainzngs
+    from mutagen import File as MutagenFile
+
+    contact = api_key or ""
+    musicbrainzngs.set_useragent(
+        "SoundVaultTagFixer",
+        "1.0",
+        contact,
+    )
+
+    # When called with no file we just issue a simple search request to check
+    # that the API is reachable.
+    if not audio_file:
+        musicbrainzngs.search_recordings(recording="test", limit=1)
+        return {}
+
+    audio = MutagenFile(ensure_long_path(audio_file), easy=True)
+    artist = (audio.tags.get("artist") or [None])[0] if audio and audio.tags else None
+    title = (audio.tags.get("title") or [None])[0] if audio and audio.tags else None
+    if not artist or not title:
+        return {}
+
+    result = musicbrainzngs.search_recordings(
+        recording=title,
+        artist=artist,
+        includes=["releases", "tags"],
+        limit=1,
+        strict=True,
+    )
+    recs = result.get("recording-list", [])
+    if not recs:
+        return {}
+
+    rec = recs[0]
+    album = None
+    rels = rec.get("releases", [])
+    if rels:
+        album = rels[0].get("title")
+    mb_tags = rec.get("tag-list", [])
+    genres = [t["name"] for t in mb_tags if "name" in t]
+    score = float(rec.get("ext:score", 100)) / 100.0
+
+    return {
+        "artist": artist,
+        "title": title,
+        "album": album,
+        "genres": genres,
+        "score": score,
+    }
 
 
 def query_gracenote(api_key: str, audio_file: str) -> Dict:
