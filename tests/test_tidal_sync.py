@@ -109,3 +109,24 @@ def test_load_subpar_list_fingerprint(tmp_path, monkeypatch):
     assert items[0]["fingerprint"] == "fp-x"
     assert items[0]["fp_prefix"] == "fp-x"[: ts.FP_PREFIX_LEN]
     assert called["p"] == str(audio)
+
+
+def test_replace_file_backup(tmp_path, monkeypatch):
+    ts = load_module(monkeypatch)
+
+    orig = tmp_path / "track.mp3"
+    new = tmp_path / "new.flac"
+    orig.write_text("old")
+    new.write_text("better")
+
+    ts.replace_file(str(orig), str(new))
+
+    backup = tmp_path / "__backup__" / "track.mp3"
+    assert backup.exists()
+    assert orig.read_text() == "better"
+    assert backup.read_text() == "old"
+
+    restored = ts.restore_backups(str(tmp_path))
+    assert str(orig) in restored
+    assert orig.read_text() == "old"
+    assert not backup.exists()

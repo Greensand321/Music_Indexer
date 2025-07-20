@@ -544,7 +544,33 @@ def match_downloads(
 
 
 def replace_file(original: str, new_file: str) -> None:
-    """Atomically replace ``original`` with ``new_file``."""
+    """Atomically replace ``original`` with ``new_file`` and backup the original."""
+    backup_dir = os.path.join(os.path.dirname(original), "__backup__")
+    os.makedirs(backup_dir, exist_ok=True)
+    backup_path = os.path.join(backup_dir, os.path.basename(original))
     tmp = original + ".tmp"
     shutil.copy2(new_file, tmp)
+    if os.path.exists(original):
+        shutil.move(original, backup_path)
     os.replace(tmp, original)
+
+
+def restore_backups(root: str, backup_dirname: str = "__backup__") -> List[str]:
+    """Move files from ``backup_dirname`` folders back to their original location."""
+    restored: List[str] = []
+    for dirpath, dirs, _files in os.walk(root):
+        if backup_dirname not in dirs:
+            continue
+        bdir = os.path.join(dirpath, backup_dirname)
+        for fname in os.listdir(bdir):
+            src = os.path.join(bdir, fname)
+            dest = os.path.join(dirpath, fname)
+            if os.path.exists(dest):
+                os.remove(dest)
+            shutil.move(src, dest)
+            restored.append(dest)
+        try:
+            os.rmdir(bdir)
+        except OSError:
+            pass
+    return restored
