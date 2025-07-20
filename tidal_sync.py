@@ -426,6 +426,7 @@ def match_downloads(
     thresholds: Dict[str, float] | None = None,
     log_callback: Callable[[str], None] | None = None,
     progress_callback: Callable[[int], None] | None = None,
+    result_callback: Callable[[Dict[str, object]], None] | None = None,
 ) -> List[Dict[str, object]]:
     """Match subpar tracks with potential replacements in downloads."""
     if thresholds is None:
@@ -565,17 +566,18 @@ def match_downloads(
             f"DEBUG: Best match: {best['path'] if best else None} with score={score if score is not None else float('nan'):.4f}",
             log_callback,
         )
-        matches.append(
-            {
-                "original": sp["path"],
-                "download": None if best is None else best["path"],
-                "score": score,
-                "method": method,
-                "tags": sp,
-                "note": note,
-                "candidates": cand_paths,
-            }
-        )
+        match = {
+            "original": sp["path"],
+            "download": None if best is None else best["path"],
+            "score": score,
+            "method": method,
+            "tags": sp,
+            "note": note,
+            "candidates": cand_paths,
+        }
+        matches.append(match)
+        if result_callback:
+            result_callback(match)
         if progress_callback:
             progress_callback(idx)
     return matches

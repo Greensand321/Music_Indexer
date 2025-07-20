@@ -2155,32 +2155,50 @@ class SoundVaultImporterApp(tk.Tk):
         def progress(idx: int) -> None:
             self.after(0, lambda i=idx: self.sync_status_var.set(f"Matching {i}/{total}"))
 
+        q = queue.Queue()
+        self.match_queue = q
+        self.matches = []
+
         def task():
             try:
-                matches = tidal_sync.match_downloads(
+                tidal_sync.match_downloads(
                     self.subpar_list,
                     self.downloads_list,
                     thresholds=thresholds,
                     log_callback=self._log,
                     progress_callback=progress,
+                    result_callback=q.put,
                 )
+                q.put("done")
+            except Exception as e:
+                q.put(("error", str(e)))
 
-                def done():
-                    self.matches = matches
-                    num_tag = sum(1 for m in matches if m.get("method") == "Tag")
-                    num_fp = sum(1 for m in matches if m.get("method") == "Fingerprint")
-                    num_none = sum(1 for m in matches if m.get("download") is None)
+        threading.Thread(target=task, daemon=True).start()
+        self.after(100, self.poll_queue)
+
+    def poll_queue(self):
+        try:
+            while True:
+                item = self.match_queue.get_nowait()
+                if item == "done":
+                    num_tag = sum(1 for m in self.matches if m.get("method") == "Tag")
+                    num_fp = sum(1 for m in self.matches if m.get("method") == "Fingerprint")
+                    num_none = sum(1 for m in self.matches if m.get("download") is None)
                     self.sync_status_var.set(
                         f"{num_tag} tag matches, {num_fp} fingerprint matches, {num_none} no matches"
                     )
                     self._render_comparison_table()
-                    self.populate_review_table(matches)
-
-                self.after(0, done)
-            except Exception as e:
-                self.after(0, lambda msg=str(e): messagebox.showerror("Match Failed", msg))
-
-        threading.Thread(target=task, daemon=True).start()
+                    self.populate_review_table(self.matches)
+                    return
+                elif isinstance(item, tuple) and item[0] == "error":
+                    messagebox.showerror("Match Failed", item[1])
+                    return
+                else:
+                    self.matches.append(item)
+                    self._render_comparison_table()
+        except queue.Empty:
+            pass
+        self.after(100, self.poll_queue)
 
     def _render_comparison_table(self):
         for w in self.compare_frame.winfo_children():
