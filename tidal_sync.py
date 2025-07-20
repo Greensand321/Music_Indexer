@@ -128,7 +128,7 @@ def scan_library_quality(library_root: str, outfile: str) -> int:
     Any flagged file is renamed immediately using the ``Artist_XX_Title.ext``
     pattern. The resulting text file contains one line per track in the form::
 
-        Artist \u2013 Title \u2013 Album \u2013 FullPath
+        Artist \u2013 Title
     """
     items: List[Tuple[str, str, str, str]] = []
     for dirpath, _, files in os.walk(library_root):
@@ -148,10 +148,8 @@ def scan_library_quality(library_root: str, outfile: str) -> int:
                 )
     os.makedirs(os.path.dirname(outfile), exist_ok=True)
     with open(outfile, "w", encoding="utf-8") as f:
-        for artist, title, album, path in items:
-            f.write(
-                f"{artist}{SUBPAR_DELIM}{title}{SUBPAR_DELIM}{album}{SUBPAR_DELIM}{path}\n"
-            )
+        for artist, title, *_ in items:
+            f.write(f"{artist}{SUBPAR_DELIM}{title}\n")
     return len(items)
 
 
