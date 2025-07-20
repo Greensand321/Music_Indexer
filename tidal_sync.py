@@ -10,6 +10,7 @@ import acoustid
 import logging
 
 from music_indexer_api import fingerprint_distance, get_tags, sanitize
+from fingerprint_cache import get_fingerprint
 
 
 AUDIO_EXTS = {".flac", ".m4a", ".aac", ".mp3", ".wav", ".ogg"}
@@ -216,13 +217,23 @@ def scan_library_quality(library_root: str, outfile: str) -> int:
     return len(items)
 
 
-def load_subpar_list(path: str) -> List[Dict[str, str]]:
+def load_subpar_list(path: str, db_path: str | None = None) -> List[Dict[str, str]]:
     """Read a txt list produced by :func:`scan_library_quality`.
 
     Supports both legacy ``Artist – Title – Album – FullPath`` lines and
-    simplified ``Artist – Title`` entries.
+    simplified ``Artist – Title`` entries. If a full path is present, a
+    fingerprint is computed using :func:`fingerprint_cache.get_fingerprint` and
+    cached under ``db_path``.
     """
     out: List[Dict[str, str]] = []
+    if db_path is None:
+        db_path = os.path.join(os.path.dirname(path), "fp.db")
+
+    def _compute_fp(p: str) -> tuple[int | None, str | None]:
+        try:
+            return acoustid.fingerprint_file(p)
+        except Exception:
+            return None, None
     with open(path, "r", encoding="utf-8") as f:
         for line in f:
             text = line.strip()
@@ -231,8 +242,16 @@ def load_subpar_list(path: str) -> List[Dict[str, str]]:
             parts = text.split(SUBPAR_DELIM)
             if len(parts) == 4:
                 artist, title, album, fpath = parts
+                fp = get_fingerprint(fpath, db_path, _compute_fp)
                 out.append(
-                    {"artist": artist, "title": title, "album": album, "path": fpath}
+                    {
+                        "artist": artist,
+                        "title": title,
+                        "album": album,
+                        "path": fpath,
+                        "fingerprint": fp,
+                        "fp_prefix": fp[:FP_PREFIX_LEN] if fp else None,
+                    }
                 )
                 continue
 
@@ -240,7 +259,14 @@ def load_subpar_list(path: str) -> List[Dict[str, str]]:
             if len(parts) == 2:
                 artist, title = parts
                 out.append(
-                    {"artist": artist, "title": title, "album": None, "path": None}
+                    {
+                        "artist": artist,
+                        "title": title,
+                        "album": None,
+                        "path": None,
+                        "fingerprint": None,
+                        "fp_prefix": None,
+                    }
                 )
     return out
 
@@ -385,7 +411,9 @@ def match_downloads(
             (sp.get("title") or "").lower(),
             (sp.get("album") or "").lower(),
         )
-        orig_fp = _fingerprint(sp["path"], log_callback)
+        orig_fp = sp.get("fingerprint")
+        if orig_fp is None and sp.get("path"):
+            orig_fp = _fingerprint(sp["path"], log_callback)
         note = None
         method = "None"
         best = None
