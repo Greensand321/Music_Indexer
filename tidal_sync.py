@@ -4,6 +4,8 @@ import shutil
 from typing import List, Dict, Tuple, Optional, Callable
 
 from mutagen import File as MutagenFile
+from mutagen.mp3 import MP3
+from mutagen.id3 import ID3, ID3NoHeaderError
 import acoustid
 import logging
 
@@ -68,6 +70,73 @@ def _read_tags(path: str) -> Dict[str, str | None]:
 SUBPAR_DELIM = " \u2013 "
 
 
+def _read_artist_title(path: str) -> Tuple[str, str]:
+    """Return best-effort artist and title from ``path`` using multiple sources."""
+    artist = None
+    title = None
+
+    try:
+        id3 = ID3(path)
+        for frame in ("TPE1", "TPE2"):
+            if not artist:
+                try:
+                    if id3.get(frame):
+                        artist = id3[frame].text[0]
+                except (KeyError, UnicodeDecodeError):
+                    pass
+        if not title:
+            try:
+                if id3.get("TIT2"):
+                    title = id3["TIT2"].text[0]
+            except (KeyError, UnicodeDecodeError):
+                pass
+        for key in list(id3.keys()):
+            if key.startswith("TXXX"):
+                lower = key.lower()
+                if "artist" in lower and not artist:
+                    try:
+                        artist = id3[key].text[0]
+                    except (KeyError, UnicodeDecodeError):
+                        pass
+                if "title" in lower and not title:
+                    try:
+                        title = id3[key].text[0]
+                    except (KeyError, UnicodeDecodeError):
+                        pass
+    except ID3NoHeaderError:
+        pass
+    except Exception:
+        pass
+
+    try:
+        mp3 = MP3(path)
+        tags = mp3.tags or {}
+        if not artist:
+            try:
+                val = tags.get("artist")
+                artist = val[0] if isinstance(val, list) else val
+            except (KeyError, UnicodeDecodeError, AttributeError):
+                pass
+        if not title:
+            try:
+                val = tags.get("title")
+                title = val[0] if isinstance(val, list) else val
+            except (KeyError, UnicodeDecodeError, AttributeError):
+                pass
+    except Exception:
+        pass
+
+    if not artist or not title:
+        base = os.path.splitext(os.path.basename(path))[0]
+        parts = base.split(" \u2013 ", 1)
+        if not artist:
+            artist = parts[0]
+        if not title:
+            title = parts[1] if len(parts) > 1 else parts[0]
+
+    return artist or "Unknown", title or "Unknown"
+
+
 def _rename_with_sanitize(path: str, library_root: str) -> str:
     """Rename ``path`` to a sanitized ``Artist_XX_Title.ext`` pattern.
 
@@ -130,25 +199,18 @@ def scan_library_quality(library_root: str, outfile: str) -> int:
 
         Artist \u2013 Title
     """
-    items: List[Tuple[str, str, str, str]] = []
+    items: List[Tuple[str, str]] = []
     for dirpath, _, files in os.walk(library_root):
         for fname in files:
             ext = os.path.splitext(fname)[1].lower()
             if ext in AUDIO_EXTS and ext != ".flac":
                 path = os.path.join(dirpath, fname)
                 new_path = _rename_with_sanitize(path, library_root)
-                tags = get_tags(new_path)
-                items.append(
-                    (
-                        tags.get("artist") or "",
-                        tags.get("title") or "",
-                        tags.get("album") or "",
-                        new_path,
-                    )
-                )
+                artist, title = _read_artist_title(new_path)
+                items.append((artist, title))
     os.makedirs(os.path.dirname(outfile), exist_ok=True)
     with open(outfile, "w", encoding="utf-8") as f:
-        for artist, title, *_ in items:
+        for artist, title in items:
             f.write(f"{artist}{SUBPAR_DELIM}{title}\n")
     return len(items)
 
