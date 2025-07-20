@@ -1,6 +1,7 @@
 import os
 import re
 import shutil
+import concurrent.futures
 from typing import List, Dict, Tuple, Optional, Callable
 
 from mutagen import File as MutagenFile
@@ -271,27 +272,55 @@ def load_subpar_list(path: str, db_path: str | None = None) -> List[Dict[str, st
     return out
 
 
-def scan_downloads(folder: str, log_callback: Callable[[str], None] | None = None) -> List[Dict[str, str]]:
-    """Return metadata and cached fingerprints for all audio files under ``folder``."""
+def scan_downloads(
+    folder: str,
+    log_callback: Callable[[str], None] | None = None,
+    max_workers: int = 1,
+) -> List[Dict[str, str]]:
+    """Return metadata and cached fingerprints for all audio files under ``folder``.
+
+    ``max_workers`` controls the number of threads used for fingerprinting.
+    A value of ``1`` preserves the previous serial behaviour.
+    """
     items: List[Dict[str, str]] = []
-    for dirpath, _, files in os.walk(folder):
-        for fname in files:
-            ext = os.path.splitext(fname)[1].lower()
-            if ext in AUDIO_EXTS:
-                path = os.path.join(dirpath, fname)
-                tags = _read_tags(path)
-                fp = _fingerprint(path, log_callback)
-                items.append(
-                    {
-                        "artist": tags.get("artist"),
-                        "title": tags.get("title"),
-                        "album": tags.get("album"),
-                        "path": path,
-                        "fingerprint": fp,
-                        "fp_prefix": fp[:FP_PREFIX_LEN] if fp else None,
-                    }
-                )
+
+    if max_workers <= 1:
+        for dirpath, _, files in os.walk(folder):
+            for fname in files:
+                ext = os.path.splitext(fname)[1].lower()
+                if ext in AUDIO_EXTS:
+                    path = os.path.join(dirpath, fname)
+                    items.append(_scan_one(path, log_callback))
+        return items
+
+    futures: List[Tuple[str, 'concurrent.futures.Future[Dict[str, str]]']] = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as exc:
+        for dirpath, _, files in os.walk(folder):
+            for fname in files:
+                ext = os.path.splitext(fname)[1].lower()
+                if ext in AUDIO_EXTS:
+                    path = os.path.join(dirpath, fname)
+                    fut = exc.submit(_scan_one, path, log_callback)
+                    futures.append((path, fut))
+
+        for _path, fut in futures:
+            items.append(fut.result())
+
     return items
+
+
+def _scan_one(path: str, log_callback: Callable[[str], None] | None = None) -> Dict[str, str]:
+    """Read tags and fingerprint a single file."""
+    tags = _read_tags(path)
+    fp = _fingerprint(path, log_callback)
+    return {
+        "artist": tags.get("artist"),
+        "title": tags.get("title"),
+        "album": tags.get("album"),
+        "path": path,
+        "fingerprint": fp,
+        "fp_prefix": fp[:FP_PREFIX_LEN] if fp else None,
+    }
 
 
 def _fingerprint(path: str, log_callback: Callable[[str], None] | None = None) -> str | None:

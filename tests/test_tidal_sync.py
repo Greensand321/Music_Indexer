@@ -130,3 +130,33 @@ def test_replace_file_backup(tmp_path, monkeypatch):
     assert str(orig) in restored
     assert orig.read_text() == "old"
     assert not backup.exists()
+
+
+def test_scan_downloads_parallel_identical(tmp_path, monkeypatch):
+    ts = load_module(monkeypatch)
+
+    def read_tags(p):
+        base = os.path.splitext(os.path.basename(p))[0]
+        return {"artist": base + "A", "title": base + "T", "album": base + "AL"}
+
+    def fp(p, log_callback=None):
+        base = os.path.splitext(os.path.basename(p))[0]
+        return base + "-fp"
+
+    monkeypatch.setattr(ts, "_read_tags", read_tags)
+    monkeypatch.setattr(ts, "_fingerprint", fp)
+
+    for idx in range(3):
+        f = tmp_path / f"t{idx}.mp3"
+        f.write_text("x")
+
+    serial = ts.scan_downloads(str(tmp_path), max_workers=1)
+    parallel = ts.scan_downloads(str(tmp_path), max_workers=2)
+
+    key = lambda item: item["path"]
+    serial_sorted = sorted(serial, key=key)
+    parallel_sorted = sorted(parallel, key=key)
+
+    assert serial_sorted == parallel_sorted
+    for item in parallel_sorted:
+        assert set(item.keys()) == {"artist", "title", "album", "path", "fingerprint", "fp_prefix"}
