@@ -45,6 +45,10 @@ Cluster generation writes progress into `<method>_log.txt` inside your library s
 
 The indexer automatically prefixes file paths with `\\?\` on Windows, allowing it to work with directories deeper than the classic 260-character limit.
 
+## Threading
+
+Long running actions such as indexing, tag fixing and tidal-dl comparison are executed in daemon threads. GUI updates from these background tasks are scheduled using Tkinter's `after` method so message boxes and progress indicators always run on the main thread.
+
 ## Configuration
 
 User settings are stored in `~/.soundvault_config.json`. To tweak the fuzzy fingerprint

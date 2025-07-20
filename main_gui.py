@@ -2054,19 +2054,37 @@ class SoundVaultImporterApp(tk.Tk):
     def build_comparison_table(self):
         thr = float(self.fp_threshold_var.get() or 0.3)
         tidal_sync.set_debug(self.sync_debug_var.get(), self.library_path or ".")
-        self.matches = tidal_sync.match_downloads(
-            self.subpar_list,
-            self.downloads_list,
-            threshold=thr,
-            log_callback=self._log,
-        )
-        num_tag = sum(1 for m in self.matches if m.get("method") == "Tag")
-        num_fp = sum(1 for m in self.matches if m.get("method") == "Fingerprint")
-        num_none = sum(1 for m in self.matches if m.get("download") is None)
-        self.sync_status_var.set(
-            f"{num_tag} tag matches, {num_fp} fingerprint matches, {num_none} no matches"
-        )
-        self._render_comparison_table()
+        total = len(self.subpar_list)
+        self.sync_status_var.set(f"Matching 0/{total}")
+
+        def progress(idx: int) -> None:
+            self.after(0, lambda i=idx: self.sync_status_var.set(f"Matching {i}/{total}"))
+
+        def task():
+            try:
+                matches = tidal_sync.match_downloads(
+                    self.subpar_list,
+                    self.downloads_list,
+                    threshold=thr,
+                    log_callback=self._log,
+                    progress_callback=progress,
+                )
+
+                def done():
+                    self.matches = matches
+                    num_tag = sum(1 for m in matches if m.get("method") == "Tag")
+                    num_fp = sum(1 for m in matches if m.get("method") == "Fingerprint")
+                    num_none = sum(1 for m in matches if m.get("download") is None)
+                    self.sync_status_var.set(
+                        f"{num_tag} tag matches, {num_fp} fingerprint matches, {num_none} no matches"
+                    )
+                    self._render_comparison_table()
+
+                self.after(0, done)
+            except Exception as e:
+                self.after(0, lambda msg=str(e): messagebox.showerror("Match Failed", msg))
+
+        threading.Thread(target=task, daemon=True).start()
 
     def _render_comparison_table(self):
         for w in self.compare_frame.winfo_children():

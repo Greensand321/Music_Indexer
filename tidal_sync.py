@@ -347,6 +347,7 @@ def match_downloads(
     downloads: List[Dict[str, str]],
     threshold: float = 0.3,
     log_callback: Callable[[str], None] | None = None,
+    progress_callback: Callable[[int], None] | None = None,
 ) -> List[Dict[str, object]]:
     """Match subpar tracks with potential replacements in downloads."""
     matches: List[Dict[str, object]] = []
@@ -375,8 +376,10 @@ def match_downloads(
 
     if log_callback is None:
         log_callback = lambda msg: None
+    if progress_callback is None:
+        progress_callback = lambda idx: None
 
-    for sp in subpar:
+    for idx, sp in enumerate(subpar, start=1):
         key_exact = (
             (sp.get("artist") or "").lower(),
             (sp.get("title") or "").lower(),
@@ -483,6 +486,8 @@ def match_downloads(
                 "note": note,
             }
         )
+        if progress_callback:
+            progress_callback(idx)
     return matches
 
 
