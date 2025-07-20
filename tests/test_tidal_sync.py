@@ -82,9 +82,79 @@ def test_match_downloads_prefix_lookup(monkeypatch):
             "fp_prefix": "1 2 3 4 5"[: ts.FP_PREFIX_LEN],
         }
     ]
-    matches = ts.match_downloads(subpar, downloads, threshold=0.1)
+    matches = ts.match_downloads(subpar, downloads, thresholds={"default": 0.1})
     assert matches[0]["download"] == "good.flac"
     assert matches[0]["candidates"] == []
+
+
+def test_match_downloads_extension_threshold(monkeypatch):
+    ts = load_module(monkeypatch)
+    downloads = [
+        {
+            "artist": "A",
+            "title": "T",
+            "album": "AL",
+            "path": "good.flac",
+            "fingerprint": "1 2 3 4 6",
+            "fp_prefix": "1 2 3 4 6"[: ts.FP_PREFIX_LEN],
+        },
+        {
+            "artist": "A",
+            "title": "T",
+            "album": "AL",
+            "path": "bad.mp3",
+            "fingerprint": "1 2 3 4 6",
+            "fp_prefix": "1 2 3 4 6"[: ts.FP_PREFIX_LEN],
+        },
+    ]
+    subpar = [
+        {
+            "artist": "A",
+            "title": "T",
+            "album": "AL",
+            "path": "orig.mp3",
+            "fingerprint": "1 2 3 4 5",
+            "fp_prefix": "1 2 3 4 5"[: ts.FP_PREFIX_LEN],
+        }
+    ]
+    thresholds = {"default": 0.5, ".mp3": 0.1, ".flac": 0.5}
+    matches = ts.match_downloads(subpar, downloads, thresholds=thresholds)
+    assert matches[0]["download"] == "good.flac"
+
+
+def test_match_downloads_mp3_override(monkeypatch):
+    ts = load_module(monkeypatch)
+    downloads = [
+        {
+            "artist": "A",
+            "title": "T",
+            "album": "AL",
+            "path": "good.mp3",
+            "fingerprint": "1 2 3 4 6",
+            "fp_prefix": "1 2 3 4 6"[: ts.FP_PREFIX_LEN],
+        },
+        {
+            "artist": "A",
+            "title": "T",
+            "album": "AL",
+            "path": "bad.flac",
+            "fingerprint": "1 2 3 4 6",
+            "fp_prefix": "1 2 3 4 6"[: ts.FP_PREFIX_LEN],
+        },
+    ]
+    subpar = [
+        {
+            "artist": "A",
+            "title": "T",
+            "album": "AL",
+            "path": "orig.mp3",
+            "fingerprint": "1 2 3 4 5",
+            "fp_prefix": "1 2 3 4 5"[: ts.FP_PREFIX_LEN],
+        }
+    ]
+    thresholds = {"default": 0.1, ".mp3": 0.3, ".flac": 0.1}
+    matches = ts.match_downloads(subpar, downloads, thresholds=thresholds)
+    assert matches[0]["download"] == "good.mp3"
 
 
 def test_load_subpar_list_fingerprint(tmp_path, monkeypatch):

@@ -18,6 +18,15 @@ NEAR_DUPLICATE_THRESHOLD = 0.1
 # File format quality priority used during Library Sync
 FORMAT_PRIORITY = {".flac": 3, ".wav": 2, ".mp3": 1}
 
+# Default fingerprint matching thresholds by file extension. The ``default`` key
+# is used when a specific extension is not provided.
+DEFAULT_FP_THRESHOLDS = {
+    "default": 0.3,
+    ".flac": 0.3,
+    ".mp3": 0.3,
+    ".aac": 0.3,
+}
+
 
 def load_config():
     """Load configuration from ``CONFIG_PATH``.
@@ -28,7 +37,13 @@ def load_config():
         with open(CONFIG_PATH, "r", encoding="utf-8") as f:
             cfg = json.load(f)
         if "musicbrainz_useragent" not in cfg:
-            cfg["musicbrainz_useragent"] = {"app": "", "version": "", "contact": ""}
+            cfg["musicbrainz_useragent"] = {
+                "app": "",
+                "version": "",
+                "contact": "",
+            }
+        if "format_fp_thresholds" not in cfg:
+            cfg["format_fp_thresholds"] = DEFAULT_FP_THRESHOLDS.copy()
         return cfg
     except Exception:
         return {}
