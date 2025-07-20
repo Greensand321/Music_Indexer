@@ -48,6 +48,12 @@ class AcoustIDPlugin(MetadataPlugin):
         result = {"ok": False}
 
         def do_test() -> None:
+            cfg = load_config()
+            cfg["metadata_service"] = service_var.get()
+            cfg["metadata_api_key"] = api_var.get()
+            save_config(cfg)
+            if service_var.get() == "AcoustID":
+                tag_fixer.ACOUSTID_API_KEY = api_var.get()
             try:
                 query_metadata(service_var.get(), api_var.get(), "")
             except Exception:
