@@ -68,13 +68,37 @@ def _read_tags(path: str) -> Dict[str, str | None]:
 SUBPAR_DELIM = " \u2013 "
 
 
-def _rename_with_sanitize(path: str) -> str:
+def _rename_with_sanitize(path: str, library_root: str) -> str:
     """Rename ``path`` to a sanitized ``Artist_XX_Title.ext`` pattern.
+
+    If either artist or title metadata is missing, move the file into the
+    ``Manual Review`` folder at the library root, preserving the original
+    filename. Duplicate names in that folder get ``(1)``, ``(2)``, … appended.
 
     Returns the new path (or original if rename failed)."""
     tags = get_tags(path)
-    artist = sanitize(tags.get("artist"))
-    title = sanitize(tags.get("title"))
+    artist = tags.get("artist")
+    title = tags.get("title")
+
+    # If key metadata is missing, move to Manual Review without renaming
+    if not artist or not title:
+        review_root = os.path.join(library_root, "Manual Review")
+        os.makedirs(review_root, exist_ok=True)
+        basename = os.path.basename(path)
+        candidate = os.path.join(review_root, basename)
+        root, ext_only = os.path.splitext(candidate)
+        idx = 1
+        while os.path.exists(candidate):
+            candidate = f"{root} ({idx}){ext_only}"
+            idx += 1
+        try:
+            os.rename(path, candidate)
+            return candidate
+        except Exception:
+            return path
+
+    artist = sanitize(artist)
+    title = sanitize(title)
     track = tags.get("track")
     track_str = f"{track:02d}" if track is not None else "00"
     ext = os.path.splitext(path)[1].lower()
@@ -112,7 +136,7 @@ def scan_library_quality(library_root: str, outfile: str) -> int:
             ext = os.path.splitext(fname)[1].lower()
             if ext in AUDIO_EXTS and ext != ".flac":
                 path = os.path.join(dirpath, fname)
-                new_path = _rename_with_sanitize(path)
+                new_path = _rename_with_sanitize(path, library_root)
                 tags = get_tags(new_path)
                 items.append(
                     (
