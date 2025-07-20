@@ -27,6 +27,7 @@ import queue
 import subprocess
 from tkinter import filedialog, messagebox, Text, Scrollbar
 from unsorted_popup import UnsortedPopup
+from candidate_popup import CandidatePopup
 from tkinter.scrolledtext import ScrolledText
 import textwrap
 
@@ -2089,7 +2090,7 @@ class SoundVaultImporterApp(tk.Tk):
     def _render_comparison_table(self):
         for w in self.compare_frame.winfo_children():
             w.destroy()
-        cols = ("download", "method", "confidence", "note")
+        cols = ("download", "method", "confidence", "note", "candidates")
         tv = ttk.Treeview(
             self.compare_frame,
             columns=cols,
@@ -2100,16 +2101,19 @@ class SoundVaultImporterApp(tk.Tk):
         tv.heading("method", text="Match Method")
         tv.heading("confidence", text="Confidence")
         tv.heading("note", text="Note")
+        tv.heading("candidates", text="Options")
         tv.column("download", width=220)
         tv.column("method", width=80, anchor="center")
         tv.column("confidence", width=80, anchor="e")
         tv.column("note", width=150, anchor="w")
+        tv.column("candidates", width=80, anchor="center")
         tv.tag_configure("hi", background="#d4edda")
         tv.tag_configure("med", background="#fff8c6")
         tv.tag_configure("low", background="#f8d7da")
         tv.tag_configure("nomatch", background="#f8d7da")
         tv.tag_configure("ambig", background="#ffe5b4")
         tv.tag_configure("error", background="#f8d7da")
+        self.candidate_map = {}
         for m in self.matches:
             score = "" if m["score"] is None else f"{m['score']:.2f}"
             method = m.get("method", "")
@@ -2126,14 +2130,27 @@ class SoundVaultImporterApp(tk.Tk):
                 tag = "med"
             else:
                 tag = "low"
+            cand_text = "View" if m.get("candidates") else ""
+            self.candidate_map[m["original"]] = m.get("candidates") or []
             tv.insert(
                 "",
                 "end",
                 iid=m["original"],
-                values=(m.get("download") or "", method, score, note),
+                values=(m.get("download") or "", method, score, note, cand_text),
                 tags=(tag,),
             )
         tv.pack(fill="both", expand=True)
+        cand_col = cols.index("candidates") + 1
+
+        def on_double(event):
+            row = tv.identify_row(event.y)
+            col = tv.identify_column(event.x)
+            if row and col == f"#{cand_col}":
+                cands = self.candidate_map.get(row)
+                if cands:
+                    CandidatePopup(self, cands)
+
+        tv.bind("<Double-1>", on_double)
         self.match_tree = tv
 
     def apply_replacements(self):

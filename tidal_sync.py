@@ -333,11 +333,14 @@ def _find_best_fp_match(
     fp_prefix_map: Dict[str, List[Dict[str, str]]] | None,
     orig_path: str = "",
     log_callback: Callable[[str], None] | None = None,
-) -> Tuple[Optional[Dict[str, str]], float, bool]:
+    return_candidates: bool = False,
+) -> Tuple[Optional[Dict[str, str]], float, bool, Optional[List[Dict[str, str]]]]:
     """Return best candidate by fingerprint distance.
 
-    Returns (candidate, distance, ambiguous). Candidate is ``None`` if no
-    distance below ``threshold``.
+    Returns (candidate, distance, ambiguous[, candidates]). Candidate is ``None`` if
+    no distance below ``threshold``. If ``return_candidates`` is ``True`` and
+    ``ambiguous`` is ``True``, a list of close candidate dicts is returned as the
+    fourth element; otherwise ``None`` is returned in that position.
     """
     if fp_prefix_map and orig_fp:
         prefix = orig_fp[:FP_PREFIX_LEN]
@@ -363,9 +366,23 @@ def _find_best_fp_match(
             best_dist = dist
             best = c
     if best is None or best_dist >= threshold:
-        return None, best_dist, False
+        return (None, best_dist, False, None) if return_candidates else (None, best_dist, False)
+
     ambiguous = sum(1 for d in distances if d <= best_dist + 0.05) > 1
-    return best, best_dist, ambiguous
+    cand_list: Optional[List[Dict[str, str]]] = None
+    if return_candidates and ambiguous:
+        close = [
+            c
+            for c, d in sorted(zip(cands, distances), key=lambda t: t[1])
+            if d <= best_dist + 0.05
+        ]
+        cand_list = close
+
+    return (best, best_dist, ambiguous, cand_list) if return_candidates else (
+        best,
+        best_dist,
+        ambiguous,
+    )
 
 
 def match_downloads(
@@ -425,15 +442,18 @@ def match_downloads(
             best_dist = 0.0
             method = "Fingerprint"
 
+        cand_list = None
+
         if best is None:
             # fingerprint-first matching
-            cand, best_dist, ambiguous = _find_best_fp_match(
+            cand, best_dist, ambiguous, cand_list = _find_best_fp_match(
                 orig_fp,
                 downloads,
                 threshold,
                 fp_prefix_map,
                 sp.get("path", ""),
                 log_callback,
+                True,
             )
             if cand is not None:
                 best = cand
@@ -453,13 +473,14 @@ def match_downloads(
                         f"DEBUG: Candidate path={candidate['path']}; artist={candidate.get('artist')!r}, title={candidate.get('title')!r}, album={candidate.get('album')!r}",
                         log_callback,
                     )
-                best, best_dist, ambiguous = _find_best_fp_match(
+                best, best_dist, ambiguous, cand_list = _find_best_fp_match(
                     orig_fp,
                     cand,
                     threshold,
                     fp_prefix_map,
                     sp.get("path", ""),
                     log_callback,
+                    True,
                 )
                 if best is not None:
                     method = "Tag"
@@ -478,13 +499,14 @@ def match_downloads(
                     seen.add(id(c))
 
             if unique_cands:
-                cand, best_dist, ambiguous = _find_best_fp_match(
+                cand, best_dist, ambiguous, cand_list = _find_best_fp_match(
                     orig_fp,
                     unique_cands,
                     threshold,
                     fp_prefix_map,
                     sp.get("path", ""),
                     log_callback,
+                    True,
                 )
                 if cand is not None:
                     best = cand
@@ -500,6 +522,7 @@ def match_downloads(
             note = "No fingerprint"
 
         score = None if best is None else 1 - best_dist
+        cand_paths = [c.get("path") for c in cand_list] if cand_list else []
         _dlog(
             f"DEBUG: Best match: {best['path'] if best else None} with score={score if score is not None else float('nan'):.4f}",
             log_callback,
@@ -512,6 +535,7 @@ def match_downloads(
                 "method": method,
                 "tags": sp,
                 "note": note,
+                "candidates": cand_paths,
             }
         )
         if progress_callback:
