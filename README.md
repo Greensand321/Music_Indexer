@@ -66,6 +66,8 @@ The configuration file also stores your selected metadata service and API key:
   "metadata_api_key": "YOUR_KEY"
 }
 ```
+These values are updated whenever you use the Tag Fixer's connection dialog.
+Testing the connection or saving will persist your selections for future runs.
 
 ## File Overview
 
