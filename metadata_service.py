@@ -7,11 +7,20 @@ from utils.path_helpers import ensure_long_path
 def query_acoustid(api_key: str, audio_file: str) -> Dict:
     """Query AcoustID for ``audio_file`` using ``api_key``.
 
-    Returns a metadata dict or raises on failure.
+    If ``audio_file`` is an empty string a lightweight request is issued to
+    verify connectivity and API key validity. An empty dictionary is
+    returned in this case.
     """
     import acoustid
     import musicbrainzngs
     from itertools import islice
+    import requests
+
+    if not audio_file:
+        url = "https://api.acoustid.org/v2/user/status"
+        resp = requests.get(url, params={"client": api_key}, timeout=5)
+        resp.raise_for_status()
+        return {}
 
     match_gen = acoustid.match(api_key, ensure_long_path(audio_file))
     peek = list(islice(match_gen, 5))
