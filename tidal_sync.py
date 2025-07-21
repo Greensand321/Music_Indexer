@@ -256,10 +256,8 @@ def load_subpar_list(path: str, db_path: str | None = None) -> List[Dict[str, st
         db_path = os.path.join(os.path.dirname(path), "fp.db")
 
     def _compute_fp(p: str) -> tuple[int | None, str | None]:
-        try:
-            return acoustid.fingerprint_file(p)
-        except Exception:
-            return None, None
+        fp = _fingerprint(p, log_callback=None)
+        return (0, fp)
     with open(path, "r", encoding="utf-8") as f:
         for line in f:
             text = line.strip()
