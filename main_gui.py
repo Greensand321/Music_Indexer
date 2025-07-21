@@ -1832,8 +1832,6 @@ class SoundVaultImporterApp(tk.Tk):
             self.sync_status_var.set(
                 f"Scanned {len(self.downloads_list)} downloaded tracks."
             )
-            if self.subpar_list:
-                self.build_comparison_table()
 
     def _select_all_tagfix(self):
         self.tagfix_tree.selection_set(self.tagfix_tree.get_children(""))
@@ -2147,8 +2145,6 @@ class SoundVaultImporterApp(tk.Tk):
         )
         self.sync_status_var.set(f"Loaded {len(self.subpar_list)} subpar tracks.")
         self._log(f"Scan Quality written to {full_path}")
-        if self.downloads_path_var.get():
-            self.build_comparison_table()
 
     def load_subpar_list(self):
         path = filedialog.askopenfilename(
@@ -2159,8 +2155,6 @@ class SoundVaultImporterApp(tk.Tk):
         self.subpar_path_var.set(path)
         self.subpar_list = tidal_sync.load_subpar_list(path)
         self.sync_status_var.set(f"Loaded {len(self.subpar_list)} subpar tracks.")
-        if self.downloads_path_var.get():
-            self.build_comparison_table()
 
     def scan_downloads_folder(self):
         initial = self.downloads_path_var.get() or load_last_path()
