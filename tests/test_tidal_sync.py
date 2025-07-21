@@ -237,3 +237,38 @@ def test_scan_downloads_parallel_identical(tmp_path, monkeypatch):
     assert serial_sorted == parallel_sorted
     for item in parallel_sorted:
         assert set(item.keys()) == {"artist", "title", "album", "path", "fingerprint", "fp_prefix"}
+
+
+def test_load_subpar_and_scan_identical(tmp_path, monkeypatch):
+    ts = load_module(monkeypatch)
+
+    def fp(p, log_callback=None):
+        return os.path.basename(p) + "_fp"
+
+    monkeypatch.setattr(ts, "_fingerprint", fp)
+    monkeypatch.setattr(
+        ts,
+        "_read_tags",
+        lambda p: {"artist": "A", "title": "T", "album": "AL"},
+    )
+
+    def fake_get_fp(path, db_path, compute):
+        return compute(path)[1]
+
+    monkeypatch.setattr(ts, "get_fingerprint", fake_get_fp)
+
+    audio = tmp_path / "t0.mp3"
+    audio.write_text("x")
+
+    list_file = tmp_path / "subpar.txt"
+    list_file.write_text(
+        f"A{ts.SUBPAR_DELIM}T{ts.SUBPAR_DELIM}AL{ts.SUBPAR_DELIM}{audio}\n"
+    )
+
+    subpar = ts.load_subpar_list(str(list_file))
+    downloads = ts.scan_downloads(str(tmp_path))
+
+    assert subpar[0]["fingerprint"] == downloads[0]["fingerprint"]
+
+    matches = ts.match_downloads(subpar, downloads)
+    assert matches[0]["download"] == str(audio)
