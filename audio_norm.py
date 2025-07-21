@@ -6,6 +6,14 @@ from typing import Callable
 from pydub import AudioSegment, silence
 
 
+def _with_thresh(func, *args, **kwargs):
+    """Call ``func`` with the correct silence threshold argument."""
+    try:
+        return func(*args, silence_thresh=SILENCE_THRESH, **kwargs)
+    except TypeError:
+        return func(*args, silence_threshold=SILENCE_THRESH, **kwargs)
+
+
 SILENCE_THRESH = -50  # dBFS used for silence detection
 
 
@@ -20,12 +28,12 @@ def normalize_for_fp(
     audio = AudioSegment.from_file(path)
     audio = audio.set_frame_rate(44100).set_channels(2)
 
-    lead = silence.detect_leading_silence(audio, silence_thresh=SILENCE_THRESH)
+    lead = _with_thresh(silence.detect_leading_silence, audio)
     trim_lead = 0
     if lead > 100:
         trim_lead = min(lead - 100, 500)
     trail = 0
-    end_sil = silence.detect_silence(audio, min_silence_len=50, silence_thresh=SILENCE_THRESH)
+    end_sil = _with_thresh(silence.detect_silence, audio, min_silence_len=50)
     if end_sil:
         last_start, last_end = end_sil[-1]
         if last_end >= len(audio):

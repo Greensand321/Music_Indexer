@@ -3,6 +3,16 @@ import sqlite3
 from typing import Callable, Tuple
 import tempfile
 from pydub import AudioSegment, silence
+
+
+SILENCE_THRESH = -50  # dBFS used for silence detection
+
+
+def _with_thresh(func, *args, **kwargs):
+    try:
+        return func(*args, silence_thresh=SILENCE_THRESH, **kwargs)
+    except TypeError:
+        return func(*args, silence_threshold=SILENCE_THRESH, **kwargs)
 from concurrent.futures import ProcessPoolExecutor
 import acoustid
 from utils.path_helpers import ensure_long_path
@@ -15,7 +25,7 @@ def _trim_silence(path: str) -> str:
     try:
         ext = os.path.splitext(path)[1].lower().lstrip(".") or "wav"
         audio = AudioSegment.from_file(path)
-        segs = silence.detect_nonsilent(audio, min_silence_len=500, silence_thresh=-50)
+        segs = _with_thresh(silence.detect_nonsilent, audio, min_silence_len=500)
         if not segs:
             return path
         start = segs[0][0]
