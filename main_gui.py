@@ -66,7 +66,7 @@ from controllers.normalize_controller import (
 )
 from plugins.assistant_plugin import AssistantPlugin
 from controllers.cluster_controller import cluster_library
-from config import load_config, save_config
+from config import load_config, save_config, DEFAULT_FP_THRESHOLDS
 
 FilterFn = Callable[[FileRecord], bool]
 _cached_filters = None
@@ -2367,10 +2367,14 @@ class SoundVaultImporterApp(tk.Tk):
             messagebox.showwarning("Scan", "Please choose library and incoming folders.")
             return
         db = os.path.join(lib, "Docs", ".soundvault.db")
+        cfg = load_config()
+        thresholds = cfg.get("format_fp_thresholds", DEFAULT_FP_THRESHOLDS)
 
         def task():
             try:
-                res = library_sync.compare_libraries(lib, inc, db)
+                res = library_sync.compare_libraries(
+                    lib, inc, db, thresholds=thresholds
+                )
                 self.sync_new = res["new"]
                 self.sync_existing = res["existing"]
                 self.sync_improved = res["improved"]

@@ -56,9 +56,23 @@ def compare_libraries(
     db_path: str,
     threshold: float | None = None,
     fmt_priority: Dict[str, int] | None = None,
+    thresholds: Dict[str, float] | None = None,
 ) -> Dict[str, object]:
-    """Return classification of incoming files vs. an existing library."""
-    threshold = threshold if threshold is not None else NEAR_DUPLICATE_THRESHOLD
+    """Return classification of incoming files vs. an existing library.
+
+    Parameters
+    ----------
+    thresholds:
+        Optional mapping of file extensions to fingerprint distance thresholds.
+        The ``default`` key is used when an extension is not present.
+    """
+    if thresholds is None:
+        if threshold is not None:
+            thresholds = {"default": threshold}
+        else:
+            from config import DEFAULT_FP_THRESHOLDS
+
+            thresholds = DEFAULT_FP_THRESHOLDS
     fmt_priority = fmt_priority or FORMAT_PRIORITY
     lib_infos = _scan_folder(library_folder, db_path)
     inc_infos = _scan_folder(incoming_folder, db_path)
@@ -76,10 +90,15 @@ def compare_libraries(
                 best_match = lib_path
                 best_dist = 0
                 break
-            if dist <= threshold and dist < best_dist:
+            if dist < best_dist:
                 best_match = lib_path
                 best_dist = dist
         if best_match is None:
+            new.append(inc_path)
+            continue
+        best_ext = lib_infos[best_match]["ext"]
+        thr = thresholds.get(best_ext, thresholds.get("default", 0.3))
+        if best_dist >= thr:
             new.append(inc_path)
             continue
         inc_score = compute_quality_score(inc_info, fmt_priority)

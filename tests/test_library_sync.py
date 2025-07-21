@@ -70,6 +70,26 @@ def test_compare_libraries(tmp_path):
     flush_cache(str(db))
 
 
+def test_compare_libraries_thresholds(tmp_path):
+    lib = tmp_path / 'lib'
+    inc = tmp_path / 'inc'
+    lib.mkdir()
+    inc.mkdir()
+    (lib / 'a.flac').write_text('x')
+    (inc / 'a.flac').write_text('x')
+
+    db = tmp_path / 'fp.db'
+    res = compare_libraries(
+        str(lib),
+        str(inc),
+        str(db),
+        thresholds={"default": 0.0},
+    )
+
+    assert str(inc / 'a.flac') in set(res['new'])
+    flush_cache(str(db))
+
+
 def test_copy_and_replace(tmp_path):
     lib = tmp_path / 'lib'
     inc = tmp_path / 'inc'

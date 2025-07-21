@@ -78,6 +78,10 @@ configured. Add a `format_fp_thresholds` section with extension keys:
 
 Values are floating point distances – lower numbers require closer matches.
 
+The same dictionary can be provided to ``library_sync.compare_libraries`` via
+the optional ``thresholds`` parameter to control how strictly fingerprints are
+matched when scanning two libraries.
+
 You can also store the path to your library for automatic scanning:
 
 ```json
