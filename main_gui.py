@@ -643,7 +643,7 @@ class SoundVaultImporterApp(tk.Tk):
         Tooltip(self.status_label, lambda: self._full_status)
 
         self.log = ScrolledText(self.indexer_tab, height=10, wrap="word")
-        self.log.grid(row=3, column=0, columnspan=3, sticky="nsew", pady=5)
+        self.log.grid(row=2, column=0, columnspan=3, sticky="nsew", pady=5)
         self.indexer_tab.rowconfigure(3, weight=1)
         self.indexer_tab.columnconfigure((0, 1, 2), weight=1)
 
@@ -689,55 +689,39 @@ class SoundVaultImporterApp(tk.Tk):
         ttk.Label(sync, textvariable=self.subpar_path_var).grid(
             row=0, column=1, columnspan=2, sticky="w"
         )
-             # --- Downloads-folder controls ------------------------------------------------
-        ttk.Label(sync, text="Downloads Folder:").grid(
-            row=1, column=0, sticky="w", pady=(5, 0)
-        )
+        ttk.Button(sync, text="Select New Songs…", command=self._browse_downloads_folder).grid(row=1, column=0, sticky="w", pady=(5, 0))
+        ttk.Label(sync, textvariable=self.downloads_path_var).grid(row=1, column=1, columnspan=2, sticky="w", padx=(5, 0), pady=(5, 0))
 
-        # read-only entry that shows the currently-selected folder
-        ttk.Entry(sync, textvariable=self.downloads_path_var, state="readonly").grid(
-            row=1, column=1, sticky="ew", padx=(5, 0), pady=(5, 0)
-        )
-
-        # lets the user pick a folder via a file-dialog
-        ttk.Button(sync, text="Browse…", command=self._browse_downloads_folder).grid(
-            row=1, column=2, padx=(5, 0), pady=(5, 0)
-        )
-
-        # optional action that scans the folder for new downloads
-        ttk.Button(sync, text="Scan Downloads…", command=self.scan_downloads_folder).grid(
-            row=2, column=0, sticky="w", pady=(5, 0)
-        )
 
         # --- Other sync-settings ------------------------------------------------------
         ttk.Label(sync, text="Default FP Thr:").grid(
-            row=3, column=0, sticky="w", pady=(5, 0)
+            row=2, column=0, sticky="w", pady=(5, 0)
         )
         ttk.Entry(sync, textvariable=self.fp_threshold_var, width=5).grid(
-            row=3, column=1, sticky="w", pady=(5, 0)
+            row=2, column=1, sticky="w", pady=(5, 0)
         )
         ttk.Checkbutton(
             sync,
             text="Verbose Debug",
             variable=self.sync_debug_var,
-        ).grid(row=3, column=2, sticky="w", pady=(5, 0))
+        ).grid(row=2, column=2, sticky="w", pady=(5, 0))
 
         # Make the middle column expand so the path field can stretch
         sync.columnconfigure(1, weight=1)
 
 
-        ttk.Label(sync, text="FLAC Thr:").grid(row=4, column=0, sticky="w", pady=(5, 0))
-        ttk.Entry(sync, textvariable=self.fp_threshold_flac_var, width=5).grid(row=4, column=1, sticky="w", pady=(5, 0))
-        ttk.Label(sync, text="MP3 Thr:").grid(row=5, column=0, sticky="w", pady=(5, 0))
-        ttk.Entry(sync, textvariable=self.fp_threshold_mp3_var, width=5).grid(row=5, column=1, sticky="w", pady=(5, 0))
-        ttk.Label(sync, text="AAC Thr:").grid(row=6, column=0, sticky="w", pady=(5, 0))
-        ttk.Entry(sync, textvariable=self.fp_threshold_aac_var, width=5).grid(row=6, column=1, sticky="w", pady=(5, 0))
+        ttk.Label(sync, text="FLAC Thr:").grid(row=3, column=0, sticky="w", pady=(5, 0))
+        ttk.Entry(sync, textvariable=self.fp_threshold_flac_var, width=5).grid(row=3, column=1, sticky="w", pady=(5, 0))
+        ttk.Label(sync, text="MP3 Thr:").grid(row=4, column=0, sticky="w", pady=(5, 0))
+        ttk.Entry(sync, textvariable=self.fp_threshold_mp3_var, width=5).grid(row=4, column=1, sticky="w", pady=(5, 0))
+        ttk.Label(sync, text="AAC Thr:").grid(row=5, column=0, sticky="w", pady=(5, 0))
+        ttk.Entry(sync, textvariable=self.fp_threshold_aac_var, width=5).grid(row=5, column=1, sticky="w", pady=(5, 0))
 
         ttk.Button(
             sync, text="Match & Compare", command=self.build_comparison_table
-        ).grid(row=7, column=0, sticky="w", pady=(5, 0))
+        ).grid(row=6, column=0, sticky="w", pady=(5, 0))
         ttk.Label(sync, textvariable=self.sync_status_var).grid(
-            row=7, column=1, sticky="w", pady=(5, 0)
+            row=6, column=1, sticky="w", pady=(5, 0)
         )
 
         self.compare_frame = ttk.Frame(self.quality_tab)
@@ -2153,16 +2137,18 @@ class SoundVaultImporterApp(tk.Tk):
         path = self.require_library()
         if not path:
             return
-        out = filedialog.asksaveasfilename(
-            title="Save Subpar List",
-            defaultextension=".txt",
-            filetypes=[("Text", "*.txt")],
+        out_base = os.path.join(path, "subpar")
+        count = tidal_sync.scan_library_quality(path, out_base)
+        full_path = out_base + "_full.txt"
+        self.subpar_path_var.set(full_path)
+        self.subpar_list = tidal_sync.load_subpar_list(full_path)
+        messagebox.showinfo(
+            "Quality Scan", f"Saved {count} entries to {full_path}"
         )
-        if not out:
-            return
-        count = tidal_sync.scan_library_quality(path, out)
-        messagebox.showinfo("Quality Scan", f"Saved {count} entries to {out}")
-        self._log(f"Scan Quality written to {out}")
+        self.sync_status_var.set(f"Loaded {len(self.subpar_list)} subpar tracks.")
+        self._log(f"Scan Quality written to {full_path}")
+        if self.downloads_path_var.get():
+            self.build_comparison_table()
 
     def load_subpar_list(self):
         path = filedialog.askopenfilename(
