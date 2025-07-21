@@ -366,10 +366,9 @@ def _fingerprint(path: str, log_callback: Callable[[str], None] | None = None) -
             log_callback,
         )
         return fp
-    except Exception as exc:
-        msg = f"Failed to fingerprint {path}: {exc}"
-        _dlog(f"ERROR: {msg}", log_callback)
-        logging.error(msg)
+    except Exception as e:
+        if log_callback:
+            log_callback(f"! Fingerprint failed for {path}: {e}")
         return None
 
 
