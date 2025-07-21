@@ -148,3 +148,42 @@ def test_format_threshold_match(tmp_path, monkeypatch):
 
     assert (str(wav_file), str(mp3_file)) in set(res["improved"])
     flush_cache(str(db))
+
+
+def test_compare_libraries_relaxed_threshold(tmp_path, monkeypatch):
+    lib = tmp_path / "lib"
+    inc = tmp_path / "inc"
+    lib.mkdir()
+    inc.mkdir()
+
+    def make_wav(path):
+        import wave
+
+        with wave.open(str(path), "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(44100)
+            w.writeframes(b"\x00\x00" * 44100)
+
+    mp3_file = lib / "same.mp3"
+    wav_file = inc / "same.wav"
+    make_wav(mp3_file)
+    make_wav(wav_file)
+
+    def fake_fp(path):
+        if path.endswith(".wav"):
+            return 0, "10 20 30 40 50"
+        return 0, "10 20 30 40 51"
+
+    monkeypatch.setattr(sys.modules["acoustid"], "fingerprint_file", fake_fp)
+
+    db = tmp_path / "fp.db"
+    res = compare_libraries(
+        str(lib),
+        str(inc),
+        str(db),
+        threshold=0.5,
+    )
+
+    assert (str(wav_file), str(mp3_file)) in set(res["improved"])
+    flush_cache(str(db))
