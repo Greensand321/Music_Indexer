@@ -9,9 +9,9 @@ from pydub import AudioSegment, silence
 def _with_thresh(func, *args, **kwargs):
     """Call ``func`` with the correct silence threshold argument."""
     try:
-        return func(*args, silence_thresh=SILENCE_THRESH, **kwargs)
-    except TypeError:
         return func(*args, silence_threshold=SILENCE_THRESH, **kwargs)
+    except TypeError:
+        return func(*args, silence_thresh=SILENCE_THRESH, **kwargs)
 
 
 SILENCE_THRESH = -50  # dBFS used for silence detection

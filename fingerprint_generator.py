@@ -10,9 +10,9 @@ SILENCE_THRESH = -50  # dBFS used for silence detection
 
 def _with_thresh(func, *args, **kwargs):
     try:
-        return func(*args, silence_thresh=SILENCE_THRESH, **kwargs)
-    except TypeError:
         return func(*args, silence_threshold=SILENCE_THRESH, **kwargs)
+    except TypeError:
+        return func(*args, silence_thresh=SILENCE_THRESH, **kwargs)
 from concurrent.futures import ProcessPoolExecutor
 import acoustid
 from utils.path_helpers import ensure_long_path
