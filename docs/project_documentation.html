@@ -578,6 +578,9 @@ if __name__ == "__main__":
 <h3>2.6 Tidal-dl Sync (<code>tidal_sync.py</code>)</h3>
 <p>Matches your library against tidal-dl downloads and replaces low-quality files
 with their FLAC counterparts. Debug logs can be written for troubleshooting.</p>
+<p>The module also provides <code>find_library_duplicates()</code> which runs the
+indexer's deduplication pass on your library. Place any new songs directly in
+the library and call this helper to list duplicate pairs chosen by quality.</p>
 
 <hr>
 <h3>2.7 Normalize Genres (<code>normalize_controller.py</code>)</h3>
