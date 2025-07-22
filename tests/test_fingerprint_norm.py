@@ -34,7 +34,7 @@ def test_trim_leading_silence(tmp_path, monkeypatch):
     audio.export(path, format="wav")
     buf = audio_norm.normalize_for_fp(str(path), fingerprint_duration_ms=2000)
     seg = AudioSegment.from_file(buf)
-    lead = audio_norm.silence.detect_leading_silence(seg, silence_thresh=audio_norm.SILENCE_THRESH)
+    lead = audio_norm.silence.detect_leading_silence(seg, silence_threshold=audio_norm.SILENCE_THRESH)
     assert lead <= 100
 
 

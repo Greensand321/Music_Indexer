@@ -45,8 +45,8 @@ if 'pydub' not in sys.modules:
         def silent(cls, duration=0):
             return cls(duration)
     silence_mod = types.SimpleNamespace(
-        detect_leading_silence=lambda audio, silence_thresh=-50: 0,
-        detect_silence=lambda audio, min_silence_len=50, silence_thresh=-50: []
+        detect_leading_silence=lambda audio, silence_threshold=-50: 0,
+        detect_silence=lambda audio, min_silence_len=50, silence_threshold=-50: []
     )
     pydub.AudioSegment = _Seg
     pydub.silence = silence_mod
