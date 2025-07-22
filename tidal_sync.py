@@ -457,6 +457,22 @@ def _find_best_fp_match(
     )
 
 
+def find_library_duplicates(
+    library_root: str, log_callback: Callable[[str], None] | None = None
+) -> List[Tuple[str, str]]:
+    """Return duplicate track pairs detected within ``library_root``.
+
+    New songs should be placed directly inside the library before running so
+    the indexer's dedupe logic can compare everything at once. The returned
+    list contains ``(original_path, duplicate_path)`` pairs as determined by
+    :func:`music_indexer_api.find_duplicates` which prefers higher quality
+    formats when choosing the file to keep.
+    """
+    from music_indexer_api import find_duplicates as _find
+
+    return _find(library_root, log_callback)
+
+
 def match_downloads(
     subpar: List[Dict[str, str]],
     downloads: List[Dict[str, str]],
