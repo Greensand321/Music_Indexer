@@ -7,7 +7,6 @@ from typing import List, Dict, Tuple, Optional, Callable
 from mutagen import File as MutagenFile
 from mutagen.mp3 import MP3
 from mutagen.id3 import ID3, ID3NoHeaderError
-import acoustid
 import logging
 
 from music_indexer_api import fingerprint_distance, get_tags, sanitize
@@ -350,23 +349,22 @@ def _scan_one(path: str, log_callback: Callable[[str], None] | None = None) -> D
 
 
 def _fingerprint(path: str, log_callback: Callable[[str], None] | None = None) -> str | None:
-    from config import load_config
-    from audio_norm import normalize_for_fp
-
-    cfg = load_config()
-    offset = cfg.get("fingerprint_offset_ms", 0)
-    duration = cfg.get("fingerprint_duration_ms", 120_000)
-    allow = cfg.get("allow_mismatched_edits", True)
+    """Return fingerprint for ``path`` using ffmpeg and fpcalc."""
+    from chromaprint_utils import fingerprint_fpcalc, FingerprintError
 
     try:
-        buf = normalize_for_fp(path, offset, duration, allow, log_callback)
-        _, fp = acoustid.fingerprint_file(fileobj=buf)
-        _dlog(
-            f"DEBUG: Fingerprinting file: {path}; fp prefix={fp[:FP_PREFIX_LEN]!r}",
-            log_callback,
-        )
+        fp = fingerprint_fpcalc(path)
+        if fp:
+            _dlog(
+                f"DEBUG: Fingerprinting file: {path}; fp prefix={fp[:FP_PREFIX_LEN]!r}",
+                log_callback,
+            )
         return fp
-    except Exception as e:
+    except FingerprintError as e:
+        if log_callback:
+            log_callback(f"! Fingerprint failed for {path}: {e}")
+        return None
+    except Exception as e:  # pragma: no cover - unexpected failures
         if log_callback:
             log_callback(f"! Fingerprint failed for {path}: {e}")
         return None
