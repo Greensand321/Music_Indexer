@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 from collections import defaultdict
-from typing import Dict, Set, List, Iterable
+from typing import Dict, Set, List, Iterable, Tuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import logging
 
@@ -36,16 +36,13 @@ def _has_exclusion(info: Dict[str, str | None]) -> bool:
     return any(k in text for k in EXCLUSION_KEYWORDS)
 
 
-
-
-def _scan_album(
-    album: str,
+def _scan_paths(
     paths: Iterable[str],
     file_infos: Dict[str, Dict[str, str | None]],
     threshold: float,
     log_callback,
-) -> tuple[str, List[Set[str]], int]:
-    """Worker helper: scan a single album for near duplicates."""
+) -> Tuple[List[Set[str]], int]:
+    """Scan a list of paths for near duplicate clusters."""
     adj: Dict[str, Set[str]] = defaultdict(set)
     comparisons = 0
     path_list = list(paths)
@@ -77,6 +74,20 @@ def _scan_album(
                     stack.append(nb)
         if len(comp) > 1:
             clusters.append(comp)
+    return clusters, comparisons
+
+
+
+
+def _scan_album(
+    album: str,
+    paths: Iterable[str],
+    file_infos: Dict[str, Dict[str, str | None]],
+    threshold: float,
+    log_callback,
+) -> tuple[str, List[Set[str]], int]:
+    """Worker helper: scan a single album for near duplicates."""
+    clusters, comparisons = _scan_paths(paths, file_infos, threshold, log_callback)
     return album, clusters, comparisons
 
 
@@ -135,13 +146,56 @@ def find_near_duplicates(
     if coord is not None:
         coord.set_html_section("B", html_str)
 
+    cross_clusters: List[Set[str]] = []
+    if enable_cross_album:
+        cross_lines = ["<h2>Phase C – Cross-Album Near-Duplicates</h2>", "<pre>"]
+        by_song: Dict[Tuple[str, str], List[str]] = defaultdict(list)
+        for p in paths:
+            key = (
+                file_infos[p].get("primary") or "",
+                file_infos[p].get("title") or "",
+            )
+            by_song[key].append(p)
+
+        song_items = sorted(by_song.items(), key=lambda x: (x[0][0], x[0][1]))
+        total_songs = len(song_items)
+        with ThreadPoolExecutor(max_workers=max_workers) as ex:
+            futures = {}
+            for idx, ((prim, title), song_paths) in enumerate(song_items, start=1):
+                if len(song_paths) < 2:
+                    continue
+                logger.debug(
+                    f"Phase C: [{idx}/{total_songs}] Scanning '{title}' ({len(song_paths)} tracks)"
+                )
+                cross_lines.append(f"{title or '<no title>'} ({len(song_paths)} tracks)")
+                futures[ex.submit(_scan_paths, song_paths, file_infos, threshold, log_callback)] = (prim, title)
+
+            for fut in as_completed(futures):
+                _key = futures[fut]
+                try:
+                    c, comps = fut.result()
+                    cross_clusters.extend(c)
+                    if coord is not None and c:
+                        coord.add_near_dupe_clusters([list(s) for s in c])
+                    total_comparisons += comps
+                except Exception as e:
+                    logger.error(f"Phase C group '{_key}' failed: {e}")
+                    cross_lines.append(f"Error scanning group '{_key}'")
+
+        cross_lines.append("</pre>")
+        cross_html = "\n".join(cross_lines)
+        if coord is not None:
+            coord.set_html_section("C", cross_html)
+
     if logger.isEnabledFor(logging.DEBUG):
         logger.debug(
             f"Phase B summary: {total_albums} albums scanned, {total_comparisons} comparisons, {len(clusters)} clusters"
         )
 
+    all_clusters = clusters + cross_clusters
+
     to_delete: Dict[str, str] = {}
-    for cluster in clusters:
+    for cluster in all_clusters:
         by_alb: Dict[str, List[str]] = defaultdict(list)
         for path in cluster:
             album = file_infos[path].get("album") or ""
