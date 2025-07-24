@@ -460,15 +460,15 @@ def find_library_duplicates(
 ) -> List[Tuple[str, str]]:
     """Return duplicate track pairs detected within ``library_root``.
 
-    New songs should be placed directly inside the library before running so
-    the indexer's dedupe logic can compare everything at once. The returned
-    list contains ``(original_path, duplicate_path)`` pairs as determined by
-    :func:`music_indexer_api.find_duplicates` which prefers higher quality
-    formats when choosing the file to keep.
+    This version uses a lightweight fingerprint scan rather than invoking the
+    full indexer. Each audio file is fingerprinted or loaded from the cache and
+    compared against others to locate duplicates. The file with the best format
+    score is chosen to keep for each group.
     """
-    from music_indexer_api import find_duplicates as _find
 
-    return _find(library_root, log_callback)
+    from simple_duplicate_finder import find_duplicates as _find
+
+    return _find(library_root, log_callback=log_callback)
 
 
 def match_downloads(
