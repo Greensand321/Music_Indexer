@@ -151,7 +151,9 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
             if "min_samples" in cluster_cfg:
                 extras["min_samples"] = int(cluster_cfg["min_samples"])
             if "cluster_selection_epsilon" in cluster_cfg:
-                extras["cluster_selection_epsilon"] = float(cluster_cfg["cluster_selection_epsilon"])
+                extras["cluster_selection_epsilon"] = float(
+                    cluster_cfg["cluster_selection_epsilon"]
+                )
         params = {"min_cluster_size": min_cs, "method": "hdbscan", **extras}
     else:
         ttk.Label(frame, text=f"{name} panel coming soon…").pack(padx=10, pady=10)
@@ -232,7 +234,9 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
     auto_btn.pack(side="left", padx=(5, 0))
 
     if name == "Interactive – HDBSCAN":
-        redo_btn = ttk.Button(btn_frame, text="Redo Values", command=panel.open_param_dialog)
+        redo_btn = ttk.Button(
+            btn_frame, text="Redo Values", command=panel.open_param_dialog
+        )
         redo_btn.pack(side="left", padx=(5, 0))
 
     # ─── Hover Metadata Panel ────────────────────────────────────────────
@@ -272,7 +276,9 @@ class Tooltip:
         self.tipwindow = tw = tk.Toplevel(self.widget)
         tw.wm_overrideredirect(True)
         tw.wm_geometry(f"+{x}+{y}")
-        ttk.Label(tw, text=text, background="#ffffe0", relief="solid", borderwidth=1).pack()
+        ttk.Label(
+            tw, text=text, background="#ffffe0", relief="solid", borderwidth=1
+        ).pack()
 
     def _hide(self, _=None) -> None:
         if self.tipwindow:
@@ -358,7 +364,9 @@ class ReviewReplacementsFrame(ttk.Frame):
                 title = m.get(f"{key}_title", "")
                 artist = m.get(f"{key}_artist", "")
                 meta = f"{title}\n{artist}"
-                ttk.Label(self.inner, text=meta, justify="center", font=("TkDefaultFont", 8)).grid(
+                ttk.Label(
+                    self.inner, text=meta, justify="center", font=("TkDefaultFont", 8)
+                ).grid(
                     row=row,
                     column=col * 2 + 1,
                     sticky="n",
@@ -402,10 +410,8 @@ class SoundVaultImporterApp(tk.Tk):
 
         # tidal-dl sync state
         self.subpar_path_var = tk.StringVar(value="")
-        self.downloads_path_var = tk.StringVar(value="")
         self.sync_status_var = tk.StringVar(value="")
         self.subpar_list = []
-        self.downloads_list = []
         self.matches = []
         thr_cfg = cfg.get("format_fp_thresholds", {})
         self.fp_threshold_var = tk.DoubleVar(value=thr_cfg.get("default", 0.3))
@@ -448,12 +454,6 @@ class SoundVaultImporterApp(tk.Tk):
 
         # Build initial UI
         self.build_ui()
-
-        # Default the Downloads folder to the configured library root (if any);
-        # the user can still pick a different folder later from the Library Quality tab.
-        lib_root = cfg.get("library_root")
-        if lib_root and os.path.isdir(lib_root):
-            self.downloads_path_var.set(lib_root)
 
     def _configure_treeview_style(self):
         """Adjust Treeview row height based on current UI scale."""
@@ -578,18 +578,26 @@ class SoundVaultImporterApp(tk.Tk):
         options.grid(row=0, column=0, columnspan=2, sticky="w")
 
         self.dry_run_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(options, text="Dry Run", variable=self.dry_run_var).pack(side="left")
+        ttk.Checkbutton(options, text="Dry Run", variable=self.dry_run_var).pack(
+            side="left"
+        )
 
         self.phase_c_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(options, text="Enable Cross-Album Scan (Phase 3)", variable=self.phase_c_var).pack(side="left", padx=(5,0))
+        ttk.Checkbutton(
+            options, text="Enable Cross-Album Scan (Phase 3)", variable=self.phase_c_var
+        ).pack(side="left", padx=(5, 0))
 
         self.flush_cache_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(options, text="Flush Cache", variable=self.flush_cache_var).pack(side="left", padx=(5,0))
+        ttk.Checkbutton(
+            options, text="Flush Cache", variable=self.flush_cache_var
+        ).pack(side="left", padx=(5, 0))
 
         self.playlists_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(options, text="Create Playlists", variable=self.playlists_var).pack(side="left", padx=(5,0))
+        ttk.Checkbutton(
+            options, text="Create Playlists", variable=self.playlists_var
+        ).pack(side="left", padx=(5, 0))
 
-        ttk.Label(options, text="Max Workers:").pack(side="left", padx=(5,0))
+        ttk.Label(options, text="Max Workers:").pack(side="left", padx=(5, 0))
         self.worker_var = tk.StringVar(value="")
         ttk.Entry(options, textvariable=self.worker_var, width=4).pack(side="left")
 
@@ -638,7 +646,9 @@ class SoundVaultImporterApp(tk.Tk):
         status_frame = ttk.Frame(self.indexer_tab, width=400)
         status_frame.grid(row=2, column=0, columnspan=2, sticky="ew")
         status_frame.grid_propagate(False)
-        self.status_label = ttk.Label(status_frame, textvariable=self.status_var, anchor="w")
+        self.status_label = ttk.Label(
+            status_frame, textvariable=self.status_var, anchor="w"
+        )
         self.status_label.pack(fill="x")
         Tooltip(self.status_label, lambda: self._full_status)
 
@@ -679,49 +689,48 @@ class SoundVaultImporterApp(tk.Tk):
             self.quality_tab, text="Scan Quality", command=self.scan_quality
         ).pack(pady=5)
 
-        sync = ttk.LabelFrame(self.quality_tab, text="Tidal-dl Sync")
+        sync = ttk.LabelFrame(self.quality_tab, text="Duplicate Scan")
         sync.pack(fill="x", padx=10, pady=10)
         sync.columnconfigure(1, weight=1)
 
-        ttk.Button(
-            sync, text="Load Subpar List", command=self.load_subpar_list
-        ).grid(row=0, column=0, sticky="w")
         ttk.Label(sync, textvariable=self.subpar_path_var).grid(
-            row=0, column=1, columnspan=2, sticky="w"
+            row=0, column=0, columnspan=3, sticky="w"
         )
-        ttk.Button(sync, text="Select New Songs…", command=self._browse_downloads_folder).grid(row=1, column=0, sticky="w", pady=(5, 0))
-        ttk.Label(sync, textvariable=self.downloads_path_var).grid(row=1, column=1, columnspan=2, sticky="w", padx=(5, 0), pady=(5, 0))
-
 
         # --- Other sync-settings ------------------------------------------------------
         ttk.Label(sync, text="Default FP Thr:").grid(
-            row=2, column=0, sticky="w", pady=(5, 0)
+            row=1, column=0, sticky="w", pady=(5, 0)
         )
         ttk.Entry(sync, textvariable=self.fp_threshold_var, width=5).grid(
-            row=2, column=1, sticky="w", pady=(5, 0)
+            row=1, column=1, sticky="w", pady=(5, 0)
         )
         ttk.Checkbutton(
             sync,
             text="Verbose Debug",
             variable=self.sync_debug_var,
-        ).grid(row=2, column=2, sticky="w", pady=(5, 0))
+        ).grid(row=1, column=2, sticky="w", pady=(5, 0))
 
         # Make the middle column expand so the path field can stretch
         sync.columnconfigure(1, weight=1)
 
-
-        ttk.Label(sync, text="FLAC Thr:").grid(row=3, column=0, sticky="w", pady=(5, 0))
-        ttk.Entry(sync, textvariable=self.fp_threshold_flac_var, width=5).grid(row=3, column=1, sticky="w", pady=(5, 0))
-        ttk.Label(sync, text="MP3 Thr:").grid(row=4, column=0, sticky="w", pady=(5, 0))
-        ttk.Entry(sync, textvariable=self.fp_threshold_mp3_var, width=5).grid(row=4, column=1, sticky="w", pady=(5, 0))
-        ttk.Label(sync, text="AAC Thr:").grid(row=5, column=0, sticky="w", pady=(5, 0))
-        ttk.Entry(sync, textvariable=self.fp_threshold_aac_var, width=5).grid(row=5, column=1, sticky="w", pady=(5, 0))
+        ttk.Label(sync, text="FLAC Thr:").grid(row=2, column=0, sticky="w", pady=(5, 0))
+        ttk.Entry(sync, textvariable=self.fp_threshold_flac_var, width=5).grid(
+            row=2, column=1, sticky="w", pady=(5, 0)
+        )
+        ttk.Label(sync, text="MP3 Thr:").grid(row=3, column=0, sticky="w", pady=(5, 0))
+        ttk.Entry(sync, textvariable=self.fp_threshold_mp3_var, width=5).grid(
+            row=3, column=1, sticky="w", pady=(5, 0)
+        )
+        ttk.Label(sync, text="AAC Thr:").grid(row=4, column=0, sticky="w", pady=(5, 0))
+        ttk.Entry(sync, textvariable=self.fp_threshold_aac_var, width=5).grid(
+            row=4, column=1, sticky="w", pady=(5, 0)
+        )
 
         ttk.Button(
             sync, text="Match & Compare", command=self.build_comparison_table
-        ).grid(row=6, column=0, sticky="w", pady=(5, 0))
+        ).grid(row=5, column=0, sticky="w", pady=(5, 0))
         ttk.Label(sync, textvariable=self.sync_status_var).grid(
-            row=6, column=1, sticky="w", pady=(5, 0)
+            row=5, column=1, sticky="w", pady=(5, 0)
         )
 
         self.compare_frame = ttk.Frame(self.quality_tab)
@@ -746,9 +755,9 @@ class SoundVaultImporterApp(tk.Tk):
         ttk.Entry(path_frame, textvariable=self.tagfix_folder_var).pack(
             side="left", fill="x", expand=True
         )
-        ttk.Button(
-            path_frame, text="Browse…", command=self._browse_tagfix_folder
-        ).pack(side="left", padx=(5, 0))
+        ttk.Button(path_frame, text="Browse…", command=self._browse_tagfix_folder).pack(
+            side="left", padx=(5, 0)
+        )
         ttk.Button(path_frame, text="Scan", command=self.fix_tags_gui).pack(
             side="left", padx=(5, 0)
         )
@@ -864,22 +873,32 @@ class SoundVaultImporterApp(tk.Tk):
         path_row = ttk.Frame(self.sync_tab)
         path_row.pack(fill="x", padx=10, pady=(10, 5))
         ttk.Label(path_row, text="Library Folder:").grid(row=0, column=0, sticky="w")
-        ttk.Entry(path_row, textvariable=self.sync_library_var, state="readonly").grid(row=0, column=1, sticky="ew")
-        ttk.Button(path_row, text="Browse…", command=self._browse_sync_library).grid(row=0, column=2, padx=(5,0))
+        ttk.Entry(path_row, textvariable=self.sync_library_var, state="readonly").grid(
+            row=0, column=1, sticky="ew"
+        )
+        ttk.Button(path_row, text="Browse…", command=self._browse_sync_library).grid(
+            row=0, column=2, padx=(5, 0)
+        )
         path_row.columnconfigure(1, weight=1)
 
         inc_row = ttk.Frame(self.sync_tab)
         inc_row.pack(fill="x", padx=10, pady=(0, 5))
         ttk.Label(inc_row, text="Incoming Folder:").grid(row=0, column=0, sticky="w")
-        ttk.Entry(inc_row, textvariable=self.sync_incoming_var).grid(row=0, column=1, sticky="ew")
-        ttk.Button(inc_row, text="Browse…", command=self._browse_sync_incoming).grid(row=0, column=2, padx=(5,0))
+        ttk.Entry(inc_row, textvariable=self.sync_incoming_var).grid(
+            row=0, column=1, sticky="ew"
+        )
+        ttk.Button(inc_row, text="Browse…", command=self._browse_sync_incoming).grid(
+            row=0, column=2, padx=(5, 0)
+        )
         inc_row.columnconfigure(1, weight=1)
 
-        ttk.Button(self.sync_tab, text="Scan", command=self._scan_library_sync).pack(pady=5)
+        ttk.Button(self.sync_tab, text="Scan", command=self._scan_library_sync).pack(
+            pady=5
+        )
 
         lists = ttk.Frame(self.sync_tab)
         lists.pack(fill="both", expand=True, padx=10, pady=5)
-        lists.columnconfigure((0,1,2), weight=1)
+        lists.columnconfigure((0, 1, 2), weight=1)
 
         ttk.Label(lists, text="New Tracks").grid(row=0, column=0)
         ttk.Label(lists, text="Existing").grid(row=0, column=1)
@@ -893,12 +912,17 @@ class SoundVaultImporterApp(tk.Tk):
         self.sync_improved_list.grid(row=1, column=2, sticky="nsew")
 
         actions = ttk.Frame(self.sync_tab)
-        actions.pack(fill="x", padx=10, pady=(0,10))
-        ttk.Checkbutton(actions, text="Auto-Update Playlists", variable=self.sync_auto_var).pack(side="left")
-        ttk.Button(actions, text="Copy New", command=self._copy_new_tracks).pack(side="left", padx=(5,0))
-        ttk.Button(actions, text="Replace Selected", command=self._replace_selected).pack(side="left", padx=(5,0))
+        actions.pack(fill="x", padx=10, pady=(0, 10))
+        ttk.Checkbutton(
+            actions, text="Auto-Update Playlists", variable=self.sync_auto_var
+        ).pack(side="left")
+        ttk.Button(actions, text="Copy New", command=self._copy_new_tracks).pack(
+            side="left", padx=(5, 0)
+        )
+        ttk.Button(
+            actions, text="Replace Selected", command=self._replace_selected
+        ).pack(side="left", padx=(5, 0))
 
-        
         # after your other tabs
         help_frame = ttk.Frame(self.notebook)
         self.notebook.add(help_frame, text="Help")
@@ -1060,7 +1084,8 @@ class SoundVaultImporterApp(tk.Tk):
                 def ui_complete() -> None:
                     if summary["dry_run"]:
                         messagebox.showinfo(
-                            "Dry Run Complete", f"Preview written to:\n{summary['html']}"
+                            "Dry Run Complete",
+                            f"Preview written to:\n{summary['html']}",
                         )
                     else:
                         moved = summary.get("moved", 0)
@@ -1070,7 +1095,9 @@ class SoundVaultImporterApp(tk.Tk):
                         )
 
                     if summary.get("errors"):
-                        self._log("! Some files failed to import. Check log for details.")
+                        self._log(
+                            "! Some files failed to import. Check log for details."
+                        )
 
                     self._log(
                         f"✓ Import finished for {import_folder} → {vault}. Dry run: {dry_run}. BPM: {estimate}."
@@ -1078,6 +1105,7 @@ class SoundVaultImporterApp(tk.Tk):
 
                 self.after(0, ui_complete)
             except Exception as e:
+
                 def ui_err() -> None:
                     messagebox.showerror("Import failed", str(e))
                     self._log(f"✘ Import failed for {import_folder}: {e}")
@@ -1118,6 +1146,7 @@ class SoundVaultImporterApp(tk.Tk):
         def progress(idx, total, path_, phase="A"):
             if cancel_event.is_set():
                 raise IndexCancelled()
+
             def ui():
                 bar = {
                     "A": self.phase_a_bar,
@@ -1148,9 +1177,11 @@ class SoundVaultImporterApp(tk.Tk):
                 if dups:
                     proceed = []
                     ev = threading.Event()
+
                     def ask():
                         proceed.append(self._confirm_duplicates(dups))
                         ev.set()
+
                     self.after(0, ask)
                     ev.wait()
                     if not proceed[0]:
@@ -1160,9 +1191,13 @@ class SoundVaultImporterApp(tk.Tk):
                 not_sorted = os.path.join(path, "Not Sorted")
                 os.makedirs(not_sorted, exist_ok=True)
                 ev = threading.Event()
+
                 def show_popup():
                     dlg = UnsortedPopup(self, not_sorted)
-                    dlg.bind("<Destroy>", lambda e: ev.set() if e.widget is dlg else None)
+                    dlg.bind(
+                        "<Destroy>", lambda e: ev.set() if e.widget is dlg else None
+                    )
+
                 self.after(0, show_popup)
                 ev.wait()
 
@@ -1207,7 +1242,9 @@ class SoundVaultImporterApp(tk.Tk):
                 import traceback
 
                 err_msg = traceback.format_exc().strip()
-                self.after(0, lambda m=err_msg: messagebox.showerror("Indexing failed", m))
+                self.after(
+                    0, lambda m=err_msg: messagebox.showerror("Indexing failed", m)
+                )
                 self.after(
                     0,
                     lambda m=err_msg: self._log(
@@ -1651,9 +1688,15 @@ class SoundVaultImporterApp(tk.Tk):
                             records = payload
                             self.all_records = records
                             for rec in self.all_records:
-                                rec.old_genres = normalize_genres(rec.old_genres, self.genre_mapping)
-                                rec.new_genres = normalize_genres(rec.new_genres, self.genre_mapping)
-                            self.tagfix_progress["value"] = self.tagfix_progress["maximum"]
+                                rec.old_genres = normalize_genres(
+                                    rec.old_genres, self.genre_mapping
+                                )
+                                rec.new_genres = normalize_genres(
+                                    rec.new_genres, self.genre_mapping
+                                )
+                            self.tagfix_progress["value"] = self.tagfix_progress[
+                                "maximum"
+                            ]
                             self._refresh_tagfix_view()
                             return
                         elif tag == "log":
@@ -1816,22 +1859,6 @@ class SoundVaultImporterApp(tk.Tk):
             self.tagfix_folder_var.set(folder)
 
     # ── Library Quality Helpers ───────────────────────────────────────
-    def _browse_downloads_folder(self):
-        """Ask the user to choose the downloads folder and scan it."""
-        initial = self.downloads_path_var.get() or load_last_path()
-        folder = filedialog.askdirectory(
-            title="Select Downloads Folder", initialdir=initial
-        )
-        if folder:
-            save_last_path(folder)
-            self.downloads_path_var.set(folder)
-            tidal_sync.set_debug(self.sync_debug_var.get(), self.library_path or ".")
-            self.downloads_list = tidal_sync.scan_downloads(
-                folder, log_callback=self._log
-            )
-            self.sync_status_var.set(
-                f"Scanned {len(self.downloads_list)} downloaded tracks."
-            )
 
     def _select_all_tagfix(self):
         self.tagfix_tree.selection_set(self.tagfix_tree.get_children(""))
@@ -1957,7 +1984,10 @@ class SoundVaultImporterApp(tk.Tk):
             self._log(f"✘ Playback failed for {path}: {e}")
 
     def _open_tagfix_debug_window(self):
-        if getattr(self, "tagfix_debug_win", None) and self.tagfix_debug_win.winfo_exists():
+        if (
+            getattr(self, "tagfix_debug_win", None)
+            and self.tagfix_debug_win.winfo_exists()
+        ):
             return
         win = tk.Toplevel(self)
         win.title("Tag Fixer Debug")
@@ -2140,111 +2170,56 @@ class SoundVaultImporterApp(tk.Tk):
         full_path = out_base + "_full.txt"
         self.subpar_path_var.set(full_path)
         self.subpar_list = tidal_sync.load_subpar_list(full_path)
-        messagebox.showinfo(
-            "Quality Scan", f"Saved {count} entries to {full_path}"
-        )
+        messagebox.showinfo("Quality Scan", f"Saved {count} entries to {full_path}")
         self.sync_status_var.set(f"Loaded {len(self.subpar_list)} subpar tracks.")
         self._log(f"Scan Quality written to {full_path}")
 
-    def load_subpar_list(self):
-        path = filedialog.askopenfilename(
-            title="Select Subpar List", filetypes=[("Text", "*.txt")]
-        )
+    def build_comparison_table(self):
+        path = self.require_library()
         if not path:
             return
-        self.subpar_path_var.set(path)
-        self.subpar_list = tidal_sync.load_subpar_list(path)
-        self.sync_status_var.set(f"Loaded {len(self.subpar_list)} subpar tracks.")
 
-    def scan_downloads_folder(self):
-        initial = self.downloads_path_var.get() or load_last_path()
-        folder = filedialog.askdirectory(title="Select Download Folder", initialdir=initial)
-        if not folder:
-            return
-        self.downloads_path_var.set(folder)
-        cfg = load_config()
-        cfg["library_root"] = folder
-        save_config(cfg)
-        self.sync_status_var.set("Scanning downloads…")
-
-        def log_line(msg: str) -> None:
-            self.after(0, lambda m=msg: self._log(m))
-
-        def task() -> None:
-            tidal_sync.set_debug(self.sync_debug_var.get(), self.library_path or ".")
-            items = tidal_sync.scan_downloads(folder, log_callback=log_line)
-
-            def ui() -> None:
-                self.downloads_list = items
-                self.sync_status_var.set(f"Scanned {len(items)} downloaded tracks.")
-
-            self.after(0, ui)
-
-        threading.Thread(target=task, daemon=True).start()
-
-
-    def build_comparison_table(self):
-        thr_default = float(self.fp_threshold_var.get() or 0.3)
-        thresholds = {
-            "default": thr_default,
-            ".flac": float(self.fp_threshold_flac_var.get() or thr_default),
-            ".mp3": float(self.fp_threshold_mp3_var.get() or thr_default),
-            ".aac": float(self.fp_threshold_aac_var.get() or thr_default),
-        }
-        cfg = load_config()
-        cfg["format_fp_thresholds"] = thresholds
-        save_config(cfg)
-        tidal_sync.set_debug(self.sync_debug_var.get(), self.library_path or ".")
-        total = len(self.subpar_list)
-        self.sync_status_var.set(f"Matching 0/{total}")
-
-        def progress(idx: int) -> None:
-            self.after(0, lambda i=idx: self.sync_status_var.set(f"Matching {i}/{total}"))
+        tidal_sync.set_debug(self.sync_debug_var.get(), path or ".")
+        self.sync_status_var.set("Scanning duplicates…")
 
         q = queue.Queue()
         self.match_queue = q
         self.matches = []
 
-        def task():
+        def task() -> None:
             try:
-                tidal_sync.match_downloads(
-                    self.subpar_list,
-                    self.downloads_list,
-                    thresholds=thresholds,
-                    log_callback=self._log,
-                    progress_callback=progress,
-                    result_callback=q.put,
-                )
-                q.put("done")
+                dups = tidal_sync.find_library_duplicates(path, log_callback=self._log)
+                q.put(dups)
             except Exception as e:
                 q.put(("error", str(e)))
 
         threading.Thread(target=task, daemon=True).start()
-        self.after(100, self.poll_queue)
 
-    def poll_queue(self):
-        try:
-            while True:
-                item = self.match_queue.get_nowait()
-                if item == "done":
-                    num_tag = sum(1 for m in self.matches if m.get("method") == "Tag")
-                    num_fp = sum(1 for m in self.matches if m.get("method") == "Fingerprint")
-                    num_none = sum(1 for m in self.matches if m.get("download") is None)
-                    self.sync_status_var.set(
-                        f"{num_tag} tag matches, {num_fp} fingerprint matches, {num_none} no matches"
-                    )
-                    self._render_comparison_table()
-                    self.populate_review_table(self.matches)
-                    return
-                elif isinstance(item, tuple) and item[0] == "error":
-                    messagebox.showerror("Match Failed", item[1])
-                    return
-                else:
-                    self.matches.append(item)
-                    self._render_comparison_table()
-        except queue.Empty:
-            pass
-        self.after(100, self.poll_queue)
+        def poll():
+            try:
+                res = q.get_nowait()
+            except queue.Empty:
+                self.after(100, poll)
+                return
+            if isinstance(res, tuple) and res[0] == "error":
+                messagebox.showerror("Duplicate Scan Failed", res[1])
+                return
+            self.matches = [
+                {
+                    "original": o,
+                    "download": n,
+                    "score": None,
+                    "method": "Duplicate",
+                    "note": "",
+                    "candidates": [],
+                }
+                for o, n in res
+            ]
+            self.sync_status_var.set(f"Found {len(self.matches)} duplicates")
+            self._render_comparison_table()
+            self.populate_review_table(self.matches)
+
+        self.after(100, poll)
 
     def _render_comparison_table(self):
         for w in self.compare_frame.winfo_children():
@@ -2328,10 +2303,11 @@ class SoundVaultImporterApp(tk.Tk):
         replaced = 0
         for iid in sels:
             match = next((m for m in self.matches if m["original"] == iid), None)
-            if match and match.get("download") and not (
-                match.get("note") and "Ambiguous" in match.get("note")
-            ) and not (
-                match.get("note") and "Error" in match.get("note")
+            if (
+                match
+                and match.get("download")
+                and not (match.get("note") and "Ambiguous" in match.get("note"))
+                and not (match.get("note") and "Error" in match.get("note"))
             ):
                 try:
                     tidal_sync.replace_file(match["original"], match["download"])
@@ -2344,13 +2320,17 @@ class SoundVaultImporterApp(tk.Tk):
     # ── Library Sync Helpers ───────────────────────────────────────────
     def _browse_sync_library(self):
         initial = self.sync_library_var.get() or load_last_path()
-        folder = filedialog.askdirectory(title="Select Library Folder", initialdir=initial)
+        folder = filedialog.askdirectory(
+            title="Select Library Folder", initialdir=initial
+        )
         if folder:
             self.sync_library_var.set(folder)
 
     def _browse_sync_incoming(self):
         initial = self.sync_incoming_var.get() or load_last_path()
-        folder = filedialog.askdirectory(title="Select Incoming Folder", initialdir=initial)
+        folder = filedialog.askdirectory(
+            title="Select Incoming Folder", initialdir=initial
+        )
         if folder:
             self.sync_incoming_var.set(folder)
 
@@ -2358,7 +2338,9 @@ class SoundVaultImporterApp(tk.Tk):
         lib = self.sync_library_var.get()
         inc = self.sync_incoming_var.get()
         if not lib or not inc:
-            messagebox.showwarning("Scan", "Please choose library and incoming folders.")
+            messagebox.showwarning(
+                "Scan", "Please choose library and incoming folders."
+            )
             return
         db = os.path.join(lib, "Docs", ".soundvault.db")
         cfg = load_config()
@@ -2394,7 +2376,9 @@ class SoundVaultImporterApp(tk.Tk):
         if not idxs:
             return
         sels = [self.sync_new[int(i)] for i in idxs]
-        dests = library_sync.copy_new_tracks(sels, self.sync_incoming_var.get(), self.sync_library_var.get())
+        dests = library_sync.copy_new_tracks(
+            sels, self.sync_incoming_var.get(), self.sync_library_var.get()
+        )
         if self.sync_auto_var.get():
             playlist_generator.update_playlists(dests)
         messagebox.showinfo("Copy New", f"Copied {len(dests)} files")
