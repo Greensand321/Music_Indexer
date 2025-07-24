@@ -38,7 +38,8 @@ python main_gui.py
 5. **Clustered Playlists** (interactive K-Means/HDBSCAN) via the Tools ▸ Clustered Playlists menu
 6. **Tidal-dl Sync** can upgrade low-quality files to FLAC
 7. **Library Duplicate Scan** finds duplicate tracks after you drop new songs directly into your library
-8. Use the **Theme** dropdown and **Help** tab for assistance
+8. **Cross-Album Scan** optionally finds duplicates appearing on multiple albums
+9. Use the **Theme** dropdown and **Help** tab for assistance
 
 Cluster generation writes progress into `<method>_log.txt` inside your library so you can review the steps later.
 

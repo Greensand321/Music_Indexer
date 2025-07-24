@@ -762,16 +762,8 @@ def build_dry_run_html(
         lines.append("</pre>")
         return "\n".join(lines)
 
-    def build_cross_album_section() -> str:
-        if not enable_phase_c:
-            return ""
-        return "<h2>Phase C – Cross-Album</h2>"
-
     sec_a = build_exact_metadata_section()
     coord.set_html_section('A', sec_a)
-    sec_c = build_cross_album_section()
-    if sec_c:
-        coord.set_html_section('C', sec_c)
 
     html_body = coord.assemble_final_report()
 
