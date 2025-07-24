@@ -231,7 +231,11 @@ def scan_library_quality(library_root: str, outfile: str) -> int:
     return len(items)
 
 
-def load_subpar_list(path: str, db_path: str | None = None) -> List[Dict[str, str]]:
+def load_subpar_list(
+    path: str,
+    db_path: str | None = None,
+    log_callback: Callable[[str], None] | None = None,
+) -> List[Dict[str, str]]:
     """Read a txt list produced by :func:`scan_library_quality`.
 
     Lines must contain ``Artist – Title – Album – FullPath``. If a full path is
@@ -265,7 +269,18 @@ def load_subpar_list(path: str, db_path: str | None = None) -> List[Dict[str, st
             fpath = fpath or ""
             if fpath and not os.path.isabs(fpath):
                 fpath = os.path.join(root, fpath)
+            _dlog(
+                f"DEBUG: Parsed line -> artist={artist!r}, title={title!r}, album={album!r}, path={fpath}",
+                log_callback,
+            )
             fp = get_fingerprint(fpath, db_path, _compute_fp) if fpath else None
+            if fp:
+                _dlog(
+                    f"DEBUG: Cached fingerprint prefix for {fpath}: {fp[:FP_PREFIX_LEN]!r}",
+                    log_callback,
+                )
+            else:
+                _dlog(f"DEBUG: No fingerprint for {fpath}", log_callback)
             out.append(
                 {
                     "artist": artist,
@@ -289,6 +304,7 @@ def scan_downloads(
     ``max_workers`` controls the number of threads used for fingerprinting.
     A value of ``1`` preserves the previous serial behaviour.
     """
+    _dlog(f"DEBUG: Scanning downloads folder: {folder}", log_callback)
     items: List[Dict[str, str]] = []
 
     if max_workers <= 1:
@@ -313,6 +329,7 @@ def scan_downloads(
         for _path, fut in futures:
             items.append(fut.result())
 
+    _dlog(f"DEBUG: Completed scanning downloads folder: {folder}", log_callback)
     return items
 
 
@@ -320,8 +337,17 @@ def _scan_one(
     path: str, log_callback: Callable[[str], None] | None = None
 ) -> Dict[str, str]:
     """Read tags and fingerprint a single file."""
+    _dlog(f"DEBUG: Scanning file: {path}", log_callback)
     tags = _read_tags(path)
+    _dlog(
+        f"DEBUG: Tags for {path}: artist={tags.get('artist')!r}, title={tags.get('title')!r}, album={tags.get('album')!r}",
+        log_callback,
+    )
     fp = _fingerprint(path, log_callback)
+    if fp:
+        _dlog(f"DEBUG: Fingerprint prefix for {path}: {fp[:FP_PREFIX_LEN]!r}", log_callback)
+    else:
+        _dlog(f"DEBUG: No fingerprint for {path}", log_callback)
     return {
         "artist": tags.get("artist"),
         "title": tags.get("title"),
@@ -339,6 +365,7 @@ def _fingerprint(
     from chromaprint_utils import fingerprint_fpcalc, FingerprintError
 
     try:
+        _dlog(f"DEBUG: Starting fingerprint for {path}", log_callback)
         fp = fingerprint_fpcalc(path)
         if fp:
             _dlog(
@@ -404,6 +431,10 @@ def _find_best_fp_match(
     best_dist = 1.0
     distances: List[float] = []
     for c in cands:
+        _dlog(
+            f"DEBUG: Comparing candidate {c.get('path')} to {orig_path}",
+            log_callback,
+        )
         dist = fingerprint_distance(orig_fp, c.get("fingerprint"))
         distances.append(dist)
         ext = os.path.splitext(c.get("path") or "")[1].lower()
@@ -428,6 +459,7 @@ def _find_best_fp_match(
     best_ext = os.path.splitext(best.get("path") or "")[1].lower()
     best_thr = thresholds.get(best_ext, thresholds.get("default", 0.3))
     if best_dist >= best_thr:
+        _dlog("DEBUG: Best candidate failed threshold", log_callback)
         return (
             (None, best_dist, False, None)
             if return_candidates
@@ -444,6 +476,10 @@ def _find_best_fp_match(
         ]
         cand_list = close
 
+    _dlog(
+        f"DEBUG: Selected best candidate {best.get('path') if best else None} distance={best_dist:.4f}",
+        log_callback,
+    )
     return (
         (best, best_dist, ambiguous, cand_list)
         if return_candidates
@@ -513,6 +549,10 @@ def match_downloads(
         progress_callback = lambda idx: None
 
     for idx, sp in enumerate(subpar, start=1):
+        _dlog(
+            f"DEBUG: Processing subpar {idx}/{len(subpar)} path={sp.get('path')}",
+            log_callback,
+        )
         key_exact = (
             (sp.get("artist") or "").lower(),
             (sp.get("title") or "").lower(),
@@ -617,6 +657,10 @@ def match_downloads(
             f"DEBUG: Best match: {best['path'] if best else None} with score={score if score is not None else float('nan'):.4f}",
             log_callback,
         )
+        _dlog(
+            f"DEBUG: Match method={method} note={note} candidates={cand_paths}",
+            log_callback,
+        )
         match = {
             "original": sp["path"],
             "download": None if best is None else best["path"],
@@ -631,6 +675,7 @@ def match_downloads(
             result_callback(match)
         if progress_callback:
             progress_callback(idx)
+    _dlog(f"DEBUG: Matching complete, {len(matches)} results", log_callback)
     return matches
 
 
