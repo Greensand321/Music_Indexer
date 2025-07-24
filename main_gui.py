@@ -2265,6 +2265,8 @@ class SoundVaultImporterApp(tk.Tk):
         cfg = load_config()
         thresholds = cfg.get("format_fp_thresholds", DEFAULT_FP_THRESHOLDS)
 
+        library_sync.set_debug(self.sync_debug_var.get(), lib or ".")
+
         def task():
             try:
                 res = library_sync.compare_libraries(
@@ -2296,7 +2298,9 @@ class SoundVaultImporterApp(tk.Tk):
             return
         sels = [self.sync_new[int(i)] for i in idxs]
         dests = library_sync.copy_new_tracks(
-            sels, self.sync_incoming_var.get(), self.sync_library_var.get()
+            sels,
+            self.sync_incoming_var.get(),
+            self.sync_library_var.get(),
         )
         if self.sync_auto_var.get():
             playlist_generator.update_playlists(dests)
