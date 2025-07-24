@@ -2110,9 +2110,12 @@ class SoundVaultImporterApp(tk.Tk):
         self.match_queue = q
         self.matches = []
 
+        def log_line(msg: str) -> None:
+            self.after(0, lambda m=msg: self._log(m))
+
         def task() -> None:
             try:
-                dups = tidal_sync.find_library_duplicates(path, log_callback=self._log)
+                dups = tidal_sync.find_library_duplicates(path, log_callback=log_line)
                 q.put(dups)
             except Exception as e:
                 q.put(("error", str(e)))
