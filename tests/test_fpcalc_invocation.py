@@ -8,7 +8,7 @@ cu = importlib.import_module('chromaprint_utils')
 
 def test_fpcalc_invocation_and_prefix(monkeypatch):
     monkeypatch.setattr(cu, "ensure_tool", lambda name: None)
-    monkeypatch.setattr(cu, "strip_long_path_prefix", lambda p: p[4:] if p.startswith("\\\\?\\") else p)
+    monkeypatch.setattr(cu, "strip_ext_prefix", lambda p: p[4:] if p.startswith("\\\\?\\") else p)
 
     captured = {}
 

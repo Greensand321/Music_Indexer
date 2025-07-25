@@ -10,10 +10,7 @@ import subprocess
 from pathlib import Path
 from typing import Iterable
 
-
-def strip_ext_prefix(p: str) -> str:
-    """Remove Windows extended-length path prefix."""
-    return p[4:] if p.startswith(r"\\?\\") else p
+from utils.path_helpers import strip_ext_prefix
 
 
 def expand_files(inputs: Iterable[str]) -> list[str]:

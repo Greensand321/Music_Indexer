@@ -4,7 +4,10 @@ import os
 import json
 import shutil
 
-from utils.path_helpers import strip_long_path_prefix
+from utils.path_helpers import strip_ext_prefix
+
+# Backwards compatibility -------------------------------------------------
+strip_long_path_prefix = strip_ext_prefix
 
 class FingerprintError(Exception):
     """Raised when fingerprint computation fails."""
@@ -75,7 +78,7 @@ def fingerprint_fpcalc(
                 min_silence_duration=min_silence_duration,
             )
             to_process = tmp
-        safe_path = strip_long_path_prefix(to_process)
+        safe_path = strip_ext_prefix(to_process)
         cmd = ["fpcalc", "-json", safe_path]
         proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         if proc.returncode != 0:
