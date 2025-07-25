@@ -575,16 +575,7 @@ def main():
 if __name__ == "__main__":
     main()
 </code></pre>
-<h3>2.6 Tidal-dl Sync (<code>tidal_sync.py</code>)</h3>
-<p>Matches your library against tidal-dl downloads and replaces low-quality files
-with their FLAC counterparts. Debug logs can be written for troubleshooting.</p>
-<p>The module also provides <code>find_library_duplicates()</code> which performs
-a lightweight fingerprint scan to locate duplicate tracks in your library. Any
-new songs can simply be dropped into the library and this helper will compare
-fingerprints and return duplicate pairs with the preferred file chosen by
-format quality.</p>
 
-<hr>
 <h3>2.7 Normalize Genres (<code>normalize_controller.py</code>)</h3>
 <p>Maps raw genre tags to canonical genres using a JSON mapping file. Updated tags are written back to each track.</p>
 
@@ -621,7 +612,6 @@ format quality.</p>
   <li><strong>Unique Genre Lister</strong>: <code>genre_list_controller.py</code> creates <code>genres.html</code> showing all distinct raw genre tags in one place.</li>
   <li><strong>Genre Updater</strong>: <code>update_genres.py</code> connects to MusicBrainz, pulls top 3 tags per track, and writes them into files—skipping files that already have ≥ 2 genres.</li>
   <li><strong>Library Index</strong>: <code>library_index_controller.py</code> builds <code>library_index.html</code>, a table listing path, artist, title, album, year, track, and genre(s) for every audio file. Useful for quick review.</li>
-  <li><strong>Tidal-dl Sync</strong>: <code>tidal_sync.py</code> upgrades MP3s to FLAC by matching downloads.</li>
   <li><strong>Near-Duplicate Detector</strong>: integrated into <code>music_indexer_api.py</code> to remove fuzzy duplicates.</li>
   <li><strong>Clustered Playlists</strong>: interactive K-Means and HDBSCAN clustering with a graph-based panel.</li>
   <li><strong>UI Enhancements</strong>: theme selector and automatic DPI scaling.</li>

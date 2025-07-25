@@ -49,7 +49,7 @@ The indexer automatically prefixes file paths with `\\?\` on Windows, allowing i
 
 ## Threading
 
-Long running actions such as indexing, tag fixing and tidal-dl comparison are executed in daemon threads. GUI updates from these background tasks are scheduled using Tkinter's `after` method so message boxes and progress indicators always run on the main thread.
+Long running actions such as indexing, tag fixing and library sync operations are executed in daemon threads. GUI updates from these background tasks are scheduled using Tkinter's `after` method so message boxes and progress indicators always run on the main thread.
 
 ## Configuration
 
@@ -64,7 +64,7 @@ threshold used during deduplication, add a value like:
 
 Lower values require more similar fingerprints.
 
-Per-format fingerprint thresholds used by the tidal-dl matcher can also be
+Per-format fingerprint thresholds used by the sync matcher can also be
 configured. Add a `format_fp_thresholds` section with extension keys:
 
 ```json
@@ -122,7 +122,6 @@ fingerprint_cache.py      - Persistent fingerprint cache
 near_duplicate_detector.py - Fuzzy near-duplicate detection helpers
 tag_fixer.py              - Tag fixing engine using plugin metadata
 update_genres.py          - Batch genre tag updater via MusicBrainz
-tidal_sync.py             - Sync tidal-dl downloads to upgrade your library
 validator.py              - Verify SoundVault folder layout
 config.py                 - Read/write persistent configuration
 mutagen_stub/             - Minimal fallback used by the tests
