@@ -8,14 +8,14 @@ from fingerprint_cache import flush_cache
 
 
 def load_module(monkeypatch):
-    acoustid_stub = types.ModuleType('acoustid')
+    chroma_stub = types.ModuleType('chromaprint_utils')
     fp_map = {
         'a.mp3': '1 2',
         'b.flac': '1 2',
         'c.mp3': '9 9',
     }
-    acoustid_stub.fingerprint_file = lambda p: (0, fp_map[os.path.basename(p)])
-    monkeypatch.setitem(sys.modules, 'acoustid', acoustid_stub)
+    chroma_stub.fingerprint_fpcalc = lambda p: fp_map[os.path.basename(p)]
+    monkeypatch.setitem(sys.modules, 'chromaprint_utils', chroma_stub)
     importlib.reload(sdf)
     return sdf
 

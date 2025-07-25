@@ -16,9 +16,9 @@ id3_stub.ID3NoHeaderError = Exception
 mutagen_stub.id3 = id3_stub
 sys.modules['mutagen'] = mutagen_stub
 sys.modules['mutagen.id3'] = id3_stub
-acoustid_stub = types.ModuleType('acoustid')
-acoustid_stub.fingerprint_file = lambda p: (0, 'hash')
-sys.modules['acoustid'] = acoustid_stub
+chroma_stub = types.ModuleType('chromaprint_utils')
+chroma_stub.fingerprint_fpcalc = lambda p: 'hash'
+sys.modules['chromaprint_utils'] = chroma_stub
 
 from music_indexer_api import build_dry_run_html
 

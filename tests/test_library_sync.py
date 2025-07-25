@@ -2,7 +2,7 @@ import types
 import sys
 import os
 
-# Stub mutagen and acoustid
+# Stub mutagen and chromaprint_utils
 mutagen_stub = types.ModuleType('mutagen')
 class DummyAudio:
     def __init__(self, bitrate=128000):
@@ -18,15 +18,15 @@ mutagen_stub.id3 = id3_stub
 sys.modules['mutagen'] = mutagen_stub
 sys.modules['mutagen.id3'] = id3_stub
 
-acoustid_stub = types.ModuleType('acoustid')
+chroma_stub = types.ModuleType('chromaprint_utils')
 fp_map = {
     'a.flac': '1 2',
     'b.mp3': '2 3',
     'b.flac': '2 3',
     'new.mp3': '9 9',
 }
-acoustid_stub.fingerprint_file = lambda p: (0, fp_map.get(os.path.basename(p), 'x'))
-sys.modules['acoustid'] = acoustid_stub
+chroma_stub.fingerprint_fpcalc = lambda p: fp_map.get(os.path.basename(p), 'x')
+sys.modules['chromaprint_utils'] = chroma_stub
 
 import importlib
 import music_indexer_api
@@ -133,10 +133,10 @@ def test_format_threshold_match(tmp_path, monkeypatch):
 
     def fake_fp(path):
         if path.endswith(".wav"):
-            return 0, "1 2 3 4"
-        return 0, "1 2 3 5"
+            return "1 2 3 4"
+        return "1 2 3 5"
 
-    monkeypatch.setattr(sys.modules["acoustid"], "fingerprint_file", fake_fp)
+    monkeypatch.setattr(sys.modules["chromaprint_utils"], "fingerprint_fpcalc", fake_fp)
 
     db = tmp_path / "fp.db"
     res = compare_libraries(
@@ -172,10 +172,10 @@ def test_compare_libraries_relaxed_threshold(tmp_path, monkeypatch):
 
     def fake_fp(path):
         if path.endswith(".wav"):
-            return 0, "10 20 30 40 50"
-        return 0, "10 20 30 40 51"
+            return "10 20 30 40 50"
+        return "10 20 30 40 51"
 
-    monkeypatch.setattr(sys.modules["acoustid"], "fingerprint_file", fake_fp)
+    monkeypatch.setattr(sys.modules["chromaprint_utils"], "fingerprint_fpcalc", fake_fp)
 
     db = tmp_path / "fp.db"
     res = compare_libraries(

@@ -38,14 +38,20 @@ def _ensure_db(db_path: str) -> sqlite3.Connection:
 def get_fingerprint(
     path: str,
     db_path: str,
-    compute_func: Callable[[str], tuple[int | None, str | None]]
+    compute_func: Callable[[str], tuple[int | None, str | None]],
+    log_callback: Optional[Callable[[str], None]] = None,
 ) -> Optional[str]:
     """Return fingerprint for path using cache; compute if missing."""
+    if log_callback is None:
+        log_callback = lambda msg: None
+
     path = ensure_long_path(path)
+    os.makedirs(os.path.dirname(db_path), exist_ok=True)
     conn = _ensure_db(db_path)
     try:
         mtime = os.path.getmtime(path)
-    except OSError:
+    except OSError as e:
+        log_callback(f"! Could not stat {path}: {e}")
         conn.close()
         return None
     row = conn.execute(
