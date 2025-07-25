@@ -25,8 +25,10 @@ def load_ts(monkeypatch):
     monkeypatch.setitem(sys.modules, 'mutagen.id3', id3_stub)
     monkeypatch.setitem(sys.modules, 'mutagen.mp3', mp3_stub)
 
-    acoustid_stub = types.ModuleType('acoustid')
-    monkeypatch.setitem(sys.modules, 'acoustid', acoustid_stub)
+    chroma_stub = types.ModuleType('chromaprint_utils')
+    chroma_stub.FingerprintError = RuntimeError
+    chroma_stub.fingerprint_fpcalc = lambda *_a, **_k: ''
+    monkeypatch.setitem(sys.modules, 'chromaprint_utils', chroma_stub)
 
     import tidal_sync
     importlib.reload(tidal_sync)
@@ -46,7 +48,7 @@ def test_fingerprint_logs_exception(tmp_path, monkeypatch):
 
     def bad_fp(*a, **k):
         raise RuntimeError('boom')
-    monkeypatch.setattr(sys.modules['acoustid'], 'fingerprint_file', bad_fp, raising=False)
+    monkeypatch.setattr(sys.modules['chromaprint_utils'], 'fingerprint_fpcalc', bad_fp, raising=False)
 
     p = tmp_path / 'a.mp3'
     p.write_text('x')

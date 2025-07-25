@@ -25,9 +25,9 @@ def load_module(monkeypatch):
     monkeypatch.setitem(sys.modules, 'mutagen.id3', id3_stub)
     monkeypatch.setitem(sys.modules, 'mutagen.mp3', mp3_stub)
 
-    acoustid_stub = types.ModuleType('acoustid')
-    acoustid_stub.fingerprint_file = lambda p: (0, '')
-    monkeypatch.setitem(sys.modules, 'acoustid', acoustid_stub)
+    chroma_stub = types.ModuleType('chromaprint_utils')
+    chroma_stub.fingerprint_fpcalc = lambda p: ''
+    monkeypatch.setitem(sys.modules, 'chromaprint_utils', chroma_stub)
 
     import tidal_sync
     importlib.reload(tidal_sync)

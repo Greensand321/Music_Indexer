@@ -3,17 +3,23 @@ from typing import List, Tuple, Dict, Optional
 
 from fingerprint_cache import get_fingerprint
 from near_duplicate_detector import fingerprint_distance
+import chromaprint_utils
 
 SUPPORTED_EXTS = {".flac", ".m4a", ".aac", ".mp3", ".wav", ".ogg"}
 EXT_PRIORITY = {".flac": 0, ".m4a": 1, ".aac": 1, ".mp3": 2, ".wav": 3, ".ogg": 4}
 FP_PREFIX_LEN = 16
 
+# log callback used by _compute_fp; set inside find_duplicates
+_log = print
+
 
 def _compute_fp(path: str) -> Tuple[Optional[int], Optional[str]]:
+    """Compute fingerprint for ``path`` using Chromaprint."""
     try:
-        import acoustid
-        return acoustid.fingerprint_file(path)
-    except Exception:
+        fp = chromaprint_utils.fingerprint_fpcalc(path)
+        return 0, fp
+    except Exception as e:
+        _log(f"! Fingerprint failed for {path}: {e}")
         return None, None
 
 
@@ -50,17 +56,20 @@ def find_duplicates(
         db_path = os.path.join(root, "Docs", ".simple_fps.db")
 
     if log_callback is None:
-        def log_callback(msg: str) -> None:
-            pass
+        log_callback = print
+
+    global _log
+    _log = log_callback
 
     audio_paths = _walk_audio_files(root)
     file_data: List[Tuple[str, str]] = []
     for p in audio_paths:
-        fp = get_fingerprint(p, db_path, _compute_fp)
+        fp = get_fingerprint(p, db_path, _compute_fp, log_callback=log_callback)
         if fp:
+            log_callback(f"\u2713 Fingerprinted {p}")
             file_data.append((p, fp))
         else:
-            log_callback(f"No fingerprint for {p}")
+            log_callback(f"\u2717 No fingerprint for {p}")
 
     groups: List[Dict[str, object]] = []
     prefix_map: Dict[str, List[Dict[str, object]]] = {}

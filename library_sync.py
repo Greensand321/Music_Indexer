@@ -49,10 +49,13 @@ def _dlog(msg: str, log_callback: Callable[[str], None] | None = None) -> None:
     _logger.debug(msg)
 
 
+import chromaprint_utils
+
+
 def _compute_fp(path: str) -> tuple[int | None, str | None]:
     try:
-        import acoustid
-        return acoustid.fingerprint_file(path)
+        fp = chromaprint_utils.fingerprint_fpcalc(path)
+        return 0, fp
     except Exception:
         return None, None
 

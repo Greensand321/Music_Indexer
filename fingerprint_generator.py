@@ -73,8 +73,7 @@ def compute_fingerprints_parallel(
 ) -> None:
     """Walk ``root_path`` and compute fingerprints using multiple processes."""
     if log_callback is None:
-        def log_callback(msg: str) -> None:
-            pass
+        log_callback = print
 
     if progress_callback is None:
         def progress_callback(current: int, total: int, msg: str, _phase: str) -> None:
