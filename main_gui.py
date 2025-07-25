@@ -29,9 +29,11 @@ from tkinter import filedialog, messagebox, Text, Scrollbar
 from unsorted_popup import UnsortedPopup
 from tkinter.scrolledtext import ScrolledText
 import textwrap
+import time
 
 from validator import validate_soundvault_structure
-from music_indexer_api import run_full_indexer, find_duplicates
+from music_indexer_api import run_full_indexer, find_duplicates as api_find_duplicates
+from simple_duplicate_finder import find_duplicates
 from controllers.library_index_controller import generate_index
 from controllers.import_controller import import_new_files
 from controllers.genre_list_controller import list_unique_genres
@@ -354,6 +356,10 @@ class SoundVaultImporterApp(tk.Tk):
         self.tf_apply_genres = tk.BooleanVar(value=False)
         self.tagfix_db_path = ""
         self.tagfix_debug_var = tk.BooleanVar(value=False)
+
+        # Duplicate Finder state
+        self.folder_path_var = tk.StringVar(value="")
+        self._dup_logging = False
 
         # assume ffmpeg is available without performing checks
         self.ffmpeg_available = True
@@ -717,6 +723,28 @@ class SoundVaultImporterApp(tk.Tk):
             apply_frame, text="Apply Selected", command=self._apply_selected_tags
         ).pack(side="right")
 
+        # ─── Duplicate Finder Tab ─────────────────────────────────────────
+        self.dup_tab = ttk.Frame(self.notebook)
+        self.notebook.add(self.dup_tab, text="Duplicate Finder")
+
+        df_controls = ttk.Frame(self.dup_tab)
+        df_controls.pack(fill="x", padx=10, pady=(10, 5))
+        ttk.Button(df_controls, text="Select Folder", command=self.select_folder).pack(
+            side="left"
+        )
+        self.folder_label = ttk.Label(df_controls, text="")
+        self.folder_label.pack(side="left", padx=(5, 0))
+        self.scan_btn = ttk.Button(
+            df_controls,
+            text="Scan for Duplicates",
+            command=self.scan_duplicates,
+            state="disabled",
+        )
+        self.scan_btn.pack(side="left", padx=(5, 0))
+
+        self.dup_text = ScrolledText(self.dup_tab, height=15, state="disabled", wrap="word")
+        self.dup_text.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+
         # ─── Library Sync Tab ─────────────────────────────────────────────
         self.sync_tab = ttk.Frame(self.notebook)
         self.notebook.add(self.sync_tab, text="Library Sync")
@@ -965,6 +993,43 @@ class SoundVaultImporterApp(tk.Tk):
 
         threading.Thread(target=task, daemon=True).start()
 
+    # ── Duplicate Finder Actions ────────────────────────────────────────
+    def select_folder(self):
+        folder = filedialog.askdirectory()
+        if not folder:
+            return
+        self.folder_path_var.set(folder)
+        self.folder_label.config(text=folder)
+        self.scan_btn.config(state="normal")
+
+    def scan_duplicates(self):
+        folder = self.folder_path_var.get()
+        if not folder:
+            messagebox.showwarning("No Folder", "Please select a folder to scan.")
+            return
+
+        self.dup_text.configure(state="normal")
+        self.dup_text.delete("1.0", "end")
+        self.dup_text.configure(state="disabled")
+        self.scan_btn.config(state="disabled")
+
+        def task():
+            self._dup_logging = True
+
+            def cb(msg):
+                self.after(0, lambda m=msg: self._log(m))
+
+            try:
+                dups = find_duplicates(folder, log_callback=cb)
+                self.after(
+                    0, lambda: self._log(f"Found {len(dups)} duplicate pairs")
+                )
+            finally:
+                self._dup_logging = False
+                self.after(0, lambda: self.scan_btn.config(state="normal"))
+
+        threading.Thread(target=task, daemon=True).start()
+
     def run_indexer(self):
         path = self.require_library()
         if not path:
@@ -1024,7 +1089,7 @@ class SoundVaultImporterApp(tk.Tk):
 
         def task():
             try:
-                dups = find_duplicates(path, log_callback=log_line)
+                dups = api_find_duplicates(path, log_callback=log_line)
                 if dups:
                     proceed = []
                     ev = threading.Event()
@@ -2130,10 +2195,17 @@ class SoundVaultImporterApp(tk.Tk):
         self._metadata_win = win
 
     def _log(self, msg):
+        timestamp = time.strftime("%H:%M:%S")
+        line = f"{timestamp} {msg}"
         self.output.configure(state="normal")
-        self.output.insert("end", msg + "\n")
+        self.output.insert("end", line + "\n")
         self.output.see("end")
         self.output.configure(state="disabled")
+        if getattr(self, "_dup_logging", False):
+            self.dup_text.configure(state="normal")
+            self.dup_text.insert("end", line + "\n")
+            self.dup_text.see("end")
+            self.dup_text.configure(state="disabled")
 
 
 if __name__ == "__main__":
