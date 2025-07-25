@@ -9,8 +9,12 @@ def ensure_long_path(path: str) -> str:
     return path
 
 
-def strip_long_path_prefix(path: str) -> str:
-    """Return path without a Windows extended-length prefix."""
+def strip_ext_prefix(path: str) -> str:
+    """Return ``path`` without a Windows extended-length prefix."""
     if os.name == "nt" and path.startswith(r"\\?\\"):
         return path[4:]
     return path
+
+
+# Backwards compatibility -------------------------------------------------
+strip_long_path_prefix = strip_ext_prefix
