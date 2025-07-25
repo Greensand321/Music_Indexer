@@ -27,7 +27,6 @@ import queue
 import subprocess
 from tkinter import filedialog, messagebox, Text, Scrollbar
 from unsorted_popup import UnsortedPopup
-from candidate_popup import CandidatePopup
 from tkinter.scrolledtext import ScrolledText
 import textwrap
 
@@ -40,7 +39,6 @@ from controllers.highlight_controller import play_snippet, PYDUB_AVAILABLE
 from tag_fixer import MIN_INTERACTIVE_SCORE, FileRecord
 from typing import Callable, List
 from indexer_control import cancel_event, IndexCancelled
-import tidal_sync
 import library_sync
 import playlist_generator
 
@@ -336,19 +334,8 @@ class SoundVaultImporterApp(tk.Tk):
         self.cluster_data = None
         self.folder_filter = {"include": [], "exclude": []}
 
-        # tidal-dl sync state
-        self.subpar_path_var = tk.StringVar(value="")
-        self.sync_status_var = tk.StringVar(value="")
-        self.subpar_list = []
-        self.matches = []
-        thr_cfg = cfg.get("format_fp_thresholds", {})
-        self.fp_threshold_var = tk.DoubleVar(value=thr_cfg.get("default", 0.3))
-        self.fp_threshold_flac_var = tk.DoubleVar(value=thr_cfg.get(".flac", 0.3))
-        self.fp_threshold_mp3_var = tk.DoubleVar(value=thr_cfg.get(".mp3", 0.3))
-        self.fp_threshold_aac_var = tk.DoubleVar(value=thr_cfg.get(".aac", 0.3))
-        self.sync_debug_var = tk.BooleanVar(value=False)
-
         # Library Sync state
+        self.sync_debug_var = tk.BooleanVar(value=False)
         self.sync_library_var = tk.StringVar(value="")
         self.sync_incoming_var = tk.StringVar(value="")
         self.sync_auto_var = tk.BooleanVar(value=True)
@@ -609,66 +596,6 @@ class SoundVaultImporterApp(tk.Tk):
         self.playlist_tab.columnconfigure(1, weight=1)
         self.playlist_tab.rowconfigure(0, weight=1)
 
-        # ─── Library Quality Tab ───────────────────────────────────────────
-        self.quality_tab = ttk.Frame(self.notebook)
-        self.notebook.add(self.quality_tab, text="Library Quality")
-
-        ttk.Button(
-            self.quality_tab, text="Scan Quality", command=self.scan_quality
-        ).pack(pady=5)
-
-        sync = ttk.LabelFrame(self.quality_tab, text="Duplicate Scan")
-        sync.pack(fill="x", padx=10, pady=10)
-        sync.columnconfigure(1, weight=1)
-
-        ttk.Label(sync, textvariable=self.subpar_path_var).grid(
-            row=0, column=0, columnspan=3, sticky="w"
-        )
-
-        # --- Other sync-settings ------------------------------------------------------
-        ttk.Label(sync, text="Default FP Thr:").grid(
-            row=1, column=0, sticky="w", pady=(5, 0)
-        )
-        ttk.Entry(sync, textvariable=self.fp_threshold_var, width=5).grid(
-            row=1, column=1, sticky="w", pady=(5, 0)
-        )
-        ttk.Checkbutton(
-            sync,
-            text="Verbose Debug",
-            variable=self.sync_debug_var,
-        ).grid(row=1, column=2, sticky="w", pady=(5, 0))
-
-        # Make the middle column expand so the path field can stretch
-        sync.columnconfigure(1, weight=1)
-
-        ttk.Label(sync, text="FLAC Thr:").grid(row=2, column=0, sticky="w", pady=(5, 0))
-        ttk.Entry(sync, textvariable=self.fp_threshold_flac_var, width=5).grid(
-            row=2, column=1, sticky="w", pady=(5, 0)
-        )
-        ttk.Label(sync, text="MP3 Thr:").grid(row=3, column=0, sticky="w", pady=(5, 0))
-        ttk.Entry(sync, textvariable=self.fp_threshold_mp3_var, width=5).grid(
-            row=3, column=1, sticky="w", pady=(5, 0)
-        )
-        ttk.Label(sync, text="AAC Thr:").grid(row=4, column=0, sticky="w", pady=(5, 0))
-        ttk.Entry(sync, textvariable=self.fp_threshold_aac_var, width=5).grid(
-            row=4, column=1, sticky="w", pady=(5, 0)
-        )
-
-        ttk.Button(
-            sync, text="Match & Compare", command=self.build_comparison_table
-        ).grid(row=5, column=0, sticky="w", pady=(5, 0))
-        ttk.Label(sync, textvariable=self.sync_status_var).grid(
-            row=5, column=1, sticky="w", pady=(5, 0)
-        )
-
-        self.compare_frame = ttk.Frame(self.quality_tab)
-        self.compare_frame.pack(fill="both", expand=True, padx=10, pady=10)
-        self.quality_tab.rowconfigure(1, weight=1)
-        self.quality_tab.columnconfigure(0, weight=1)
-
-        ttk.Button(
-            self.quality_tab, text="Apply Changes", command=self.apply_replacements
-        ).pack(pady=(0, 10))
 
         # ─── Tag Fixer Tab ────────────────────────────────────────────────
         self.tagfix_tab = ttk.Frame(self.notebook)
@@ -2082,159 +2009,6 @@ class SoundVaultImporterApp(tk.Tk):
             os.remove(db_path)
         messagebox.showinfo("Reset", "Tag-fix log cleared.")
         self._log(f"Reset tag-fix log for {folder}")
-
-    # ─── Tidal-dl Sync Methods ──────────────────────────────────────────
-
-    def scan_quality(self):
-        path = self.require_library()
-        if not path:
-            return
-        out_base = os.path.join(path, "subpar")
-        count = tidal_sync.scan_library_quality(path, out_base)
-        full_path = out_base + "_full.txt"
-        self.subpar_path_var.set(full_path)
-        self.subpar_list = tidal_sync.load_subpar_list(full_path)
-        messagebox.showinfo("Quality Scan", f"Saved {count} entries to {full_path}")
-        self.sync_status_var.set(f"Loaded {len(self.subpar_list)} subpar tracks.")
-        self._log(f"Scan Quality written to {full_path}")
-
-    def build_comparison_table(self):
-        path = self.require_library()
-        if not path:
-            return
-
-        tidal_sync.set_debug(self.sync_debug_var.get(), path or ".")
-        self.sync_status_var.set("Scanning duplicates…")
-
-        q = queue.Queue()
-        self.match_queue = q
-        self.matches = []
-
-        def log_line(msg: str) -> None:
-            self.after(0, lambda m=msg: self._log(m))
-
-        def task() -> None:
-            try:
-                dups = tidal_sync.find_library_duplicates(path, log_callback=log_line)
-                q.put(dups)
-            except Exception as e:
-                q.put(("error", str(e)))
-
-        threading.Thread(target=task, daemon=True).start()
-
-        def poll():
-            try:
-                res = q.get_nowait()
-            except queue.Empty:
-                self.after(100, poll)
-                return
-            if isinstance(res, tuple) and res[0] == "error":
-                messagebox.showerror("Duplicate Scan Failed", res[1])
-                return
-            self.matches = [
-                {
-                    "original": o,
-                    "download": n,
-                    "score": None,
-                    "method": "Duplicate",
-                    "note": "",
-                    "candidates": [],
-                }
-                for o, n in res
-            ]
-            self.sync_status_var.set(f"Found {len(self.matches)} duplicates")
-            self._render_comparison_table()
-
-        self.after(100, poll)
-
-    def _render_comparison_table(self):
-        for w in self.compare_frame.winfo_children():
-            w.destroy()
-        cols = ("download", "method", "confidence", "note", "candidates")
-        tv = ttk.Treeview(
-            self.compare_frame,
-            columns=cols,
-            show="headings",
-            selectmode="extended",
-        )
-        tv.heading("download", text="Downloaded")
-        tv.heading("method", text="Match Method")
-        tv.heading("confidence", text="Confidence")
-        tv.heading("note", text="Note")
-        tv.heading("candidates", text="Options")
-        tv.column("download", width=220)
-        tv.column("method", width=80, anchor="center")
-        tv.column("confidence", width=80, anchor="e")
-        tv.column("note", width=150, anchor="w")
-        tv.column("candidates", width=80, anchor="center")
-        tv.tag_configure("hi", background="#d4edda")
-        tv.tag_configure("med", background="#fff8c6")
-        tv.tag_configure("low", background="#f8d7da")
-        tv.tag_configure("nomatch", background="#f8d7da")
-        tv.tag_configure("ambig", background="#ffe5b4")
-        tv.tag_configure("error", background="#f8d7da")
-        self.candidate_map = {}
-        for m in self.matches:
-            score = "" if m["score"] is None else f"{m['score']:.2f}"
-            method = m.get("method", "")
-            note = m.get("note", "") or ""
-            if m.get("download") is None:
-                tag = "nomatch"
-            elif "Ambiguous" in note:
-                tag = "ambig"
-            elif "Error" in note:
-                tag = "error"
-            elif m["score"] is not None and m["score"] >= 0.8:
-                tag = "hi"
-            elif m["score"] is not None and m["score"] >= 0.5:
-                tag = "med"
-            else:
-                tag = "low"
-            cand_text = "View" if m.get("candidates") else ""
-            self.candidate_map[m["original"]] = m.get("candidates") or []
-            tv.insert(
-                "",
-                "end",
-                iid=m["original"],
-                values=(m.get("download") or "", method, score, note, cand_text),
-                tags=(tag,),
-            )
-        tv.pack(fill="both", expand=True)
-        cand_col = cols.index("candidates") + 1
-
-        def on_double(event):
-            row = tv.identify_row(event.y)
-            col = tv.identify_column(event.x)
-            if row and col == f"#{cand_col}":
-                cands = self.candidate_map.get(row)
-                if cands:
-                    CandidatePopup(self, cands)
-
-        tv.bind("<Double-1>", on_double)
-        self.match_tree = tv
-
-    def apply_replacements(self):
-        if not hasattr(self, "match_tree"):
-            return
-        sels = self.match_tree.selection()
-        if not sels:
-            return
-        replaced = 0
-        for iid in sels:
-            match = next((m for m in self.matches if m["original"] == iid), None)
-            if (
-                match
-                and match.get("download")
-                and not (match.get("note") and "Ambiguous" in match.get("note"))
-                and not (match.get("note") and "Error" in match.get("note"))
-            ):
-                try:
-                    tidal_sync.replace_file(match["original"], match["download"])
-                    replaced += 1
-                except Exception as e:
-                    self._log(f"Failed to replace {match['original']}: {e}")
-        messagebox.showinfo("Apply Changes", f"Replaced {replaced} files")
-        self._log(f"Applied {replaced} replacements")
 
     # ── Library Sync Helpers ───────────────────────────────────────────
     def _browse_sync_library(self):
