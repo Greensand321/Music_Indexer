@@ -33,7 +33,9 @@ import time
 
 from validator import validate_soundvault_structure
 from music_indexer_api import run_full_indexer, find_duplicates as api_find_duplicates
-from simple_duplicate_finder import find_duplicates
+import simple_duplicate_finder as sdf_mod
+import fingerprint_cache
+import chromaprint_utils
 from controllers.library_index_controller import generate_index
 from controllers.import_controller import import_new_files
 from controllers.genre_list_controller import list_unique_genres
@@ -359,6 +361,8 @@ class SoundVaultImporterApp(tk.Tk):
         self.tf_apply_genres = tk.BooleanVar(value=False)
         self.tagfix_db_path = ""
         self.tagfix_debug_var = tk.BooleanVar(value=False)
+
+        self.dup_debug_var = tk.BooleanVar(value=False)
 
         # Quality Checker state
         self._dup_logging = False
@@ -739,6 +743,11 @@ class SoundVaultImporterApp(tk.Tk):
             state="disabled",
         )
         self.scan_btn.pack(side="left", padx=(5, 0))
+        ttk.Checkbutton(
+            df_controls,
+            text="Verbose Debug",
+            variable=self.dup_debug_var,
+        ).pack(side="left", padx=(5, 0))
 
         self.qc_canvas = tk.Canvas(self.dup_tab)
         self.qc_scroll = ttk.Scrollbar(
@@ -1013,6 +1022,13 @@ class SoundVaultImporterApp(tk.Tk):
             messagebox.showwarning("No Library", "Please select a library first.")
             return
 
+        debug_enabled = self.dup_debug_var.get()
+        sdf_mod.verbose = debug_enabled
+        fingerprint_cache.verbose = debug_enabled
+        chromaprint_utils.verbose = debug_enabled
+        if debug_enabled:
+            self._open_dup_debug_window()
+
         self.clear_quality_view()
         self.scan_btn.config(state="disabled")
 
@@ -1023,7 +1039,7 @@ class SoundVaultImporterApp(tk.Tk):
                 self.after(0, lambda m=msg: self._log(m))
 
             try:
-                dups = find_duplicates(folder, log_callback=cb)
+                dups = sdf_mod.find_duplicates(folder, log_callback=cb)
                 self.after(0, lambda: self._log(f"Found {len(dups)} duplicate pairs"))
                 self.after(0, lambda: self.populate_quality_table(dups))
             finally:
@@ -1919,6 +1935,19 @@ class SoundVaultImporterApp(tk.Tk):
         if widget:
             widget.insert("end", msg + "\n")
             widget.see("end")
+
+    def _open_dup_debug_window(self) -> None:
+        if (
+            getattr(self, "dup_debug_win", None)
+            and self.dup_debug_win.winfo_exists()
+        ):
+            return
+        win = tk.Toplevel(self)
+        win.title("Duplicate Finder Debug")
+        text = ScrolledText(win, height=20, wrap="word")
+        text.pack(fill="both", expand=True)
+        self.dup_debug_win = win
+        self.dup_text = text
 
     def _open_genre_normalizer(self, _show_dialog: bool = False):
         """Open a dialog to assist with genre normalization."""
