@@ -1028,6 +1028,12 @@ class SoundVaultImporterApp(tk.Tk):
         chromaprint_utils.verbose = debug_enabled
         if debug_enabled:
             self._open_dup_debug_window()
+            docs_dir = os.path.join(folder, "Docs")
+            os.makedirs(docs_dir, exist_ok=True)
+            self._dup_log_path = os.path.join(docs_dir, "duplicate_finder_debug.txt")
+            self._dup_log_fp = open(self._dup_log_path, "w", encoding="utf-8")
+        else:
+            self._dup_log_fp = None
 
         self.clear_quality_view()
         self.scan_btn.config(state="disabled")
@@ -1045,6 +1051,11 @@ class SoundVaultImporterApp(tk.Tk):
             finally:
                 self._dup_logging = False
                 self.after(0, lambda: self.scan_btn.config(state="normal"))
+                if getattr(self, "_dup_log_fp", None):
+                    try:
+                        self._dup_log_fp.close()
+                    finally:
+                        self._dup_log_fp = None
 
         threading.Thread(target=task, daemon=True).start()
 
@@ -2311,6 +2322,11 @@ class SoundVaultImporterApp(tk.Tk):
             self.dup_text.insert("end", line + "\n")
             self.dup_text.see("end")
             self.dup_text.configure(state="disabled")
+        if getattr(self, "_dup_log_fp", None):
+            try:
+                self._dup_log_fp.write(line + "\n")
+            except Exception:
+                pass
 
 
 if __name__ == "__main__":

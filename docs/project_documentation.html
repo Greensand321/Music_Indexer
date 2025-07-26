@@ -47,6 +47,7 @@
   <li>Generates a “dry-run” HTML preview of the proposed reorganization (color-coded).</li>
   <li>Applies the final moves: creates new folders, renames/moves audio files, archives docs into <code>Docs/</code> and other leftovers into <code>Trash/</code>, then deletes empty folders (two passes to also remove now-empty parents).</li>
   <li>Writes <code>Docs/indexer_log.txt</code> detailing exactly how each file was classified and moved.</li>
+  <li>Verbose logs from the Duplicate Finder are written to <code>Docs/duplicate_finder_debug.txt</code>.</li>
 </ul>
 
 <p><strong>Skeleton of <code>music_indexer_api.py</code> (comments only):</strong></p>
