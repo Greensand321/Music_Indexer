@@ -97,6 +97,7 @@ def find_duplicates(
     prefix_map: Dict[str, List[Dict[str, object]]] = {}
     for path, fp in file_data:
         prefix = fp[:FP_PREFIX_LEN]
+        log_callback(f"[GROUP] path={path}, prefix={prefix}")
         cand_groups = prefix_map.get(prefix, [])
         _dlog("GROUP", f"file {path} -> prefix {prefix}")
         _dlog("GROUP", f"{len(cand_groups)} groups for prefix")
@@ -104,6 +105,9 @@ def find_duplicates(
         for g in cand_groups:
             dist = fingerprint_distance(fp, g["fp"])
             _dlog("DIST", f"{path} vs {g['paths'][0]} dist={dist:.3f} threshold={threshold}")
+            log_callback(
+                f"[DIST] {path} \u2194 {g['paths'][0]} distance={dist:.4f} (thr={threshold:.4f})"
+            )
             if dist <= threshold:
                 g["paths"].append(path)
                 _dlog("GROUP", f"added to existing group with {g['paths'][0]}")
