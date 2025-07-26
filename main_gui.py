@@ -38,6 +38,9 @@ from controllers.library_index_controller import generate_index
 from controllers.import_controller import import_new_files
 from controllers.genre_list_controller import list_unique_genres
 from controllers.highlight_controller import play_snippet, PYDUB_AVAILABLE
+from io import BytesIO
+from PIL import Image, ImageTk
+from mutagen import File as MutagenFile
 from tag_fixer import MIN_INTERACTIVE_SCORE, FileRecord
 from typing import Callable, List
 from indexer_control import cancel_event, IndexCancelled
@@ -357,8 +360,7 @@ class SoundVaultImporterApp(tk.Tk):
         self.tagfix_db_path = ""
         self.tagfix_debug_var = tk.BooleanVar(value=False)
 
-        # Duplicate Finder state
-        self.folder_path_var = tk.StringVar(value="")
+        # Quality Checker state
         self._dup_logging = False
 
         # assume ffmpeg is available without performing checks
@@ -723,27 +725,36 @@ class SoundVaultImporterApp(tk.Tk):
             apply_frame, text="Apply Selected", command=self._apply_selected_tags
         ).pack(side="right")
 
-        # ─── Duplicate Finder Tab ─────────────────────────────────────────
+        # ─── Quality Checker Tab ─────────────────────────────────────────
         self.dup_tab = ttk.Frame(self.notebook)
-        self.notebook.add(self.dup_tab, text="Duplicate Finder")
+        self.notebook.add(self.dup_tab, text="Quality Checker")
 
         df_controls = ttk.Frame(self.dup_tab)
         df_controls.pack(fill="x", padx=10, pady=(10, 5))
-        ttk.Button(df_controls, text="Select Folder", command=self.select_folder).pack(
-            side="left"
-        )
-        self.folder_label = ttk.Label(df_controls, text="")
-        self.folder_label.pack(side="left", padx=(5, 0))
+        ttk.Label(df_controls, textvariable=self.library_path_var).pack(side="left")
         self.scan_btn = ttk.Button(
             df_controls,
-            text="Scan for Duplicates",
+            text="Scan Library",
             command=self.scan_duplicates,
             state="disabled",
         )
         self.scan_btn.pack(side="left", padx=(5, 0))
 
-        self.dup_text = ScrolledText(self.dup_tab, height=15, state="disabled", wrap="word")
-        self.dup_text.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+        self.qc_canvas = tk.Canvas(self.dup_tab)
+        self.qc_scroll = ttk.Scrollbar(
+            self.dup_tab, orient="vertical", command=self.qc_canvas.yview
+        )
+        self.qc_canvas.configure(yscrollcommand=self.qc_scroll.set)
+        self.qc_canvas.pack(side="left", fill="both", expand=True, padx=(10, 0), pady=(0, 10))
+        self.qc_scroll.pack(side="right", fill="y", pady=(0, 10))
+        self.qc_inner = ttk.Frame(self.qc_canvas)
+        self.qc_canvas.create_window((0, 0), window=self.qc_inner, anchor="nw")
+        self.qc_inner.bind(
+            "<Configure>",
+            lambda e: self.qc_canvas.configure(scrollregion=self.qc_canvas.bbox("all")),
+        )
+        if self.library_path_var.get():
+            self.scan_btn.config(state="normal")
 
         # ─── Library Sync Tab ─────────────────────────────────────────────
         self.sync_tab = ttk.Frame(self.notebook)
@@ -884,6 +895,8 @@ class SoundVaultImporterApp(tk.Tk):
         self._load_genre_mapping()
         # Clear any cached clustering data when switching libraries
         self.cluster_data = None
+        if hasattr(self, "scan_btn"):
+            self.scan_btn.config(state="normal")
         self.update_library_info()
 
     def update_library_info(self):
@@ -993,24 +1006,14 @@ class SoundVaultImporterApp(tk.Tk):
 
         threading.Thread(target=task, daemon=True).start()
 
-    # ── Duplicate Finder Actions ────────────────────────────────────────
-    def select_folder(self):
-        folder = filedialog.askdirectory()
-        if not folder:
-            return
-        self.folder_path_var.set(folder)
-        self.folder_label.config(text=folder)
-        self.scan_btn.config(state="normal")
-
+    # ── Quality Checker Actions ────────────────────────────────────────
     def scan_duplicates(self):
-        folder = self.folder_path_var.get()
+        folder = self.library_path_var.get()
         if not folder:
-            messagebox.showwarning("No Folder", "Please select a folder to scan.")
+            messagebox.showwarning("No Library", "Please select a library first.")
             return
 
-        self.dup_text.configure(state="normal")
-        self.dup_text.delete("1.0", "end")
-        self.dup_text.configure(state="disabled")
+        self.clear_quality_view()
         self.scan_btn.config(state="disabled")
 
         def task():
@@ -1021,9 +1024,8 @@ class SoundVaultImporterApp(tk.Tk):
 
             try:
                 dups = find_duplicates(folder, log_callback=cb)
-                self.after(
-                    0, lambda: self._log(f"Found {len(dups)} duplicate pairs")
-                )
+                self.after(0, lambda: self._log(f"Found {len(dups)} duplicate pairs"))
+                self.after(0, lambda: self.populate_quality_table(dups))
             finally:
                 self._dup_logging = False
                 self.after(0, lambda: self.scan_btn.config(state="normal"))
@@ -2155,6 +2157,80 @@ class SoundVaultImporterApp(tk.Tk):
             playlist_generator.update_playlists(dests)
         messagebox.showinfo("Replace", f"Replaced {len(dests)} files")
 
+    # ── Quality Checker Helpers ─────────────────────────────────────────
+    def clear_quality_view(self) -> None:
+        for w in self.qc_inner.winfo_children():
+            w.destroy()
+
+    def _play_preview(self, path: str) -> None:
+        if not PYDUB_AVAILABLE:
+            messagebox.showerror(
+                "Playback failed",
+                "pydub/ffmpeg not available. Install requirements to enable preview.",
+            )
+            return
+
+        def task() -> None:
+            try:
+                play_snippet(path)
+            except Exception as e:
+                self.after(0, lambda: messagebox.showerror("Playback failed", str(e)))
+
+        threading.Thread(target=task, daemon=True).start()
+
+    def _load_thumbnail(self, path: str, size: int = 100) -> ImageTk.PhotoImage:
+        img = None
+        try:
+            audio = MutagenFile(path)
+            img_data = None
+            if hasattr(audio, "tags") and audio.tags is not None:
+                for key in audio.tags.keys():
+                    if str(key).startswith("APIC"):
+                        img_data = audio.tags[key].data
+                        break
+            if img_data is None and getattr(audio, "pictures", None):
+                pics = getattr(audio, "pictures", [])
+                if pics:
+                    img_data = pics[0].data
+            if img_data:
+                img = Image.open(BytesIO(img_data))
+        except Exception:
+            img = None
+        if img is None:
+            img = Image.new("RGB", (size, size), "#777777")
+        img.thumbnail((size, size))
+        return ImageTk.PhotoImage(img)
+
+    def populate_quality_table(self, matches):
+        self.clear_quality_view()
+        if not matches:
+            ttk.Label(self.qc_inner, text="No duplicates detected in this library").pack(pady=20)
+            return
+
+        for orig, dup in matches:
+            row = ttk.Frame(self.qc_inner)
+            row.pack(fill="x", padx=10, pady=5)
+            for path in (orig, dup):
+                panel = ttk.Frame(row)
+                panel.pack(side="left", padx=10)
+                thumb = self._load_thumbnail(path)
+                img_label = ttk.Label(panel, image=thumb)
+                img_label.image = thumb
+                img_label.pack()
+                btn = ttk.Button(panel, text="▶", width=2, command=lambda p=path: self._play_preview(p))
+                btn.place(relx=0.5, rely=0.5, anchor="center")
+                btn.place_forget()
+                img_label.bind("<Enter>", lambda _e, b=btn: b.place(relx=0.5, rely=0.5, anchor="center"))
+                img_label.bind("<Leave>", lambda _e, b=btn: b.place_forget())
+                tags = get_tags(path)
+                title = tags.get("title") or os.path.basename(path)
+                artist = tags.get("artist") or "Unknown"
+                album = tags.get("album") or "Unknown"
+                ttk.Label(panel, text=title, font=("TkDefaultFont", 9, "bold"), wraplength=150).pack()
+                ttk.Label(panel, text=artist, wraplength=150).pack()
+                ttk.Label(panel, text=album, wraplength=150).pack()
+        self.qc_canvas.update_idletasks()
+
     def _send_help_query(self):
         threading.Thread(target=self._do_help_query, daemon=True).start()
 
@@ -2201,7 +2277,7 @@ class SoundVaultImporterApp(tk.Tk):
         self.output.insert("end", line + "\n")
         self.output.see("end")
         self.output.configure(state="disabled")
-        if getattr(self, "_dup_logging", False):
+        if getattr(self, "_dup_logging", False) and hasattr(self, "dup_text"):
             self.dup_text.configure(state="normal")
             self.dup_text.insert("end", line + "\n")
             self.dup_text.see("end")
