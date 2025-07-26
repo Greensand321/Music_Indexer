@@ -3,8 +3,19 @@ import tempfile
 import os
 import json
 import shutil
+import time
+import logging
 
 from utils.path_helpers import strip_ext_prefix
+
+verbose: bool = True
+_logger = logging.getLogger(__name__)
+
+
+def _dlog(label: str, msg: str) -> None:
+    if not verbose:
+        return
+    _logger.debug(f"{time.strftime('%H:%M:%S')} [{label}] {msg}")
 
 # Backwards compatibility -------------------------------------------------
 strip_long_path_prefix = strip_ext_prefix
@@ -80,14 +91,19 @@ def fingerprint_fpcalc(
             to_process = tmp
         safe_path = strip_ext_prefix(to_process)
         cmd = ["fpcalc", "-json", safe_path]
+        _dlog("FPCLI", f"cmd={cmd}")
         proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        _dlog("FPCLI", f"stdout={proc.stdout.strip()}")
+        _dlog("FPCLI", f"stderr={proc.stderr.strip()}")
         if proc.returncode != 0:
             raise FingerprintError(proc.stderr.strip())
         data = json.loads(proc.stdout)
         fp = data.get("fingerprint")
         if not fp:
             return None
-        return " ".join(fp.split(","))
+        fp_str = " ".join(fp.split(","))
+        _dlog("FP", f"value={fp_str} prefix={fp_str[:16]}")
+        return fp_str
     finally:
         if tmp and os.path.exists(tmp):
             try:
