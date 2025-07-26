@@ -1,8 +1,22 @@
 import os
 import sqlite3
+import time
 from typing import Callable, Optional
 from functools import lru_cache
 from utils.path_helpers import ensure_long_path
+
+verbose: bool = True
+
+
+def _dlog(label: str, msg: str, cb: Optional[Callable[[str], None]] = None) -> None:
+    if not verbose:
+        return
+    ts = time.strftime("%H:%M:%S")
+    line = f"{ts} [{label}] {msg}"
+    if cb:
+        cb(line)
+    else:
+        print(line)
 
 
 def _ensure_db(db_path: str) -> sqlite3.Connection:
@@ -60,16 +74,20 @@ def get_fingerprint(
     ).fetchone()
     if row and abs(row[0] - mtime) < 1e-6:
         fp = row[1]
+        _dlog("FP", f"cache hit {path}", log_callback)
         conn.close()
         if isinstance(fp, (bytes, bytearray)):
             try:
-                return fp.decode("utf-8")
+                fp = fp.decode("utf-8")
             except Exception:
-                return fp.decode("latin1", errors="ignore")
+                fp = fp.decode("latin1", errors="ignore")
+        _dlog("FP", f"fingerprint={fp} prefix={fp[:16]}", log_callback)
         return fp
 
+    _dlog("FP", f"cache miss {path}", log_callback)
     duration, fp_hash = compute_func(path)
     if fp_hash is not None:
+        _dlog("FP", f"computed fingerprint {fp_hash} prefix={fp_hash[:16]}", log_callback)
         conn.execute(
             "INSERT OR REPLACE INTO fingerprints (path, mtime, duration, fingerprint) VALUES (?, ?, ?, ?)",
             (path, mtime, duration, fp_hash),

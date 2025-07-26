@@ -1,4 +1,5 @@
 import os
+import time
 from typing import List, Tuple, Dict, Optional
 
 from fingerprint_cache import get_fingerprint
@@ -9,6 +10,17 @@ SUPPORTED_EXTS = {".flac", ".m4a", ".aac", ".mp3", ".wav", ".ogg"}
 EXT_PRIORITY = {".flac": 0, ".m4a": 1, ".aac": 1, ".mp3": 2, ".wav": 3, ".ogg": 4}
 FP_PREFIX_LEN = 16
 
+# enable verbose debug logging
+verbose: bool = True
+
+
+def _dlog(label: str, msg: str) -> None:
+    """Print debug log message if ``verbose`` is True."""
+    if not verbose:
+        return
+    ts = time.strftime("%H:%M:%S")
+    _log(f"{ts} [{label}] {msg}")
+
 # log callback used by _compute_fp; set inside find_duplicates
 _log = print
 
@@ -17,6 +29,8 @@ def _compute_fp(path: str) -> Tuple[Optional[int], Optional[str]]:
     """Compute fingerprint for ``path`` using Chromaprint."""
     try:
         fp = chromaprint_utils.fingerprint_fpcalc(path)
+        _dlog("FP", f"computed fingerprint for {path}: {fp}")
+        _dlog("FP", f"prefix={fp[:FP_PREFIX_LEN]}")
         return 0, fp
     except Exception as e:
         _log(f"! Fingerprint failed for {path}: {e}")
@@ -34,14 +48,20 @@ def _keep_score(path: str, ext_priority: Dict[str, int]) -> float:
 def _walk_audio_files(root: str) -> List[str]:
     paths: List[str] = []
     for dirpath, _dirs, files in os.walk(root):
+        _dlog("WALK", f"enter {dirpath}")
         rel = os.path.relpath(dirpath, root)
         parts = {p.lower() for p in rel.split(os.sep)}
         if {"not sorted", "playlists"} & parts:
+            _dlog("WALK", f"skip dir {dirpath}")
             continue
         for fname in files:
             ext = os.path.splitext(fname)[1].lower()
             if ext in SUPPORTED_EXTS:
-                paths.append(os.path.join(dirpath, fname))
+                path = os.path.join(dirpath, fname)
+                _dlog("WALK", f"match {path}")
+                paths.append(path)
+            else:
+                _dlog("WALK", f"skip file {fname}")
     return paths
 
 
@@ -67,7 +87,9 @@ def find_duplicates(
         fp = get_fingerprint(p, db_path, _compute_fp, log_callback=log_callback)
         if fp:
             log_callback(f"\u2713 Fingerprinted {p}")
+            _dlog("FP", f"prefix={fp[:FP_PREFIX_LEN]} value={fp}")
             file_data.append((p, fp))
+            _dlog("GROUP", f"added file_data {p}")
         else:
             log_callback(f"\u2717 No fingerprint for {p}")
 
@@ -76,11 +98,15 @@ def find_duplicates(
     for path, fp in file_data:
         prefix = fp[:FP_PREFIX_LEN]
         cand_groups = prefix_map.get(prefix, [])
+        _dlog("GROUP", f"file {path} -> prefix {prefix}")
+        _dlog("GROUP", f"{len(cand_groups)} groups for prefix")
         placed = False
         for g in cand_groups:
             dist = fingerprint_distance(fp, g["fp"])
+            _dlog("DIST", f"{path} vs {g['paths'][0]} dist={dist:.3f} threshold={threshold}")
             if dist <= threshold:
                 g["paths"].append(path)
+                _dlog("GROUP", f"added to existing group with {g['paths'][0]}")
                 placed = True
                 break
         if not placed:
@@ -88,6 +114,7 @@ def find_duplicates(
             cand_groups.append(g)
             prefix_map[prefix] = cand_groups
             groups.append(g)
+            _dlog("GROUP", f"new group for prefix {prefix}")
 
     duplicates: List[Tuple[str, str]] = []
     for g in groups:
@@ -98,6 +125,7 @@ def find_duplicates(
         keep = scored[0]
         for dup in scored[1:]:
             log_callback(f"Duplicate: keep {keep} -> drop {dup}")
+            _dlog("RESULT", f"keep={keep} score={_keep_score(keep, EXT_PRIORITY):.2f} dup={dup}")
             duplicates.append((keep, dup))
     return duplicates
 
