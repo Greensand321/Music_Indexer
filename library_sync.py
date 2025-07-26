@@ -19,7 +19,11 @@ _file_handler: Optional[logging.Handler] = None
 
 
 def set_debug(enabled: bool, log_root: str | None = None) -> None:
-    """Enable or disable verbose debug logging."""
+    """Enable or disable verbose debug logging.
+
+    If ``log_root`` is ``None`` the log will be written to the ``docs``
+    directory next to this module. Existing logs are overwritten on each run.
+    """
     global debug, _file_handler
     debug = enabled
     if not enabled:
@@ -30,15 +34,16 @@ def set_debug(enabled: bool, log_root: str | None = None) -> None:
         return
 
     _logger.setLevel(logging.DEBUG)
-    if log_root:
-        os.makedirs(log_root, exist_ok=True)
-        log_path = os.path.join(log_root, "library_sync_debug.log")
-        if _file_handler:
-            _logger.removeHandler(_file_handler)
-            _file_handler.close()
-        _file_handler = logging.FileHandler(log_path, encoding="utf-8")
-        _file_handler.setFormatter(logging.Formatter("%(message)s"))
-        _logger.addHandler(_file_handler)
+    if log_root is None:
+        log_root = os.path.join(os.path.dirname(__file__), "docs")
+    os.makedirs(log_root, exist_ok=True)
+    log_path = os.path.join(log_root, "library_sync_debug.log")
+    if _file_handler:
+        _logger.removeHandler(_file_handler)
+        _file_handler.close()
+    _file_handler = logging.FileHandler(log_path, mode="w", encoding="utf-8")
+    _file_handler.setFormatter(logging.Formatter("%(message)s"))
+    _logger.addHandler(_file_handler)
 
 
 def _dlog(msg: str, log_callback: Callable[[str], None] | None = None) -> None:
