@@ -2135,7 +2135,7 @@ class SoundVaultImporterApp(tk.Tk):
         cfg = load_config()
         thresholds = cfg.get("format_fp_thresholds", DEFAULT_FP_THRESHOLDS)
 
-        library_sync.set_debug(self.sync_debug_var.get(), lib or ".")
+        library_sync.set_debug(self.sync_debug_var.get())
 
         def task():
             try:
