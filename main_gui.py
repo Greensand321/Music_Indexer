@@ -364,6 +364,10 @@ class SoundVaultImporterApp(tk.Tk):
 
         self.dup_debug_var = tk.BooleanVar(value=False)
 
+        # Distance threshold for duplicate scanning
+        dup_thr = cfg.get("duplicate_threshold", 0.03)
+        self.fp_threshold_var = tk.DoubleVar(value=dup_thr)
+
         # Quality Checker state
         self._dup_logging = False
 
@@ -743,6 +747,10 @@ class SoundVaultImporterApp(tk.Tk):
             state="disabled",
         )
         self.scan_btn.pack(side="left", padx=(5, 0))
+        ttk.Label(df_controls, text="Distance Threshold:").pack(side="left", padx=(10, 0))
+        thr_entry = ttk.Entry(df_controls, textvariable=self.fp_threshold_var, width=5)
+        thr_entry.pack(side="left")
+        self.fp_threshold_var.trace_add("write", lambda *a: self._validate_threshold())
         ttk.Checkbutton(
             df_controls,
             text="Verbose Debug",
@@ -764,6 +772,7 @@ class SoundVaultImporterApp(tk.Tk):
         )
         if self.library_path_var.get():
             self.scan_btn.config(state="normal")
+        self._validate_threshold()
 
         # ─── Library Sync Tab ─────────────────────────────────────────────
         self.sync_tab = ttk.Frame(self.notebook)
@@ -1031,6 +1040,18 @@ class SoundVaultImporterApp(tk.Tk):
 
         self.clear_quality_view()
         self.scan_btn.config(state="disabled")
+        try:
+            thr = float(self.fp_threshold_var.get())
+        except Exception:
+            thr = load_config().get("duplicate_threshold", 0.03)
+            self._log("! Invalid threshold; using saved value")
+        else:
+            if not (0.0 < thr <= 1.0):
+                thr = load_config().get("duplicate_threshold", 0.03)
+                self._log("! Threshold out of range; using saved value")
+        cfg = load_config()
+        cfg["duplicate_threshold"] = thr
+        save_config(cfg)
 
         def task():
             self._dup_logging = True
@@ -1039,7 +1060,7 @@ class SoundVaultImporterApp(tk.Tk):
                 self.after(0, lambda m=msg: self._log(m))
 
             try:
-                dups = sdf_mod.find_duplicates(folder, log_callback=cb)
+                dups = sdf_mod.find_duplicates(folder, threshold=thr, log_callback=cb)
                 self.after(0, lambda: self._log(f"Found {len(dups)} duplicate pairs"))
                 self.after(0, lambda: self.populate_quality_table(dups))
             finally:
@@ -2190,6 +2211,18 @@ class SoundVaultImporterApp(tk.Tk):
     def clear_quality_view(self) -> None:
         for w in self.qc_inner.winfo_children():
             w.destroy()
+
+    def _validate_threshold(self) -> None:
+        """Enable Scan button only when threshold is valid."""
+        try:
+            val = float(self.fp_threshold_var.get())
+            valid = 0.0 < val <= 1.0
+        except Exception:
+            valid = False
+        if valid and self.library_path_var.get():
+            self.scan_btn.config(state="normal")
+        else:
+            self.scan_btn.config(state="disabled")
 
     def _play_preview(self, path: str) -> None:
         if not PYDUB_AVAILABLE:
