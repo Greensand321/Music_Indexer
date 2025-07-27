@@ -14,7 +14,7 @@ def load_module(monkeypatch):
         'b.flac': '1 2',
         'c.mp3': '9 9',
     }
-    chroma_stub.fingerprint_fpcalc = lambda p: fp_map[os.path.basename(p)]
+    chroma_stub.fingerprint_fpcalc = lambda p, **kw: fp_map[os.path.basename(p)]
     monkeypatch.setitem(sys.modules, 'chromaprint_utils', chroma_stub)
     importlib.reload(sdf)
     return sdf

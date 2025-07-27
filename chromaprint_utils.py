@@ -74,21 +74,46 @@ def fingerprint_fpcalc(
     path: str,
     *,
     trim: bool = True,
+    start_sec: float = 0.0,
+    duration_sec: float = 120.0,
     threshold_db: float = -50.0,
     min_silence_duration: float = 0.5,
 ) -> str | None:
     """Return fingerprint string computed via fpcalc."""
     ensure_tool("fpcalc")
-    tmp = None
+    ensure_tool("ffmpeg")
+    tmp1 = None
+    tmp2 = None
     to_process = path
     try:
         if trim:
-            tmp = trim_silence(
+            tmp1 = trim_silence(
                 path,
                 threshold_db=threshold_db,
                 min_silence_duration=min_silence_duration,
             )
-            to_process = tmp
+        else:
+            tmp1 = path
+
+        tmp2 = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+        tmp2.close()
+        ffmpeg_cmd = [
+            "ffmpeg",
+            "-y",
+            "-ss",
+            str(start_sec),
+            "-t",
+            str(duration_sec),
+            "-i",
+            tmp1,
+            "-ar",
+            str(44100),
+            "-ac",
+            str(1),
+            tmp2.name,
+        ]
+        subprocess.run(ffmpeg_cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        to_process = tmp2.name
         safe_path = strip_ext_prefix(to_process)
         cmd = ["fpcalc", "-json", safe_path]
         _dlog("FPCLI", f"cmd={cmd}")
@@ -105,8 +130,9 @@ def fingerprint_fpcalc(
         _dlog("FP", f"value={fp_str} prefix={fp_str[:16]}")
         return fp_str
     finally:
-        if tmp and os.path.exists(tmp):
-            try:
-                os.remove(tmp)
-            except OSError:
-                pass
+        for t in (tmp1 if trim else None, tmp2.name if tmp2 else None):
+            if t and os.path.exists(t) and t != path:
+                try:
+                    os.remove(t)
+                except OSError:
+                    pass

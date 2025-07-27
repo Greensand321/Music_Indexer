@@ -12,7 +12,7 @@ def test_fpcalc_invocation_and_prefix(monkeypatch):
 
     captured = {}
 
-    def fake_run(cmd, stdout=None, stderr=None, text=None):
+    def fake_run(cmd, stdout=None, stderr=None, text=None, **kw):
         captured['cmd'] = cmd
         class P:
             returncode = 0
@@ -27,4 +27,5 @@ def test_fpcalc_invocation_and_prefix(monkeypatch):
 
     assert fp == '1 2 3'
     assert captured['cmd'][1] == '-json'
-    assert captured['cmd'][2] == r"C:\music\song.flac"
+    # result path should not contain Windows long-path prefix
+    assert not captured['cmd'][2].startswith('\\\\?\\')

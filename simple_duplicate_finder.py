@@ -28,7 +28,12 @@ _log = print
 def _compute_fp(path: str) -> Tuple[Optional[int], Optional[str]]:
     """Compute fingerprint for ``path`` using Chromaprint."""
     try:
-        fp = chromaprint_utils.fingerprint_fpcalc(path)
+        fp = chromaprint_utils.fingerprint_fpcalc(
+            path,
+            trim=True,
+            start_sec=5.0,
+            duration_sec=60.0,
+        )
         _dlog("FP", f"computed fingerprint for {path}: {fp}")
         _dlog("FP", f"prefix={fp[:FP_PREFIX_LEN]}")
         return 0, fp
