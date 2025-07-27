@@ -17,7 +17,7 @@ mutagen_stub.id3 = id3_stub
 sys.modules['mutagen'] = mutagen_stub
 sys.modules['mutagen.id3'] = id3_stub
 chroma_stub = types.ModuleType('chromaprint_utils')
-chroma_stub.fingerprint_fpcalc = lambda p: 'hash'
+chroma_stub.fingerprint_fpcalc = lambda p, **kw: 'hash'
 sys.modules['chromaprint_utils'] = chroma_stub
 
 from music_indexer_api import build_dry_run_html

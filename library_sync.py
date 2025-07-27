@@ -59,7 +59,12 @@ import chromaprint_utils
 
 def _compute_fp(path: str) -> tuple[int | None, str | None]:
     try:
-        fp = chromaprint_utils.fingerprint_fpcalc(path)
+        fp = chromaprint_utils.fingerprint_fpcalc(
+            path,
+            trim=True,
+            start_sec=5.0,
+            duration_sec=60.0,
+        )
         return 0, fp
     except Exception:
         return None, None

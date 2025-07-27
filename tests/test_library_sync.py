@@ -25,7 +25,7 @@ fp_map = {
     'b.flac': '2 3',
     'new.mp3': '9 9',
 }
-chroma_stub.fingerprint_fpcalc = lambda p: fp_map.get(os.path.basename(p), 'x')
+chroma_stub.fingerprint_fpcalc = lambda p, **kw: fp_map.get(os.path.basename(p), 'x')
 sys.modules['chromaprint_utils'] = chroma_stub
 
 import importlib
@@ -131,7 +131,7 @@ def test_format_threshold_match(tmp_path, monkeypatch):
     make_wav(mp3_file)
     make_wav(wav_file)
 
-    def fake_fp(path):
+    def fake_fp(path, **kw):
         if path.endswith(".wav"):
             return "1 2 3 4"
         return "1 2 3 5"
@@ -170,7 +170,7 @@ def test_compare_libraries_relaxed_threshold(tmp_path, monkeypatch):
     make_wav(mp3_file)
     make_wav(wav_file)
 
-    def fake_fp(path):
+    def fake_fp(path, **kw):
         if path.endswith(".wav"):
             return "10 20 30 40 50"
         return "10 20 30 40 51"
