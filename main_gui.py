@@ -32,7 +32,11 @@ import textwrap
 import time
 
 from validator import validate_soundvault_structure
-from music_indexer_api import run_full_indexer, find_duplicates as api_find_duplicates
+from music_indexer_api import (
+    run_full_indexer,
+    find_duplicates as api_find_duplicates,
+    get_tags,
+)
 import simple_duplicate_finder as sdf_mod
 import fingerprint_cache
 import chromaprint_utils
