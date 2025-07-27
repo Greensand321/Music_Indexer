@@ -40,6 +40,7 @@ python main_gui.py
 7. **Library Duplicate Scan** finds duplicate tracks after you drop new songs directly into your library
 8. **Cross-Album Scan** optionally finds duplicates appearing on multiple albums
 9. Use the **Theme** dropdown and **Help** tab for assistance
+10. Adjust the **Distance Threshold** in the Quality Checker tab to fine‑tune duplicate detection and view detailed fingerprint distance logs
 
 Cluster generation writes progress into `<method>_log.txt` inside your library so you can review the steps later.
 
