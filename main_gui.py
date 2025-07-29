@@ -2280,13 +2280,10 @@ class SoundVaultImporterApp(tk.Tk):
             )
             return
 
-        def task() -> None:
-            try:
-                _play_clip(path)
-            except Exception as e:
-                self.after(0, lambda: messagebox.showerror("Playback failed", str(e)))
-
-        threading.Thread(target=task, daemon=True).start()
+        try:
+            _play_clip(path)
+        except Exception as e:
+            messagebox.showerror("Playback failed", str(e))
 
     def _load_thumbnail(self, path: str, size: int = 100) -> ImageTk.PhotoImage:
         img = None
