@@ -4,6 +4,7 @@ import os
 import re
 import shutil  # used for relocating special folders
 import hashlib
+import base64
 from collections import defaultdict
 from typing import Dict, List
 from dry_run_coordinator import DryRunCoordinator
@@ -199,20 +200,60 @@ def derive_tags_from_path(filepath: str, music_root: str):
     return set(parts)
 
 
+def _parse_fp(fp: str) -> tuple[str, list[int] | bytes] | None:
+    """Parse fingerprint string into integer list or decoded bytes."""
+    text = fp.strip()
+    if not text:
+        return None
+    try:
+        arr = [int(x) for x in text.replace(',', ' ').split()]
+        if arr:
+            return ("ints", arr)
+    except Exception:
+        pass
+    try:
+        data = base64.urlsafe_b64decode(text + '=' * (-len(text) % 4))
+        if data:
+            return ("bytes", data)
+    except Exception:
+        pass
+    return None
+
+
+def _hamming_ints(a: list[int], b: list[int]) -> float:
+    n = min(len(a), len(b))
+    if n == 0:
+        return 1.0
+    diff = sum(x != y for x, y in zip(a[:n], b[:n]))
+    return diff / n
+
+
+def _hamming_bytes(a: bytes, b: bytes) -> float:
+    n = min(len(a), len(b))
+    if n == 0:
+        return 1.0
+    diff = 0
+    for i in range(n):
+        diff += (a[i] ^ b[i]).bit_count()
+    return diff / (n * 8)
+
+
 def fingerprint_distance(fp1: str | None, fp2: str | None) -> float:
     """Return normalized Hamming distance between two fingerprint strings."""
     if not fp1 or not fp2:
         return 1.0
-    try:
-        arr1 = [int(x) for x in fp1.split()]
-        arr2 = [int(x) for x in fp2.split()]
-    except Exception:
+    if fp1 == fp2:
+        return 0.0
+    p1 = _parse_fp(fp1)
+    p2 = _parse_fp(fp2)
+    if not p1 or not p2 or p1[0] != p2[0]:
         return 1.0
-    n = min(len(arr1), len(arr2))
-    if n == 0:
-        return 1.0
-    diff = sum(a != b for a, b in zip(arr1[:n], arr2[:n]))
-    return diff / n
+    kind, a = p1
+    _, b = p2
+    if kind == "ints":
+        return _hamming_ints(a, b)  # type: ignore[arg-type]
+    else:
+        return _hamming_bytes(a, b)  # type: ignore[arg-type]
 
 
 def _keep_score(path: str, info: dict, ext_priority: dict) -> float:
