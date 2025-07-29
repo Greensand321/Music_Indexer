@@ -9,6 +9,12 @@ import chromaprint_utils
 SUPPORTED_EXTS = {".flac", ".m4a", ".aac", ".mp3", ".wav", ".ogg"}
 EXT_PRIORITY = {".flac": 0, ".m4a": 1, ".aac": 1, ".mp3": 2, ".wav": 3, ".ogg": 4}
 FP_PREFIX_LEN = 16
+PREFIX_THRESHOLD = 2
+
+
+def prefix_distance(p1: str, p2: str) -> int:
+    """Return Hamming distance between two prefix strings of equal length."""
+    return sum(c1 != c2 for c1, c2 in zip(p1, p2))
 
 # enable verbose debug logging
 verbose: bool = True
@@ -124,25 +130,36 @@ def find_duplicates(
     for path, fp in file_data:
         prefix = fp[:prefix_len] if use_prefix else ""
         log_callback(f"[GROUP] path={path}, prefix={prefix}")
-        cand_groups = prefix_map.get(prefix, [])
+        cand_groups: List[Tuple[Dict[str, object], str]] = []
+        if use_prefix:
+            for key, groups_for_key in prefix_map.items():
+                if prefix_distance(prefix, key) <= PREFIX_THRESHOLD:
+                    for g in groups_for_key:
+                        cand_groups.append((g, key))
+        else:
+            for g in prefix_map.get(prefix, []):
+                cand_groups.append((g, prefix))
         _dlog("GROUP", f"file {path} -> prefix {prefix}")
         _dlog("GROUP", f"{len(cand_groups)} groups for prefix")
         placed = False
-        for g in cand_groups:
+        for g, key in cand_groups:
             dist = fingerprint_distance(fp, g["fp"])
             _dlog("DIST", f"{path} vs {g['paths'][0]} dist={dist:.3f} threshold={threshold}")
             log_callback(
                 f"[DIST] {path} \u2194 {g['paths'][0]} distance={dist:.4f} (thr={threshold:.4f})"
             )
             if dist <= threshold:
+                if key != prefix:
+                    log_callback(
+                        f"[FUZZY] {path} matched prefix {key} (dist={prefix_distance(prefix, key)})"
+                    )
                 g["paths"].append(path)
                 _dlog("GROUP", f"added to existing group with {g['paths'][0]}")
                 placed = True
                 break
         if not placed:
             g = {"fp": fp, "paths": [path]}
-            cand_groups.append(g)
-            prefix_map[prefix] = cand_groups
+            prefix_map.setdefault(prefix, []).append(g)
             groups.append(g)
             _dlog("GROUP", f"new group for prefix {prefix}")
 
