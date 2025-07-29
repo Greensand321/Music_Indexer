@@ -78,8 +78,8 @@ def find_duplicates(
     threshold: float = 0.03,
     db_path: Optional[str] = None,
     log_callback: Optional[callable] = None,
-) -> Tuple[List[Tuple[str, str]], int]:
-    """Return (duplicates, missing_count) for audio files in ``root``."""
+) -> Tuple[List[Tuple[str, str]], int, float, float]:
+    """Return (duplicates, missing_count, min_dist, max_dist) for audio files in ``root``."""
     if db_path is None:
         db_path = os.path.join(root, "Docs", ".simple_fps.db")
 
@@ -112,6 +112,8 @@ def find_duplicates(
 
     groups: List[Dict[str, object]] = []
     prefix_map: Dict[str, List[Dict[str, object]]] = {}
+    min_dist = float("inf")
+    max_dist = 0.0
     for path, fp in file_data:
         prefix = fp[:FP_PREFIX_LEN]
         log_callback(f"[GROUP] path={path}, prefix={prefix}")
@@ -121,6 +123,10 @@ def find_duplicates(
         placed = False
         for g in cand_groups:
             dist = fingerprint_distance(fp, g["fp"])
+            if dist < min_dist:
+                min_dist = dist
+            if dist > max_dist:
+                max_dist = dist
             _dlog("DIST", f"{path} vs {g['paths'][0]} dist={dist:.3f} threshold={threshold}")
             log_callback(
                 f"[DIST] {path} \u2194 {g['paths'][0]} distance={dist:.4f} (thr={threshold:.4f})"
@@ -151,5 +157,7 @@ def find_duplicates(
                 f"keep={keep} score={_keep_score(keep, EXT_PRIORITY):.2f} dup={dup}",
             )
             duplicates.append((keep, dup))
-    return duplicates, missing_fp
+    if min_dist == float("inf"):
+        min_dist = 0.0
+    return duplicates, missing_fp, min_dist, max_dist
 

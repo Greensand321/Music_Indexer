@@ -65,6 +65,10 @@ threshold used during deduplication, add a value like:
 
 Lower values require more similar fingerprints.
 
+Typical duplicate distances fall between **0.02** and **0.15** when using
+Chromaprint fingerprints. After a scan the GUI will report the smallest and
+largest distances seen so you can fine‑tune your threshold.
+
 Per-format fingerprint thresholds used by the sync matcher can also be
 configured. Add a `format_fp_thresholds` section with extension keys:
 

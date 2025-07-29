@@ -26,9 +26,11 @@ def test_duplicate_detection(tmp_path, monkeypatch):
     (tmp_path / 'b.flac').write_text('x')
     (tmp_path / 'c.mp3').write_text('x')
     db = tmp_path / 'fp.db'
-    dups, missing = sdf_mod.find_duplicates(str(tmp_path), db_path=str(db))
+    dups, missing, min_d, max_d = sdf_mod.find_duplicates(str(tmp_path), db_path=str(db))
     pair = (str(tmp_path / 'b.flac'), str(tmp_path / 'a.mp3'))
     assert pair in dups or (pair[1], pair[0]) in dups
     assert missing == 0
+    assert min_d == 0.0
+    assert max_d == 0.0
     flush_cache(str(db))
 
