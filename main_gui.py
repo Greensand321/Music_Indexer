@@ -2316,29 +2316,74 @@ class SoundVaultImporterApp(tk.Tk):
             ttk.Label(self.qc_inner, text="No duplicates detected in this library").pack(pady=20)
             return
 
-        for orig, dup in matches:
+        for keep_path, dup_path in matches:
             row = ttk.Frame(self.qc_inner)
             row.pack(fill="x", padx=10, pady=5)
-            for path in (orig, dup):
-                panel = ttk.Frame(row)
-                panel.pack(side="left", padx=10)
-                thumb = self._load_thumbnail(path)
-                img_label = ttk.Label(panel, image=thumb)
-                img_label.image = thumb
-                img_label.pack()
-                btn = ttk.Button(panel, text="▶", width=2, command=lambda p=path: self._play_preview(p))
-                btn.place(relx=0.5, rely=0.5, anchor="center")
-                btn.place_forget()
-                img_label.bind("<Enter>", lambda _e, b=btn: b.place(relx=0.5, rely=0.5, anchor="center"))
-                img_label.bind("<Leave>", lambda _e, b=btn: b.place_forget())
-                tags = get_tags(path)
-                title = tags.get("title") or os.path.basename(path)
-                artist = tags.get("artist") or "Unknown"
-                album = tags.get("album") or "Unknown"
-                ttk.Label(panel, text=title, font=("TkDefaultFont", 9, "bold"), wraplength=150).pack()
-                ttk.Label(panel, text=artist, wraplength=150).pack()
-                ttk.Label(panel, text=album, wraplength=150).pack()
+
+            play_btn = ttk.Button(row, text="▶", width=2, command=lambda p=dup_path: self._play_preview(p))
+            play_btn.pack(side="left")
+
+            thumb = self._load_thumbnail(dup_path, size=64)
+            img_label = ttk.Label(row, image=thumb)
+            img_label.image = thumb
+            img_label.pack(side="left", padx=(5, 10))
+
+            tags = get_tags(dup_path)
+            title = tags.get("title") or os.path.basename(dup_path)
+            artist = tags.get("artist") or "Unknown"
+            year = tags.get("year") or "?"
+            ext = os.path.splitext(dup_path)[1].lower()
+            size = os.path.getsize(dup_path) / 1024 / 1024
+
+            info = ttk.Frame(row)
+            info.pack(side="left", fill="x", expand=True)
+            ttk.Label(info, text=title, font=("TkDefaultFont", 9, "bold"), anchor="w").pack(anchor="w")
+            ttk.Label(info, text=f"{artist} • {year}", anchor="w").pack(anchor="w")
+            ttk.Label(info, text=f"{ext[1:].upper()} {size:.1f} MB", anchor="w").pack(anchor="w")
+
+            del_btn = ttk.Button(row, text="Delete", command=lambda p=dup_path, f=row: self._prompt_delete(p, f))
+            del_btn.pack(side="right")
+
         self.qc_canvas.update_idletasks()
+
+    def _prompt_delete(self, path: str, row: tk.Widget) -> None:
+        if getattr(self, "_skip_delete_confirm", False):
+            proceed = True
+        else:
+            proceed, skip = self._confirm_delete(path)
+            if skip:
+                self._skip_delete_confirm = True
+        if not proceed:
+            return
+        try:
+            os.remove(path)
+            row.destroy()
+            self._log(f"Deleted duplicate {path}")
+        except Exception as e:
+            messagebox.showerror("Delete Failed", str(e))
+
+    def _confirm_delete(self, path: str) -> tuple[bool, bool]:
+        top = tk.Toplevel(self)
+        top.title("Confirm Delete")
+        top.grab_set()
+        ttk.Label(top, text=f"Delete {os.path.basename(path)}?").pack(padx=10, pady=(10, 5))
+        skip_var = tk.BooleanVar()
+        ttk.Checkbutton(top, text="Don't ask again this session", variable=skip_var).pack(padx=10, pady=(0, 5), anchor="w")
+        result = {"ok": False}
+
+        def do_ok() -> None:
+            result["ok"] = True
+            top.destroy()
+
+        def do_cancel() -> None:
+            top.destroy()
+
+        btn_frame = ttk.Frame(top)
+        btn_frame.pack(pady=(0, 10))
+        ttk.Button(btn_frame, text="Delete", command=do_ok).pack(side="left", padx=5)
+        ttk.Button(btn_frame, text="Cancel", command=do_cancel).pack(side="left", padx=5)
+        top.wait_window()
+        return result["ok"], skip_var.get()
 
     def _send_help_query(self):
         threading.Thread(target=self._do_help_query, daemon=True).start()
