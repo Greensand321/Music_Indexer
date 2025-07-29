@@ -336,9 +336,8 @@ class SoundVaultImporterApp(tk.Tk):
         self.library_path = ""
         self.library_name_var = tk.StringVar(value="No library selected")
         self.library_path_var = tk.StringVar(value="")
-        # Folder to run Quality Checker on (defaults to library_path)
-        self.dup_folder_var = tk.StringVar(value="")
-        self.dup_folder_var.trace_add("write", lambda *a: self._validate_threshold())
+        # Folder to run Quality Checker - now always uses library_path
+        self.dup_folder_var = tk.StringVar(value="")  # retained for compatibility
         self.library_stats_var = tk.StringVar(value="")
         self.show_all = False
         self.genre_mapping = {}
@@ -749,12 +748,7 @@ class SoundVaultImporterApp(tk.Tk):
 
         df_controls = ttk.Frame(self.dup_tab)
         df_controls.pack(fill="x", padx=10, pady=(10, 5))
-        ttk.Label(df_controls, textvariable=self.dup_folder_var).pack(side="left")
-        ttk.Button(
-            df_controls,
-            text="Browse…",
-            command=self._browse_dup_folder,
-        ).pack(side="left", padx=(5, 0))
+        ttk.Label(df_controls, textvariable=self.library_path_var).pack(side="left")
         self.scan_btn = ttk.Button(
             df_controls,
             text="Scan",
@@ -789,7 +783,7 @@ class SoundVaultImporterApp(tk.Tk):
             "<Configure>",
             lambda e: self.qc_canvas.configure(scrollregion=self.qc_canvas.bbox("all")),
         )
-        if self.dup_folder_var.get() or self.library_path_var.get():
+        if self.library_path_var.get():
             self.scan_btn.config(state="normal")
         self._validate_threshold()
 
@@ -934,6 +928,7 @@ class SoundVaultImporterApp(tk.Tk):
         self.cluster_data = None
         if hasattr(self, "scan_btn"):
             self.scan_btn.config(state="normal")
+            self._validate_threshold()
         self.update_library_info()
 
     def update_library_info(self):
@@ -1045,9 +1040,9 @@ class SoundVaultImporterApp(tk.Tk):
 
     # ── Quality Checker Actions ────────────────────────────────────────
     def scan_duplicates(self):
-        folder = self.dup_folder_var.get() or self.library_path_var.get()
+        folder = self.library_path_var.get()
         if not folder:
-            messagebox.showwarning("No Folder", "Please select a folder to scan.")
+            messagebox.showwarning("No Folder", "Please select a library first.")
             return
 
         debug_enabled = self.dup_debug_var.get()
@@ -2266,7 +2261,7 @@ class SoundVaultImporterApp(tk.Tk):
             valid_pref = pref >= 0
         except Exception:
             valid_pref = False
-        folder_selected = self.dup_folder_var.get() or self.library_path_var.get()
+        folder_selected = self.library_path_var.get()
         if valid and valid_pref and folder_selected:
             self.scan_btn.config(state="normal")
         else:
@@ -2319,12 +2314,12 @@ class SoundVaultImporterApp(tk.Tk):
 
         for keep_path, dup_path in matches:
             row = ttk.Frame(self.qc_inner)
-            row.pack(fill="x", padx=10, pady=5)
+            row.pack(fill="x", padx=10, pady=2)
 
-            play_btn = ttk.Button(row, text="▶", width=2, command=lambda p=dup_path: self._play_preview(p))
+            play_btn = ttk.Button(row, text="▶", width=1, command=lambda p=dup_path: self._play_preview(p))
             play_btn.pack(side="left")
 
-            thumb = self._load_thumbnail(dup_path, size=64)
+            thumb = self._load_thumbnail(dup_path, size=40)
             img_label = ttk.Label(row, image=thumb)
             img_label.image = thumb
             img_label.pack(side="left", padx=(5, 10))
@@ -2339,8 +2334,8 @@ class SoundVaultImporterApp(tk.Tk):
             info = ttk.Frame(row)
             info.pack(side="left", fill="x", expand=True)
             ttk.Label(info, text=title, font=("TkDefaultFont", 9, "bold"), anchor="w").pack(anchor="w")
-            ttk.Label(info, text=f"{artist} • {year}", anchor="w").pack(anchor="w")
-            ttk.Label(info, text=f"{ext[1:].upper()} {size:.1f} MB", anchor="w").pack(anchor="w")
+            ttk.Label(info, text=f"{artist} • {year}", font=("TkDefaultFont", 8), anchor="w").pack(anchor="w")
+            ttk.Label(info, text=f"{ext[1:].upper()} {size:.1f} MB", font=("TkDefaultFont", 8), anchor="w").pack(anchor="w")
 
             del_btn = ttk.Button(row, text="Delete", command=lambda p=dup_path, f=row: self._prompt_delete(p, f))
             del_btn.pack(side="right")
