@@ -374,6 +374,8 @@ class SoundVaultImporterApp(tk.Tk):
         # Distance threshold for duplicate scanning
         dup_thr = cfg.get("duplicate_threshold", 0.03)
         self.fp_threshold_var = tk.DoubleVar(value=dup_thr)
+        dup_pref = cfg.get("duplicate_prefix_len", sdf_mod.FP_PREFIX_LEN)
+        self.fp_prefix_var = tk.IntVar(value=dup_pref)
 
         # Quality Checker state
         self._dup_logging = False
@@ -762,7 +764,11 @@ class SoundVaultImporterApp(tk.Tk):
         ttk.Label(df_controls, text="Distance Threshold:").pack(side="left", padx=(10, 0))
         thr_entry = ttk.Entry(df_controls, textvariable=self.fp_threshold_var, width=5)
         thr_entry.pack(side="left")
+        ttk.Label(df_controls, text="Prefix Length:").pack(side="left", padx=(10, 0))
+        pref_entry = ttk.Entry(df_controls, textvariable=self.fp_prefix_var, width=4)
+        pref_entry.pack(side="left")
         self.fp_threshold_var.trace_add("write", lambda *a: self._validate_threshold())
+        self.fp_prefix_var.trace_add("write", lambda *a: self._validate_threshold())
         ttk.Checkbutton(
             df_controls,
             text="Verbose Debug",
@@ -1063,6 +1069,12 @@ class SoundVaultImporterApp(tk.Tk):
                 self._log("! Threshold out of range; using saved value")
         cfg = load_config()
         cfg["duplicate_threshold"] = thr
+        try:
+            pref_val = int(self.fp_prefix_var.get())
+        except Exception:
+            pref_val = sdf_mod.FP_PREFIX_LEN
+            self._log("! Invalid prefix length; using saved value")
+        cfg["duplicate_prefix_len"] = pref_val
         save_config(cfg)
 
         def task():
@@ -1073,7 +1085,7 @@ class SoundVaultImporterApp(tk.Tk):
 
             try:
                 dups, missing = sdf_mod.find_duplicates(
-                    folder, threshold=thr, log_callback=cb
+                    folder, threshold=thr, prefix_len=pref_val, log_callback=cb
                 )
                 self.after(0, lambda: self._log(f"Found {len(dups)} duplicate pairs"))
                 self.after(0, lambda: self.populate_quality_table(dups))
@@ -2248,8 +2260,13 @@ class SoundVaultImporterApp(tk.Tk):
             valid = 0.0 < val <= 1.0
         except Exception:
             valid = False
+        try:
+            pref = int(self.fp_prefix_var.get())
+            valid_pref = pref >= 0
+        except Exception:
+            valid_pref = False
         folder_selected = self.dup_folder_var.get() or self.library_path_var.get()
-        if valid and folder_selected:
+        if valid and valid_pref and folder_selected:
             self.scan_btn.config(state="normal")
         else:
             self.scan_btn.config(state="disabled")

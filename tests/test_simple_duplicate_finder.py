@@ -13,6 +13,8 @@ def load_module(monkeypatch):
         'a.mp3': '1 2',
         'b.flac': '1 2',
         'c.mp3': '9 9',
+        'd.mp3': '1 1',
+        'e.mp3': '2 1',
     }
     chroma_stub.fingerprint_fpcalc = lambda p, **kw: fp_map[os.path.basename(p)]
     monkeypatch.setitem(sys.modules, 'chromaprint_utils', chroma_stub)
@@ -30,5 +32,24 @@ def test_duplicate_detection(tmp_path, monkeypatch):
     pair = (str(tmp_path / 'b.flac'), str(tmp_path / 'a.mp3'))
     assert pair in dups or (pair[1], pair[0]) in dups
     assert missing == 0
+    flush_cache(str(db))
+
+
+def test_cross_prefix_detection(tmp_path, monkeypatch):
+    sdf_mod = load_module(monkeypatch)
+    (tmp_path / 'd.mp3').write_text('x')
+    (tmp_path / 'e.mp3').write_text('x')
+    db = tmp_path / 'fp.db'
+    # With default prefix length the fingerprints have different prefixes
+    dups, _ = sdf_mod.find_duplicates(str(tmp_path), db_path=str(db), threshold=0.5)
+    pair = (str(tmp_path / 'd.mp3'), str(tmp_path / 'e.mp3'))
+    assert pair not in dups and (pair[1], pair[0]) not in dups
+    flush_cache(str(db))
+
+    # Cross-prefix comparison should group them
+    dups, _ = sdf_mod.find_duplicates(
+        str(tmp_path), db_path=str(db), threshold=0.5, prefix_len=0
+    )
+    assert pair in dups or (pair[1], pair[0]) in dups
     flush_cache(str(db))
 

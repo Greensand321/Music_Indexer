@@ -29,6 +29,8 @@ DEFAULT_FP_THRESHOLDS = {
 
 # Default threshold for simple duplicate detection
 DEFAULT_DUP_THRESHOLD = 0.03
+# Default prefix length used for duplicate grouping
+DEFAULT_DUP_PREFIX_LEN = 16
 
 # Default settings for fingerprint normalization
 FP_OFFSET_MS = 0
@@ -53,6 +55,7 @@ def load_config():
         if "format_fp_thresholds" not in cfg:
             cfg["format_fp_thresholds"] = DEFAULT_FP_THRESHOLDS.copy()
         cfg.setdefault("duplicate_threshold", DEFAULT_DUP_THRESHOLD)
+        cfg.setdefault("duplicate_prefix_len", DEFAULT_DUP_PREFIX_LEN)
         cfg.setdefault("fingerprint_offset_ms", FP_OFFSET_MS)
         cfg.setdefault("fingerprint_duration_ms", FP_DURATION_MS)
         cfg.setdefault("allow_mismatched_edits", ALLOW_MISMATCHED_EDITS)
@@ -65,6 +68,7 @@ def load_config():
             "allow_mismatched_edits": ALLOW_MISMATCHED_EDITS,
             "library_root": "",
             "duplicate_threshold": DEFAULT_DUP_THRESHOLD,
+            "duplicate_prefix_len": DEFAULT_DUP_PREFIX_LEN,
         }
 
 
