@@ -76,10 +76,17 @@ def _walk_audio_files(root: str) -> List[str]:
 def find_duplicates(
     root: str,
     threshold: float = 0.03,
+    prefix_len: int | None = FP_PREFIX_LEN,
     db_path: Optional[str] = None,
     log_callback: Optional[callable] = None,
 ) -> Tuple[List[Tuple[str, str]], int]:
-    """Return (duplicates, missing_count) for audio files in ``root``."""
+    """Return (duplicates, missing_count) for audio files in ``root``.
+
+    ``prefix_len`` controls how many characters of the fingerprint are used to
+    pre-group files before performing expensive distance comparisons. A value of
+    ``0`` or ``None`` disables prefix grouping entirely, comparing every file
+    against all existing groups.
+    """
     if db_path is None:
         db_path = os.path.join(root, "Docs", ".simple_fps.db")
 
@@ -104,7 +111,8 @@ def find_duplicates(
         fp = get_fingerprint(p, db_path, compute, log_callback=log_callback)
         if fp:
             log_callback(f"\u2713 Fingerprinted {p}")
-            _dlog("FP", f"prefix={fp[:FP_PREFIX_LEN]} value={fp}")
+            show_pref = fp[:prefix_len] if (prefix_len and prefix_len > 0) else ""
+            _dlog("FP", f"prefix={show_pref} value={fp}")
             file_data.append((p, fp))
             _dlog("GROUP", f"added file_data {p}")
         else:
@@ -112,8 +120,9 @@ def find_duplicates(
 
     groups: List[Dict[str, object]] = []
     prefix_map: Dict[str, List[Dict[str, object]]] = {}
+    use_prefix = prefix_len is not None and prefix_len > 0
     for path, fp in file_data:
-        prefix = fp[:FP_PREFIX_LEN]
+        prefix = fp[:prefix_len] if use_prefix else ""
         log_callback(f"[GROUP] path={path}, prefix={prefix}")
         cand_groups = prefix_map.get(prefix, [])
         _dlog("GROUP", f"file {path} -> prefix {prefix}")
