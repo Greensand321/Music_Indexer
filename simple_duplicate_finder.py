@@ -37,8 +37,11 @@ def _compute_fp(path: str) -> Tuple[Optional[int], Optional[str]]:
         _dlog("FP", f"computed fingerprint for {path}: {fp}")
         _dlog("FP", f"prefix={fp[:FP_PREFIX_LEN]}")
         return 0, fp
-    except Exception as e:
+    except chromaprint_utils.FingerprintError as e:
         _log(f"! Fingerprint failed for {path}: {e}")
+        return None, None
+    except Exception as e:
+        _log(f"! Unexpected fingerprint error for {path}: {e}")
         return None, None
 
 
@@ -75,8 +78,8 @@ def find_duplicates(
     threshold: float = 0.03,
     db_path: Optional[str] = None,
     log_callback: Optional[callable] = None,
-) -> List[Tuple[str, str]]:
-    """Return list of duplicate pairs detected in ``root``."""
+) -> Tuple[List[Tuple[str, str]], int]:
+    """Return (duplicates, missing_count) for audio files in ``root``."""
     if db_path is None:
         db_path = os.path.join(root, "Docs", ".simple_fps.db")
 
@@ -86,10 +89,19 @@ def find_duplicates(
     global _log
     _log = log_callback
 
+    missing_fp = 0
+
+    def compute(path: str) -> Tuple[Optional[int], Optional[str]]:
+        nonlocal missing_fp
+        duration, fp = _compute_fp(path)
+        if fp is None:
+            missing_fp += 1
+        return duration, fp
+
     audio_paths = _walk_audio_files(root)
     file_data: List[Tuple[str, str]] = []
     for p in audio_paths:
-        fp = get_fingerprint(p, db_path, _compute_fp, log_callback=log_callback)
+        fp = get_fingerprint(p, db_path, compute, log_callback=log_callback)
         if fp:
             log_callback(f"\u2713 Fingerprinted {p}")
             _dlog("FP", f"prefix={fp[:FP_PREFIX_LEN]} value={fp}")
@@ -134,7 +146,10 @@ def find_duplicates(
         keep = scored[0]
         for dup in scored[1:]:
             log_callback(f"Duplicate: keep {keep} -> drop {dup}")
-            _dlog("RESULT", f"keep={keep} score={_keep_score(keep, EXT_PRIORITY):.2f} dup={dup}")
+            _dlog(
+                "RESULT",
+                f"keep={keep} score={_keep_score(keep, EXT_PRIORITY):.2f} dup={dup}",
+            )
             duplicates.append((keep, dup))
-    return duplicates
+    return duplicates, missing_fp
 
