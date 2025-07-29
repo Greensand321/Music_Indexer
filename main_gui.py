@@ -1072,9 +1072,14 @@ class SoundVaultImporterApp(tk.Tk):
                 self.after(0, lambda m=msg: self._log(m))
 
             try:
-                dups = sdf_mod.find_duplicates(folder, threshold=thr, log_callback=cb)
+                dups, missing = sdf_mod.find_duplicates(
+                    folder, threshold=thr, log_callback=cb
+                )
                 self.after(0, lambda: self._log(f"Found {len(dups)} duplicate pairs"))
                 self.after(0, lambda: self.populate_quality_table(dups))
+                if missing:
+                    msg = f"{missing} files could not be fingerprinted."
+                    self.after(0, lambda m=msg: self._log(m))
             finally:
                 self._dup_logging = False
                 self.after(0, lambda: self.scan_btn.config(state="normal"))
