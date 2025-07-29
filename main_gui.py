@@ -335,6 +335,9 @@ class SoundVaultImporterApp(tk.Tk):
         self.library_path = ""
         self.library_name_var = tk.StringVar(value="No library selected")
         self.library_path_var = tk.StringVar(value="")
+        # Folder to run Quality Checker on (defaults to library_path)
+        self.dup_folder_var = tk.StringVar(value="")
+        self.dup_folder_var.trace_add("write", lambda *a: self._validate_threshold())
         self.library_stats_var = tk.StringVar(value="")
         self.show_all = False
         self.genre_mapping = {}
@@ -743,10 +746,15 @@ class SoundVaultImporterApp(tk.Tk):
 
         df_controls = ttk.Frame(self.dup_tab)
         df_controls.pack(fill="x", padx=10, pady=(10, 5))
-        ttk.Label(df_controls, textvariable=self.library_path_var).pack(side="left")
+        ttk.Label(df_controls, textvariable=self.dup_folder_var).pack(side="left")
+        ttk.Button(
+            df_controls,
+            text="Browse…",
+            command=self._browse_dup_folder,
+        ).pack(side="left", padx=(5, 0))
         self.scan_btn = ttk.Button(
             df_controls,
-            text="Scan Library",
+            text="Scan",
             command=self.scan_duplicates,
             state="disabled",
         )
@@ -774,7 +782,7 @@ class SoundVaultImporterApp(tk.Tk):
             "<Configure>",
             lambda e: self.qc_canvas.configure(scrollregion=self.qc_canvas.bbox("all")),
         )
-        if self.library_path_var.get():
+        if self.dup_folder_var.get() or self.library_path_var.get():
             self.scan_btn.config(state="normal")
         self._validate_threshold()
 
@@ -1030,9 +1038,9 @@ class SoundVaultImporterApp(tk.Tk):
 
     # ── Quality Checker Actions ────────────────────────────────────────
     def scan_duplicates(self):
-        folder = self.library_path_var.get()
+        folder = self.dup_folder_var.get() or self.library_path_var.get()
         if not folder:
-            messagebox.showwarning("No Library", "Please select a library first.")
+            messagebox.showwarning("No Folder", "Please select a folder to scan.")
             return
 
         debug_enabled = self.dup_debug_var.get()
@@ -1819,6 +1827,18 @@ class SoundVaultImporterApp(tk.Tk):
 
     # ── Library Quality Helpers ───────────────────────────────────────
 
+    def _browse_dup_folder(self) -> None:
+        """Choose folder to scan for duplicates."""
+        initial = (
+            self.dup_folder_var.get()
+            or self.library_path_var.get()
+            or load_last_path()
+        )
+        folder = filedialog.askdirectory(title="Select Folder", initialdir=initial)
+        if folder:
+            save_last_path(folder)
+            self.dup_folder_var.set(folder)
+
     def _select_all_tagfix(self):
         self.tagfix_tree.selection_set(self.tagfix_tree.get_children(""))
         return "break"
@@ -2223,7 +2243,8 @@ class SoundVaultImporterApp(tk.Tk):
             valid = 0.0 < val <= 1.0
         except Exception:
             valid = False
-        if valid and self.library_path_var.get():
+        folder_selected = self.dup_folder_var.get() or self.library_path_var.get()
+        if valid and folder_selected:
             self.scan_btn.config(state="normal")
         else:
             self.scan_btn.config(state="disabled")
