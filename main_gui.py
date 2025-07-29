@@ -44,6 +44,7 @@ from controllers.library_index_controller import generate_index
 from controllers.import_controller import import_new_files
 from controllers.genre_list_controller import list_unique_genres
 from controllers.highlight_controller import play_snippet, PYDUB_AVAILABLE
+from gui.audio_preview import play_preview as _play_clip, stop_preview as _stop_clip
 from io import BytesIO
 from PIL import Image, ImageTk
 from mutagen import File as MutagenFile
@@ -2250,6 +2251,7 @@ class SoundVaultImporterApp(tk.Tk):
 
     # ── Quality Checker Helpers ─────────────────────────────────────────
     def clear_quality_view(self) -> None:
+        _stop_clip()
         for w in self.qc_inner.winfo_children():
             w.destroy()
 
@@ -2279,13 +2281,11 @@ class SoundVaultImporterApp(tk.Tk):
             )
             return
 
-        def task() -> None:
-            try:
-                play_snippet(path)
-            except Exception as e:
-                self.after(0, lambda: messagebox.showerror("Playback failed", str(e)))
-
-        threading.Thread(target=task, daemon=True).start()
+        try:
+            _stop_clip()
+            _play_clip(path)
+        except Exception as e:
+            messagebox.showerror("Playback failed", str(e))
 
     def _load_thumbnail(self, path: str, size: int = 100) -> ImageTk.PhotoImage:
         img = None
