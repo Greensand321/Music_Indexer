@@ -109,14 +109,72 @@ def write_playlist(tracks, outfile):
         raise RuntimeError(f"Failed to write playlist {outfile}: {e}")
 
 
-def update_playlists(new_tracks):
-    """Placeholder for playlist update hook used by Library Sync."""
-    # The real implementation would update any smart playlists
-    # that should include ``new_tracks``. For now we simply call
-    # ``generate_playlists`` treating each parent folder as a playlist.
-    root = os.path.commonpath(new_tracks) if new_tracks else None
+def update_playlists(changes):
+    """Update ``.m3u`` playlists based on moved or deleted tracks.
+
+    ``changes`` may be either an iterable of new track paths or a mapping of
+    ``old_path -> new_path``. A ``None`` value means the old path was removed
+    without a replacement.
+    """
+
+    if not changes:
+        return
+
+    if isinstance(changes, dict):
+        move_map = dict(changes)
+    else:
+        move_map = {p: p for p in changes}
+
+    all_paths = list(move_map.keys()) + [p for p in move_map.values() if p]
+    root = os.path.commonpath(all_paths) if all_paths else None
     if not root:
         return
-    moves = {p: p for p in new_tracks}
-    generate_playlists(moves, root, overwrite=False, log_callback=lambda m: None)
+
+    playlists_dir = os.path.join(root, "Playlists")
+    if not os.path.isdir(playlists_dir):
+        return
+
+    for dirpath, _dirs, files in os.walk(playlists_dir):
+        for fname in files:
+            if not fname.lower().endswith(".m3u"):
+                continue
+            pl_path = os.path.join(dirpath, fname)
+            try:
+                with open(pl_path, "r", encoding="utf-8") as f:
+                    lines = [ln.rstrip("\n") for ln in f]
+            except Exception:
+                continue
+
+            changed = False
+            new_lines = []
+            for ln in lines:
+                abs_line = os.path.normpath(os.path.join(dirpath, ln))
+                if abs_line in move_map:
+                    new = move_map[abs_line]
+                    if new is None:
+                        changed = True
+                        continue
+                    rel_new = os.path.relpath(new, dirpath)
+                    if rel_new != ln:
+                        changed = True
+                    new_lines.append(rel_new)
+                else:
+                    new_lines.append(ln)
+
+            if changed:
+                try:
+                    with open(pl_path, "w", encoding="utf-8") as f:
+                        for l in new_lines:
+                            f.write(l + "\n")
+                except Exception:
+                    pass
+
+    new_tracks = [p for p in move_map.values() if p]
+    if new_tracks:
+        generate_playlists(
+            {p: p for p in new_tracks},
+            root,
+            overwrite=False,
+            log_callback=lambda m: None,
+        )
 
