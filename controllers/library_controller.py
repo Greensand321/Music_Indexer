@@ -1,6 +1,7 @@
 import os
 import json
-from typing import Tuple, Dict, Callable
+from typing import Tuple, Dict, Callable, Iterable
+from controllers.playlist_controller import save_playlist as _save
 from validator import validate_soundvault_structure
 
 CONFIG_FILE = os.path.join(os.path.dirname(__file__), "..", "last_path.txt")
@@ -57,7 +58,10 @@ def open_library(folder_path: str, progress_callback: Callable[[int], None] | No
     return info
 
 
-def save_playlist():
-    """Trigger playlist engine export (stub)."""
-    # TODO: implement real playlist export
-    pass
+def save_playlist(library_path: str, name: str, tracks: Iterable[str]) -> str:
+    """Save a playlist inside ``library_path`` and update auto playlists."""
+
+    playlists_dir = os.path.join(library_path, "Playlists")
+    os.makedirs(playlists_dir, exist_ok=True)
+    out_path = os.path.join(playlists_dir, f"{name}.m3u")
+    return _save(tracks, out_path)
