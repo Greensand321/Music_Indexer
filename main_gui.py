@@ -1,6 +1,7 @@
 import os
 import threading
 import sys
+import logging
 
 if sys.platform == "win32":
     try:
@@ -537,6 +538,19 @@ class SoundVaultImporterApp(tk.Tk):
         )
         tools_menu.add_cascade(label="Clustered Playlists", menu=cluster_menu)
         menubar.add_cascade(label="Tools", menu=tools_menu)
+
+        debug_menu = tk.Menu(menubar, tearoff=False)
+        debug_menu.add_command(
+            label="Enable Verbose Logging",
+            command=lambda: logging.getLogger().setLevel(logging.DEBUG),
+        )
+        menubar.add_cascade(label="Debug", menu=debug_menu)
+
+        help_menu = tk.Menu(menubar, tearoff=False)
+        help_menu.add_command(
+            label="View Crash Log…", command=self._view_crash_log
+        )
+        menubar.add_cascade(label="Help", menu=help_menu)
 
         # ─── Library Info ───────────────────────────────────────────────────
         top = tk.Frame(self)
@@ -2508,6 +2522,23 @@ class SoundVaultImporterApp(tk.Tk):
             self._preview_thread.join(timeout=0.1)
         self.destroy()
 
+    def _view_crash_log(self) -> None:
+        """Open a window displaying the last 50 lines of the crash log."""
+        path = getattr(self, "log_path", "soundvault_crash.log")
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                lines = fh.readlines()[-50:]
+        except FileNotFoundError:
+            messagebox.showinfo("Crash Log", "No crash log found.")
+            return
+
+        win = tk.Toplevel(self)
+        win.title("Crash Log")
+        text = ScrolledText(win, width=80, height=24)
+        text.pack(fill="both", expand=True)
+        text.insert("end", "".join(lines))
+        text.configure(state="disabled")
+
     def _log(self, msg):
         timestamp = time.strftime("%H:%M:%S")
         line = f"{timestamp} {msg}"
@@ -2523,8 +2554,15 @@ class SoundVaultImporterApp(tk.Tk):
 
 
 if __name__ == "__main__":
-    from crash_logger import install as install_crash_logger
+    import logging
+    from crash_logger import (
+        install as install_crash_logger,
+        add_context_provider,
+    )
 
-    install_crash_logger()
+    LOG_PATH = "soundvault_crash.log"
+    install_crash_logger(log_path=LOG_PATH, level=logging.DEBUG)
     app = SoundVaultImporterApp()
+    add_context_provider(lambda: {"library_path": app.library_path})
+    app.log_path = LOG_PATH
     app.mainloop()
