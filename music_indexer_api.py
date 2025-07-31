@@ -1157,4 +1157,7 @@ def main(argv: List[str] | None = None) -> None:
 
 
 if __name__ == "__main__":
+    from crash_logger import install as install_crash_logger
+
+    install_crash_logger()
     main()
