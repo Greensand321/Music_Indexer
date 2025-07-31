@@ -45,7 +45,7 @@ from controllers.library_index_controller import generate_index
 from controllers.import_controller import import_new_files
 from controllers.genre_list_controller import list_unique_genres
 from controllers.highlight_controller import play_snippet, PYDUB_AVAILABLE
-from gui.audio_preview import play_preview as _play_clip, stop_preview
+from gui.audio_preview import PreviewPlayer
 from io import BytesIO
 from PIL import Image, ImageTk
 from mutagen import File as MutagenFile
@@ -453,6 +453,7 @@ class SoundVaultImporterApp(tk.Tk):
         # Quality Checker state
         self._dup_logging = False
         self._preview_thread = None
+        self.preview_player = PreviewPlayer()
 
         # assume ffmpeg is available without performing checks
         self.ffmpeg_available = True
@@ -2364,14 +2365,14 @@ class SoundVaultImporterApp(tk.Tk):
             )
             return
 
-        stop_preview()
+        self.preview_player.stop_preview()
 
         if self._preview_thread and self._preview_thread.is_alive():
             self._preview_thread.join(timeout=0.1)
 
         def task() -> None:
             try:
-                _play_clip(path)
+                self.preview_player.play_preview(path)
             except Exception as e:
                 self.after(0, lambda: messagebox.showerror("Playback failed", str(e)))
 
@@ -2517,7 +2518,7 @@ class SoundVaultImporterApp(tk.Tk):
 
     def _on_close(self):
         """Handle application close event."""
-        stop_preview()
+        self.preview_player.stop_preview()
         if self._preview_thread and self._preview_thread.is_alive():
             self._preview_thread.join(timeout=0.1)
         self.destroy()
