@@ -62,7 +62,7 @@ class PreviewPlayer:
                 str(duration_ms / 1000),
                 path,
             ]
-            self._ffplay_proc = subprocess.Popen(cmd)
+            self._ffplay_proc = subprocess.Popen(cmd, start_new_session=True)
         except Exception as exc:
             raise PlaybackError(str(exc)) from exc
 
@@ -73,9 +73,22 @@ class PreviewPlayer:
                 self._play_obj.stop()
             self._play_obj = None
         if self._ffplay_proc and self._ffplay_proc.poll() is None:
-            self._ffplay_proc.terminate()
+            try:
+                self._ffplay_proc.terminate()
+            except ProcessLookupError:
+                pass
             try:
                 self._ffplay_proc.wait(timeout=1)
-            except Exception:
-                self._ffplay_proc.kill()
+            except subprocess.TimeoutExpired:
+                try:
+                    self._ffplay_proc.kill()
+                except ProcessLookupError:
+                    pass
+                finally:
+                    try:
+                        self._ffplay_proc.wait(timeout=1)
+                    except Exception:
+                        pass
+            except ProcessLookupError:
+                pass
         self._ffplay_proc = None
