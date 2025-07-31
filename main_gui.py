@@ -451,6 +451,7 @@ class SoundVaultImporterApp(tk.Tk):
 
         # Quality Checker state
         self._dup_logging = False
+        self._preview_thread = None
 
         # assume ffmpeg is available without performing checks
         self.ffmpeg_available = True
@@ -466,6 +467,7 @@ class SoundVaultImporterApp(tk.Tk):
 
         # Build initial UI
         self.build_ui()
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
 
     def _configure_treeview_style(self):
         """Adjust Treeview row height based on current UI scale."""
@@ -2350,13 +2352,17 @@ class SoundVaultImporterApp(tk.Tk):
 
         stop_preview()
 
+        if self._preview_thread and self._preview_thread.is_alive():
+            self._preview_thread.join(timeout=0.1)
+
         def task() -> None:
             try:
                 _play_clip(path)
             except Exception as e:
                 self.after(0, lambda: messagebox.showerror("Playback failed", str(e)))
 
-        threading.Thread(target=task, daemon=True).start()
+        self._preview_thread = threading.Thread(target=task, daemon=True)
+        self._preview_thread.start()
 
     def _load_thumbnail(self, path: str, size: int = 100) -> ImageTk.PhotoImage:
         img = None
@@ -2494,6 +2500,13 @@ class SoundVaultImporterApp(tk.Tk):
         frame = MetadataServiceConfigFrame(win)
         frame.pack(fill="both", expand=True, padx=10, pady=10)
         self._metadata_win = win
+
+    def _on_close(self):
+        """Handle application close event."""
+        stop_preview()
+        if self._preview_thread and self._preview_thread.is_alive():
+            self._preview_thread.join(timeout=0.1)
+        self.destroy()
 
     def _log(self, msg):
         timestamp = time.strftime("%H:%M:%S")
