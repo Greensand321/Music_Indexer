@@ -44,7 +44,7 @@ from controllers.library_index_controller import generate_index
 from controllers.import_controller import import_new_files
 from controllers.genre_list_controller import list_unique_genres
 from controllers.highlight_controller import play_snippet, PYDUB_AVAILABLE
-from gui.audio_preview import play_preview as _play_clip
+from gui.audio_preview import play_preview as _play_clip, stop_preview
 from io import BytesIO
 from PIL import Image, ImageTk
 from mutagen import File as MutagenFile
@@ -2347,6 +2347,8 @@ class SoundVaultImporterApp(tk.Tk):
                 "pydub/ffmpeg not available. Install requirements to enable preview.",
             )
             return
+
+        stop_preview()
 
         def task() -> None:
             try:
