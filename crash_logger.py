@@ -6,7 +6,10 @@ import logging
 from logging.handlers import RotatingFileHandler
 import os
 import platform
-import resource
+try:
+    import resource
+except ModuleNotFoundError:  # resource module unavailable on Windows
+    resource = None
 import shutil
 import sys
 import threading
@@ -77,7 +80,11 @@ def _gather_context() -> Dict[str, object]:
         "cwd": os.getcwd(),
         "python": sys.version.replace("\n", " "),
         "platform": platform.platform(),
-        "memory_kb": getattr(resource.getrusage(resource.RUSAGE_SELF), "ru_maxrss", "N/A"),
+        "memory_kb": (
+            getattr(resource.getrusage(resource.RUSAGE_SELF), "ru_maxrss", "N/A")
+            if resource is not None
+            else "N/A"
+        ),
         "fpcalc": shutil.which("fpcalc"),
         "ffmpeg": shutil.which("ffmpeg"),
     }
