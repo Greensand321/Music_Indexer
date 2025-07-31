@@ -1,7 +1,11 @@
 from pydub import AudioSegment
 import simpleaudio as sa
-from tkinter import messagebox
 import threading
+
+
+class PlaybackError(Exception):
+    """Raised when preview playback fails."""
+
 
 _play_obj = None
 _play_lock = threading.Lock()
@@ -32,4 +36,14 @@ def play_preview(path: str, start_ms: int = 30000, duration_ms: int = 15000) -> 
                 sample_rate=clip.frame_rate,
             )
     except Exception as exc:
-        messagebox.showerror("Playback Error", str(exc))
+        raise PlaybackError(str(exc)) from exc
+
+
+def stop_preview() -> None:
+    """Stop any currently playing preview."""
+    global _play_obj
+    with _play_lock:
+        if _play_obj and _play_obj.is_playing():
+            _play_obj.stop()
+        _play_obj = None
+
