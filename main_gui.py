@@ -75,6 +75,8 @@ from controllers.normalize_controller import (
 from plugins.assistant_plugin import AssistantPlugin
 from controllers.cluster_controller import cluster_library
 from config import load_config, save_config, DEFAULT_FP_THRESHOLDS
+from playlist_engine import bucket_by_tempo_energy, more_like_this, autodj_playlist
+from controllers.cluster_controller import gather_tracks
 
 FilterFn = Callable[[FileRecord], bool]
 _cached_filters = None
@@ -163,6 +165,76 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
                     cluster_cfg["cluster_selection_epsilon"]
                 )
         params = {"min_cluster_size": min_cs, "method": "hdbscan", **extras}
+    elif name == "Tempo/Energy Buckets":
+        def _run():
+            path = app.require_library()
+            if not path:
+                return
+            tracks = gather_tracks(path)
+            try:
+                bucket_by_tempo_energy(tracks, path, app._log)
+                messagebox.showinfo("Buckets", "Tempo/Energy playlists written")
+            except Exception as e:
+                messagebox.showerror("Error", str(e))
+
+        ttk.Button(frame, text="Generate Buckets", command=_run).pack(padx=10, pady=10)
+        return frame
+    elif name == "More Like This":
+        sel = tk.StringVar()
+
+        def browse():
+            f = filedialog.askopenfilename()
+            if f:
+                sel.set(f)
+
+        def generate():
+            path = app.require_library()
+            if not path or not sel.get():
+                messagebox.showerror("Error", "Select a library and track")
+                return
+            tracks = gather_tracks(path)
+            res = more_like_this(sel.get(), tracks, 10, log_callback=app._log)
+            outfile = os.path.join(path, "Playlists", "more_like_this.m3u")
+            write_playlist(res, outfile)
+            messagebox.showinfo("Playlist", f"Written to {outfile}")
+
+        tk.Entry(frame, textvariable=sel, width=40).pack(side="left", padx=5, pady=5)
+        ttk.Button(frame, text="Browse", command=browse).pack(side="left")
+        ttk.Button(frame, text="Generate", command=generate).pack(side="left", padx=5)
+        return frame
+    elif name == "Auto-DJ":
+        sel = tk.StringVar()
+        count_var = tk.StringVar(value="20")
+
+        def browse():
+            f = filedialog.askopenfilename()
+            if f:
+                sel.set(f)
+
+        def generate():
+            path = app.require_library()
+            if not path or not sel.get():
+                messagebox.showerror("Error", "Select a library and track")
+                return
+            try:
+                n = int(count_var.get())
+            except ValueError:
+                messagebox.showerror("Error", "Invalid count")
+                return
+            tracks = gather_tracks(path)
+            order = autodj_playlist(sel.get(), tracks, n, log_callback=app._log)
+            outfile = os.path.join(path, "Playlists", "autodj.m3u")
+            write_playlist(order, outfile)
+            messagebox.showinfo("Playlist", f"Written to {outfile}")
+
+        row = ttk.Frame(frame)
+        row.pack(padx=10, pady=10)
+        tk.Entry(row, textvariable=sel, width=40).pack(side="left")
+        ttk.Button(row, text="Browse", command=browse).pack(side="left", padx=5)
+        ttk.Entry(row, textvariable=count_var, width=5).pack(side="left")
+        ttk.Label(row, text="songs").pack(side="left")
+        ttk.Button(row, text="Generate", command=generate).pack(side="left", padx=5)
+        return frame
     else:
         ttk.Label(frame, text=f"{name} panel coming soon…").pack(padx=10, pady=10)
         return frame
@@ -609,9 +681,10 @@ class SoundVaultImporterApp(tk.Tk):
             "Interactive – KMeans",
             "Interactive – HDBSCAN",
             "Sort by Genre",
-            "BPM Range",
+            "Tempo/Energy Buckets",
             "Metadata",
             "More Like This",
+            "Auto-DJ",
         ]:
             self.plugin_list.insert("end", name)
         self.plugin_list.bind("<<ListboxSelect>>", self.on_plugin_select)
