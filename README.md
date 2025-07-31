@@ -36,11 +36,13 @@ python main_gui.py
 3. **Fix Tags** via the AcoustID menu (now supports multiple metadata services)
 4. **Generate Playlists** from your folder structure
 5. **Clustered Playlists** (interactive K-Means/HDBSCAN) via the Tools ▸ Clustered Playlists menu
-6. **Tidal-dl Sync** can upgrade low-quality files to FLAC
-7. **Library Duplicate Scan** finds duplicate tracks after you drop new songs directly into your library
-8. **Cross-Album Scan** optionally finds duplicates appearing on multiple albums
-9. Use the **Theme** dropdown and **Help** tab for assistance
-10. Adjust the **Distance Threshold** in the Quality Checker tab to fine‑tune duplicate detection and view detailed fingerprint distance logs
+6. **Smart Playlist Engine** with tempo/energy buckets and “More Like This” suggestions
+7. **Auto‑DJ** mode builds seamless playlists starting from any song
+8. **Tidal-dl Sync** can upgrade low-quality files to FLAC
+9. **Library Duplicate Scan** finds duplicate tracks after you drop new songs directly into your library
+10. **Cross-Album Scan** optionally finds duplicates appearing on multiple albums
+11. Use the **Theme** dropdown and **Help** tab for assistance
+12. Adjust the **Distance Threshold** in the Quality Checker tab to fine‑tune duplicate detection and view detailed fingerprint distance logs
 
 Cluster generation writes progress into `<method>_log.txt` inside your library so you can review the steps later.
 
@@ -156,10 +158,6 @@ third_party/ - Prebuilt llama executables
 
 These items are currently under development and not yet part of the stable release.
 
-- Smarter Playlist Engine
-- Tempo/Energy Buckets
-- "More Like This" suggestions
-- Deej-AI / Auto-DJ Integration
 - Metadata Plugins (Discogs, Spotify)
 
 See [`docs/project_documentation.html`](docs/project_documentation.html) for technical details.
