@@ -10,28 +10,24 @@ class PlaybackError(Exception):
 
 
 class PreviewPlayer:
-    """Play short audio previews with thread-safe state."""
+    """Play short audio previews with improved thread safety."""
 
     def __init__(self) -> None:
         self._play_obj = None
         self._ffplay_proc = None
         self._play_lock = threading.Lock()
+        self._is_playing = False
 
     def play_preview(
         self, path: str, start_ms: int = 30000, duration_ms: int = 15000
     ) -> None:
-        """Play a short preview of the audio file at ``path``.
+        """Play a short preview of the audio file at ``path``."""
 
-        Parameters
-        ----------
-        path : str
-            File path of the audio clip.
-        start_ms : int, optional
-            Starting point in milliseconds, by default 30000.
-        duration_ms : int, optional
-            Duration of the preview in milliseconds, by default 15000.
-        """
-        self.stop_preview()
+        with self._play_lock:
+            if self._is_playing:
+                self.stop_preview()
+            self._is_playing = True
+
         try:
             audio = AudioSegment.from_file(path)
             clip = audio[start_ms : start_ms + duration_ms]
@@ -43,28 +39,33 @@ class PreviewPlayer:
                     sample_rate=clip.frame_rate,
                 )
             return
-        except Exception as exc:
-            sa_error = exc
+        except Exception as sa_error:
+            # Fallback to ffplay if simpleaudio fails
+            ffplay = shutil.which("ffplay")
+            if not ffplay:
+                with self._play_lock:
+                    self._is_playing = False
+                raise PlaybackError(str(sa_error)) from sa_error
 
-        ffplay = shutil.which("ffplay")
-        if not ffplay:
-            raise PlaybackError(str(sa_error)) from sa_error
-        try:
-            cmd = [
-                ffplay,
-                "-nodisp",
-                "-autoexit",
-                "-loglevel",
-                "quiet",
-                "-ss",
-                str(start_ms / 1000),
-                "-t",
-                str(duration_ms / 1000),
-                path,
-            ]
-            self._ffplay_proc = subprocess.Popen(cmd, start_new_session=True)
-        except Exception as exc:
-            raise PlaybackError(str(exc)) from exc
+            try:
+                cmd = [
+                    ffplay,
+                    "-nodisp",
+                    "-autoexit",
+                    "-loglevel",
+                    "quiet",
+                    "-ss",
+                    str(start_ms / 1000),
+                    "-t",
+                    str(duration_ms / 1000),
+                    path,
+                ]
+                with self._play_lock:
+                    self._ffplay_proc = subprocess.Popen(cmd, start_new_session=True)
+            except Exception as exc:
+                with self._play_lock:
+                    self._is_playing = False
+                raise PlaybackError(str(exc)) from exc
 
     def stop_preview(self) -> None:
         """Stop any currently playing preview."""
@@ -72,23 +73,17 @@ class PreviewPlayer:
             if self._play_obj and self._play_obj.is_playing():
                 self._play_obj.stop()
             self._play_obj = None
-        if self._ffplay_proc and self._ffplay_proc.poll() is None:
-            try:
-                self._ffplay_proc.terminate()
-            except ProcessLookupError:
-                pass
-            try:
-                self._ffplay_proc.wait(timeout=1)
-            except subprocess.TimeoutExpired:
+
+            if self._ffplay_proc and self._ffplay_proc.poll() is None:
                 try:
-                    self._ffplay_proc.kill()
-                except ProcessLookupError:
-                    pass
-                finally:
+                    self._ffplay_proc.terminate()
+                    self._ffplay_proc.wait(timeout=1)
+                except (ProcessLookupError, subprocess.TimeoutExpired):
                     try:
+                        self._ffplay_proc.kill()
                         self._ffplay_proc.wait(timeout=1)
                     except Exception:
                         pass
-            except ProcessLookupError:
-                pass
-        self._ffplay_proc = None
+                self._ffplay_proc = None
+
+            self._is_playing = False

@@ -2358,17 +2358,21 @@ class SoundVaultImporterApp(tk.Tk):
             self.scan_btn.config(state="disabled")
 
     def _play_preview(self, path: str) -> None:
+        """Play an audio preview, ensuring previous playback is cleaned up."""
+
+        # Stop any existing playback first
+        self.preview_player.stop_preview()
+
+        # Wait for previous thread to fully terminate
+        if self._preview_thread and self._preview_thread.is_alive():
+            self._preview_thread.join(timeout=1.0)
+
         if not PYDUB_AVAILABLE:
             messagebox.showerror(
                 "Playback failed",
                 "pydub/ffmpeg not available. Install requirements to enable preview.",
             )
             return
-
-        self.preview_player.stop_preview()
-
-        if self._preview_thread and self._preview_thread.is_alive():
-            self._preview_thread.join(timeout=0.1)
 
         def task() -> None:
             try:
