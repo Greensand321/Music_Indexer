@@ -465,15 +465,27 @@ def compute_moves_and_tag_index(
             kept_files.discard(loser)
 
 
+    trash_dir = os.path.join(root_path, "Trash")
+    os.makedirs(trash_dir, exist_ok=True)
     for loser, reason in to_delete.items():
         if dry_run:
-            log_callback(f"   ? (dry-run) Would delete duplicate {loser} ({reason})")
+            log_callback(
+                f"   ? (dry-run) Would move duplicate {loser} to Trash ({reason})"
+            )
         else:
             try:
-                os.remove(loser)
-                log_callback(f"   - Deleted duplicate ({reason}): {loser}")
+                dest = os.path.join(trash_dir, os.path.basename(loser))
+                base, ext = os.path.splitext(os.path.basename(loser))
+                counter = 1
+                while os.path.exists(dest):
+                    dest = os.path.join(trash_dir, f"{base}_{counter}{ext}")
+                    counter += 1
+                shutil.move(loser, dest)
+                log_callback(
+                    f"   - Moved duplicate to Trash ({reason}): {loser}"
+                )
             except Exception as e:
-                log_callback(f"   ! Failed to delete {loser}: {e}")
+                log_callback(f"   ! Failed to move {loser} to Trash: {e}")
 
     # ─── Phase 3: Read metadata & build counters ─────────────────────────────────
     log_callback("3/6: Reading metadata and building counters…")
