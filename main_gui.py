@@ -45,6 +45,7 @@ from controllers.library_index_controller import generate_index
 from controllers.import_controller import import_new_files
 from controllers.genre_list_controller import list_unique_genres
 from controllers.highlight_controller import play_snippet, PYDUB_AVAILABLE
+from controllers.scan_progress_controller import ScanProgressController
 from gui.audio_preview import PreviewPlayer
 from io import BytesIO
 from PIL import Image, ImageTk
@@ -391,6 +392,63 @@ class ProgressDialog(tk.Toplevel):
         self.pb["value"] = value
         self.update_idletasks()
 
+
+class ScanProgressWindow(tk.Toplevel):
+    """Non-modal window showing scan progress and logs."""
+
+    def __init__(self, parent: tk.Widget, cancel_event: threading.Event):
+        super().__init__(parent)
+        self.title("Scanning…")
+        self.cancel_event = cancel_event
+        self.resizable(True, True)
+        self.transient(parent)
+
+        self.progress = ttk.Progressbar(self, mode="indeterminate")
+        self.progress.pack(fill="x", padx=10, pady=(10, 0))
+        self.progress.start()
+
+        self.log_widget = ScrolledText(self, width=60, height=15, state="disabled")
+        self.log_widget.pack(padx=10, pady=10, fill="both", expand=True)
+
+        btn = ttk.Button(self, text="Cancel", command=self._on_cancel)
+        btn.pack(pady=(0, 10))
+        self.protocol("WM_DELETE_WINDOW", self._on_cancel)
+
+    def _on_cancel(self) -> None:
+        if messagebox.askyesno("Cancel Scan", "Stop scanning?"):
+            self.cancel_event.set()
+
+    # Public method used by background threads
+    def update_progress(self, kind: str, current: int, total: int, msg: str) -> None:
+        self.after(0, lambda: self._do_update(kind, current, total, msg))
+
+    # Actual UI updates executed on main thread
+    def _do_update(self, kind: str, current: int, total: int, msg: str) -> None:
+        if kind == "walk":
+            if self.progress["mode"] != "indeterminate":
+                self.progress.config(mode="indeterminate")
+                self.progress.start()
+            if msg:
+                self._append(f"Scanning: {msg}")
+        elif kind == "fp_start":
+            if self.progress["mode"] != "determinate":
+                self.progress.stop()
+                self.progress.config(mode="determinate", maximum=total, value=current - 1)
+            self._append(f"Fingerprinting file {current} of {total}\n{msg}")
+        elif kind == "fp_end":
+            if self.progress["mode"] == "determinate":
+                self.progress["value"] = current
+        elif kind == "log":
+            self._append(msg)
+        elif kind == "complete":
+            self.progress.stop()
+            self._append(f"Completed: {current} duplicate pairs found")
+
+    def _append(self, text: str) -> None:
+        self.log_widget.configure(state="normal")
+        self.log_widget.insert("end", text + "\n")
+        self.log_widget.see("end")
+        self.log_widget.configure(state="disabled")
 
 class SoundVaultImporterApp(tk.Tk):
     def __init__(self):
@@ -1162,16 +1220,25 @@ class SoundVaultImporterApp(tk.Tk):
             self._log("! Invalid prefix length; using saved value")
         cfg["duplicate_prefix_len"] = pref_val
         save_config(cfg)
+        controller = ScanProgressController()
+        prog_win = ScanProgressWindow(self, controller.cancel_event)
+        controller.set_callback(prog_win.update_progress)
 
         def task():
             self._dup_logging = True
 
             def cb(msg):
                 self.after(0, lambda m=msg: self._log(m))
+                controller.update("log", 0, 0, msg)
 
             try:
                 dups, missing = sdf_mod.find_duplicates(
-                    folder, threshold=thr, prefix_len=pref_val, log_callback=cb
+                    folder,
+                    threshold=thr,
+                    prefix_len=pref_val,
+                    log_callback=cb,
+                    progress_callback=controller.update,
+                    cancel_event=controller.cancel_event,
                 )
                 self.after(0, lambda: self._log(f"Found {len(dups)} duplicate pairs"))
                 self.after(0, lambda: self.populate_quality_table(dups))
@@ -1180,7 +1247,7 @@ class SoundVaultImporterApp(tk.Tk):
                     self.after(0, lambda m=msg: self._log(m))
             finally:
                 self._dup_logging = False
-                self.after(0, lambda: self.scan_btn.config(state="normal"))
+                self.after(0, lambda: (self.scan_btn.config(state="normal"), prog_win.destroy()))
 
         threading.Thread(target=task, daemon=True).start()
 

@@ -1,6 +1,7 @@
 import os
 import time
-from typing import List, Tuple, Dict, Optional
+import threading
+from typing import Callable, List, Tuple, Dict, Optional
 
 from fingerprint_cache import get_fingerprint
 from near_duplicate_detector import fingerprint_distance
@@ -59,7 +60,11 @@ def _keep_score(path: str, ext_priority: Dict[str, int]) -> float:
     return ext_score + fname_score
 
 
-def _walk_audio_files(root: str) -> List[str]:
+def _walk_audio_files(
+    root: str,
+    progress_callback: Optional[Callable[[str, int, int, str], None]] = None,
+    cancel_event: Optional[threading.Event] = None,
+) -> List[str]:
     paths: List[str] = []
     for dirpath, _dirs, files in os.walk(root):
         _dlog("WALK", f"enter {dirpath}")
@@ -74,8 +79,16 @@ def _walk_audio_files(root: str) -> List[str]:
                 path = os.path.join(dirpath, fname)
                 _dlog("WALK", f"match {path}")
                 paths.append(path)
+                if progress_callback:
+                    progress_callback("walk", len(paths), 0, path)
+                if cancel_event and cancel_event.is_set():
+                    return paths
             else:
                 _dlog("WALK", f"skip file {fname}")
+            if cancel_event and cancel_event.is_set():
+                return paths
+        if cancel_event and cancel_event.is_set():
+            return paths
     return paths
 
 
@@ -85,6 +98,8 @@ def find_duplicates(
     prefix_len: int | None = FP_PREFIX_LEN,
     db_path: Optional[str] = None,
     log_callback: Optional[callable] = None,
+    progress_callback: Optional[Callable[[str, int, int, str], None]] = None,
+    cancel_event: Optional[threading.Event] = None,
 ) -> Tuple[List[Tuple[str, str]], int]:
     """Return (duplicates, missing_count) for audio files in ``root``.
 
@@ -111,10 +126,22 @@ def find_duplicates(
             missing_fp += 1
         return duration, fp
 
-    audio_paths = _walk_audio_files(root)
+    audio_paths = _walk_audio_files(root, progress_callback, cancel_event)
+    if cancel_event and cancel_event.is_set():
+        return [], missing_fp
+
+    total = len(audio_paths)
     file_data: List[Tuple[str, str]] = []
-    for p in audio_paths:
+    for idx, p in enumerate(audio_paths, 1):
+        if cancel_event and cancel_event.is_set():
+            break
+        if progress_callback:
+            progress_callback("fp_start", idx, total, p)
         fp = get_fingerprint(p, db_path, compute, log_callback=log_callback)
+        if cancel_event and cancel_event.is_set():
+            break
+        if progress_callback:
+            progress_callback("fp_end", idx, total, p)
         if fp:
             log_callback(f"\u2713 Fingerprinted {p}")
             show_pref = fp[:prefix_len] if (prefix_len and prefix_len > 0) else ""
@@ -165,6 +192,8 @@ def find_duplicates(
 
     duplicates: List[Tuple[str, str]] = []
     for g in groups:
+        if cancel_event and cancel_event.is_set():
+            break
         paths = g["paths"]
         if len(paths) <= 1:
             continue
@@ -177,5 +206,7 @@ def find_duplicates(
                 f"keep={keep} score={_keep_score(keep, EXT_PRIORITY):.2f} dup={dup}",
             )
             duplicates.append((keep, dup))
+    if progress_callback:
+        progress_callback("complete", len(duplicates), 0, "")
     return duplicates, missing_fp
 
