@@ -12,6 +12,55 @@ import music_indexer_api as idx
 SUPPORTED_EXTS = {".flac", ".m4a", ".aac", ".mp3", ".wav", ".ogg"}
 
 
+def build_import_preview_html(
+    root_path: str, moves: Dict[str, str], output_html_path: str
+) -> None:
+    """Write a minimal HTML preview listing only newly added tracks."""
+
+    lines = ["<h2>Import Preview</h2>", "<pre>"]
+    lines.append(
+        f"<span class=\"folder\">{idx.sanitize(os.path.basename(root_path))}/</span>"
+    )
+    dests = set(moves.values())
+    tree_nodes = set()
+    for dest in dests:
+        parts = os.path.relpath(dest, root_path).split(os.sep)
+        for i in range(1, len(parts) + 1):
+            tree_nodes.add(os.path.join(root_path, *parts[:i]))
+
+    for node in sorted(tree_nodes, key=lambda p: os.path.relpath(p, root_path)):
+        rel = os.path.relpath(node, root_path)
+        depth = rel.count(os.sep)
+        indent = "    " * depth
+        if node in dests:
+            lines.append(
+                f"{indent}<span class=\"song\">- {idx.sanitize(os.path.basename(node))}</span>"
+            )
+        else:
+            lines.append(
+                f"{indent}<span class=\"folder\">{idx.sanitize(os.path.basename(node))}/</span>"
+            )
+    lines.append("</pre>")
+    html_body = "\n".join(lines)
+
+    with open(output_html_path, "w", encoding="utf-8") as out:
+        out.write(
+            "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n  <meta charset=\"UTF-8\">\n"
+        )
+        out.write(
+            f"  <title>Import Preview – {idx.sanitize(os.path.basename(root_path))}</title>\n"
+        )
+        out.write(
+            "  <style>\n    body { background:#2e3440; color:#d8dee9; font-family:'Courier New', monospace; }\n"
+            "    pre  { font-size:14px; }\n    .folder { color:#81a1c1; }\n    .song   { color:#a3be8c; }\n  </style>\n"
+            "</head>\n<body>\n"
+        )
+        out.write(html_body)
+        if html_body and not html_body.endswith("\n"):
+            out.write("\n")
+        out.write("</body>\n</html>\n")
+
+
 def import_new_files(
     vault_root: str,
     import_folder: str,
@@ -110,20 +159,20 @@ def import_new_files(
     preview_html = os.path.join(import_folder, "import_preview.html")
 
     if dry_run:
-        idx.build_dry_run_html(
-            vault_root, preview_html, log_callback, enable_phase_c=enable_phase_c
-        )
+        build_import_preview_html(vault_root, import_moves, preview_html)
         shutil.rmtree(temp_dir, ignore_errors=True)
         return {"moved": 0, "html": preview_html, "dry_run": True}
 
     moved = 0
     errors = []
+    successful_moves: Dict[str, str] = {}
     for src, dest in import_moves.items():
         parent_dir = os.path.dirname(dest)
         try:
             os.makedirs(parent_dir, exist_ok=True)
             shutil.move(src, dest)
             moved += 1
+            successful_moves[src] = dest
         except Exception as e:
             errors.append(f"Failed to move {src} → {dest}: {e}")
 
@@ -136,13 +185,18 @@ def import_new_files(
     log_path = os.path.join(vault_root, "import_log.txt")
     try:
         with open(log_path, "a", encoding="utf-8") as lf:
-            for src, dest in import_moves.items():
-                lf.write(f"{os.path.basename(src)} → {os.path.relpath(dest, music_root)}\n")
+            for src, dest in successful_moves.items():
+                lf.write(
+                    f"{os.path.basename(src)} → {os.path.relpath(dest, music_root)}\n"
+                )
     except Exception:
         pass
 
-    idx.build_dry_run_html(
-        vault_root, preview_html, log_callback, enable_phase_c=enable_phase_c
-    )
+    build_import_preview_html(vault_root, successful_moves, preview_html)
 
-    return {"moved": moved, "html": preview_html, "dry_run": False, "errors": errors}
+    return {
+        "moved": moved,
+        "html": preview_html,
+        "dry_run": False,
+        "errors": errors,
+    }
