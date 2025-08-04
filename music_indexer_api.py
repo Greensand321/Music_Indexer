@@ -510,9 +510,8 @@ def compute_moves_and_tag_index(
         genre   = data["genre"]
         track   = data["track"]
 
-        # 1) Primary & collabs (normalize case)
+        # 1) Primary & collabs (preserve original case)
         primary, collabs = extract_primary_and_collabs(raw_artist)
-        primary = primary.upper()
         p_lower = primary.lower()
 
         # 2) album_counts for genuine (non-remix) tracks under each (artist, album)
