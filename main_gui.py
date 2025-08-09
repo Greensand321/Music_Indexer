@@ -2443,9 +2443,6 @@ class SoundVaultImporterApp(tk.Tk):
     def _play_preview(self, path: str) -> None:
         """Play an audio preview, ensuring previous playback is cleaned up."""
 
-        # Stop any existing playback first
-        self.preview_player.stop_preview()
-
         # Wait for previous thread to fully terminate
         if self._preview_thread and self._preview_thread.is_alive():
             self._preview_thread.join(timeout=1.0)
