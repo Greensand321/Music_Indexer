@@ -1,6 +1,7 @@
 import os
 import time
 import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Callable, List, Tuple, Dict, Optional
 
 from fingerprint_cache import get_fingerprint
@@ -100,6 +101,7 @@ def find_duplicates(
     log_callback: Optional[callable] = None,
     progress_callback: Optional[Callable[[str, int, int, str], None]] = None,
     cancel_event: Optional[threading.Event] = None,
+    max_workers: int | None = None,
 ) -> Tuple[List[Tuple[str, str]], int]:
     """Return (duplicates, missing_count) for audio files in ``root``.
 
@@ -118,12 +120,14 @@ def find_duplicates(
     _log = log_callback
 
     missing_fp = 0
+    missing_lock = threading.Lock()
 
     def compute(path: str) -> Tuple[Optional[int], Optional[str]]:
         nonlocal missing_fp
         duration, fp = _compute_fp(path)
         if fp is None:
-            missing_fp += 1
+            with missing_lock:
+                missing_fp += 1
         return duration, fp
 
     audio_paths = _walk_audio_files(root, progress_callback, cancel_event)
@@ -132,24 +136,38 @@ def find_duplicates(
 
     total = len(audio_paths)
     file_data: List[Tuple[str, str]] = []
-    for idx, p in enumerate(audio_paths, 1):
-        if cancel_event and cancel_event.is_set():
-            break
-        if progress_callback:
-            progress_callback("fp_start", idx, total, p)
-        fp = get_fingerprint(p, db_path, compute, log_callback=log_callback)
-        if cancel_event and cancel_event.is_set():
-            break
-        if progress_callback:
-            progress_callback("fp_end", idx, total, p)
-        if fp:
-            log_callback(f"\u2713 Fingerprinted {p}")
-            show_pref = fp[:prefix_len] if (prefix_len and prefix_len > 0) else ""
-            _dlog("FP", f"prefix={show_pref} value={fp}")
-            file_data.append((p, fp))
-            _dlog("GROUP", f"added file_data {p}")
-        else:
-            log_callback(f"\u2717 No fingerprint for {p}")
+    futures: Dict[object, Tuple[int, str]] = {}
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        for idx, p in enumerate(audio_paths, 1):
+            if cancel_event and cancel_event.is_set():
+                break
+            if progress_callback:
+                progress_callback("fp_start", idx, total, p)
+            fut = executor.submit(
+                get_fingerprint, p, db_path, compute, log_callback=log_callback
+            )
+            futures[fut] = (idx, p)
+
+        for fut in as_completed(futures):
+            idx, p = futures[fut]
+            if cancel_event and cancel_event.is_set():
+                break
+            fp = fut.result()
+            if progress_callback:
+                progress_callback("fp_end", idx, total, p)
+            if fp:
+                log_callback(f"\u2713 Fingerprinted {p}")
+                show_pref = fp[:prefix_len] if (prefix_len and prefix_len > 0) else ""
+                _dlog("FP", f"prefix={show_pref} value={fp}")
+                file_data.append((p, fp))
+                _dlog("GROUP", f"added file_data {p}")
+            else:
+                log_callback(f"\u2717 No fingerprint for {p}")
+
+    if cancel_event and cancel_event.is_set():
+        for fut in futures:
+            fut.cancel()
 
     groups: List[Dict[str, object]] = []
     prefix_map: Dict[str, List[Dict[str, object]]] = {}
