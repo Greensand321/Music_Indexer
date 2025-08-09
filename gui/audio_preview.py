@@ -15,8 +15,30 @@ class PreviewPlayer:
     def __init__(self) -> None:
         self._play_obj = None
         self._ffplay_proc = None
-        self._play_lock = threading.Lock()
+        # Re-entrant lock so stop_preview can be called while already held
+        self._play_lock = threading.RLock()
         self._is_playing = False
+
+    def _monitor_playback(self, play_obj=None, ffplay_proc=None) -> None:
+        """Wait for playback to finish then clean up.
+
+        Parameters
+        ----------
+        play_obj:
+            The ``simpleaudio`` play object to monitor.
+        ffplay_proc:
+            The ``ffplay`` subprocess to monitor.
+        """
+
+        if play_obj is not None:
+            play_obj.wait_done()
+        elif ffplay_proc is not None:
+            ffplay_proc.wait()
+
+        with self._play_lock:
+            # Ensure this monitor corresponds to the current playback
+            if self._play_obj is play_obj and self._ffplay_proc is ffplay_proc:
+                self.stop_preview()
 
     def play_preview(
         self, path: str, start_ms: int = 30000, duration_ms: int = 15000
@@ -38,6 +60,10 @@ class PreviewPlayer:
                     bytes_per_sample=clip.sample_width,
                     sample_rate=clip.frame_rate,
                 )
+                play_obj = self._play_obj
+            threading.Thread(
+                target=self._monitor_playback, args=(play_obj, None), daemon=True
+            ).start()
             return
         except Exception as sa_error:
             # Fallback to ffplay if simpleaudio fails
@@ -62,6 +88,10 @@ class PreviewPlayer:
                 ]
                 with self._play_lock:
                     self._ffplay_proc = subprocess.Popen(cmd, start_new_session=True)
+                    proc = self._ffplay_proc
+                threading.Thread(
+                    target=self._monitor_playback, args=(None, proc), daemon=True
+                ).start()
             except Exception as exc:
                 with self._play_lock:
                     self._is_playing = False
