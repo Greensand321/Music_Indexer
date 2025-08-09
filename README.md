@@ -25,6 +25,11 @@ pip install -r requirements.txt
 The indexer will exit with an error if the real `mutagen` package is missing,
 so ensure all dependencies are installed before running.
 
+The **Quality Checker** now imports the indexer's `fingerprint_generator`
+module. Make sure the Music Indexer package itself is installed (e.g.
+`pip install .`) so this dependency is available when running the Quality
+Checker.
+
 ## Quickstart
 
 ```bash
