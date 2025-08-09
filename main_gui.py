@@ -1140,6 +1140,13 @@ class SoundVaultImporterApp(tk.Tk):
             "Estimate BPM?", "Attempt BPM estimation for missing values?"
         )
 
+        stop_on_error = False
+        if not dry_run:
+            stop_on_error = messagebox.askyesno(
+                "Stop on Error?",
+                "Stop the import if any file move fails?",
+            )
+
         def log_line(msg: str) -> None:
             self.after(0, lambda m=msg: self._log(m))
 
@@ -1151,6 +1158,7 @@ class SoundVaultImporterApp(tk.Tk):
                     dry_run=dry_run,
                     estimate_bpm=estimate,
                     log_callback=log_line,
+                    stop_on_error=stop_on_error,
                 )
 
                 def ui_complete() -> None:
@@ -1161,15 +1169,23 @@ class SoundVaultImporterApp(tk.Tk):
                         )
                     else:
                         moved = summary.get("moved", 0)
-                        messagebox.showinfo(
-                            "Import Complete",
-                            f"Imported {moved} files. Preview:\n{summary['html']}",
+                        base_msg = (
+                            f"Imported {moved} files. Preview:\n{summary['html']}"
                         )
+                        if summary.get("errors"):
+                            err_text = "\n".join(summary["errors"])
+                            full_msg = f"{base_msg}\n\nErrors:\n{err_text}"
+                            if messagebox.askretrycancel(
+                                "Import Complete (with errors)", full_msg
+                            ):
+                                threading.Thread(target=task, daemon=True).start()
+                                return
+                        else:
+                            messagebox.showinfo("Import Complete", base_msg)
 
                     if summary.get("errors"):
-                        self._log(
-                            "! Some files failed to import. Check log for details."
-                        )
+                        for err in summary["errors"]:
+                            self._log(f"! {err}")
 
                     self._log(
                         f"✓ Import finished for {import_folder} → {vault}. Dry run: {dry_run}. BPM: {estimate}."

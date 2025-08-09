@@ -68,6 +68,7 @@ def import_new_files(
     estimate_bpm: bool = False,
     log_callback: Callable[[str], None] | None = None,
     enable_phase_c: bool = False,
+    stop_on_error: bool = False,
 ) -> Dict[str, Any]:
     """Import new audio files into a SoundVault library."""
     if log_callback is None:
@@ -175,6 +176,8 @@ def import_new_files(
             successful_moves[src] = dest
         except Exception as e:
             errors.append(f"Failed to move {src} → {dest}: {e}")
+            if stop_on_error:
+                break
 
     if errors:
         for err in errors:
