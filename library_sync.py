@@ -6,7 +6,8 @@ import logging
 from typing import Dict, List, Tuple, Callable, Optional
 
 import music_indexer_api as idx
-from fingerprint_cache import get_fingerprint
+import fingerprint_generator
+from fingerprint_cache import _ensure_db
 from near_duplicate_detector import fingerprint_distance
 from config import NEAR_DUPLICATE_THRESHOLD, FORMAT_PRIORITY
 
@@ -53,23 +54,6 @@ def _dlog(msg: str, log_callback: Callable[[str], None] | None = None) -> None:
         log_callback(msg)
     _logger.debug(msg)
 
-
-import chromaprint_utils
-
-
-def _compute_fp(path: str) -> tuple[int | None, str | None]:
-    try:
-        fp = chromaprint_utils.fingerprint_fpcalc(
-            path,
-            trim=True,
-            start_sec=5.0,
-            duration_sec=60.0,
-        )
-        return 0, fp
-    except Exception:
-        return None, None
-
-
 def _scan_folder(
     folder: str,
     db_path: str,
@@ -77,6 +61,7 @@ def _scan_folder(
 ) -> Dict[str, Dict[str, object]]:
     _dlog(f"DEBUG: Scanning folder {folder}", log_callback)
     infos: Dict[str, Dict[str, object]] = {}
+    audio_paths: List[str] = []
     for dirpath, _dirs, files in os.walk(folder):
         for fname in files:
             ext = os.path.splitext(fname)[1].lower()
@@ -85,7 +70,6 @@ def _scan_folder(
             path = os.path.join(dirpath, fname)
             _dlog(f"DEBUG: Processing {path}", log_callback)
             tags = idx.get_tags(path)
-            fp = get_fingerprint(path, db_path, _compute_fp)
             bitrate = 0
             try:
                 audio = idx.MutagenFile(path)
@@ -93,20 +77,42 @@ def _scan_folder(
                     bitrate = getattr(audio.info, "bitrate", 0) or getattr(audio.info, "sample_rate", 0) or 0
             except Exception:
                 pass
-            if fp:
-                _dlog(f"DEBUG: Fingerprint prefix={fp[:16]!r}", log_callback)
-            else:
-                _dlog("DEBUG: No fingerprint", log_callback)
-            _dlog(
-                f"DEBUG: Tags artist={tags.get('artist')!r} title={tags.get('title')!r} album={tags.get('album')!r} bitrate={bitrate}",
-                log_callback,
-            )
             infos[path] = {
                 **tags,
-                "fp": fp,
+                "fp": None,
                 "ext": ext,
                 "bitrate": bitrate,
             }
+            audio_paths.append(path)
+
+    if not audio_paths:
+        return infos
+
+    conn = _ensure_db(db_path)
+
+    def progress_cb(current: int, total: int, path: str, _phase: str) -> None:
+        if log_callback and path:
+            log_callback(f"{current}/{total}: {path}")
+
+    for result in fingerprint_generator.compute_fingerprints_parallel(
+        audio_paths, db_path, log_callback, progress_cb
+    ):
+        path = result[0]
+        fp = result[-1]
+        duration = result[1] if len(result) > 2 else None
+        try:
+            mtime = os.path.getmtime(path)
+        except OSError:
+            mtime = 0.0
+        conn.execute(
+            "INSERT OR REPLACE INTO fingerprints (path, mtime, duration, fingerprint) VALUES (?, ?, ?, ?)",
+            (path, mtime, duration, fp),
+        )
+        if path in infos:
+            infos[path]["fp"] = fp
+
+    conn.commit()
+    conn.close()
     return infos
 
 
