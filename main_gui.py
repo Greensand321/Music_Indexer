@@ -55,6 +55,7 @@ from typing import Callable, List
 from indexer_control import cancel_event, IndexCancelled
 import library_sync
 import playlist_generator
+import crash_watcher
 
 from controllers.library_controller import (
     load_last_path,
@@ -551,7 +552,7 @@ class SoundVaultImporterApp(tk.Tk):
         file_menu.add_command(label="Compare Libraries", command=self.compare_libraries)
         file_menu.add_command(label="Show All Files", command=self._on_show_all)
         file_menu.add_separator()
-        file_menu.add_command(label="Exit", command=self.quit)
+        file_menu.add_command(label="Exit", command=self._on_exit)
         menubar.add_cascade(label="File", menu=file_menu)
 
         settings_menu = tk.Menu(menubar, tearoff=False)
@@ -2600,8 +2601,14 @@ class SoundVaultImporterApp(tk.Tk):
         frame.pack(fill="both", expand=True, padx=10, pady=10)
         self._metadata_win = win
 
+    def _on_exit(self) -> None:
+        """Triggered by File→Exit to mark a clean shutdown."""
+        crash_watcher.mark_clean_shutdown()
+        self.quit()
+
     def _on_close(self):
         """Handle application close event."""
+        crash_watcher.record_event("WM_DELETE_WINDOW")
         self.preview_player.stop_preview()
         if self._preview_thread and self._preview_thread.is_alive():
             self._preview_thread.join(timeout=0.1)
@@ -2647,6 +2654,7 @@ if __name__ == "__main__":
 
     LOG_PATH = "soundvault_crash.log"
     install_crash_logger(log_path=LOG_PATH, level=logging.DEBUG)
+    crash_watcher.start()
     app = SoundVaultImporterApp()
     add_context_provider(lambda: {"library_path": app.library_path})
     app.log_path = LOG_PATH
