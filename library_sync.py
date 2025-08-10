@@ -10,6 +10,8 @@ import fingerprint_generator
 from fingerprint_cache import _ensure_db
 from near_duplicate_detector import fingerprint_distance
 from config import NEAR_DUPLICATE_THRESHOLD, FORMAT_PRIORITY
+from crash_watcher import record_event
+from crash_logger import watcher
 
 
 debug: bool = False
@@ -54,11 +56,13 @@ def _dlog(msg: str, log_callback: Callable[[str], None] | None = None) -> None:
         log_callback(msg)
     _logger.debug(msg)
 
+@watcher.traced
 def _scan_folder(
     folder: str,
     db_path: str,
     log_callback: Callable[[str], None] | None = None,
 ) -> Dict[str, Dict[str, object]]:
+    record_event(f"library_sync: scanning folder {folder}")
     _dlog(f"DEBUG: Scanning folder {folder}", log_callback)
     infos: Dict[str, Dict[str, object]] = {}
     audio_paths: List[str] = []
@@ -113,6 +117,7 @@ def _scan_folder(
 
     conn.commit()
     conn.close()
+    record_event(f"library_sync: finished scanning {folder}")
     return infos
 
 
@@ -127,6 +132,7 @@ def compute_quality_score(info: Dict[str, object], fmt_priority: Dict[str, int])
     return score
 
 
+@watcher.traced
 def compare_libraries(
     library_folder: str,
     incoming_folder: str,
@@ -144,6 +150,9 @@ def compare_libraries(
         Optional mapping of file extensions to fingerprint distance thresholds.
         The ``default`` key is used when an extension is not present.
     """
+    record_event(
+        f"library_sync: comparing {library_folder} to {incoming_folder}"
+    )
     if thresholds is None:
         if threshold is not None:
             thresholds = {"default": threshold}
@@ -207,7 +216,11 @@ def compare_libraries(
         f"DEBUG: Compare complete new={len(new)} existing={len(existing)} improved={len(improved)}",
         log_callback,
     )
-    return {"new": new, "existing": existing, "improved": improved}
+    result = {"new": new, "existing": existing, "improved": improved}
+    record_event(
+        f"library_sync: comparison complete new={len(new)} existing={len(existing)} improved={len(improved)}"
+    )
+    return result
 
 def copy_new_tracks(
     new_paths: List[str],
