@@ -7,6 +7,8 @@ playlists. Existing playlists are overwritten by default; pass
 
 import os, hashlib
 from collections import defaultdict
+from crash_watcher import record_event
+from crash_logger import watcher
 
 # Default extensions for playlist generation
 DEFAULT_EXTS = {".mp3", ".flac", ".wav", ".aac", ".m4a"}
@@ -25,6 +27,7 @@ def _sanitize_name(rel_path, existing):
     return f"{base}_{h}"
 
 
+@watcher.traced
 def generate_playlists(
     moves,
     root_path,
@@ -56,6 +59,7 @@ def generate_playlists(
 
     playlists_dir = output_dir or os.path.join(root_path, "Playlists")
     os.makedirs(playlists_dir, exist_ok=True)
+    record_event(f"playlist_generator: generating playlists in {playlists_dir}")
 
     dir_map = defaultdict(list)
     for old, new in moves.items():
@@ -96,6 +100,7 @@ def generate_playlists(
                     f.write(p + "\n")
         except Exception as e:
             log_callback(f"\u2717 Failed to write {playlist_file}: {e}")
+    record_event("playlist_generator: playlist generation complete")
 
 
 def write_playlist(tracks, outfile):
@@ -109,6 +114,7 @@ def write_playlist(tracks, outfile):
         raise RuntimeError(f"Failed to write playlist {outfile}: {e}")
 
 
+@watcher.traced
 def update_playlists(changes):
     """Update ``.m3u`` playlists based on moved or deleted tracks.
 
@@ -133,6 +139,7 @@ def update_playlists(changes):
     playlists_dir = os.path.join(root, "Playlists")
     if not os.path.isdir(playlists_dir):
         return
+    record_event("playlist_generator: updating existing playlists")
 
     for dirpath, _dirs, files in os.walk(playlists_dir):
         for fname in files:
@@ -177,4 +184,5 @@ def update_playlists(changes):
             overwrite=False,
             log_callback=lambda m: None,
         )
+    record_event("playlist_generator: playlist update complete")
 

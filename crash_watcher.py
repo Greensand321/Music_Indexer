@@ -26,8 +26,9 @@ class CrashWatcher(threading.Thread):
 
     def record_event(self, msg: str) -> None:
         ts = time.strftime("%Y-%m-%d %H:%M:%S")
+        thread = threading.current_thread().name
         with self._lock:
-            self._events.append(f"{ts} - {msg}")
+            self._events.append(f"{ts} [{thread}] {msg}")
 
     def dump_events(self) -> str:
         with self._lock:
@@ -55,6 +56,13 @@ def record_event(msg: str) -> None:
     """Record an event in the crash buffer."""
     if _watcher is not None:
         _watcher.record_event(msg)
+
+
+def dump_events() -> str:
+    """Return concatenated recent events."""
+    if _watcher is None:
+        return ""
+    return _watcher.dump_events()
 
 
 def mark_clean_shutdown() -> None:

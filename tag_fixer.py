@@ -12,6 +12,8 @@ from utils.path_helpers import ensure_long_path
 from plugins.base import MetadataPlugin
 
 import sqlite3
+from crash_watcher import record_event
+from crash_logger import watcher
 
 # ─── Database Helpers ─────────────────────────────────────────────────────
 def init_db(path: str):
@@ -113,8 +115,10 @@ def find_files(root):
     return audio_files
 
 
+@watcher.traced
 def update_tags(path: str, proposal: FileRecord, fields: List[str], log_callback):
     """Write selected tags from ``proposal`` into ``path``. Return True if saved."""
+    record_event(f"tag_fixer: updating tags for {path}")
     try:
         audio = MutagenFile(ensure_long_path(path), easy=True)
     except Exception as e:
@@ -149,9 +153,11 @@ def update_tags(path: str, proposal: FileRecord, fields: List[str], log_callback
         try:
             audio.save()
             log_callback(f"Updated tags for {path}")
+            record_event(f"tag_fixer: updated tags for {path}")
             return True
         except Exception as e:
             log_callback(f"Failed to save {path}: {e}")
+            record_event(f"tag_fixer: failed to save {path}")
     return False
 
 def prompt_user_about_tags(f, old_artist, old_title, new_tags):
@@ -168,6 +174,7 @@ def prompt_user_about_tags(f, old_artist, old_title, new_tags):
     return (resp == "y")
 
 # ─── Main Tag-Fixing Logic ────────────────────────────────────────────────
+@watcher.traced
 def build_file_records(
     root: str,
     *,
@@ -177,6 +184,7 @@ def build_file_records(
     progress_callback: Callable[[int], None] | None = None,
 ) -> List[FileRecord]:
     """Return a list of ``FileRecord`` objects for ``root``."""
+    record_event(f"tag_fixer: building records for {root}")
 
     if log_callback is None:
         def log_callback(msg: str):
@@ -290,9 +298,13 @@ def build_file_records(
         )
 
     db_conn.commit()
+    record_event(
+        f"tag_fixer: built {len(records)} records for {root}"
+    )
     return records
 
 
+@watcher.traced
 def apply_tag_proposals(
     selected: Iterable[FileRecord],
     *,
@@ -300,6 +312,9 @@ def apply_tag_proposals(
     log_callback: Callable[[str], None] | None = None,
 ) -> int:
     """Apply ``selected`` proposals and return number of files updated."""
+    selected = list(selected)
+    record_event(f"tag_fixer: applying {len(selected)} proposals")
+
     if log_callback is None:
         def log_callback(msg: str):
             print(msg)
@@ -311,18 +326,23 @@ def apply_tag_proposals(
     for p in selected:
         if update_tags(str(p.path), p, fields, log_callback):
             updated += 1
+    record_event(f"tag_fixer: applied {updated} proposals")
     return updated
 
 
+@watcher.traced
 def fix_tags(target, log_callback=None, interactive=False):
     """Fill missing tags for files in target using AcoustID."""
     if log_callback is None:
         def log_callback(msg):
             print(msg)
 
+    record_event(f"tag_fixer: fix_tags starting on {target}")
+
     files = find_files(target)
     if not files:
         log_callback("No audio files found.")
+        record_event("tag_fixer: no audio files found")
         return {"processed": 0, "updated": 0}
 
     base_folder = target if os.path.isdir(target) else os.path.dirname(target)
@@ -381,7 +401,11 @@ def fix_tags(target, log_callback=None, interactive=False):
 
     db_conn.commit()
     db_conn.close()
-    return {"processed": len(files), "updated": updated}
+    result = {"processed": len(files), "updated": updated}
+    record_event(
+        f"tag_fixer: fix_tags finished processed={len(files)} updated={updated}"
+    )
+    return result
 
 # ─── CLI Entry Point ─────────────────────────────────────────────────────
 def main():

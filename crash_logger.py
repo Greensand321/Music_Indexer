@@ -6,6 +6,8 @@ import logging
 from logging.handlers import RotatingFileHandler
 import os
 import platform
+import functools
+import time
 try:
     import resource
 except ModuleNotFoundError:  # resource module unavailable on Windows
@@ -15,10 +17,45 @@ import sys
 import threading
 import traceback
 
-from typing import Callable, Dict, List
+from typing import Callable, Dict, List, TypeVar
+from typing_extensions import ParamSpec
+
+import crash_watcher
+
+try:
+    import tkinter as tk
+    from tkinter import messagebox
+except Exception:  # pragma: no cover - tkinter may be unavailable
+    tk = None  # type: ignore
+    messagebox = None  # type: ignore
 
 
 _context_providers: List[Callable[[], Dict[str, object]]] = []
+
+
+P = ParamSpec("P")
+R = TypeVar("R")
+
+
+class _WatcherHelper:
+    """Helper exposing decorators for crash event instrumentation."""
+
+    def traced(self, func: Callable[P, R]) -> Callable[P, R]:
+        """Decorator logging entry and exit of ``func``."""
+
+        @functools.wraps(func)
+        def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
+            name = func.__qualname__
+            crash_watcher.record_event(f"enter {name}")
+            try:
+                return func(*args, **kwargs)
+            finally:
+                crash_watcher.record_event(f"exit {name}")
+
+        return wrapper
+
+
+watcher = _WatcherHelper()
 
 
 def add_context_provider(func: Callable[[], Dict[str, object]]) -> None:
@@ -54,9 +91,27 @@ def install(log_path: str = "crash.log", *, level: int = logging.INFO) -> None:
         if issubclass(exc_type, KeyboardInterrupt):
             sys.__excepthook__(exc_type, exc_value, exc_tb)
             return
+
+        stack = "".join(traceback.format_exception(exc_type, exc_value, exc_tb))
+        thread_name = threading.current_thread().name
+        ts = time.strftime("%Y-%m-%d %H:%M:%S")
+        events = crash_watcher.dump_events()
         context = _gather_context()
-        msg = "".join(traceback.format_exception(exc_type, exc_value, exc_tb))
-        logger.critical("Unhandled exception:\n%s\nContext: %s", msg, context)
+        summary = (
+            f"{ts} [{thread_name}] Unhandled exception:\n{stack}\nRecent events:\n{events}\nContext: {context}"
+        )
+        logger.critical(summary)
+
+        if tk and messagebox:
+            try:
+                root = tk.Tk()
+                root.withdraw()
+                messagebox.showerror("Crash Report", summary)
+                root.destroy()
+            except Exception:
+                pass
+
+        crash_watcher.mark_clean_shutdown()
         sys.__excepthook__(exc_type, exc_value, exc_tb)
 
     def _handle_thread_exception(args: threading.ExceptHookArgs) -> None:
