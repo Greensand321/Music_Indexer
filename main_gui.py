@@ -512,7 +512,9 @@ class SoundVaultImporterApp(tk.Tk):
         # Quality Checker state
         self._dup_logging = False
         self._preview_thread = None
-        self.preview_player = PreviewPlayer()
+        self.preview_player = PreviewPlayer(
+            on_done=lambda: self.after(0, self._preview_finished_ui)
+        )
 
         # assume ffmpeg is available without performing checks
         self.ffmpeg_available = True
@@ -2444,9 +2446,8 @@ class SoundVaultImporterApp(tk.Tk):
     def _play_preview(self, path: str) -> None:
         """Play an audio preview, ensuring previous playback is cleaned up."""
 
-        # Wait for previous thread to fully terminate
-        if self._preview_thread and self._preview_thread.is_alive():
-            self._preview_thread.join(timeout=1.0)
+        # Stop any current preview immediately (no Tk calls inside)
+        self.preview_player.stop_preview()
 
         if not PYDUB_AVAILABLE:
             messagebox.showerror(
@@ -2463,6 +2464,10 @@ class SoundVaultImporterApp(tk.Tk):
 
         self._preview_thread = threading.Thread(target=task, daemon=True)
         self._preview_thread.start()
+
+    def _preview_finished_ui(self):
+        # Placeholder for UI updates when preview completes
+        pass
 
     def _load_thumbnail(self, path: str, size: int = 100) -> ImageTk.PhotoImage:
         img = None
@@ -2610,8 +2615,6 @@ class SoundVaultImporterApp(tk.Tk):
         """Handle application close event."""
         crash_watcher.record_event("WM_DELETE_WINDOW")
         self.preview_player.stop_preview()
-        if self._preview_thread and self._preview_thread.is_alive():
-            self._preview_thread.join(timeout=0.1)
         self.destroy()
 
     def _view_crash_log(self) -> None:
