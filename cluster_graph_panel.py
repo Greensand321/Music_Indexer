@@ -124,7 +124,13 @@ class ClusterGraphPanel(ttk.Frame):
             return
 
         dpi = self.canvas.figure.get_dpi()
-        self.canvas.figure.set_size_inches(width / dpi, height / dpi, forward=True)
+        # Tk's global scaling inflates widget dimensions; compensate so the
+        # Matplotlib figure matches the actual canvas pixels instead of
+        # rendering larger and getting clipped to the top-left corner.
+        scale = float(self.canvas_widget.tk.call("tk", "scaling"))
+        scaled_w = width / scale
+        scaled_h = height / scale
+        self.canvas.figure.set_size_inches(scaled_w / dpi, scaled_h / dpi, forward=True)
         self.canvas.figure.tight_layout()
         self.canvas.draw_idle()
 
