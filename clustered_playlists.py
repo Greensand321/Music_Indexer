@@ -176,4 +176,4 @@ def generate_clustered_playlists(
             log_callback(f"\u2717 Failed to write {outfile}: {e}")
 
     log_callback("✓ Clustered playlist generation finished")
-    return feats
+    return X
