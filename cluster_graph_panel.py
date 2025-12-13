@@ -55,6 +55,7 @@ class ClusterGraphPanel(ttk.Frame):
         self._draw_clusters(cluster_func(X, self._cluster_kwargs(cluster_params)))
 
         # Track resize events so the canvas redraws to the latest geometry
+        self._pending_size: tuple[int, int] | None = None
         self._resize_after_id: str | None = None
         self.canvas_widget.bind("<Configure>", self._on_resize)
         # Force an initial layout pass once the widget is visible
@@ -99,6 +100,10 @@ class ClusterGraphPanel(ttk.Frame):
 
     def _on_resize(self, _event):
         """Schedule a canvas redraw after geometry changes."""
+        self._pending_size = (
+            self.canvas_widget.winfo_width(),
+            self.canvas_widget.winfo_height(),
+        )
         if self._resize_after_id is not None:
             self.after_cancel(self._resize_after_id)
         self._resize_after_id = self.after(50, self._apply_pending_resize)
@@ -106,6 +111,15 @@ class ClusterGraphPanel(ttk.Frame):
     def _apply_pending_resize(self):
         """Redraw the canvas using the latest widget size."""
         self._resize_after_id = None
+        width, height = self._pending_size or (
+            self.canvas_widget.winfo_width(),
+            self.canvas_widget.winfo_height(),
+        )
+        if width <= 1 or height <= 1:
+            return
+
+        dpi = self.canvas.figure.get_dpi()
+        self.canvas.figure.set_size_inches(width / dpi, height / dpi, forward=True)
         self.canvas.figure.tight_layout()
         self.canvas.draw_idle()
 
