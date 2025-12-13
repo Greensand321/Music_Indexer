@@ -66,9 +66,10 @@ class ClusterGraphPanel(ttk.Frame):
 
         # Track resize events so the canvas redraws to the latest geometry
         self._resize_after_id: str | None = None
-        self.canvas_widget.bind("<Configure>", self._on_resize)
+        self._resize_bind_id: str | None = None
+        self._resize_bind_id = self.canvas_widget.bind("<Configure>", self._on_resize)
         # Force an initial layout pass once the widget is visible
-        self.after_idle(self.canvas.draw_idle)
+        self.after_idle(self._refresh_canvas)
 
         self.lasso = None
         self.sel_scatter = None
@@ -148,10 +149,28 @@ class ClusterGraphPanel(ttk.Frame):
 
     def _refresh_canvas(self):
         """Debounced canvas redraw to respond to geometry changes."""
-        self._resize_after_id = None
-        if not self.canvas:
+        after_id, self._resize_after_id = self._resize_after_id, None
+        if after_id is None or not self.canvas or not self.figure or not self.canvas_widget:
             return
+
+        width_px = self.canvas_widget.winfo_width()
+        height_px = self.canvas_widget.winfo_height()
+        if width_px <= 1 or height_px <= 1:
+            return
+
+        dpi = self.figure.get_dpi()
+        self.figure.set_size_inches(width_px / dpi, height_px / dpi, forward=True)
         self.canvas.draw_idle()
+
+    def destroy(self):
+        """Release resize callbacks to avoid dangling timers after close."""
+        if self._resize_after_id is not None:
+            self.after_cancel(self._resize_after_id)
+            self._resize_after_id = None
+        if self.canvas_widget and self._resize_bind_id is not None:
+            self.canvas_widget.unbind("<Configure>", self._resize_bind_id)
+            self._resize_bind_id = None
+        super().destroy()
 
     # ─── Hover Metadata Panel ────────────────────────────────────────────────
     def setup_hover(self, panel, album_label, title_label, artist_label):
