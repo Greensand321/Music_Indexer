@@ -44,6 +44,10 @@ import chromaprint_utils
 from controllers.library_index_controller import generate_index
 from controllers.import_controller import import_new_files
 from controllers.genre_list_controller import list_unique_genres
+from controllers.genre_playlist_controller import (
+    group_tracks_by_genre,
+    write_genre_playlists,
+)
 from controllers.highlight_controller import play_snippet, PYDUB_AVAILABLE
 from controllers.scan_progress_controller import ScanProgressController
 from gui.audio_preview import PreviewPlayer
@@ -79,6 +83,7 @@ from plugins.assistant_plugin import AssistantPlugin
 from controllers.cluster_controller import cluster_library
 from config import load_config, save_config, DEFAULT_FP_THRESHOLDS
 from playlist_engine import bucket_by_tempo_energy, more_like_this, autodj_playlist
+from playlist_generator import write_playlist
 from controllers.cluster_controller import gather_tracks
 
 FilterFn = Callable[[FileRecord], bool]
@@ -179,6 +184,66 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
             "engine": engine,
             **extras,
         }
+    elif name == "Sort by Genre":
+        use_mapping_var = tk.BooleanVar(value=True)
+        split_multi_var = tk.BooleanVar(value=True)
+        include_unknown_var = tk.BooleanVar(value=True)
+
+        opts = ttk.Frame(frame)
+        opts.pack(fill="x", padx=10, pady=10)
+        ttk.Checkbutton(
+            opts,
+            text="Normalize with genre mapping",
+            variable=use_mapping_var,
+        ).pack(anchor="w")
+        ttk.Checkbutton(
+            opts,
+            text="Split multiple genres (;,/)",
+            variable=split_multi_var,
+        ).pack(anchor="w", pady=(5, 0))
+        ttk.Checkbutton(
+            opts,
+            text="Include Unknown playlist",
+            variable=include_unknown_var,
+        ).pack(anchor="w", pady=(5, 0))
+
+        def _run():
+            path = app.require_library()
+            if not path:
+                return
+
+            app.show_log_tab()
+            tracks = gather_tracks(path, getattr(app, "folder_filter", None))
+            if not tracks:
+                messagebox.showinfo("No Tracks", "No audio files found in the library.")
+                return
+
+            mapping = app.genre_mapping if use_mapping_var.get() else {}
+            grouped = group_tracks_by_genre(
+                tracks,
+                mapping=mapping,
+                include_unknown=include_unknown_var.get(),
+                split_multi=split_multi_var.get(),
+                log_callback=app._log,
+            )
+            if not grouped:
+                messagebox.showinfo(
+                    "No Genres",
+                    "No genre tags found. Update your tags or adjust the options.",
+                )
+                return
+
+            playlists_dir = os.path.join(path, "Playlists")
+            write_genre_playlists(grouped, playlists_dir, log_callback=app._log)
+            messagebox.showinfo(
+                "Playlists",
+                f"Wrote {len(grouped)} genre playlists to {playlists_dir}",
+            )
+
+        ttk.Button(frame, text="Generate Playlists", command=_run).pack(
+            padx=10, pady=10
+        )
+        return frame
     elif name == "Tempo/Energy Buckets":
         def _run():
             path = app.require_library()
