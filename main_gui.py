@@ -91,6 +91,8 @@ from playlist_engine import (
 )
 from playlist_generator import write_playlist
 from controllers.cluster_controller import gather_tracks
+from playlist_engine_kmeans import KMeansPlaylistEngine
+from playlist_engine_hdbscan import HDBSCANPlaylistEngine
 
 FilterFn = Callable[[FileRecord], bool]
 _cached_filters = None
@@ -141,11 +143,16 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
         return frame
 
     cluster_cache = getattr(app, "cluster_cache", {})
-    cache_key = None
-    if name == "Interactive – KMeans":
-        cache_key = "kmeans"
-    elif name == "Interactive – HDBSCAN":
-        cache_key = "hdbscan"
+
+    def _engine_for_plugin(plugin_name: str):
+        if plugin_name == "Interactive – KMeans":
+            return KMeansPlaylistEngine()
+        if plugin_name == "Interactive – HDBSCAN":
+            return HDBSCANPlaylistEngine()
+        return None
+
+    engine_impl = _engine_for_plugin(name)
+    cache_key = getattr(engine_impl, "method", None)
 
     tracks = features = None
     cache_entry = cluster_cache.get(cache_key, {}) if cache_key else {}
@@ -159,45 +166,15 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
                 features = entry["features"]
                 break
 
-    if name == "Interactive – KMeans":
-        from sklearn.cluster import KMeans
+    if engine_impl:
+        cached_params = cache_entry.get("params", {})
+        engine_name = cache_entry.get("engine", "librosa")
+        merged_params = {**engine_impl.default_params(), **cached_params}
 
         def km_func(X, p):
-            return KMeans(n_clusters=p["n_clusters"]).fit_predict(X)
+            return engine_impl.cluster_only(X, p, log_callback=app._log)
 
-        km_cfg = cluster_cache.get("kmeans", {})
-        km_params = km_cfg.get("params", {})
-        n_clusters = int(km_params.get("n_clusters", km_params.get("num", 5) or 5))
-        engine = km_cfg.get("engine", "librosa")
-        params = {"n_clusters": n_clusters, "method": "kmeans", "engine": engine}
-    elif name == "Interactive – HDBSCAN":
-        from hdbscan import HDBSCAN
-
-        def km_func(X, p):
-            kwargs = {"min_cluster_size": p["min_cluster_size"]}
-            if "min_samples" in p:
-                kwargs["min_samples"] = p["min_samples"]
-            if "cluster_selection_epsilon" in p:
-                kwargs["cluster_selection_epsilon"] = p["cluster_selection_epsilon"]
-            return HDBSCAN(**kwargs).fit_predict(X)
-
-        hdb_cfg = cluster_cache.get("hdbscan", {})
-        hdb_params = hdb_cfg.get("params", {})
-        min_cs = int(hdb_params.get("min_cluster_size", hdb_params.get("num", 25) or 25))
-        extras = {}
-        if "min_samples" in hdb_params:
-            extras["min_samples"] = int(hdb_params["min_samples"])
-        if "cluster_selection_epsilon" in hdb_params:
-            extras["cluster_selection_epsilon"] = float(
-                hdb_params["cluster_selection_epsilon"]
-            )
-        engine = hdb_cfg.get("engine", "librosa")
-        params = {
-            "min_cluster_size": min_cs,
-            "method": "hdbscan",
-            "engine": engine,
-            **extras,
-        }
+        params = {"method": engine_impl.method, "engine": engine_name, **merged_params}
     elif name == "Sort by Genre":
         use_mapping_var = tk.BooleanVar(value=True)
         split_multi_var = tk.BooleanVar(value=True)
