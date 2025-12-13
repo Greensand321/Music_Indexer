@@ -2,6 +2,8 @@
 
 import os
 from playlist_generator import DEFAULT_EXTS
+from playlist_engine_kmeans import KMeansPlaylistEngine
+from playlist_engine_hdbscan import HDBSCANPlaylistEngine
 
 
 def gather_tracks(library_path: str, folder_filter: dict | None = None) -> list[str]:
@@ -48,10 +50,11 @@ def cluster_library(
     log_callback,
     folder_filter: dict | None = None,
     engine: str = "librosa",
+    feature_loader=None,
 ) -> tuple[list[str], list]:
     """Generate clustered playlists for ``library_path`` and return features."""
 
-    from clustered_playlists import generate_clustered_playlists
+    engine_impl = HDBSCANPlaylistEngine() if method == "hdbscan" else KMeansPlaylistEngine()
 
     tracks = gather_tracks(library_path, folder_filter)
     log_path = os.path.join(library_path, f"{method}_log.txt")
@@ -65,12 +68,12 @@ def cluster_library(
             pass
 
     log(f"Found {len(tracks)} audio files")
-    feats = generate_clustered_playlists(
+    feats = engine_impl.generate(
         tracks,
         library_path,
-        method,
         cluster_params,
         log,
         engine=engine,
+        feature_loader=feature_loader,
     )
     return tracks, feats

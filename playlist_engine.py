@@ -193,7 +193,8 @@ def bucket_by_tempo_energy(
 
 def _get_feat(path: str, cache: dict, log_callback):
     if path not in cache:
-        from clustered_playlists import extract_audio_features
+        from playlist_engine_shared import extract_audio_features
+
         cache[path] = extract_audio_features(path, log_callback)
     return cache[path]
 
