@@ -159,12 +159,6 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
     if cache_entry:
         tracks = cache_entry.get("tracks")
         features = cache_entry.get("features")
-    if tracks is None or features is None:
-        for entry in cluster_cache.values():
-            if entry.get("tracks") is not None and entry.get("features") is not None:
-                tracks = entry["tracks"]
-                features = entry["features"]
-                break
 
     if engine_impl:
         cached_params = cache_entry.get("params", {})
@@ -665,6 +659,8 @@ class SoundVaultImporterApp(tk.Tk):
         self.cluster_cache: dict[str, dict] = {}
         self.cluster_data = None
         self.cluster_params = None
+        self.cluster_method_var = tk.StringVar(value="kmeans")
+        self._syncing_cluster_method = False
         self.folder_filter = {"include": [], "exclude": []}
 
         # Library Sync state
@@ -940,10 +936,29 @@ class SoundVaultImporterApp(tk.Tk):
         self.playlist_tab = ttk.Frame(self.notebook)
         self.notebook.add(self.playlist_tab, text="Playlist Creator")
 
+        method_sel = ttk.LabelFrame(
+            self.playlist_tab, text="Clustering Method", padding=(6, 4)
+        )
+        method_sel.grid(row=0, column=0, columnspan=2, sticky="w", padx=(0, 10))
+        ttk.Radiobutton(
+            method_sel,
+            text="KMeans",
+            value="kmeans",
+            variable=self.cluster_method_var,
+            command=lambda: self._on_cluster_method_change("kmeans"),
+        ).pack(side="left", padx=(0, 6))
+        ttk.Radiobutton(
+            method_sel,
+            text="HDBSCAN",
+            value="hdbscan",
+            variable=self.cluster_method_var,
+            command=lambda: self._on_cluster_method_change("hdbscan"),
+        ).pack(side="left")
+
         self.plugin_list = tk.Listbox(
             self.playlist_tab, width=30, exportselection=False
         )
-        self.plugin_list.grid(row=0, column=0, sticky="ns")
+        self.plugin_list.grid(row=1, column=0, sticky="ns")
         for name in [
             "Interactive – KMeans",
             "Interactive – HDBSCAN",
@@ -958,9 +973,10 @@ class SoundVaultImporterApp(tk.Tk):
         self.plugin_list.bind("<ButtonRelease-1>", self._on_plugin_click)
 
         self.plugin_panel = ttk.Frame(self.playlist_tab)
-        self.plugin_panel.grid(row=0, column=1, sticky="nsew", padx=10, pady=10)
+        self.plugin_panel.grid(row=1, column=1, sticky="nsew", padx=10, pady=10)
         self.playlist_tab.columnconfigure(1, weight=1)
-        self.playlist_tab.rowconfigure(0, weight=1)
+        self.playlist_tab.rowconfigure(1, weight=1)
+        self._select_plugin_for_method(self.cluster_method_var.get())
 
 
         # ─── Tag Fixer Tab ────────────────────────────────────────────────
@@ -1227,6 +1243,35 @@ class SoundVaultImporterApp(tk.Tk):
             widget.destroy()
         self.build_ui()
 
+    def _select_plugin_for_method(self, method: str) -> None:
+        if not hasattr(self, "plugin_list"):
+            return
+        name = "Interactive – KMeans" if method == "kmeans" else "Interactive – HDBSCAN"
+        try:
+            idx = list(self.plugin_list.get(0, "end")).index(name)
+        except ValueError:
+            return
+        if self._syncing_cluster_method:
+            return
+        self._syncing_cluster_method = True
+        try:
+            self.plugin_list.selection_clear(0, "end")
+            self.plugin_list.selection_set(idx)
+            self.plugin_list.activate(idx)
+            self.on_plugin_select(None)
+        finally:
+            self._syncing_cluster_method = False
+
+    def _on_cluster_method_change(self, method: str) -> None:
+        if self._syncing_cluster_method:
+            return
+        self._syncing_cluster_method = True
+        try:
+            self.cluster_method_var.set(method)
+            self._select_plugin_for_method(method)
+        finally:
+            self._syncing_cluster_method = False
+
     def on_plugin_select(self, event):
         """Swap in the UI panel for the selected playlist plugin."""
         for w in self.plugin_panel.winfo_children():
@@ -1235,6 +1280,14 @@ class SoundVaultImporterApp(tk.Tk):
             sel = self.plugin_list.get(self.plugin_list.curselection())
         except tk.TclError:
             return
+        if sel.startswith("Interactive – "):
+            method = "kmeans" if "KMeans" in sel else "hdbscan"
+            if not self._syncing_cluster_method:
+                self._syncing_cluster_method = True
+                try:
+                    self.cluster_method_var.set(method)
+                finally:
+                    self._syncing_cluster_method = False
         panel = create_panel_for_plugin(self, sel, parent=self.plugin_panel)
         if panel:
             panel.pack(fill="both", expand=True)
@@ -1717,6 +1770,8 @@ class SoundVaultImporterApp(tk.Tk):
         if not path:
             return
 
+        method = method or self.cluster_method_var.get() or "kmeans"
+
         dlg = tk.Toplevel(self)
         dlg.title("Clustered Playlists")
         dlg.grab_set()
@@ -1763,6 +1818,13 @@ class SoundVaultImporterApp(tk.Tk):
         )
         rb_km.pack(side="left")
         rb_hdb.pack(side="left", padx=(5, 0))
+
+        def _sync_method_var(*_):
+            method_name = method_var.get()
+            self.cluster_method_var.set(method_name)
+            self._select_plugin_for_method(method_name)
+
+        method_var.trace_add("write", _sync_method_var)
 
         params_frame = ttk.Frame(dlg)
         params_frame.pack(fill="x", padx=10, pady=(5, 0))
@@ -2022,6 +2084,7 @@ class SoundVaultImporterApp(tk.Tk):
     ) -> None:
         if not method:
             return
+        self.cluster_method_var.set(method)
         clean_params = {
             k: v
             for k, v in params.items()
@@ -2055,6 +2118,7 @@ class SoundVaultImporterApp(tk.Tk):
             return
 
         self._cluster_method = method
+        self.cluster_method_var.set(method)
         worker = threading.Thread(
             target=self._run_cluster_generation,
             args=(path, method, params, engine),
