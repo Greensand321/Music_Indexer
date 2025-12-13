@@ -149,8 +149,14 @@ class ClusterGraphPanel(ttk.Frame):
 
     def _refresh_canvas(self):
         """Debounced canvas redraw to respond to geometry changes."""
-        after_id, self._resize_after_id = self._resize_after_id, None
-        if after_id is None or not self.canvas or not self.figure or not self.canvas_widget:
+        if self._resize_after_id is not None:
+            self.after_cancel(self._resize_after_id)
+            self._resize_after_id = None
+
+        if not self.canvas_widget or not self.canvas_widget.winfo_exists():
+            return
+
+        if not self.canvas or not self.figure:
             return
 
         width_px = self.canvas_widget.winfo_width()
