@@ -82,7 +82,13 @@ from controllers.normalize_controller import (
 from plugins.assistant_plugin import AssistantPlugin
 from controllers.cluster_controller import cluster_library
 from config import load_config, save_config, DEFAULT_FP_THRESHOLDS
-from playlist_engine import bucket_by_tempo_energy, more_like_this, autodj_playlist
+from playlist_engine import (
+    bucket_by_tempo_energy,
+    more_like_this,
+    autodj_playlist,
+    parse_range_spec,
+    parse_thresholds,
+)
 from playlist_generator import write_playlist
 from controllers.cluster_controller import gather_tracks
 
@@ -245,19 +251,111 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
         )
         return frame
     elif name == "Tempo/Energy Buckets":
+        tempo_var = tk.StringVar(value="0-90,90-120,120+")
+        energy_var = tk.StringVar(value="0.1,0.3")
+        output_var = tk.StringVar()
+
+        ttk.Label(frame, text="Bucket ranges and output").pack(
+            anchor="w", padx=10, pady=(8, 0)
+        )
+        form = ttk.Frame(frame)
+        form.pack(fill="x", padx=10, pady=5)
+        form.columnconfigure(1, weight=1)
+
+        ttk.Label(form, text="Tempo ranges (BPM)").grid(row=0, column=0, sticky="w")
+        ttk.Entry(form, textvariable=tempo_var, width=45).grid(
+            row=0, column=1, sticky="ew", padx=(8, 0)
+        )
+
+        ttk.Label(form, text="Energy thresholds").grid(
+            row=1, column=0, sticky="w", pady=(6, 0)
+        )
+        ttk.Entry(form, textvariable=energy_var, width=45).grid(
+            row=1, column=1, sticky="ew", padx=(8, 0), pady=(6, 0)
+        )
+
+        ttk.Label(form, text="Output folder").grid(
+            row=2, column=0, sticky="w", pady=(6, 0)
+        )
+        out_row = ttk.Frame(form)
+        out_row.grid(row=2, column=1, sticky="ew", padx=(8, 0), pady=(6, 0))
+        out_row.columnconfigure(0, weight=1)
+        ttk.Entry(out_row, textvariable=output_var).grid(row=0, column=0, sticky="ew")
+        ttk.Button(out_row, text="Browse", command=lambda: output_var.set(
+            filedialog.askdirectory(
+                title="Playlist output folder",
+                initialdir=output_var.get()
+                or getattr(app, "library_path", os.getcwd()),
+            )
+            or output_var.get()
+        )).grid(row=0, column=1, padx=(6, 0))
+
+        hint = ttk.Label(
+            frame,
+            text=(
+                "Example: tempo ranges '0-90,90-120,120+' and energy thresholds "
+                "'0.1,0.3' create tempo_0-90.m3u, tempo_90-120.m3u, energy_0-0.1.m3u, ..."
+            ),
+            wraplength=420,
+            foreground="#555",
+            justify="left",
+        )
+        hint.pack(fill="x", padx=10, pady=(2, 6))
+
         def _run():
             path = app.require_library()
             if not path:
                 return
-            app.show_log_tab()
-            tracks = gather_tracks(path)
+            if not output_var.get():
+                output_var.set(os.path.join(path, "Playlists"))
             try:
-                bucket_by_tempo_energy(tracks, path, app._log)
-                messagebox.showinfo("Buckets", "Tempo/Energy playlists written")
-            except Exception as e:
-                messagebox.showerror("Error", str(e))
+                tempo_ranges = parse_range_spec(tempo_var.get())
+            except ValueError as exc:
+                messagebox.showerror("Invalid tempo ranges", str(exc))
+                return
+            try:
+                energy_thresholds = parse_thresholds(energy_var.get())
+            except ValueError as exc:
+                messagebox.showerror("Invalid energy thresholds", str(exc))
+                return
 
-        ttk.Button(frame, text="Generate Buckets", command=_run).pack(padx=10, pady=10)
+            app.show_log_tab()
+
+            def log_line(msg: str) -> None:
+                app.after(0, lambda m=msg: app._log(m))
+
+            def task():
+                try:
+                    results = bucket_by_tempo_energy(
+                        path,
+                        tempo_ranges=tempo_ranges,
+                        energy_thresholds=energy_thresholds,
+                        output_dir=output_var.get(),
+                        folder_filter=getattr(app, "folder_filter", None),
+                        log_callback=log_line,
+                    )
+
+                    def on_done():
+                        count = sum(len(v) for v in results.values())
+                        messagebox.showinfo(
+                            "Buckets",
+                            f"Wrote {count} playlists to {output_var.get()}",
+                        )
+
+                    app.after(0, on_done)
+                except Exception as exc:
+
+                    def on_err():
+                        messagebox.showerror("Error", str(exc))
+                        app._log(f"! Tempo/Energy buckets failed: {exc}")
+
+                    app.after(0, on_err)
+
+            threading.Thread(target=task, daemon=True).start()
+
+        ttk.Button(frame, text="Generate Buckets", command=_run).pack(
+            padx=10, pady=(4, 10)
+        )
         return frame
     elif name == "More Like This":
         sel = tk.StringVar()

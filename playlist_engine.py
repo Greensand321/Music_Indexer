@@ -1,5 +1,7 @@
 import os
 import math
+from typing import Callable, Iterable, Sequence
+
 try:
     import numpy as np  # type: ignore
 except Exception:  # pragma: no cover - numpy optional
@@ -9,23 +11,107 @@ try:
 except Exception:  # pragma: no cover - librosa optional
     librosa = None
 
-from playlist_generator import write_playlist, DEFAULT_EXTS
+from playlist_generator import write_playlist
 
 
-def categorize_tempo(bpm: float) -> str:
-    if bpm < 90:
-        return "slow"
-    if bpm < 120:
-        return "medium"
-    return "fast"
+DEFAULT_TEMPO_BUCKETS: list[tuple[float | None, float | None, str]] = [
+    (None, 90.0, "slow"),
+    (90.0, 120.0, "medium"),
+    (120.0, None, "fast"),
+]
+DEFAULT_ENERGY_BUCKETS: list[tuple[float | None, float | None, str]] = [
+    (None, 0.1, "low"),
+    (0.1, 0.3, "medium"),
+    (0.3, None, "high"),
+]
 
 
-def categorize_energy(rms: float) -> str:
-    if rms < 0.1:
-        return "low"
-    if rms < 0.3:
-        return "medium"
-    return "high"
+def _fmt_val(val: float | None, decimals: int = 0) -> str:
+    if val is None:
+        return ""
+    if decimals:
+        return f"{val:.{decimals}f}".rstrip("0").rstrip(".")
+    return str(int(val))
+
+
+def _format_range_name(lower: float | None, upper: float | None, decimals: int = 0) -> str:
+    lo = _fmt_val(lower, decimals) if lower is not None else "0"
+    if upper is None:
+        return f"{lo}+"
+    hi = _fmt_val(upper, decimals)
+    return f"{lo}-{hi}"
+
+
+def parse_range_spec(spec: str) -> list[tuple[float | None, float | None]]:
+    ranges: list[tuple[float | None, float | None]] = []
+    for raw in spec.split(","):
+        part = raw.strip()
+        if not part:
+            continue
+        if part.endswith("+"):
+            lower = float(part[:-1])
+            upper = None
+        elif "-" in part:
+            lower_s, upper_s = part.split("-", 1)
+            lower = float(lower_s) if lower_s else None
+            upper = float(upper_s) if upper_s else None
+        else:
+            raise ValueError(f"Invalid range segment: '{part}'")
+        if upper is not None and lower is not None and upper <= lower:
+            raise ValueError(f"Upper bound must be greater than lower bound: '{part}'")
+        ranges.append((lower, upper))
+    if not ranges:
+        raise ValueError("Provide at least one tempo range")
+    return ranges
+
+
+def parse_thresholds(spec: str) -> list[float]:
+    vals = []
+    for raw in spec.split(","):
+        part = raw.strip()
+        if not part:
+            continue
+        vals.append(float(part))
+    vals = sorted(set(vals))
+    return vals
+
+
+def _tempo_buckets_from_ranges(ranges: Iterable[tuple[float | None, float | None]] | None):
+    if not ranges:
+        return DEFAULT_TEMPO_BUCKETS
+    buckets = []
+    for lower, upper in ranges:
+        buckets.append((lower, upper, _format_range_name(lower, upper)))
+    return buckets
+
+
+def _energy_buckets_from_thresholds(thresholds: Iterable[float] | None):
+    if not thresholds:
+        return DEFAULT_ENERGY_BUCKETS
+    sorted_thr = sorted(thresholds)
+    buckets = []
+    prev: float | None = None
+    for thr in sorted_thr:
+        buckets.append((prev, thr, _format_range_name(prev, thr, decimals=2)))
+        prev = thr
+    buckets.append((prev, None, _format_range_name(prev, None, decimals=2)))
+    return buckets
+
+
+def categorize_tempo(bpm: float, buckets=None) -> str:
+    buckets = buckets or DEFAULT_TEMPO_BUCKETS
+    for lower, upper, name in buckets:
+        if (lower is None or bpm >= lower) and (upper is None or bpm < upper):
+            return name
+    return "unknown"
+
+
+def categorize_energy(rms: float, buckets=None) -> str:
+    buckets = buckets or DEFAULT_ENERGY_BUCKETS
+    for lower, upper, name in buckets:
+        if (lower is None or rms >= lower) and (upper is None or rms < upper):
+            return name
+    return "unknown"
 
 
 def compute_tempo_energy(path: str) -> tuple[float, float]:
@@ -37,30 +123,72 @@ def compute_tempo_energy(path: str) -> tuple[float, float]:
     return tempo, rms
 
 
-def bucket_by_tempo_energy(tracks: list[str], root_path: str, log_callback=None) -> dict:
+def bucket_by_tempo_energy(
+    library_path: str,
+    tempo_ranges: Sequence[tuple[float | None, float | None]] | None = None,
+    energy_thresholds: Sequence[float] | None = None,
+    output_dir: str | None = None,
+    folder_filter: dict | None = None,
+    log_callback: Callable[[str], None] | None = None,
+    feature_provider: Callable[[str], tuple[float, float]] | None = None,
+) -> dict:
     if log_callback is None:
         log_callback = lambda m: None
-    if librosa is None or np is None:
+    from controllers.cluster_controller import gather_tracks
+
+    feature_provider = feature_provider or compute_tempo_energy
+    if feature_provider is compute_tempo_energy and (librosa is None or np is None):
         raise RuntimeError("librosa/numpy required for bucket generation")
-    playlists_dir = os.path.join(root_path, "Playlists")
-    os.makedirs(playlists_dir, exist_ok=True)
-    buckets: dict[tuple[str, str], list[str]] = {}
+
+    tracks = gather_tracks(library_path, folder_filter)
+    if not tracks:
+        raise ValueError("No audio files found in the library.")
+
+    tempo_buckets = _tempo_buckets_from_ranges(tempo_ranges)
+    energy_buckets = _energy_buckets_from_thresholds(energy_thresholds)
+
+    assignments: dict[str, dict[str, list[str]]] = {
+        "tempo": {name: [] for *_rest, name in tempo_buckets},
+        "energy": {name: [] for *_rest, name in energy_buckets},
+    }
+
+    log_callback(f"Found {len(tracks)} audio files; analyzing tempo and energy")
     for path in tracks:
         try:
-            tempo, rms = compute_tempo_energy(path)
-            tb = categorize_tempo(tempo)
-            eb = categorize_energy(rms)
-            buckets.setdefault((tb, eb), []).append(path)
-            log_callback(f"• {os.path.basename(path)} → {tb}/{eb}")
+            tempo, rms = feature_provider(path)
         except Exception as e:
             log_callback(f"! Failed analysis for {path}: {e}")
-    out_paths = {}
-    for (tb, eb), items in buckets.items():
-        outfile = os.path.join(playlists_dir, f"{tb}_{eb}.m3u")
+            continue
+        tempo_label = categorize_tempo(tempo, tempo_buckets)
+        energy_label = categorize_energy(rms, energy_buckets)
+        assignments["tempo"].setdefault(tempo_label, []).append(path)
+        assignments["energy"].setdefault(energy_label, []).append(path)
+        log_callback(
+            f"• {os.path.basename(path)} → tempo={tempo_label} ({tempo:.2f} BPM), "
+            f"energy={energy_label} ({rms:.3f})"
+        )
+
+    playlists_dir = output_dir or os.path.join(library_path, "Playlists")
+    os.makedirs(playlists_dir, exist_ok=True)
+
+    results: dict[str, dict[str, str]] = {"tempo": {}, "energy": {}}
+    for label, items in assignments["tempo"].items():
+        if not items:
+            continue
+        outfile = os.path.join(playlists_dir, f"tempo_{label}.m3u")
         write_playlist(items, outfile)
-        out_paths[(tb, eb)] = outfile
+        results["tempo"][label] = outfile
         log_callback(f"→ Wrote {outfile}")
-    return out_paths
+
+    for label, items in assignments["energy"].items():
+        if not items:
+            continue
+        outfile = os.path.join(playlists_dir, f"energy_{label}.m3u")
+        write_playlist(items, outfile)
+        results["energy"][label] = outfile
+        log_callback(f"→ Wrote {outfile}")
+
+    return results
 
 
 def _get_feat(path: str, cache: dict, log_callback):
