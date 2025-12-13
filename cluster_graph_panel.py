@@ -67,7 +67,10 @@ class ClusterGraphPanel(ttk.Frame):
         # Track resize events so the canvas redraws to the latest geometry
         self._resize_after_id: str | None = None
         self._resize_bind_id: str | None = None
+        self._map_bind_id: str | None = None
         self._resize_bind_id = self.canvas_widget.bind("<Configure>", self._on_resize)
+        # Notebook tabs start hidden; map events tell us when a real size exists
+        self._map_bind_id = self.canvas_widget.bind("<Map>", self._on_mapped)
         # Force an initial layout pass once the widget is visible
         self.after_idle(self._refresh_canvas)
 
@@ -147,6 +150,12 @@ class ClusterGraphPanel(ttk.Frame):
             self.after_cancel(self._resize_after_id)
         self._resize_after_id = self.after(50, self._refresh_canvas)
 
+    def _on_mapped(self, _event):
+        """Refresh once the widget is actually displayed in the notebook."""
+        if self._resize_after_id is not None:
+            self.after_cancel(self._resize_after_id)
+        self._resize_after_id = self.after(10, self._refresh_canvas)
+
     def _refresh_canvas(self):
         """Debounced canvas redraw to respond to geometry changes."""
         if self._resize_after_id is not None:
@@ -162,11 +171,14 @@ class ClusterGraphPanel(ttk.Frame):
         width_px = self.canvas_widget.winfo_width()
         height_px = self.canvas_widget.winfo_height()
         if width_px <= 1 or height_px <= 1:
+            # Notebook tabs start with a 1x1 phantom size; try again shortly
+            self._resize_after_id = self.after(100, self._refresh_canvas)
             return
 
         dpi = self.figure.get_dpi()
         self.figure.set_size_inches(width_px / dpi, height_px / dpi, forward=True)
-        self.canvas.draw_idle()
+        # draw() avoids race with rapid tab switches where draw_idle never runs
+        self.canvas.draw()
 
     def destroy(self):
         """Release resize callbacks to avoid dangling timers after close."""
@@ -176,6 +188,9 @@ class ClusterGraphPanel(ttk.Frame):
         if self.canvas_widget and self._resize_bind_id is not None:
             self.canvas_widget.unbind("<Configure>", self._resize_bind_id)
             self._resize_bind_id = None
+        if self.canvas_widget and self._map_bind_id is not None:
+            self.canvas_widget.unbind("<Map>", self._map_bind_id)
+            self._map_bind_id = None
         super().destroy()
 
     # ─── Hover Metadata Panel ────────────────────────────────────────────────
