@@ -54,7 +54,12 @@ def cluster_library(
 ) -> tuple[list[str], list]:
     """Generate clustered playlists for ``library_path`` and return features."""
 
-    engine_impl = HDBSCANPlaylistEngine() if method == "hdbscan" else KMeansPlaylistEngine()
+    if method == "hdbscan":
+        engine_impl = HDBSCANPlaylistEngine()
+    elif method == "kmeans":
+        engine_impl = KMeansPlaylistEngine()
+    else:
+        raise ValueError(f"Unknown clustering method: {method}")
 
     tracks = gather_tracks(library_path, folder_filter)
     log_path = os.path.join(library_path, f"{method}_log.txt")
