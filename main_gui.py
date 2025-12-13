@@ -1255,17 +1255,17 @@ class SoundVaultImporterApp(tk.Tk):
         self.build_ui()
         
         def _load_plugin_panel(self, plugin_name: str) -> None:
-    """Display the panel for `plugin_name` and remember the selection."""
-    self.active_plugin = plugin_name
-
-    # NOTE: The rest of your existing panel-loading implementation should
-    # remain here (clearing old widgets, creating/packing the new panel, etc.)
-    # Example (keep your real code below):
-    # for w in self.plugin_panel.winfo_children():
-    #     w.destroy()
-    # panel = create_panel_for_plugin(self, plugin_name, parent=self.plugin_panel)
-    # if panel:
-    #     panel.pack(fill="both", expand=True)
+            """Display the panel for `plugin_name` and remember the selection."""
+            self.active_plugin = plugin_name
+        
+            # NOTE: The rest of your existing panel-loading implementation should
+            # remain here (clearing old widgets, creating/packing the new panel, etc.)
+            # Example (keep your real code below):
+            # for w in self.plugin_panel.winfo_children():
+            #     w.destroy()
+            # panel = create_panel_for_plugin(self, plugin_name, parent=self.plugin_panel)
+            # if panel:
+            #     panel.pack(fill="both", expand=True)
 
 
 def _select_plugin_for_method(self, method: str) -> None:
