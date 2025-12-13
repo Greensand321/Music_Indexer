@@ -48,10 +48,17 @@ class ClusterGraphPanel(ttk.Frame):
         fig = Figure(figsize=(5, 5))
         self.ax = fig.add_subplot(111)
         self.canvas = FigureCanvasTkAgg(fig, master=self)
-        self.canvas.get_tk_widget().pack(fill="both", expand=True)
+        self.canvas_widget = self.canvas.get_tk_widget()
+        self.canvas_widget.pack(fill="both", expand=True)
 
         self.scatter = None
         self._draw_clusters(cluster_func(X, self._cluster_kwargs(cluster_params)))
+
+        # Track resize events so the canvas redraws to the latest geometry
+        self._resize_after_id: str | None = None
+        self.canvas_widget.bind("<Configure>", self._on_resize)
+        # Force an initial layout pass once the widget is visible
+        self.after_idle(self._apply_pending_resize)
 
         self.lasso = None
         self.sel_scatter = None
@@ -88,6 +95,18 @@ class ClusterGraphPanel(ttk.Frame):
 
         self.ok_btn.configure(state="disabled")
         self.gen_btn.configure(state="disabled")
+        self.canvas.draw_idle()
+
+    def _on_resize(self, _event):
+        """Schedule a canvas redraw after geometry changes."""
+        if self._resize_after_id is not None:
+            self.after_cancel(self._resize_after_id)
+        self._resize_after_id = self.after(50, self._apply_pending_resize)
+
+    def _apply_pending_resize(self):
+        """Redraw the canvas using the latest widget size."""
+        self._resize_after_id = None
+        self.canvas.figure.tight_layout()
         self.canvas.draw_idle()
 
     # ─── Hover Metadata Panel ────────────────────────────────────────────────

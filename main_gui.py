@@ -666,6 +666,7 @@ class SoundVaultImporterApp(tk.Tk):
         self.cluster_data = None
         self.cluster_params = None
         self.folder_filter = {"include": [], "exclude": []}
+        self.active_plugin: str | None = None
 
         # Library Sync state
         self.sync_debug_var = tk.BooleanVar(value=False)
@@ -962,6 +963,16 @@ class SoundVaultImporterApp(tk.Tk):
         self.playlist_tab.columnconfigure(1, weight=1)
         self.playlist_tab.rowconfigure(0, weight=1)
 
+        if self.active_plugin:
+            try:
+                idx = list(self.plugin_list.get(0, "end")).index(self.active_plugin)
+            except ValueError:
+                pass
+            else:
+                self.plugin_list.selection_set(idx)
+                self.plugin_list.activate(idx)
+                self._load_plugin_panel(self.active_plugin)
+
 
         # ─── Tag Fixer Tab ────────────────────────────────────────────────
         self.tagfix_tab = ttk.Frame(self.notebook)
@@ -1227,17 +1238,22 @@ class SoundVaultImporterApp(tk.Tk):
             widget.destroy()
         self.build_ui()
 
-    def on_plugin_select(self, event):
-        """Swap in the UI panel for the selected playlist plugin."""
+    def _load_plugin_panel(self, plugin_name: str) -> None:
+        """Display the panel for ``plugin_name`` and remember the selection."""
+        self.active_plugin = plugin_name
         for w in self.plugin_panel.winfo_children():
             w.destroy()
+        panel = create_panel_for_plugin(self, plugin_name, parent=self.plugin_panel)
+        if panel:
+            panel.pack(fill="both", expand=True)
+
+    def on_plugin_select(self, event):
+        """Swap in the UI panel for the selected playlist plugin."""
         try:
             sel = self.plugin_list.get(self.plugin_list.curselection())
         except tk.TclError:
             return
-        panel = create_panel_for_plugin(self, sel, parent=self.plugin_panel)
-        if panel:
-            panel.pack(fill="both", expand=True)
+        self._load_plugin_panel(sel)
 
     def _on_plugin_click(self, event):
         """Ensure clicks select the correct plugin even after UI resizes."""
@@ -1247,7 +1263,7 @@ class SoundVaultImporterApp(tk.Tk):
             lb.selection_clear(0, "end")
             lb.selection_set(idx)
             lb.activate(idx)
-        self.on_plugin_select(event)
+            self._load_plugin_panel(lb.get(idx))
 
     def _load_genre_mapping(self):
         """Load genre mapping from ``self.mapping_path`` if possible."""
@@ -2095,12 +2111,10 @@ class SoundVaultImporterApp(tk.Tk):
         try:
             sel = self.plugin_list.get(self.plugin_list.curselection())
         except tk.TclError:
+            sel = self.active_plugin
+        if not sel:
             return
-        for w in self.plugin_panel.winfo_children():
-            w.destroy()
-        panel = create_panel_for_plugin(self, sel, parent=self.plugin_panel)
-        if panel:
-            panel.pack(fill="both", expand=True)
+        self._load_plugin_panel(sel)
 
     def _tagfix_filter_dialog(self):
         dlg = tk.Toplevel(self)
