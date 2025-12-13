@@ -662,6 +662,7 @@ class SoundVaultImporterApp(tk.Tk):
         self.cluster_method_var = tk.StringVar(value="kmeans")
         self._syncing_cluster_method = False
         self.folder_filter = {"include": [], "exclude": []}
+        self.active_plugin: str | None = None
 
         # Library Sync state
         self.sync_debug_var = tk.BooleanVar(value=False)
@@ -978,6 +979,16 @@ class SoundVaultImporterApp(tk.Tk):
         self.playlist_tab.rowconfigure(1, weight=1)
         self._select_plugin_for_method(self.cluster_method_var.get())
 
+        if self.active_plugin:
+            try:
+                idx = list(self.plugin_list.get(0, "end")).index(self.active_plugin)
+            except ValueError:
+                pass
+            else:
+                self.plugin_list.selection_set(idx)
+                self.plugin_list.activate(idx)
+                self._load_plugin_panel(self.active_plugin)
+
 
         # ─── Tag Fixer Tab ────────────────────────────────────────────────
         self.tagfix_tab = ttk.Frame(self.notebook)
@@ -1242,56 +1253,95 @@ class SoundVaultImporterApp(tk.Tk):
         for widget in self.winfo_children():
             widget.destroy()
         self.build_ui()
+        
+        def _load_plugin_panel(self, plugin_name: str) -> None:
+    """Display the panel for `plugin_name` and remember the selection."""
+    self.active_plugin = plugin_name
 
-    def _select_plugin_for_method(self, method: str) -> None:
-        if not hasattr(self, "plugin_list"):
-            return
-        name = "Interactive – KMeans" if method == "kmeans" else "Interactive – HDBSCAN"
-        try:
-            idx = list(self.plugin_list.get(0, "end")).index(name)
-        except ValueError:
-            return
-        if self._syncing_cluster_method:
-            return
-        self._syncing_cluster_method = True
-        try:
-            self.plugin_list.selection_clear(0, "end")
-            self.plugin_list.selection_set(idx)
-            self.plugin_list.activate(idx)
-            self.on_plugin_select(None)
-        finally:
-            self._syncing_cluster_method = False
+    # NOTE: The rest of your existing panel-loading implementation should
+    # remain here (clearing old widgets, creating/packing the new panel, etc.)
+    # Example (keep your real code below):
+    # for w in self.plugin_panel.winfo_children():
+    #     w.destroy()
+    # panel = create_panel_for_plugin(self, plugin_name, parent=self.plugin_panel)
+    # if panel:
+    #     panel.pack(fill="both", expand=True)
 
-    def _on_cluster_method_change(self, method: str) -> None:
-        if self._syncing_cluster_method:
-            return
-        self._syncing_cluster_method = True
-        try:
-            self.cluster_method_var.set(method)
-            self._select_plugin_for_method(method)
-        finally:
-            self._syncing_cluster_method = False
+
+def _select_plugin_for_method(self, method: str) -> None:
+    """Select the corresponding Interactive plugin in the listbox for a given method."""
+    if not hasattr(self, "plugin_list"):
+        return
+
+    name = "Interactive - KMeans" if method == "kmeans" else "Interactive - HDBSCAN"
+
+    try:
+        idx = list(self.plugin_list.get(0, "end")).index(name)
+    except ValueError:
+        return
+
+    # Prevent feedback loops between list selection <-> method selection
+    if getattr(self, "_syncing_cluster_method", False):
+        return
+
+    self._syncing_cluster_method = True
+    try:
+        self.plugin_list.selection_clear(0, "end")
+        self.plugin_list.selection_set(idx)
+        self.plugin_list.activate(idx)
+
+        # Load the newly selected panel directly
+        self._load_plugin_panel(name)
+    finally:
+        self._syncing_cluster_method = False
+
+
+def _on_cluster_method_change(self, method: str) -> None:
+    """Handle cluster method toggles from the GUI and sync the plugin selection."""
+    if getattr(self, "_syncing_cluster_method", False):
+        return
+
+    self._syncing_cluster_method = True
+    try:
+        self.cluster_method_var.set(method)
+        self._select_plugin_for_method(method)
+    finally:
+        self._syncing_cluster_method = False
+
+
+def on_plugin_select(self, event):
+    """Swap in the UI panel for the selected playlist plugin."""
+    # (Your on_plugin_select implementation continues below)
+       
+        
+        for w in self.plugin_panel.winfo_children():
+            w.destroy()
+        panel = create_panel_for_plugin(self, plugin_name, parent=self.plugin_panel)
+        if panel:
+            panel.pack(fill="both", expand=True)
 
     def on_plugin_select(self, event):
         """Swap in the UI panel for the selected playlist plugin."""
-        for w in self.plugin_panel.winfo_children():
-            w.destroy()
         try:
             sel = self.plugin_list.get(self.plugin_list.curselection())
         except tk.TclError:
             return
-        if sel.startswith("Interactive – "):
-            method = "kmeans" if "KMeans" in sel else "hdbscan"
-            if not self._syncing_cluster_method:
-                self._syncing_cluster_method = True
-                try:
-                    self.cluster_method_var.set(method)
-                finally:
-                    self._syncing_cluster_method = False
-        panel = create_panel_for_plugin(self, sel, parent=self.plugin_panel)
-        if panel:
-            panel.pack(fill="both", expand=True)
+          
+        # Sync cluster method when selecting Interactive plugins
+            if sel.startswith("Interactive - "):
+                method = "kmeans" if "KMeans" in sel else "hdbscan"
 
+                # Prevent feedback loops when syncing UI state
+                if not getattr(self, "_syncing_cluster_method", False):
+                    self._syncing_cluster_method = True
+                    try:
+                        self.cluster_method_var.set(method)
+                    finally:
+                        self._syncing_cluster_method = False
+
+        # Load the selected plugin panel (single source of truth)
+            self._load_plugin_panel(sel)
+    
     def _on_plugin_click(self, event):
         """Ensure clicks select the correct plugin even after UI resizes."""
         lb: tk.Listbox = event.widget
@@ -1300,7 +1350,7 @@ class SoundVaultImporterApp(tk.Tk):
             lb.selection_clear(0, "end")
             lb.selection_set(idx)
             lb.activate(idx)
-        self.on_plugin_select(event)
+            self._load_plugin_panel(lb.get(idx))
 
     def _load_genre_mapping(self):
         """Load genre mapping from ``self.mapping_path`` if possible."""
@@ -2159,12 +2209,10 @@ class SoundVaultImporterApp(tk.Tk):
         try:
             sel = self.plugin_list.get(self.plugin_list.curselection())
         except tk.TclError:
+            sel = self.active_plugin
+        if not sel:
             return
-        for w in self.plugin_panel.winfo_children():
-            w.destroy()
-        panel = create_panel_for_plugin(self, sel, parent=self.plugin_panel)
-        if panel:
-            panel.pack(fill="both", expand=True)
+        self._load_plugin_panel(sel)
 
     def _tagfix_filter_dialog(self):
         dlg = tk.Toplevel(self)
