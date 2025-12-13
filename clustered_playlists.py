@@ -79,7 +79,12 @@ def cluster_tracks(
 
 
 def generate_clustered_playlists(
-    tracks, root_path: str, method: str, params: dict, log_callback=None
+    tracks,
+    root_path: str,
+    method: str,
+    params: dict,
+    log_callback=None,
+    engine: str = "librosa",
 ) -> None:
     """Create clustered playlists for the given tracks."""
     if log_callback is None:
@@ -99,7 +104,7 @@ def generate_clustered_playlists(
         cache = {}
         log_callback("→ No feature cache found; extracting all tracks")
 
-    log_callback("⚙ Extracting audio features with librosa…")
+    log_callback(f"⚙ Extracting audio features with {engine}…")
 
     feats = []
     updated = False

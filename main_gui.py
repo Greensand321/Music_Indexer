@@ -145,7 +145,10 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
         n_clusters = 5
         if cluster_cfg and cluster_cfg.get("method") == "kmeans":
             n_clusters = int(cluster_cfg.get("num", 5))
-        params = {"n_clusters": n_clusters, "method": "kmeans"}
+        engine = "librosa"
+        if cluster_cfg and "engine" in cluster_cfg:
+            engine = cluster_cfg["engine"]
+        params = {"n_clusters": n_clusters, "method": "kmeans", "engine": engine}
     elif name == "Interactive – HDBSCAN":
         from hdbscan import HDBSCAN
 
@@ -167,7 +170,15 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
                 extras["cluster_selection_epsilon"] = float(
                     cluster_cfg["cluster_selection_epsilon"]
                 )
-        params = {"min_cluster_size": min_cs, "method": "hdbscan", **extras}
+        engine = "librosa"
+        if cluster_cfg and "engine" in cluster_cfg:
+            engine = cluster_cfg["engine"]
+        params = {
+            "min_cluster_size": min_cs,
+            "method": "hdbscan",
+            "engine": engine,
+            **extras,
+        }
     elif name == "Tempo/Energy Buckets":
         def _run():
             path = app.require_library()
@@ -304,12 +315,17 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
 
     def _auto_create_all():
         method = panel.cluster_params.get("method")
-        params = {k: v for k, v in panel.cluster_params.items() if k != "method"}
+        params = {
+            k: v
+            for k, v in panel.cluster_params.items()
+            if k not in {"method", "engine"}
+        }
+        engine = panel.cluster_params.get("engine", "librosa")
         if not params:
             return
         threading.Thread(
             target=app._run_cluster_generation,
-            args=(app.library_path, method, params),
+            args=(app.library_path, method, params, engine),
             daemon=True,
         ).start()
 
@@ -1521,6 +1537,7 @@ class SoundVaultImporterApp(tk.Tk):
         dlg.resizable(True, True)
 
         method_var = tk.StringVar(value=method)
+        engine_var = tk.StringVar(value="")
 
         top = ttk.Frame(dlg)
         top.pack(fill="x", padx=10, pady=(10, 0))
@@ -1552,6 +1569,23 @@ class SoundVaultImporterApp(tk.Tk):
 
         params_frame = ttk.Frame(dlg)
         params_frame.pack(fill="x", padx=10, pady=(5, 0))
+
+        engine_frame = ttk.LabelFrame(dlg, text="Feature Extraction Engine")
+        engine_frame.pack(fill="x", padx=10, pady=(10, 0))
+
+        ttk.Radiobutton(
+            engine_frame,
+            text="Librosa (current)",
+            variable=engine_var,
+            value="librosa",
+        ).pack(anchor="w", padx=5, pady=(2, 0))
+        ttk.Radiobutton(
+            engine_frame,
+            text="Essentia (coming soon)",
+            variable=engine_var,
+            value="essentia",
+            state="disabled",
+        ).pack(anchor="w", padx=5, pady=(0, 5))
 
         # KMeans params
         km_frame = ttk.Frame(params_frame)
@@ -1662,6 +1696,13 @@ class SoundVaultImporterApp(tk.Tk):
                 "exclude": list(exc_list.get(0, "end")),
             }
 
+            engine = engine_var.get()
+            if not engine:
+                messagebox.showerror(
+                    "Select Engine", "Please select a feature extraction engine."
+                )
+                return
+
             m = method_var.get()
             params = {}
             if m == "kmeans":
@@ -1698,12 +1739,12 @@ class SoundVaultImporterApp(tk.Tk):
                             f"{epsilon_var.get()} is not a valid number",
                         )
                         return
-            self._start_cluster_playlists(m, params, dlg)
+            self._start_cluster_playlists(m, params, engine, dlg)
 
         ttk.Button(btns, text="Generate", command=generate).pack(side="left", padx=5)
         ttk.Button(btns, text="Cancel", command=dlg.destroy).pack(side="left", padx=5)
 
-    def _start_cluster_playlists(self, method: str, params: dict, dlg):
+    def _start_cluster_playlists(self, method: str, params: dict, engine: str, dlg):
         if dlg is not None:
             dlg.destroy()
         path = self.require_library()
@@ -1711,16 +1752,18 @@ class SoundVaultImporterApp(tk.Tk):
             return
         threading.Thread(
             target=self._run_cluster_generation,
-            args=(path, method, params),
+            args=(path, method, params, engine),
             daemon=True,
         ).start()
 
-    def _run_cluster_generation(self, path: str, method: str, params: dict):
+    def _run_cluster_generation(
+        self, path: str, method: str, params: dict, engine: str
+    ):
         tracks, feats = cluster_library(
-            path, method, params, self._log, self.folder_filter
+            path, method, params, self._log, self.folder_filter, engine
         )
         self.cluster_data = (tracks, feats)
-        self.cluster_params = {"method": method, **params}
+        self.cluster_params = {"method": method, "engine": engine, **params}
 
         def done():
             messagebox.showinfo("Clustered Playlists", "Generation complete")
