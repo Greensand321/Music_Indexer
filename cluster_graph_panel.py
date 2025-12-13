@@ -65,12 +65,10 @@ class ClusterGraphPanel(ttk.Frame):
         self._draw_clusters(cluster_func(X, self._cluster_kwargs(cluster_params)))
 
         # Track resize events so the canvas redraws to the latest geometry
-        self._pending_size: tuple[int, int] | None = None
         self._resize_after_id: str | None = None
-        self.bind("<Configure>", self._on_resize)
         self.canvas_widget.bind("<Configure>", self._on_resize)
         # Force an initial layout pass once the widget is visible
-        self.after_idle(self._apply_pending_resize)
+        self.after_idle(self.canvas.draw_idle)
 
         self.lasso = None
         self.sel_scatter = None
@@ -144,35 +142,15 @@ class ClusterGraphPanel(ttk.Frame):
         """Schedule a canvas redraw after geometry changes."""
         if not self.canvas_widget:
             return
-        self._pending_size = (
-            self.canvas_widget.winfo_width(),
-            self.canvas_widget.winfo_height(),
-        )
         if self._resize_after_id is not None:
             self.after_cancel(self._resize_after_id)
-        self._resize_after_id = self.after(50, self._apply_pending_resize)
+        self._resize_after_id = self.after(50, self._refresh_canvas)
 
-    def _apply_pending_resize(self):
-        """Redraw the canvas using the latest widget size."""
+    def _refresh_canvas(self):
+        """Debounced canvas redraw to respond to geometry changes."""
         self._resize_after_id = None
-        width, height = self._pending_size or (
-            self.canvas_widget.winfo_width(),
-            self.canvas_widget.winfo_height(),
-        )
-        self._pending_size = None
-        if width <= 1 or height <= 1:
+        if not self.canvas:
             return
-
-        dpi = self.figure.get_dpi()
-        # Tk's global scaling inflates widget dimensions; compensate so the
-        # Matplotlib figure matches the actual canvas pixels instead of
-        # rendering larger and getting clipped to the top-left corner.
-        scale = float(self.canvas_widget.tk.call("tk", "scaling"))
-        scaled_w = width / scale
-        scaled_h = height / scale
-        self.figure.set_size_inches(scaled_w / dpi, scaled_h / dpi, forward=True)
-        self.figure.subplots_adjust(left=0.08, right=0.98, bottom=0.1, top=0.9)
-        self._update_axes_limits()
         self.canvas.draw_idle()
 
     # ─── Hover Metadata Panel ────────────────────────────────────────────────
