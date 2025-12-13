@@ -967,10 +967,6 @@ class SoundVaultImporterApp(tk.Tk):
 
         self.plugin_panel = ttk.Frame(self.playlist_tab)
         self.plugin_panel.grid(row=1, column=1, sticky="nsew", padx=10, pady=10)
-        self.plugin_panel.rowconfigure(0, weight=1)
-        self.plugin_panel.columnconfigure(0, weight=1)
-        # Prevent child geometry requests from shrinking the available graph area
-        self.plugin_panel.grid_propagate(False)
         self.playlist_tab.columnconfigure(1, weight=1)
         self.playlist_tab.rowconfigure(1, weight=1)
         self._select_plugin_for_method(self.cluster_method_var.get())
@@ -1259,7 +1255,7 @@ class SoundVaultImporterApp(tk.Tk):
 
         panel = create_panel_for_plugin(self, plugin_name, parent=self.plugin_panel)
         if panel:
-            panel.grid(row=0, column=0, sticky="nsew")
+            panel.pack(fill="both", expand=True)
 
     def _select_plugin_for_method(self, method: str) -> None:
         """Select the corresponding Interactive plugin in the listbox for a given method."""
