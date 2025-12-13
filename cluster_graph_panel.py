@@ -45,11 +45,16 @@ class ClusterGraphPanel(ttk.Frame):
         X = np.vstack(features)
         self.X2 = PCA(n_components=2).fit_transform(X)
 
+        # Layout: the canvas consumes all space in this frame so it can resize
+        # with the surrounding window/container.
+        self.rowconfigure(0, weight=1)
+        self.columnconfigure(0, weight=1)
+
         fig = Figure(figsize=(5, 5))
         self.ax = fig.add_subplot(111)
         self.canvas = FigureCanvasTkAgg(fig, master=self)
         self.canvas_widget = self.canvas.get_tk_widget()
-        self.canvas_widget.pack(fill="both", expand=True)
+        self.canvas_widget.grid(row=0, column=0, sticky="nsew")
 
         self.scatter = None
         self._draw_clusters(cluster_func(X, self._cluster_kwargs(cluster_params)))
