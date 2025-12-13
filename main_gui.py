@@ -44,6 +44,10 @@ import chromaprint_utils
 from controllers.library_index_controller import generate_index
 from controllers.import_controller import import_new_files
 from controllers.genre_list_controller import list_unique_genres
+from controllers.genre_playlist_controller import (
+    group_tracks_by_genre,
+    write_genre_playlists,
+)
 from controllers.highlight_controller import play_snippet, PYDUB_AVAILABLE
 from controllers.scan_progress_controller import ScanProgressController
 from gui.audio_preview import PreviewPlayer
@@ -78,8 +82,17 @@ from controllers.normalize_controller import (
 from plugins.assistant_plugin import AssistantPlugin
 from controllers.cluster_controller import cluster_library
 from config import load_config, save_config, DEFAULT_FP_THRESHOLDS
-from playlist_engine import bucket_by_tempo_energy, more_like_this, autodj_playlist
+from playlist_engine import (
+    bucket_by_tempo_energy,
+    more_like_this,
+    autodj_playlist,
+    parse_range_spec,
+    parse_thresholds,
+)
+from playlist_generator import write_playlist
 from controllers.cluster_controller import gather_tracks
+from playlist_engine_kmeans import KMeansPlaylistEngine
+from playlist_engine_hdbscan import HDBSCANPlaylistEngine
 
 FilterFn = Callable[[FileRecord], bool]
 _cached_filters = None
@@ -115,6 +128,17 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
     """Return a UI panel for the given playlist plugin."""
     frame = ttk.Frame(parent)
 
+    if name.startswith("Interactive"):
+        banner = ttk.Label(
+            frame,
+            text=name,
+            font=("TkDefaultFont", 14, "bold"),
+            anchor="w",
+        )
+        banner.pack(fill="x", padx=10, pady=(10, 4))
+
+        ttk.Separator(frame, orient="horizontal").pack(fill="x", padx=10)
+
     try:
         from cluster_graph_panel import ClusterGraphPanel
     except ModuleNotFoundError as exc:
@@ -129,59 +153,199 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
         app._log(f"\u26a0 {exc}")
         return frame
 
-    cluster_data = getattr(app, "cluster_data", None)
-    cluster_cfg = getattr(app, "cluster_params", None)
-    if cluster_data is None:
-        tracks = features = None
-    else:
-        tracks, features = cluster_data
+    cluster_cache = getattr(app, "cluster_cache", {})
 
-    if name == "Interactive – KMeans":
-        from sklearn.cluster import KMeans
+    def _engine_for_plugin(plugin_name: str):
+        if plugin_name == "Interactive – KMeans":
+            return KMeansPlaylistEngine()
+        if plugin_name == "Interactive – HDBSCAN":
+            return HDBSCANPlaylistEngine()
+        return None
+
+    engine_impl = _engine_for_plugin(name)
+    cache_key = getattr(engine_impl, "method", None)
+
+    tracks = features = None
+    cache_entry = cluster_cache.get(cache_key, {}) if cache_key else {}
+    if cache_entry:
+        tracks = cache_entry.get("tracks")
+        features = cache_entry.get("features")
+
+    if engine_impl:
+        cached_params = cache_entry.get("params", {})
+        engine_name = cache_entry.get("engine", "librosa")
+        merged_params = {**engine_impl.default_params(), **cached_params}
 
         def km_func(X, p):
-            return KMeans(n_clusters=p["n_clusters"]).fit_predict(X)
+            return engine_impl.cluster_only(X, p, log_callback=app._log)
 
-        n_clusters = 5
-        if cluster_cfg and cluster_cfg.get("method") == "kmeans":
-            n_clusters = int(cluster_cfg.get("num", 5))
-        params = {"n_clusters": n_clusters, "method": "kmeans"}
-    elif name == "Interactive – HDBSCAN":
-        from hdbscan import HDBSCAN
+        params = {"method": engine_impl.method, "engine": engine_name, **merged_params}
+    elif name == "Sort by Genre":
+        use_mapping_var = tk.BooleanVar(value=True)
+        split_multi_var = tk.BooleanVar(value=True)
+        include_unknown_var = tk.BooleanVar(value=True)
 
-        def km_func(X, p):
-            kwargs = {"min_cluster_size": p["min_cluster_size"]}
-            if "min_samples" in p:
-                kwargs["min_samples"] = p["min_samples"]
-            if "cluster_selection_epsilon" in p:
-                kwargs["cluster_selection_epsilon"] = p["cluster_selection_epsilon"]
-            return HDBSCAN(**kwargs).fit_predict(X)
+        opts = ttk.Frame(frame)
+        opts.pack(fill="x", padx=10, pady=10)
+        ttk.Checkbutton(
+            opts,
+            text="Normalize with genre mapping",
+            variable=use_mapping_var,
+        ).pack(anchor="w")
+        ttk.Checkbutton(
+            opts,
+            text="Split multiple genres (;,/)",
+            variable=split_multi_var,
+        ).pack(anchor="w", pady=(5, 0))
+        ttk.Checkbutton(
+            opts,
+            text="Include Unknown playlist",
+            variable=include_unknown_var,
+        ).pack(anchor="w", pady=(5, 0))
 
-        min_cs = 5
-        extras = {}
-        if cluster_cfg and cluster_cfg.get("method") == "hdbscan":
-            min_cs = int(cluster_cfg.get("min_cluster_size", cluster_cfg.get("num", 5)))
-            if "min_samples" in cluster_cfg:
-                extras["min_samples"] = int(cluster_cfg["min_samples"])
-            if "cluster_selection_epsilon" in cluster_cfg:
-                extras["cluster_selection_epsilon"] = float(
-                    cluster_cfg["cluster_selection_epsilon"]
-                )
-        params = {"min_cluster_size": min_cs, "method": "hdbscan", **extras}
-    elif name == "Tempo/Energy Buckets":
         def _run():
             path = app.require_library()
             if not path:
                 return
-            app.show_log_tab()
-            tracks = gather_tracks(path)
-            try:
-                bucket_by_tempo_energy(tracks, path, app._log)
-                messagebox.showinfo("Buckets", "Tempo/Energy playlists written")
-            except Exception as e:
-                messagebox.showerror("Error", str(e))
 
-        ttk.Button(frame, text="Generate Buckets", command=_run).pack(padx=10, pady=10)
+            app.show_log_tab()
+            tracks = gather_tracks(path, getattr(app, "folder_filter", None))
+            if not tracks:
+                messagebox.showinfo("No Tracks", "No audio files found in the library.")
+                return
+
+            mapping = app.genre_mapping if use_mapping_var.get() else {}
+            grouped = group_tracks_by_genre(
+                tracks,
+                mapping=mapping,
+                include_unknown=include_unknown_var.get(),
+                split_multi=split_multi_var.get(),
+                log_callback=app._log,
+            )
+            if not grouped:
+                messagebox.showinfo(
+                    "No Genres",
+                    "No genre tags found. Update your tags or adjust the options.",
+                )
+                return
+
+            playlists_dir = os.path.join(path, "Playlists")
+            write_genre_playlists(grouped, playlists_dir, log_callback=app._log)
+            messagebox.showinfo(
+                "Playlists",
+                f"Wrote {len(grouped)} genre playlists to {playlists_dir}",
+            )
+
+        ttk.Button(frame, text="Generate Playlists", command=_run).pack(
+            padx=10, pady=10
+        )
+        return frame
+    elif name == "Tempo/Energy Buckets":
+        tempo_var = tk.StringVar(value="0-90,90-120,120+")
+        energy_var = tk.StringVar(value="0.1,0.3")
+        output_var = tk.StringVar()
+
+        ttk.Label(frame, text="Bucket ranges and output").pack(
+            anchor="w", padx=10, pady=(8, 0)
+        )
+        form = ttk.Frame(frame)
+        form.pack(fill="x", padx=10, pady=5)
+        form.columnconfigure(1, weight=1)
+
+        ttk.Label(form, text="Tempo ranges (BPM)").grid(row=0, column=0, sticky="w")
+        ttk.Entry(form, textvariable=tempo_var, width=45).grid(
+            row=0, column=1, sticky="ew", padx=(8, 0)
+        )
+
+        ttk.Label(form, text="Energy thresholds").grid(
+            row=1, column=0, sticky="w", pady=(6, 0)
+        )
+        ttk.Entry(form, textvariable=energy_var, width=45).grid(
+            row=1, column=1, sticky="ew", padx=(8, 0), pady=(6, 0)
+        )
+
+        ttk.Label(form, text="Output folder").grid(
+            row=2, column=0, sticky="w", pady=(6, 0)
+        )
+        out_row = ttk.Frame(form)
+        out_row.grid(row=2, column=1, sticky="ew", padx=(8, 0), pady=(6, 0))
+        out_row.columnconfigure(0, weight=1)
+        ttk.Entry(out_row, textvariable=output_var).grid(row=0, column=0, sticky="ew")
+        ttk.Button(out_row, text="Browse", command=lambda: output_var.set(
+            filedialog.askdirectory(
+                title="Playlist output folder",
+                initialdir=output_var.get()
+                or getattr(app, "library_path", os.getcwd()),
+            )
+            or output_var.get()
+        )).grid(row=0, column=1, padx=(6, 0))
+
+        hint = ttk.Label(
+            frame,
+            text=(
+                "Example: tempo ranges '0-90,90-120,120+' and energy thresholds "
+                "'0.1,0.3' create tempo_0-90.m3u, tempo_90-120.m3u, energy_0-0.1.m3u, ..."
+            ),
+            wraplength=420,
+            foreground="#555",
+            justify="left",
+        )
+        hint.pack(fill="x", padx=10, pady=(2, 6))
+
+        def _run():
+            path = app.require_library()
+            if not path:
+                return
+            if not output_var.get():
+                output_var.set(os.path.join(path, "Playlists"))
+            try:
+                tempo_ranges = parse_range_spec(tempo_var.get())
+            except ValueError as exc:
+                messagebox.showerror("Invalid tempo ranges", str(exc))
+                return
+            try:
+                energy_thresholds = parse_thresholds(energy_var.get())
+            except ValueError as exc:
+                messagebox.showerror("Invalid energy thresholds", str(exc))
+                return
+
+            app.show_log_tab()
+
+            def log_line(msg: str) -> None:
+                app.after(0, lambda m=msg: app._log(m))
+
+            def task():
+                try:
+                    results = bucket_by_tempo_energy(
+                        path,
+                        tempo_ranges=tempo_ranges,
+                        energy_thresholds=energy_thresholds,
+                        output_dir=output_var.get(),
+                        folder_filter=getattr(app, "folder_filter", None),
+                        log_callback=log_line,
+                    )
+
+                    def on_done():
+                        count = sum(len(v) for v in results.values())
+                        messagebox.showinfo(
+                            "Buckets",
+                            f"Wrote {count} playlists to {output_var.get()}",
+                        )
+
+                    app.after(0, on_done)
+                except Exception as exc:
+
+                    def on_err():
+                        messagebox.showerror("Error", str(exc))
+                        app._log(f"! Tempo/Energy buckets failed: {exc}")
+
+                    app.after(0, on_err)
+
+            threading.Thread(target=task, daemon=True).start()
+
+        ttk.Button(frame, text="Generate Buckets", command=_run).pack(
+            padx=10, pady=(4, 10)
+        )
         return frame
     elif name == "More Like This":
         sel = tk.StringVar()
@@ -256,6 +420,19 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
         ).pack(pady=(5, 0))
         return frame
 
+    def _remember_params(updated_params: dict):
+        method_name = updated_params.get("method", cache_key or params.get("method"))
+        if not method_name:
+            return
+        engine_name = updated_params.get("engine", params.get("engine", "librosa"))
+        app._remember_cluster_settings(
+            method_name,
+            updated_params,
+            engine_name,
+            tracks,
+            features,
+        )
+
     # Container ensures the graph resizes while keeping controls visible
     container = ttk.Frame(frame)
     container.pack(fill="both", expand=True)
@@ -270,6 +447,7 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
         cluster_params=params,
         library_path=app.library_path,
         log_callback=app._log,
+        on_params_updated=_remember_params,
     )
     panel.grid(row=0, column=0, sticky="nsew", pady=(0, 5))
 
@@ -277,6 +455,7 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
 
     btn_frame = ttk.Frame(container)
     btn_frame.grid(row=2, column=0, sticky="ew", pady=5)
+    btn_frame.columnconfigure(5, weight=1)
 
     panel.lasso_var = tk.BooleanVar(value=False)
 
@@ -286,7 +465,7 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
         variable=panel.lasso_var,
         command=panel.toggle_lasso,
     )
-    lasso_btn.pack(side="left")
+    lasso_btn.grid(row=0, column=0, padx=(0, 5), sticky="w")
     panel.lasso_btn = lasso_btn
 
     panel.ok_btn = ttk.Button(
@@ -295,7 +474,7 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
         command=panel.finalize_lasso,
         state="disabled",
     )
-    panel.ok_btn.pack(side="left", padx=(5, 0))
+    panel.ok_btn.grid(row=0, column=1, padx=(0, 5), sticky="w")
 
     panel.gen_btn = ttk.Button(
         btn_frame,
@@ -303,28 +482,35 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
         command=panel.create_playlist,
         state="disabled",
     )
-    panel.gen_btn.pack(side="left", padx=(5, 0))
+    panel.gen_btn.grid(row=0, column=2, padx=(0, 5), sticky="w")
 
     def _auto_create_all():
         method = panel.cluster_params.get("method")
-        params = {k: v for k, v in panel.cluster_params.items() if k != "method"}
+        params = {
+            k: v
+            for k, v in panel.cluster_params.items()
+            if k not in {"method", "engine"}
+        }
+        engine = panel.cluster_params.get("engine", "librosa")
         if not params:
             return
         app.show_log_tab()
         threading.Thread(
             target=app._run_cluster_generation,
-            args=(app.library_path, method, params),
+            args=(app.library_path, method, params, engine),
             daemon=True,
         ).start()
 
     auto_btn = ttk.Button(btn_frame, text="Auto-Create", command=_auto_create_all)
-    auto_btn.pack(side="left", padx=(5, 0))
+    auto_btn.grid(row=0, column=3, padx=(0, 5), sticky="w")
 
     if name == "Interactive – HDBSCAN":
         redo_btn = ttk.Button(
             btn_frame, text="Redo Values", command=panel.open_param_dialog
         )
-        redo_btn.pack(side="left", padx=(5, 0))
+        redo_btn.grid(row=0, column=4, padx=(0, 5), sticky="w")
+
+    ttk.Frame(btn_frame).grid(row=0, column=5, sticky="ew")
 
     # ─── Hover Metadata Panel ────────────────────────────────────────────
     hover_panel = ttk.Frame(panel, relief="solid", borderwidth=1)
@@ -480,9 +666,14 @@ class SoundVaultImporterApp(tk.Tk):
         self.mapping_path = ""
         self.assistant_plugin = AssistantPlugin()
 
-        # Cached tracks and feature vectors for interactive clustering
+        # Cached tracks, features, and params for interactive clustering
+        self.cluster_cache: dict[str, dict] = {}
         self.cluster_data = None
+        self.cluster_params = None
+        self.cluster_method_var = tk.StringVar(value="kmeans")
+        self._syncing_cluster_method = False
         self.folder_filter = {"include": [], "exclude": []}
+        self.active_plugin: str | None = None
 
         # Library Sync state
         self.sync_debug_var = tk.BooleanVar(value=False)
@@ -529,6 +720,8 @@ class SoundVaultImporterApp(tk.Tk):
         self.style.theme_use(default_theme)
         self.theme_var = tk.StringVar(value=default_theme)
         self.scale_var = tk.StringVar(value=str(self.current_scale))
+        self._cluster_thread: threading.Thread | None = None
+        self._cluster_method: str | None = None
 
         self._configure_treeview_style()
 
@@ -758,7 +951,7 @@ class SoundVaultImporterApp(tk.Tk):
         self.plugin_list = tk.Listbox(
             self.playlist_tab, width=30, exportselection=False
         )
-        self.plugin_list.grid(row=0, column=0, sticky="ns")
+        self.plugin_list.grid(row=1, column=0, sticky="ns")
         for name in [
             "Interactive – KMeans",
             "Interactive – HDBSCAN",
@@ -770,11 +963,23 @@ class SoundVaultImporterApp(tk.Tk):
         ]:
             self.plugin_list.insert("end", name)
         self.plugin_list.bind("<<ListboxSelect>>", self.on_plugin_select)
+        self.plugin_list.bind("<ButtonRelease-1>", self._on_plugin_click)
 
         self.plugin_panel = ttk.Frame(self.playlist_tab)
-        self.plugin_panel.grid(row=0, column=1, sticky="nsew", padx=10, pady=10)
+        self.plugin_panel.grid(row=1, column=1, sticky="nsew", padx=10, pady=10)
         self.playlist_tab.columnconfigure(1, weight=1)
-        self.playlist_tab.rowconfigure(0, weight=1)
+        self.playlist_tab.rowconfigure(1, weight=1)
+        self._select_plugin_for_method(self.cluster_method_var.get())
+
+        if self.active_plugin:
+            try:
+                idx = list(self.plugin_list.get(0, "end")).index(self.active_plugin)
+            except ValueError:
+                pass
+            else:
+                self.plugin_list.selection_set(idx)
+                self.plugin_list.activate(idx)
+                self._load_plugin_panel(self.active_plugin)
 
 
         # ─── Tag Fixer Tab ────────────────────────────────────────────────
@@ -1040,18 +1245,80 @@ class SoundVaultImporterApp(tk.Tk):
         for widget in self.winfo_children():
             widget.destroy()
         self.build_ui()
+        
+    def _load_plugin_panel(self, plugin_name: str) -> None:
+        """Display the panel for `plugin_name` and remember the selection."""
+        self.active_plugin = plugin_name
+
+        for w in self.plugin_panel.winfo_children():
+            w.destroy()
+
+        panel = create_panel_for_plugin(self, plugin_name, parent=self.plugin_panel)
+        if panel:
+            panel.pack(fill="both", expand=True)
+
+    def _select_plugin_for_method(self, method: str) -> None:
+        """Select the corresponding Interactive plugin in the listbox for a given method."""
+        if not hasattr(self, "plugin_list"):
+            return
+
+        names = list(self.plugin_list.get(0, "end"))
+        try:
+            idx = next(
+                i
+                for i, name in enumerate(names)
+                if name.startswith("Interactive")
+                and ("KMeans" in name if method == "kmeans" else "HDBSCAN" in name)
+            )
+        except StopIteration:
+            return
+
+        # Prevent feedback loops between list selection <-> method selection
+        if getattr(self, "_syncing_cluster_method", False):
+            return
+
+        self._syncing_cluster_method = True
+        try:
+            self.plugin_list.selection_clear(0, "end")
+            self.plugin_list.selection_set(idx)
+            self.plugin_list.activate(idx)
+
+            # Load the newly selected panel directly
+            self._load_plugin_panel(names[idx])
+        finally:
+            self._syncing_cluster_method = False
 
     def on_plugin_select(self, event):
         """Swap in the UI panel for the selected playlist plugin."""
-        for w in self.plugin_panel.winfo_children():
-            w.destroy()
         try:
             sel = self.plugin_list.get(self.plugin_list.curselection())
         except tk.TclError:
             return
-        panel = create_panel_for_plugin(self, sel, parent=self.plugin_panel)
-        if panel:
-            panel.pack(fill="both", expand=True)
+
+        # Sync cluster method when selecting Interactive plugins
+        if sel.startswith("Interactive"):
+            method = "kmeans" if "KMeans" in sel else "hdbscan"
+
+            # Prevent feedback loops when syncing UI state
+            if not getattr(self, "_syncing_cluster_method", False):
+                self._syncing_cluster_method = True
+                try:
+                    self.cluster_method_var.set(method)
+                finally:
+                    self._syncing_cluster_method = False
+
+        # Load the selected plugin panel (single source of truth)
+        self._load_plugin_panel(sel)
+
+    def _on_plugin_click(self, event):
+        """Ensure clicks select the correct plugin even after UI resizes."""
+        lb: tk.Listbox = event.widget
+        idx = lb.nearest(event.y)
+        if idx >= 0:
+            lb.selection_clear(0, "end")
+            lb.selection_set(idx)
+            lb.activate(idx)
+            self._load_plugin_panel(lb.get(idx))
 
     def _load_genre_mapping(self):
         """Load genre mapping from ``self.mapping_path`` if possible."""
@@ -1080,7 +1347,9 @@ class SoundVaultImporterApp(tk.Tk):
         self.mapping_path = os.path.join(self.library_path, ".genre_mapping.json")
         self._load_genre_mapping()
         # Clear any cached clustering data when switching libraries
+        self.cluster_cache = {}
         self.cluster_data = None
+        self.cluster_params = None
         if hasattr(self, "scan_btn"):
             self.scan_btn.config(state="normal")
             self._validate_threshold()
@@ -1519,47 +1788,56 @@ class SoundVaultImporterApp(tk.Tk):
         if not path:
             return
 
+        method = (method or self.cluster_method_var.get() or "kmeans").lower()
+        if method not in {"kmeans", "hdbscan"}:
+            method = "kmeans"
+        self.cluster_method_var.set(method)
+        self._select_plugin_for_method(method)
+
         dlg = tk.Toplevel(self)
-        dlg.title("Clustered Playlists")
+        dlg.title(f"Clustered Playlists – {method.upper()}")
         dlg.grab_set()
         dlg.resizable(True, True)
 
-        method_var = tk.StringVar(value=method)
+        defaults = self.cluster_cache.get(method, {})
+        method_params = defaults.get("params", {})
+        engine_var = tk.StringVar(value=defaults.get("engine", "librosa"))
 
         top = ttk.Frame(dlg)
         top.pack(fill="x", padx=10, pady=(10, 0))
-
-        def _update_fields(*args):
-            if method_var.get() == "kmeans":
-                hdb_frame.pack_forget()
-                km_frame.pack(fill="x")
-            else:
-                km_frame.pack_forget()
-                hdb_frame.pack(fill="x")
-
-        rb_km = ttk.Radiobutton(
+        ttk.Label(
             top,
-            text="KMeans",
-            variable=method_var,
-            value="kmeans",
-            command=_update_fields,
-        )
-        rb_hdb = ttk.Radiobutton(
-            top,
-            text="HDBSCAN",
-            variable=method_var,
-            value="hdbscan",
-            command=_update_fields,
-        )
-        rb_km.pack(side="left")
-        rb_hdb.pack(side="left", padx=(5, 0))
+            text=f"{method.upper()} clustering settings",
+            font=("TkDefaultFont", 12, "bold"),
+        ).pack(anchor="w")
 
         params_frame = ttk.Frame(dlg)
         params_frame.pack(fill="x", padx=10, pady=(5, 0))
 
+        engine_frame = ttk.LabelFrame(dlg, text="Feature Extraction Engine")
+        engine_frame.pack(fill="x", padx=10, pady=(10, 0))
+
+        ttk.Radiobutton(
+            engine_frame,
+            text="Librosa (current)",
+            variable=engine_var,
+            value="librosa",
+        ).pack(anchor="w", padx=5, pady=(2, 0))
+        ttk.Radiobutton(
+            engine_frame,
+            text="Essentia (coming soon)",
+            variable=engine_var,
+            value="essentia",
+            state="disabled",
+        ).pack(anchor="w", padx=5, pady=(0, 5))
+
         # KMeans params
         km_frame = ttk.Frame(params_frame)
-        km_var = tk.StringVar(value="5")
+        km_var = tk.StringVar(
+            value=str(
+                method_params.get("n_clusters", method_params.get("num", 5) or 5)
+            )
+        )
         ttk.Label(km_frame, text="Number of clusters:").pack(side="left")
         ttk.Entry(km_frame, textvariable=km_var, width=10).pack(
             side="left", padx=(5, 0)
@@ -1567,23 +1845,78 @@ class SoundVaultImporterApp(tk.Tk):
 
         # HDBSCAN params
         hdb_frame = ttk.Frame(params_frame)
-        min_size_var = tk.StringVar(value="5")
+        min_size_var = tk.StringVar(
+            value=str(
+                method_params.get("min_cluster_size", method_params.get("num", 25) or 25)
+            )
+        )
         ttk.Label(hdb_frame, text="Min cluster size:").grid(row=0, column=0, sticky="w")
         ttk.Entry(hdb_frame, textvariable=min_size_var, width=10).grid(
             row=0, column=1, sticky="w", padx=(5, 0)
         )
-        ttk.Label(hdb_frame, text="Min samples:").grid(row=1, column=0, sticky="w")
-        min_samples_var = tk.StringVar(value="")
+        ttk.Label(hdb_frame, text="Min samples (optional):").grid(
+            row=1, column=0, sticky="w"
+        )
+        min_samples_var = tk.StringVar(value=str(method_params.get("min_samples", "")))
         ttk.Entry(hdb_frame, textvariable=min_samples_var, width=10).grid(
             row=1, column=1, sticky="w", padx=(5, 0)
         )
-        ttk.Label(hdb_frame, text="Epsilon:").grid(row=2, column=0, sticky="w")
-        epsilon_var = tk.StringVar(value="")
+        ttk.Label(hdb_frame, text="Epsilon (advanced, optional):").grid(
+            row=2, column=0, sticky="w"
+        )
+        epsilon_var = tk.StringVar(
+            value=str(method_params.get("cluster_selection_epsilon", ""))
+        )
         ttk.Entry(hdb_frame, textvariable=epsilon_var, width=10).grid(
             row=2, column=1, sticky="w", padx=(5, 0)
         )
+        ttk.Label(
+            hdb_frame,
+            text=(
+                "Suggested min cluster size: 5–20 for <500 tracks, 10–50 for "
+                "500–2k, 25–150 for 2k–10k, 50–500 for 10k+. Smaller values "
+                "find niche moods; larger values find broad, stable clusters."
+            ),
+            wraplength=360,
+            foreground="gray",
+        ).grid(row=3, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        ttk.Label(
+            hdb_frame,
+            text=(
+                "Leave min samples empty to match min cluster size (recommended). "
+                "Higher values require tighter musical similarity and may mark "
+                "more tracks as noise."
+            ),
+            wraplength=360,
+            foreground="gray",
+        ).grid(row=4, column=0, columnspan=2, sticky="w", pady=(4, 0))
+        ttk.Label(
+            hdb_frame,
+            text=(
+                "Epsilon rarely helps HDBSCAN. Leave blank unless you need to "
+                "merge nearby clusters: 0.01–0.05 is subtle, 0.05–0.2 is "
+                "aggressive; values above 0.2 usually ruin results."
+            ),
+            wraplength=360,
+            foreground="gray",
+        ).grid(row=5, column=0, columnspan=2, sticky="w", pady=(4, 0))
+        ttk.Label(
+            hdb_frame,
+            text=(
+                "Why HDBSCAN may show no clusters: it only reports clusters when "
+                "tracks form dense musical groupings. A smooth stylistic "
+                "continuum can appear as all noise."
+            ),
+            wraplength=360,
+            foreground="gray",
+        ).grid(row=6, column=0, columnspan=2, sticky="w", pady=(4, 0))
 
-        _update_fields()
+        if method == "kmeans":
+            hdb_frame.pack_forget()
+            km_frame.pack(fill="x")
+        else:
+            km_frame.pack_forget()
+            hdb_frame.pack(fill="x")
 
         # ─── Folder Filter UI ────────────────────────────────────────────
         music_root = (
@@ -1660,13 +1993,30 @@ class SoundVaultImporterApp(tk.Tk):
         btns = ttk.Frame(dlg)
         btns.pack(pady=(0, 10))
 
+        def _clamp_min_cluster_size(value: int) -> int:
+            return max(5, min(value, 500))
+
+        def _clamp_min_samples(value: int, min_cluster_size: int) -> int:
+            clamped = max(1, min(value, 20))
+            return min(clamped, min_cluster_size)
+
+        def _clamp_epsilon(value: float) -> float:
+            return max(0.0, min(value, 0.2))
+
         def generate():
             self.folder_filter = {
                 "include": list(inc_list.get(0, "end")),
                 "exclude": list(exc_list.get(0, "end")),
             }
 
-            m = method_var.get()
+            engine = engine_var.get()
+            if not engine:
+                messagebox.showerror(
+                    "Select Engine", "Please select a feature extraction engine."
+                )
+                return
+
+            m = method
             params = {}
             if m == "kmeans":
                 try:
@@ -1678,59 +2028,122 @@ class SoundVaultImporterApp(tk.Tk):
                     return
             else:
                 try:
-                    params["min_cluster_size"] = int(min_size_var.get())
+                    cs_val = int(min_size_var.get())
                 except ValueError:
                     messagebox.showerror(
                         "Invalid Value", f"{min_size_var.get()} is not a valid number"
                     )
                     return
+                cs_val = _clamp_min_cluster_size(cs_val)
+                min_size_var.set(str(cs_val))
+                params["min_cluster_size"] = cs_val
+
                 if min_samples_var.get().strip():
                     try:
-                        params["min_samples"] = int(min_samples_var.get())
+                        ms_val = int(min_samples_var.get())
                     except ValueError:
                         messagebox.showerror(
                             "Invalid Value",
                             f"{min_samples_var.get()} is not a valid number",
                         )
                         return
+                    ms_val = _clamp_min_samples(ms_val, cs_val)
+                    min_samples_var.set(str(ms_val))
+                    params["min_samples"] = ms_val
                 if epsilon_var.get().strip():
                     try:
-                        params["cluster_selection_epsilon"] = float(epsilon_var.get())
+                        eps_val = float(epsilon_var.get())
                     except ValueError:
                         messagebox.showerror(
                             "Invalid Value",
                             f"{epsilon_var.get()} is not a valid number",
                         )
                         return
-            self._start_cluster_playlists(m, params, dlg)
+                    eps_val = _clamp_epsilon(eps_val)
+                    epsilon_var.set(f"{eps_val}")
+                    params["cluster_selection_epsilon"] = eps_val
+            self._start_cluster_playlists(m, params, engine, dlg)
 
         ttk.Button(btns, text="Generate", command=generate).pack(side="left", padx=5)
         ttk.Button(btns, text="Cancel", command=dlg.destroy).pack(side="left", padx=5)
 
-    def _start_cluster_playlists(self, method: str, params: dict, dlg):
+    def _remember_cluster_settings(
+        self,
+        method: str,
+        params: dict,
+        engine: str,
+        tracks: list[str] | None = None,
+        features=None,
+    ) -> None:
+        if not method:
+            return
+        self.cluster_method_var.set(method)
+        clean_params = {
+            k: v
+            for k, v in params.items()
+            if k not in {"method", "engine"}
+        }
+        entry = {**self.cluster_cache.get(method, {})}
+        entry["params"] = clean_params
+        entry["engine"] = engine
+        if tracks is not None:
+            entry["tracks"] = tracks
+        if features is not None:
+            entry["features"] = features
+        self.cluster_cache[method] = entry
+        if entry.get("tracks") is not None and entry.get("features") is not None:
+            self.cluster_data = (entry["tracks"], entry["features"])
+        self.cluster_params = {"method": method, "engine": engine, **clean_params}
+
+    def _start_cluster_playlists(self, method: str, params: dict, engine: str, dlg):
         if dlg is not None:
             dlg.destroy()
         path = self.require_library()
         if not path:
             return
-        threading.Thread(
+
+        if self._cluster_thread and self._cluster_thread.is_alive():
+            running = self._cluster_method or "another clustering job"
+            messagebox.showwarning(
+                "Clustering In Progress",
+                f"Please wait for {running} to finish before starting a new run.",
+            )
+            return
+
+        self._cluster_method = method
+        self.cluster_method_var.set(method)
+        worker = threading.Thread(
             target=self._run_cluster_generation,
-            args=(path, method, params),
+            args=(path, method, params, engine),
             daemon=True,
-        ).start()
-
-    def _run_cluster_generation(self, path: str, method: str, params: dict):
-        tracks, feats = cluster_library(
-            path, method, params, self._log, self.folder_filter
         )
-        self.cluster_data = (tracks, feats)
-        self.cluster_params = {"method": method, **params}
+        self._cluster_thread = worker
+        worker.start()
 
-        def done():
-            messagebox.showinfo("Clustered Playlists", "Generation complete")
-            self._refresh_plugin_panel()
+    def _run_cluster_generation(
+        self, path: str, method: str, params: dict, engine: str
+    ):
+        self._cluster_thread = threading.current_thread()
+        try:
+            tracks, feats = cluster_library(
+                path, method, params, self._log, self.folder_filter, engine
+            )
+            self._remember_cluster_settings(
+                method,
+                {"method": method, "engine": engine, **params},
+                engine,
+                tracks,
+                feats,
+            )
 
-        self.after(0, done)
+            def done():
+                messagebox.showinfo("Clustered Playlists", "Generation complete")
+                self._refresh_plugin_panel()
+
+            self.after(0, done)
+        finally:
+            self._cluster_method = None
+            self._cluster_thread = None
 
     def _refresh_plugin_panel(self):
         """Rebuild the current plugin panel if a plugin is selected."""
@@ -1739,12 +2152,10 @@ class SoundVaultImporterApp(tk.Tk):
         try:
             sel = self.plugin_list.get(self.plugin_list.curselection())
         except tk.TclError:
+            sel = self.active_plugin
+        if not sel:
             return
-        for w in self.plugin_panel.winfo_children():
-            w.destroy()
-        panel = create_panel_for_plugin(self, sel, parent=self.plugin_panel)
-        if panel:
-            panel.pack(fill="both", expand=True)
+        self._load_plugin_panel(sel)
 
     def _tagfix_filter_dialog(self):
         dlg = tk.Toplevel(self)
@@ -2633,10 +3044,10 @@ class SoundVaultImporterApp(tk.Tk):
 
         win = tk.Toplevel(self)
         win.title("Crash Log")
-            text = ScrolledText(win, width=80, height=24)
-            text.pack(fill="both", expand=True)
-            text.insert("end", "".join(lines))
-            text.configure(state="disabled")
+        text = ScrolledText(win, width=80, height=24)
+        text.pack(fill="both", expand=True)
+        text.insert("end", "".join(lines))
+        text.configure(state="disabled")
 
     def show_log_tab(self) -> None:
         """Switch to the Log tab so users can see background activity."""

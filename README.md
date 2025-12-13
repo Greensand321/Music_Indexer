@@ -41,7 +41,7 @@ python main_gui.py
 3. **Fix Tags** via the AcoustID menu (now supports multiple metadata services)
 4. **Generate Playlists** from your folder structure
 5. **Clustered Playlists** (interactive K-Means/HDBSCAN) via the Tools ▸ Clustered Playlists menu
-6. **Smart Playlist Engine** with tempo/energy buckets and “More Like This” suggestions
+6. **Smart Playlist Engine** with configurable tempo/energy buckets (custom ranges and output folders) and “More Like This” suggestions
 7. **Auto‑DJ** mode builds seamless playlists starting from any song
 8. **Tidal-dl Sync** can upgrade low-quality files to FLAC
 9. **Library Duplicate Scan** finds duplicate tracks after you drop new songs directly into your library
@@ -51,7 +51,7 @@ python main_gui.py
 
 ### Playlist generator feedback
 
-When you start a playlist job (tempo/energy buckets, *More Like This*, Auto‑DJ, or auto‑creating clustered playlists), the app automatically switches to the **Log** tab. The tab shows timestamped messages from the playlist helpers (feature gathering, similarity calculations, and playlist writes) so you can see that background work is running without waiting for a popup.
+When you start a playlist job (tempo/energy buckets, *More Like This*, Auto‑DJ, or auto‑creating clustered playlists), the app automatically switches to the **Log** tab. The tab shows timestamped messages from the playlist helpers (feature gathering, similarity calculations, and playlist writes) so you can see that background work is running without waiting for a popup. The Tempo/Energy Buckets tool now accepts custom BPM ranges and energy thresholds and can write the resulting `.m3u` files to any folder you choose.
 
 Cluster generation writes progress into `<method>_log.txt` inside your library so you can review the steps later.
 

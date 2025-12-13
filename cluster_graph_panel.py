@@ -4,7 +4,7 @@ from datetime import datetime
 import numpy as np
 import tkinter as tk
 from tkinter import ttk, messagebox
-from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 from matplotlib.figure import Figure
 from matplotlib.widgets import LassoSelector
 from matplotlib.path import Path
@@ -29,6 +29,7 @@ class ClusterGraphPanel(ttk.Frame):
         cluster_params,
         library_path,
         log_callback,
+        on_params_updated=None,
     ):
         super().__init__(parent)
         self.tracks = tracks
@@ -37,19 +38,48 @@ class ClusterGraphPanel(ttk.Frame):
         self.cluster_params = cluster_params
         self.library_path = library_path
         self.log = log_callback
+        self.on_params_updated = on_params_updated
 
         from sklearn.decomposition import PCA
 
         X = np.vstack(features)
         self.X2 = PCA(n_components=2).fit_transform(X)
 
-        fig = Figure(figsize=(5, 5))
-        self.ax = fig.add_subplot(111)
-        self.canvas = FigureCanvasTkAgg(fig, master=self)
-        self.canvas.get_tk_widget().pack(fill="both", expand=True)
+        # Layout: dedicated frame so the canvas can expand without affecting
+        # the surrounding controls.
+        self.rowconfigure(0, weight=1)
+        self.columnconfigure(0, weight=1)
+
+        self.plot_frame = ttk.Frame(self)
+        self.plot_frame.grid(row=0, column=0, sticky="nsew")
+        self.plot_frame.rowconfigure(0, weight=1)
+        self.plot_frame.columnconfigure(0, weight=1)
+
+        self.graph_frame = ttk.Frame(self.plot_frame)
+        self.graph_frame.grid(row=0, column=0, sticky="nsew")
+        self.graph_frame.rowconfigure(0, weight=1)
+        self.graph_frame.columnconfigure(0, weight=1)
+
+        self.figure = None
+        self.canvas = None
+        self.canvas_widget = None
+        self.ax = None
+        self.toolbar = None
+        self.toolbar_frame = None
+        self._build_canvas()
 
         self.scatter = None
-        self._draw_clusters(cluster_func(X, cluster_params))
+        self._draw_clusters(cluster_func(X, self._cluster_kwargs(cluster_params)))
+
+        # Track resize events so the canvas redraws to the latest geometry
+        self._resize_after_id: str | None = None
+        self._resize_bind_id: str | None = None
+        self._map_bind_id: str | None = None
+        self._resize_bind_id = self.canvas_widget.bind("<Configure>", self._on_resize)
+        # Notebook tabs start hidden; map events tell us when a real size exists
+        self._map_bind_id = self.canvas_widget.bind("<Map>", self._on_mapped)
+        # Force an initial layout pass once the widget is visible
+        self.after_idle(self._refresh_canvas)
 
         self.lasso = None
         self.sel_scatter = None
@@ -71,6 +101,54 @@ class ClusterGraphPanel(ttk.Frame):
     ok_btn: ttk.Button
     gen_btn: ttk.Button
 
+    # ─── Canvas / Figure setup ─────────────────────────────────────────────
+    def _build_canvas(self):
+        """Create a fresh Matplotlib figure and embed it into the panel."""
+
+        if self.canvas_widget:
+            self.canvas_widget.destroy()
+        if self.toolbar:
+            self.toolbar.destroy()
+            self.toolbar = None
+        if self.toolbar_frame:
+            self.toolbar_frame.destroy()
+            self.toolbar_frame = None
+
+        # Let the Tk geometry dictate the final dimensions instead of hardcoding
+        # a starting size; ``_refresh_canvas`` will resize the figure to match
+        # the canvas as soon as the widget is mapped.
+        self.figure = Figure(constrained_layout=False)
+        self.ax = self.figure.add_subplot(111)
+        # Leave space for titles without trimming axes on resize
+        self.figure.subplots_adjust(left=0.08, right=0.98, bottom=0.1, top=0.9)
+
+        self.canvas = FigureCanvasTkAgg(self.figure, master=self.graph_frame)
+        self.canvas_widget = self.canvas.get_tk_widget()
+        self.canvas_widget.grid(row=0, column=0, sticky="nsew")
+
+        self.toolbar_frame = ttk.Frame(self.graph_frame)
+        self.toolbar_frame.grid(row=1, column=0, sticky="ew")
+        self.toolbar_frame.columnconfigure(0, weight=1)
+        # Navigation toolbar needs an explicit update to size to the frame
+        self.toolbar = NavigationToolbar2Tk(self.canvas, self.toolbar_frame, pack_toolbar=False)
+        self.toolbar.update()
+        self.toolbar.grid(row=0, column=0, sticky="w")
+
+    def _update_axes_limits(self):
+        """Pad axes limits so points are comfortably visible after resize."""
+
+        if self.ax is None or self.X2.size == 0:
+            return
+
+        x_vals = self.X2[:, 0]
+        y_vals = self.X2[:, 1]
+        x_range = max(np.ptp(x_vals), 1e-3)
+        y_range = max(np.ptp(y_vals), 1e-3)
+        x_pad = x_range * 0.05
+        y_pad = y_range * 0.05
+        self.ax.set_xlim(x_vals.min() - x_pad, x_vals.max() + x_pad)
+        self.ax.set_ylim(y_vals.min() - y_pad, y_vals.max() + y_pad)
+
     # ─── Lasso Handling ─────────────────────────────────────────────────────
     def toggle_lasso(self):
         """Enter or exit lasso selection mode."""
@@ -87,6 +165,63 @@ class ClusterGraphPanel(ttk.Frame):
         self.ok_btn.configure(state="disabled")
         self.gen_btn.configure(state="disabled")
         self.canvas.draw_idle()
+
+    def _on_resize(self, _event):
+        """Schedule a canvas redraw after geometry changes."""
+        if not self.canvas_widget:
+            return
+        if self._resize_after_id is not None:
+            self.after_cancel(self._resize_after_id)
+        self._resize_after_id = self.after(50, self._refresh_canvas)
+
+    def _on_mapped(self, _event):
+        """Refresh once the widget is actually displayed in the notebook."""
+        if self._resize_after_id is not None:
+            self.after_cancel(self._resize_after_id)
+        self._resize_after_id = self.after(10, self._refresh_canvas)
+
+    def _refresh_canvas(self):
+        """Debounced canvas redraw to respond to geometry changes.
+
+        Tk reports widget sizes in pixels, so we translate the canvas widget's
+        latest geometry into inches for Matplotlib. A direct ``draw`` call keeps
+        the figure synchronized with fast tab switches and window maximization
+        where ``draw_idle`` might be deferred too long.
+        """
+        if self._resize_after_id is not None:
+            self.after_cancel(self._resize_after_id)
+            self._resize_after_id = None
+
+        if not self.canvas_widget or not self.canvas_widget.winfo_exists():
+            return
+
+        if not self.canvas or not self.figure:
+            return
+
+        width_px = self.canvas_widget.winfo_width()
+        height_px = self.canvas_widget.winfo_height()
+        if width_px <= 1 or height_px <= 1:
+            # Notebook tabs start with a 1x1 phantom size; try again shortly
+            self._resize_after_id = self.after(100, self._refresh_canvas)
+            return
+
+        dpi = self.figure.get_dpi()
+        self.figure.set_size_inches(width_px / dpi, height_px / dpi, forward=True)
+        # draw() avoids race with rapid tab switches where draw_idle never runs
+        self.canvas.draw()
+
+    def destroy(self):
+        """Release resize callbacks to avoid dangling timers after close."""
+        if self._resize_after_id is not None:
+            self.after_cancel(self._resize_after_id)
+            self._resize_after_id = None
+        if self.canvas_widget and self._resize_bind_id is not None:
+            self.canvas_widget.unbind("<Configure>", self._resize_bind_id)
+            self._resize_bind_id = None
+        if self.canvas_widget and self._map_bind_id is not None:
+            self.canvas_widget.unbind("<Map>", self._map_bind_id)
+            self._map_bind_id = None
+        super().destroy()
 
     # ─── Hover Metadata Panel ────────────────────────────────────────────────
     def setup_hover(self, panel, album_label, title_label, artist_label):
@@ -250,17 +385,32 @@ class ClusterGraphPanel(ttk.Frame):
             s=20,
         )
         self.ax.set_title("Lasso to select & generate playlist")
+        self._update_axes_limits()
         self.canvas.draw_idle()
+
+    def _cluster_kwargs(self, params: dict | None = None) -> dict:
+        """Return clustering-only parameters without metadata keys."""
+
+        if params is None:
+            params = self.cluster_params
+        return {
+            k: v
+            for k, v in params.items()
+            if k not in {"method", "engine"}
+        }
 
     def recluster(self, params: dict):
         """Re-run clustering with new ``params`` and redraw the plot."""
-        self.cluster_params = params
+        meta = {k: v for k, v in self.cluster_params.items() if k in {"method", "engine"}}
+        self.cluster_params = {**meta, **params}
         if self.lasso is not None:
             self.toggle_lasso()
         self._clear_selection()
         X = np.vstack(self.features)
-        labels = self.cluster_func(X, params)
+        labels = self.cluster_func(X, self._cluster_kwargs())
         self._draw_clusters(labels)
+        if self.on_params_updated:
+            self.on_params_updated(self.cluster_params)
 
     def open_param_dialog(self):
         """Show dialog to edit HDBSCAN parameters and redraw clusters."""
@@ -268,38 +418,89 @@ class ClusterGraphPanel(ttk.Frame):
         dlg.title("HDBSCAN Parameters")
         dlg.grab_set()
 
-        cs_var = tk.StringVar(value=str(self.cluster_params.get("min_cluster_size", 5)))
+        cs_var = tk.StringVar(value=str(self.cluster_params.get("min_cluster_size", 25)))
         ms_var = tk.StringVar(value=str(self.cluster_params.get("min_samples", "")))
-        eps_var = tk.StringVar(value=str(self.cluster_params.get("cluster_selection_epsilon", "")))
+        eps_var = tk.StringVar(
+            value=str(self.cluster_params.get("cluster_selection_epsilon", ""))
+        )
 
         ttk.Label(dlg, text="Min cluster size:").grid(row=0, column=0, sticky="w")
         ttk.Entry(dlg, textvariable=cs_var, width=10).grid(row=0, column=1, sticky="w", padx=(5, 0))
-        ttk.Label(dlg, text="Min samples:").grid(row=1, column=0, sticky="w")
+        ttk.Label(dlg, text="Min samples (optional):").grid(row=1, column=0, sticky="w")
         ttk.Entry(dlg, textvariable=ms_var, width=10).grid(row=1, column=1, sticky="w", padx=(5, 0))
-        ttk.Label(dlg, text="Epsilon:").grid(row=2, column=0, sticky="w")
+        ttk.Label(dlg, text="Epsilon (advanced, optional):").grid(row=2, column=0, sticky="w")
         ttk.Entry(dlg, textvariable=eps_var, width=10).grid(row=2, column=1, sticky="w", padx=(5, 0))
 
+        ttk.Label(
+            dlg,
+            text=(
+                "Suggested min cluster size: 5–20 for <500 tracks, 10–50 for "
+                "500–2k, 25–150 for 2k–10k, 50–500 for 10k+. Smaller values "
+                "find niche moods; larger values find broad, stable clusters."
+            ),
+            wraplength=360,
+            foreground="gray",
+        ).grid(row=3, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        ttk.Label(
+            dlg,
+            text=(
+                "Leave min samples empty to match min cluster size. Higher "
+                "values require tighter similarity and increase noise."
+            ),
+            wraplength=360,
+            foreground="gray",
+        ).grid(row=4, column=0, columnspan=2, sticky="w", pady=(4, 0))
+        ttk.Label(
+            dlg,
+            text=(
+                "Epsilon is rarely needed. Leave blank unless you need to merge "
+                "nearby clusters; keep it under 0.2 to avoid destroying results."
+            ),
+            wraplength=360,
+            foreground="gray",
+        ).grid(row=5, column=0, columnspan=2, sticky="w", pady=(4, 0))
+
         btns = ttk.Frame(dlg)
-        btns.grid(row=3, column=0, columnspan=2, pady=(10, 5))
+        btns.grid(row=6, column=0, columnspan=2, pady=(10, 5))
+
+        def _clamp_min_cluster_size(value: int) -> int:
+            return max(5, min(value, 500))
+
+        def _clamp_min_samples(value: int, min_cluster_size: int) -> int:
+            clamped = max(1, min(value, 20))
+            return min(clamped, min_cluster_size)
+
+        def _clamp_epsilon(value: float) -> float:
+            return max(0.0, min(value, 0.2))
 
         def generate():
             try:
-                params = {"min_cluster_size": int(cs_var.get())}
+                cs_val = int(cs_var.get())
             except ValueError:
                 messagebox.showerror("Invalid Value", f"{cs_var.get()} is not a valid number")
                 return
+            cs_val = _clamp_min_cluster_size(cs_val)
+            cs_var.set(str(cs_val))
+            params = {"min_cluster_size": cs_val}
+
             if ms_var.get().strip():
                 try:
-                    params["min_samples"] = int(ms_var.get())
+                    ms_val = int(ms_var.get())
                 except ValueError:
                     messagebox.showerror("Invalid Value", f"{ms_var.get()} is not a valid number")
                     return
+                ms_val = _clamp_min_samples(ms_val, cs_val)
+                ms_var.set(str(ms_val))
+                params["min_samples"] = ms_val
             if eps_var.get().strip():
                 try:
-                    params["cluster_selection_epsilon"] = float(eps_var.get())
+                    eps_val = float(eps_var.get())
                 except ValueError:
                     messagebox.showerror("Invalid Value", f"{eps_var.get()} is not a valid number")
                     return
+                eps_val = _clamp_epsilon(eps_val)
+                eps_var.set(f"{eps_val}")
+                params["cluster_selection_epsilon"] = eps_val
             self.recluster(params)
             dlg.destroy()
 
