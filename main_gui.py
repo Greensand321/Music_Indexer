@@ -134,12 +134,9 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
         app._log(f"\u26a0 {exc}")
         return frame
 
-    cluster_data = getattr(app, "cluster_data", None)
-    cluster_cfg = getattr(app, "cluster_params", None)
-    if cluster_data is None:
-        tracks = features = None
-    else:
-        tracks, features = cluster_data
+    cluster_results = getattr(app, "cluster_results", {})
+    cluster_cfgs = getattr(app, "cluster_params", {})
+    tracks = features = None
 
     if name == "Interactive – KMeans":
         from sklearn.cluster import KMeans
@@ -147,12 +144,13 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
         def km_func(X, p):
             return KMeans(n_clusters=p["n_clusters"]).fit_predict(X)
 
-        n_clusters = 5
-        if cluster_cfg and cluster_cfg.get("method") == "kmeans":
-            n_clusters = int(cluster_cfg.get("num", 5))
-        engine = "librosa"
-        if cluster_cfg and "engine" in cluster_cfg:
-            engine = cluster_cfg["engine"]
+        cfg = cluster_cfgs.get("kmeans", {})
+        data = cluster_results.get("kmeans")
+        if data:
+            tracks, features = data
+
+        n_clusters = int(cfg.get("n_clusters", cfg.get("num", 5)))
+        engine = cfg.get("engine", "librosa")
         params = {"n_clusters": n_clusters, "method": "kmeans", "engine": engine}
     elif name == "Interactive – HDBSCAN":
         from hdbscan import HDBSCAN
@@ -165,19 +163,20 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
                 kwargs["cluster_selection_epsilon"] = p["cluster_selection_epsilon"]
             return HDBSCAN(**kwargs).fit_predict(X)
 
-        min_cs = 5
+        cfg = cluster_cfgs.get("hdbscan", {})
+        data = cluster_results.get("hdbscan")
+        if data:
+            tracks, features = data
+
+        min_cs = int(cfg.get("min_cluster_size", cfg.get("num", 5)))
         extras = {}
-        if cluster_cfg and cluster_cfg.get("method") == "hdbscan":
-            min_cs = int(cluster_cfg.get("min_cluster_size", cluster_cfg.get("num", 5)))
-            if "min_samples" in cluster_cfg:
-                extras["min_samples"] = int(cluster_cfg["min_samples"])
-            if "cluster_selection_epsilon" in cluster_cfg:
-                extras["cluster_selection_epsilon"] = float(
-                    cluster_cfg["cluster_selection_epsilon"]
-                )
-        engine = "librosa"
-        if cluster_cfg and "engine" in cluster_cfg:
-            engine = cluster_cfg["engine"]
+        if "min_samples" in cfg:
+            extras["min_samples"] = int(cfg["min_samples"])
+        if "cluster_selection_epsilon" in cfg:
+            extras["cluster_selection_epsilon"] = float(
+                cfg["cluster_selection_epsilon"]
+            )
+        engine = cfg.get("engine", "librosa")
         params = {
             "min_cluster_size": min_cs,
             "method": "hdbscan",
@@ -353,6 +352,7 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
 
     btn_frame = ttk.Frame(container)
     btn_frame.grid(row=2, column=0, sticky="ew", pady=5)
+    btn_frame.columnconfigure(6, weight=1)
 
     panel.lasso_var = tk.BooleanVar(value=False)
 
@@ -362,7 +362,7 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
         variable=panel.lasso_var,
         command=panel.toggle_lasso,
     )
-    lasso_btn.pack(side="left")
+    lasso_btn.grid(row=0, column=0, padx=(0, 5))
     panel.lasso_btn = lasso_btn
 
     panel.ok_btn = ttk.Button(
@@ -371,7 +371,7 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
         command=panel.finalize_lasso,
         state="disabled",
     )
-    panel.ok_btn.pack(side="left", padx=(5, 0))
+    panel.ok_btn.grid(row=0, column=1, padx=(0, 5))
 
     panel.gen_btn = ttk.Button(
         btn_frame,
@@ -379,7 +379,7 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
         command=panel.create_playlist,
         state="disabled",
     )
-    panel.gen_btn.pack(side="left", padx=(5, 0))
+    panel.gen_btn.grid(row=0, column=2, padx=(0, 5))
 
     def _auto_create_all():
         method = panel.cluster_params.get("method")
@@ -399,13 +399,13 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
         ).start()
 
     auto_btn = ttk.Button(btn_frame, text="Auto-Create", command=_auto_create_all)
-    auto_btn.pack(side="left", padx=(5, 0))
+    auto_btn.grid(row=0, column=3, padx=(0, 5))
 
     if name == "Interactive – HDBSCAN":
         redo_btn = ttk.Button(
             btn_frame, text="Redo Values", command=panel.open_param_dialog
         )
-        redo_btn.pack(side="left", padx=(5, 0))
+        redo_btn.grid(row=0, column=4, padx=(0, 5))
 
     # ─── Hover Metadata Panel ────────────────────────────────────────────
     hover_panel = ttk.Frame(panel, relief="solid", borderwidth=1)
@@ -562,7 +562,8 @@ class SoundVaultImporterApp(tk.Tk):
         self.assistant_plugin = AssistantPlugin()
 
         # Cached tracks and feature vectors for interactive clustering
-        self.cluster_data = None
+        self.cluster_results: dict[str, tuple[list[str], list]] = {}
+        self.cluster_params: dict[str, dict] = {}
         self.folder_filter = {"include": [], "exclude": []}
 
         # Library Sync state
@@ -1161,7 +1162,8 @@ class SoundVaultImporterApp(tk.Tk):
         self.mapping_path = os.path.join(self.library_path, ".genre_mapping.json")
         self._load_genre_mapping()
         # Clear any cached clustering data when switching libraries
-        self.cluster_data = None
+        self.cluster_results.clear()
+        self.cluster_params.clear()
         if hasattr(self, "scan_btn"):
             self.scan_btn.config(state="normal")
             self._validate_threshold()
@@ -1658,7 +1660,8 @@ class SoundVaultImporterApp(tk.Tk):
 
         # KMeans params
         km_frame = ttk.Frame(params_frame)
-        km_var = tk.StringVar(value="5")
+        prev_km = self.cluster_params.get("kmeans", {})
+        km_var = tk.StringVar(value=str(prev_km.get("n_clusters", 5)))
         ttk.Label(km_frame, text="Number of clusters:").pack(side="left")
         ttk.Entry(km_frame, textvariable=km_var, width=10).pack(
             side="left", padx=(5, 0)
@@ -1666,18 +1669,21 @@ class SoundVaultImporterApp(tk.Tk):
 
         # HDBSCAN params
         hdb_frame = ttk.Frame(params_frame)
-        min_size_var = tk.StringVar(value="5")
+        prev_hdb = self.cluster_params.get("hdbscan", {})
+        min_size_var = tk.StringVar(value=str(prev_hdb.get("min_cluster_size", 5)))
         ttk.Label(hdb_frame, text="Min cluster size:").grid(row=0, column=0, sticky="w")
         ttk.Entry(hdb_frame, textvariable=min_size_var, width=10).grid(
             row=0, column=1, sticky="w", padx=(5, 0)
         )
         ttk.Label(hdb_frame, text="Min samples:").grid(row=1, column=0, sticky="w")
-        min_samples_var = tk.StringVar(value="")
+        min_samples_var = tk.StringVar(value=str(prev_hdb.get("min_samples", "")))
         ttk.Entry(hdb_frame, textvariable=min_samples_var, width=10).grid(
             row=1, column=1, sticky="w", padx=(5, 0)
         )
         ttk.Label(hdb_frame, text="Epsilon:").grid(row=2, column=0, sticky="w")
-        epsilon_var = tk.StringVar(value="")
+        epsilon_var = tk.StringVar(
+            value=str(prev_hdb.get("cluster_selection_epsilon", ""))
+        )
         ttk.Entry(hdb_frame, textvariable=epsilon_var, width=10).grid(
             row=2, column=1, sticky="w", padx=(5, 0)
         )
@@ -1831,8 +1837,8 @@ class SoundVaultImporterApp(tk.Tk):
         tracks, feats = cluster_library(
             path, method, params, self._log, self.folder_filter, engine
         )
-        self.cluster_data = (tracks, feats)
-        self.cluster_params = {"method": method, "engine": engine, **params}
+        self.cluster_results[method] = (tracks, feats)
+        self.cluster_params[method] = {"method": method, "engine": engine, **params}
 
         def done():
             messagebox.showinfo("Clustered Playlists", "Generation complete")
