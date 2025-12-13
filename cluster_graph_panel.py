@@ -4,7 +4,7 @@ from datetime import datetime
 import numpy as np
 import tkinter as tk
 from tkinter import ttk, messagebox
-from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 from matplotlib.figure import Figure
 from matplotlib.widgets import LassoSelector
 from matplotlib.path import Path
@@ -55,10 +55,17 @@ class ClusterGraphPanel(ttk.Frame):
         self.plot_frame.rowconfigure(0, weight=1)
         self.plot_frame.columnconfigure(0, weight=1)
 
+        self.graph_frame = ttk.Frame(self.plot_frame)
+        self.graph_frame.grid(row=0, column=0, sticky="nsew")
+        self.graph_frame.rowconfigure(0, weight=1)
+        self.graph_frame.columnconfigure(0, weight=1)
+
         self.figure = None
         self.canvas = None
         self.canvas_widget = None
         self.ax = None
+        self.toolbar = None
+        self.toolbar_frame = None
         self._build_canvas()
 
         self.scatter = None
@@ -100,15 +107,32 @@ class ClusterGraphPanel(ttk.Frame):
 
         if self.canvas_widget:
             self.canvas_widget.destroy()
+        if self.toolbar:
+            self.toolbar.destroy()
+            self.toolbar = None
+        if self.toolbar_frame:
+            self.toolbar_frame.destroy()
+            self.toolbar_frame = None
 
-        self.figure = Figure(figsize=(5, 5), constrained_layout=False)
+        # Let the Tk geometry dictate the final dimensions instead of hardcoding
+        # a starting size; ``_refresh_canvas`` will resize the figure to match
+        # the canvas as soon as the widget is mapped.
+        self.figure = Figure(constrained_layout=False)
         self.ax = self.figure.add_subplot(111)
         # Leave space for titles without trimming axes on resize
         self.figure.subplots_adjust(left=0.08, right=0.98, bottom=0.1, top=0.9)
 
-        self.canvas = FigureCanvasTkAgg(self.figure, master=self.plot_frame)
+        self.canvas = FigureCanvasTkAgg(self.figure, master=self.graph_frame)
         self.canvas_widget = self.canvas.get_tk_widget()
         self.canvas_widget.grid(row=0, column=0, sticky="nsew")
+
+        self.toolbar_frame = ttk.Frame(self.graph_frame)
+        self.toolbar_frame.grid(row=1, column=0, sticky="ew")
+        self.toolbar_frame.columnconfigure(0, weight=1)
+        # Navigation toolbar needs an explicit update to size to the frame
+        self.toolbar = NavigationToolbar2Tk(self.canvas, self.toolbar_frame, pack_toolbar=False)
+        self.toolbar.update()
+        self.toolbar.grid(row=0, column=0, sticky="w")
 
     def _update_axes_limits(self):
         """Pad axes limits so points are comfortably visible after resize."""
@@ -157,7 +181,13 @@ class ClusterGraphPanel(ttk.Frame):
         self._resize_after_id = self.after(10, self._refresh_canvas)
 
     def _refresh_canvas(self):
-        """Debounced canvas redraw to respond to geometry changes."""
+        """Debounced canvas redraw to respond to geometry changes.
+
+        Tk reports widget sizes in pixels, so we translate the canvas widget's
+        latest geometry into inches for Matplotlib. A direct ``draw`` call keeps
+        the figure synchronized with fast tab switches and window maximization
+        where ``draw_idle`` might be deferred too long.
+        """
         if self._resize_after_id is not None:
             self.after_cancel(self._resize_after_id)
             self._resize_after_id = None
