@@ -268,38 +268,87 @@ class ClusterGraphPanel(ttk.Frame):
         dlg.title("HDBSCAN Parameters")
         dlg.grab_set()
 
-        cs_var = tk.StringVar(value=str(self.cluster_params.get("min_cluster_size", 5)))
+        cs_var = tk.StringVar(value=str(self.cluster_params.get("min_cluster_size", 25)))
         ms_var = tk.StringVar(value=str(self.cluster_params.get("min_samples", "")))
         eps_var = tk.StringVar(value=str(self.cluster_params.get("cluster_selection_epsilon", "")))
 
         ttk.Label(dlg, text="Min cluster size:").grid(row=0, column=0, sticky="w")
         ttk.Entry(dlg, textvariable=cs_var, width=10).grid(row=0, column=1, sticky="w", padx=(5, 0))
-        ttk.Label(dlg, text="Min samples:").grid(row=1, column=0, sticky="w")
+        ttk.Label(dlg, text="Min samples (optional):").grid(row=1, column=0, sticky="w")
         ttk.Entry(dlg, textvariable=ms_var, width=10).grid(row=1, column=1, sticky="w", padx=(5, 0))
-        ttk.Label(dlg, text="Epsilon:").grid(row=2, column=0, sticky="w")
+        ttk.Label(dlg, text="Epsilon (advanced, optional):").grid(row=2, column=0, sticky="w")
         ttk.Entry(dlg, textvariable=eps_var, width=10).grid(row=2, column=1, sticky="w", padx=(5, 0))
 
+        ttk.Label(
+            dlg,
+            text=(
+                "Suggested min cluster size: 5–20 for <500 tracks, 10–50 for "
+                "500–2k, 25–150 for 2k–10k, 50–500 for 10k+. Smaller values "
+                "find niche moods; larger values find broad, stable clusters."
+            ),
+            wraplength=360,
+            foreground="gray",
+        ).grid(row=3, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        ttk.Label(
+            dlg,
+            text=(
+                "Leave min samples empty to match min cluster size. Higher "
+                "values require tighter similarity and increase noise."
+            ),
+            wraplength=360,
+            foreground="gray",
+        ).grid(row=4, column=0, columnspan=2, sticky="w", pady=(4, 0))
+        ttk.Label(
+            dlg,
+            text=(
+                "Epsilon is rarely needed. Leave blank unless you need to merge "
+                "nearby clusters; keep it under 0.2 to avoid destroying results."
+            ),
+            wraplength=360,
+            foreground="gray",
+        ).grid(row=5, column=0, columnspan=2, sticky="w", pady=(4, 0))
+
         btns = ttk.Frame(dlg)
-        btns.grid(row=3, column=0, columnspan=2, pady=(10, 5))
+        btns.grid(row=6, column=0, columnspan=2, pady=(10, 5))
+
+        def _clamp_min_cluster_size(value: int) -> int:
+            return max(5, min(value, 500))
+
+        def _clamp_min_samples(value: int, min_cluster_size: int) -> int:
+            clamped = max(1, min(value, 20))
+            return min(clamped, min_cluster_size)
+
+        def _clamp_epsilon(value: float) -> float:
+            return max(0.0, min(value, 0.2))
 
         def generate():
             try:
-                params = {"min_cluster_size": int(cs_var.get())}
+                cs_val = int(cs_var.get())
             except ValueError:
                 messagebox.showerror("Invalid Value", f"{cs_var.get()} is not a valid number")
                 return
+            cs_val = _clamp_min_cluster_size(cs_val)
+            cs_var.set(str(cs_val))
+            params = {"min_cluster_size": cs_val}
+
             if ms_var.get().strip():
                 try:
-                    params["min_samples"] = int(ms_var.get())
+                    ms_val = int(ms_var.get())
                 except ValueError:
                     messagebox.showerror("Invalid Value", f"{ms_var.get()} is not a valid number")
                     return
+                ms_val = _clamp_min_samples(ms_val, cs_val)
+                ms_var.set(str(ms_val))
+                params["min_samples"] = ms_val
             if eps_var.get().strip():
                 try:
-                    params["cluster_selection_epsilon"] = float(eps_var.get())
+                    eps_val = float(eps_var.get())
                 except ValueError:
                     messagebox.showerror("Invalid Value", f"{eps_var.get()} is not a valid number")
                     return
+                eps_val = _clamp_epsilon(eps_val)
+                eps_var.set(f"{eps_val}")
+                params["cluster_selection_epsilon"] = eps_val
             self.recluster(params)
             dlg.destroy()
 

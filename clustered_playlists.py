@@ -42,6 +42,19 @@ def extract_audio_features(file_path: str, log_callback=None) -> np.ndarray:
     return vec
 
 
+def _clamp_min_cluster_size(value: int) -> int:
+    return max(5, min(value, 500))
+
+
+def _clamp_min_samples(value: int, min_cluster_size: int) -> int:
+    clamped = max(1, min(value, 20))
+    return min(clamped, min_cluster_size)
+
+
+def _clamp_epsilon(value: float) -> float:
+    return max(0.0, min(value, 0.2))
+
+
 def cluster_tracks(
     feature_matrix: np.ndarray,
     method: str = "kmeans",
@@ -61,14 +74,27 @@ def cluster_tracks(
             feature_matrix
         )
     else:
-        min_cluster_size = int(kwargs.get("min_cluster_size", 5))
+        min_cluster_size_raw = int(kwargs.get("min_cluster_size", 25))
+        min_cluster_size = _clamp_min_cluster_size(min_cluster_size_raw)
+        if min_cluster_size != min_cluster_size_raw:
+            log_callback(
+                f"• Clamped min_cluster_size from {min_cluster_size_raw} to {min_cluster_size}"
+            )
         extra: dict = {}
         if "min_samples" in kwargs:
-            extra["min_samples"] = int(kwargs["min_samples"])
+            raw_ms = int(kwargs["min_samples"])
+            clamped_ms = _clamp_min_samples(raw_ms, min_cluster_size)
+            if raw_ms != clamped_ms:
+                log_callback(f"• Clamped min_samples from {raw_ms} to {clamped_ms}")
+            extra["min_samples"] = clamped_ms
         if "cluster_selection_epsilon" in kwargs:
-            extra["cluster_selection_epsilon"] = float(
-                kwargs["cluster_selection_epsilon"]
-            )
+            raw_eps = float(kwargs["cluster_selection_epsilon"])
+            clamped_eps = _clamp_epsilon(raw_eps)
+            if raw_eps != clamped_eps:
+                log_callback(
+                    f"• Clamped cluster_selection_epsilon from {raw_eps} to {clamped_eps}"
+                )
+            extra["cluster_selection_epsilon"] = clamped_eps
         log_callback("⚙ Running clustering algorithm …")
         labels = hdbscan.HDBSCAN(
             min_cluster_size=min_cluster_size, **extra
