@@ -128,6 +128,17 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
     """Return a UI panel for the given playlist plugin."""
     frame = ttk.Frame(parent)
 
+    if name.startswith("Interactive"):
+        banner = ttk.Label(
+            frame,
+            text=name,
+            font=("TkDefaultFont", 14, "bold"),
+            anchor="w",
+        )
+        banner.pack(fill="x", padx=10, pady=(10, 4))
+
+        ttk.Separator(frame, orient="horizontal").pack(fill="x", padx=10)
+
     try:
         from cluster_graph_panel import ClusterGraphPanel
     except ModuleNotFoundError as exc:
@@ -937,25 +948,6 @@ class SoundVaultImporterApp(tk.Tk):
         self.playlist_tab = ttk.Frame(self.notebook)
         self.notebook.add(self.playlist_tab, text="Playlist Creator")
 
-        method_sel = ttk.LabelFrame(
-            self.playlist_tab, text="Clustering Method", padding=(6, 4)
-        )
-        method_sel.grid(row=0, column=0, columnspan=2, sticky="w", padx=(0, 10))
-        ttk.Radiobutton(
-            method_sel,
-            text="KMeans",
-            value="kmeans",
-            variable=self.cluster_method_var,
-            command=lambda: self._on_cluster_method_change("kmeans"),
-        ).pack(side="left", padx=(0, 6))
-        ttk.Radiobutton(
-            method_sel,
-            text="HDBSCAN",
-            value="hdbscan",
-            variable=self.cluster_method_var,
-            command=lambda: self._on_cluster_method_change("hdbscan"),
-        ).pack(side="left")
-
         self.plugin_list = tk.Listbox(
             self.playlist_tab, width=30, exportselection=False
         )
@@ -1293,18 +1285,6 @@ class SoundVaultImporterApp(tk.Tk):
 
             # Load the newly selected panel directly
             self._load_plugin_panel(names[idx])
-        finally:
-            self._syncing_cluster_method = False
-
-    def _on_cluster_method_change(self, method: str) -> None:
-        """Handle cluster method toggles from the GUI and sync the plugin selection."""
-        if getattr(self, "_syncing_cluster_method", False):
-            return
-
-        self._syncing_cluster_method = True
-        try:
-            self.cluster_method_var.set(method)
-            self._select_plugin_for_method(method)
         finally:
             self._syncing_cluster_method = False
 
@@ -1808,61 +1788,28 @@ class SoundVaultImporterApp(tk.Tk):
         if not path:
             return
 
-        method = method or self.cluster_method_var.get() or "kmeans"
+        method = (method or self.cluster_method_var.get() or "kmeans").lower()
+        if method not in {"kmeans", "hdbscan"}:
+            method = "kmeans"
+        self.cluster_method_var.set(method)
+        self._select_plugin_for_method(method)
 
         dlg = tk.Toplevel(self)
-        dlg.title("Clustered Playlists")
+        dlg.title(f"Clustered Playlists – {method.upper()}")
         dlg.grab_set()
         dlg.resizable(True, True)
 
-        method_var = tk.StringVar(value=method)
-        km_defaults = self.cluster_cache.get("kmeans", {})
-        hdb_defaults = self.cluster_cache.get("hdbscan", {})
-        km_params = km_defaults.get("params", {})
-        hdb_params = hdb_defaults.get("params", {})
-        engine_defaults = {
-            "kmeans": km_defaults.get("engine", "librosa"),
-            "hdbscan": hdb_defaults.get("engine", "librosa"),
-        }
-        engine_var = tk.StringVar(value=engine_defaults.get(method, "librosa"))
+        defaults = self.cluster_cache.get(method, {})
+        method_params = defaults.get("params", {})
+        engine_var = tk.StringVar(value=defaults.get("engine", "librosa"))
 
         top = ttk.Frame(dlg)
         top.pack(fill="x", padx=10, pady=(10, 0))
-
-        def _update_fields(*args):
-            selected = method_var.get()
-            if selected == "kmeans":
-                engine_var.set(engine_defaults.get("kmeans", engine_var.get()))
-                hdb_frame.pack_forget()
-                km_frame.pack(fill="x")
-            else:
-                engine_var.set(engine_defaults.get("hdbscan", engine_var.get()))
-                km_frame.pack_forget()
-                hdb_frame.pack(fill="x")
-
-        rb_km = ttk.Radiobutton(
+        ttk.Label(
             top,
-            text="KMeans",
-            variable=method_var,
-            value="kmeans",
-            command=_update_fields,
-        )
-        rb_hdb = ttk.Radiobutton(
-            top,
-            text="HDBSCAN",
-            variable=method_var,
-            value="hdbscan",
-            command=_update_fields,
-        )
-        rb_km.pack(side="left")
-        rb_hdb.pack(side="left", padx=(5, 0))
-
-        def _sync_method_var(*_):
-            method_name = method_var.get()
-            self.cluster_method_var.set(method_name)
-            self._select_plugin_for_method(method_name)
-
-        method_var.trace_add("write", _sync_method_var)
+            text=f"{method.upper()} clustering settings",
+            font=("TkDefaultFont", 12, "bold"),
+        ).pack(anchor="w")
 
         params_frame = ttk.Frame(dlg)
         params_frame.pack(fill="x", padx=10, pady=(5, 0))
@@ -1887,7 +1834,9 @@ class SoundVaultImporterApp(tk.Tk):
         # KMeans params
         km_frame = ttk.Frame(params_frame)
         km_var = tk.StringVar(
-            value=str(km_params.get("n_clusters", km_params.get("num", 5) or 5))
+            value=str(
+                method_params.get("n_clusters", method_params.get("num", 5) or 5)
+            )
         )
         ttk.Label(km_frame, text="Number of clusters:").pack(side="left")
         ttk.Entry(km_frame, textvariable=km_var, width=10).pack(
@@ -1897,7 +1846,9 @@ class SoundVaultImporterApp(tk.Tk):
         # HDBSCAN params
         hdb_frame = ttk.Frame(params_frame)
         min_size_var = tk.StringVar(
-            value=str(hdb_params.get("min_cluster_size", hdb_params.get("num", 25) or 25))
+            value=str(
+                method_params.get("min_cluster_size", method_params.get("num", 25) or 25)
+            )
         )
         ttk.Label(hdb_frame, text="Min cluster size:").grid(row=0, column=0, sticky="w")
         ttk.Entry(hdb_frame, textvariable=min_size_var, width=10).grid(
@@ -1906,7 +1857,7 @@ class SoundVaultImporterApp(tk.Tk):
         ttk.Label(hdb_frame, text="Min samples (optional):").grid(
             row=1, column=0, sticky="w"
         )
-        min_samples_var = tk.StringVar(value=str(hdb_params.get("min_samples", "")))
+        min_samples_var = tk.StringVar(value=str(method_params.get("min_samples", "")))
         ttk.Entry(hdb_frame, textvariable=min_samples_var, width=10).grid(
             row=1, column=1, sticky="w", padx=(5, 0)
         )
@@ -1914,7 +1865,7 @@ class SoundVaultImporterApp(tk.Tk):
             row=2, column=0, sticky="w"
         )
         epsilon_var = tk.StringVar(
-            value=str(hdb_params.get("cluster_selection_epsilon", ""))
+            value=str(method_params.get("cluster_selection_epsilon", ""))
         )
         ttk.Entry(hdb_frame, textvariable=epsilon_var, width=10).grid(
             row=2, column=1, sticky="w", padx=(5, 0)
@@ -1960,8 +1911,12 @@ class SoundVaultImporterApp(tk.Tk):
             foreground="gray",
         ).grid(row=6, column=0, columnspan=2, sticky="w", pady=(4, 0))
 
-        method_var.trace_add("write", _update_fields)
-        _update_fields()
+        if method == "kmeans":
+            hdb_frame.pack_forget()
+            km_frame.pack(fill="x")
+        else:
+            km_frame.pack_forget()
+            hdb_frame.pack(fill="x")
 
         # ─── Folder Filter UI ────────────────────────────────────────────
         music_root = (
@@ -2061,7 +2016,7 @@ class SoundVaultImporterApp(tk.Tk):
                 )
                 return
 
-            m = method_var.get()
+            m = method
             params = {}
             if m == "kmeans":
                 try:
