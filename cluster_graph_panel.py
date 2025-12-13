@@ -29,6 +29,7 @@ class ClusterGraphPanel(ttk.Frame):
         cluster_params,
         library_path,
         log_callback,
+        on_params_updated=None,
     ):
         super().__init__(parent)
         self.tracks = tracks
@@ -37,6 +38,7 @@ class ClusterGraphPanel(ttk.Frame):
         self.cluster_params = cluster_params
         self.library_path = library_path
         self.log = log_callback
+        self.on_params_updated = on_params_updated
 
         from sklearn.decomposition import PCA
 
@@ -49,7 +51,7 @@ class ClusterGraphPanel(ttk.Frame):
         self.canvas.get_tk_widget().pack(fill="both", expand=True)
 
         self.scatter = None
-        self._draw_clusters(cluster_func(X, cluster_params))
+        self._draw_clusters(cluster_func(X, self._cluster_kwargs(cluster_params)))
 
         self.lasso = None
         self.sel_scatter = None
@@ -252,15 +254,29 @@ class ClusterGraphPanel(ttk.Frame):
         self.ax.set_title("Lasso to select & generate playlist")
         self.canvas.draw_idle()
 
+    def _cluster_kwargs(self, params: dict | None = None) -> dict:
+        """Return clustering-only parameters without metadata keys."""
+
+        if params is None:
+            params = self.cluster_params
+        return {
+            k: v
+            for k, v in params.items()
+            if k not in {"method", "engine"}
+        }
+
     def recluster(self, params: dict):
         """Re-run clustering with new ``params`` and redraw the plot."""
-        self.cluster_params = params
+        meta = {k: v for k, v in self.cluster_params.items() if k in {"method", "engine"}}
+        self.cluster_params = {**meta, **params}
         if self.lasso is not None:
             self.toggle_lasso()
         self._clear_selection()
         X = np.vstack(self.features)
-        labels = self.cluster_func(X, params)
+        labels = self.cluster_func(X, self._cluster_kwargs())
         self._draw_clusters(labels)
+        if self.on_params_updated:
+            self.on_params_updated(self.cluster_params)
 
     def open_param_dialog(self):
         """Show dialog to edit HDBSCAN parameters and redraw clusters."""
@@ -270,7 +286,9 @@ class ClusterGraphPanel(ttk.Frame):
 
         cs_var = tk.StringVar(value=str(self.cluster_params.get("min_cluster_size", 25)))
         ms_var = tk.StringVar(value=str(self.cluster_params.get("min_samples", "")))
-        eps_var = tk.StringVar(value=str(self.cluster_params.get("cluster_selection_epsilon", "")))
+        eps_var = tk.StringVar(
+            value=str(self.cluster_params.get("cluster_selection_epsilon", ""))
+        )
 
         ttk.Label(dlg, text="Min cluster size:").grid(row=0, column=0, sticky="w")
         ttk.Entry(dlg, textvariable=cs_var, width=10).grid(row=0, column=1, sticky="w", padx=(5, 0))
