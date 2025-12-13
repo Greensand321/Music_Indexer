@@ -173,6 +173,7 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
             path = app.require_library()
             if not path:
                 return
+            app.show_log_tab()
             tracks = gather_tracks(path)
             try:
                 bucket_by_tempo_energy(tracks, path, app._log)
@@ -195,6 +196,7 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
             if not path or not sel.get():
                 messagebox.showerror("Error", "Select a library and track")
                 return
+            app.show_log_tab()
             tracks = gather_tracks(path)
             res = more_like_this(sel.get(), tracks, 10, log_callback=app._log)
             outfile = os.path.join(path, "Playlists", "more_like_this.m3u")
@@ -224,6 +226,7 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
             except ValueError:
                 messagebox.showerror("Error", "Invalid count")
                 return
+            app.show_log_tab()
             tracks = gather_tracks(path)
             order = autodj_playlist(sel.get(), tracks, n, log_callback=app._log)
             outfile = os.path.join(path, "Playlists", "autodj.m3u")
@@ -307,6 +310,7 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
         params = {k: v for k, v in panel.cluster_params.items() if k != "method"}
         if not params:
             return
+        app.show_log_tab()
         threading.Thread(
             target=app._run_cluster_generation,
             args=(app.library_path, method, params),
@@ -653,10 +657,10 @@ class SoundVaultImporterApp(tk.Tk):
         self.notebook = ttk.Notebook(self)
         self.notebook.pack(fill="both", expand=True, padx=10, pady=(0, 10))
 
-        log_frame = ttk.Frame(self.notebook)
-        self.notebook.add(log_frame, text="Log")
+        self.log_tab = ttk.Frame(self.notebook)
+        self.notebook.add(self.log_tab, text="Log")
 
-        self.output = tk.Text(log_frame, wrap="word", state="disabled", height=15)
+        self.output = tk.Text(self.log_tab, wrap="word", state="disabled", height=15)
         self.output.pack(fill="both", expand=True)
 
         # ─── Indexer Tab ──────────────────────────────────────────────────
@@ -2629,10 +2633,15 @@ class SoundVaultImporterApp(tk.Tk):
 
         win = tk.Toplevel(self)
         win.title("Crash Log")
-        text = ScrolledText(win, width=80, height=24)
-        text.pack(fill="both", expand=True)
-        text.insert("end", "".join(lines))
-        text.configure(state="disabled")
+            text = ScrolledText(win, width=80, height=24)
+            text.pack(fill="both", expand=True)
+            text.insert("end", "".join(lines))
+            text.configure(state="disabled")
+
+    def show_log_tab(self) -> None:
+        """Switch to the Log tab so users can see background activity."""
+        if hasattr(self, "log_tab"):
+            self.notebook.select(self.log_tab)
 
     def _log(self, msg):
         timestamp = time.strftime("%H:%M:%S")

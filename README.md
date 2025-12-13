@@ -49,6 +49,10 @@ python main_gui.py
 11. Use the **Theme** dropdown and **Help** tab for assistance
 12. Adjust the **Distance Threshold** in the Quality Checker tab to fine‑tune duplicate detection and view detailed fingerprint distance logs
 
+### Playlist generator feedback
+
+When you start a playlist job (tempo/energy buckets, *More Like This*, Auto‑DJ, or auto‑creating clustered playlists), the app automatically switches to the **Log** tab. The tab shows timestamped messages from the playlist helpers (feature gathering, similarity calculations, and playlist writes) so you can see that background work is running without waiting for a popup.
+
 Cluster generation writes progress into `<method>_log.txt` inside your library so you can review the steps later.
 
 ### Windows Long Paths
