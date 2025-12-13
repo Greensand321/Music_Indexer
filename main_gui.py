@@ -165,10 +165,10 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
                 kwargs["cluster_selection_epsilon"] = p["cluster_selection_epsilon"]
             return HDBSCAN(**kwargs).fit_predict(X)
 
-        min_cs = 5
+        min_cs = 25
         extras = {}
         if cluster_cfg and cluster_cfg.get("method") == "hdbscan":
-            min_cs = int(cluster_cfg.get("min_cluster_size", cluster_cfg.get("num", 5)))
+            min_cs = int(cluster_cfg.get("min_cluster_size", cluster_cfg.get("num", 25)))
             if "min_samples" in cluster_cfg:
                 extras["min_samples"] = int(cluster_cfg["min_samples"])
             if "cluster_selection_epsilon" in cluster_cfg:
@@ -1666,22 +1666,68 @@ class SoundVaultImporterApp(tk.Tk):
 
         # HDBSCAN params
         hdb_frame = ttk.Frame(params_frame)
-        min_size_var = tk.StringVar(value="5")
+        min_size_var = tk.StringVar(value="25")
         ttk.Label(hdb_frame, text="Min cluster size:").grid(row=0, column=0, sticky="w")
         ttk.Entry(hdb_frame, textvariable=min_size_var, width=10).grid(
             row=0, column=1, sticky="w", padx=(5, 0)
         )
-        ttk.Label(hdb_frame, text="Min samples:").grid(row=1, column=0, sticky="w")
+        ttk.Label(hdb_frame, text="Min samples (optional):").grid(
+            row=1, column=0, sticky="w"
+        )
         min_samples_var = tk.StringVar(value="")
         ttk.Entry(hdb_frame, textvariable=min_samples_var, width=10).grid(
             row=1, column=1, sticky="w", padx=(5, 0)
         )
-        ttk.Label(hdb_frame, text="Epsilon:").grid(row=2, column=0, sticky="w")
+        ttk.Label(hdb_frame, text="Epsilon (advanced, optional):").grid(
+            row=2, column=0, sticky="w"
+        )
         epsilon_var = tk.StringVar(value="")
         ttk.Entry(hdb_frame, textvariable=epsilon_var, width=10).grid(
             row=2, column=1, sticky="w", padx=(5, 0)
         )
+        ttk.Label(
+            hdb_frame,
+            text=(
+                "Suggested min cluster size: 5–20 for <500 tracks, 10–50 for "
+                "500–2k, 25–150 for 2k–10k, 50–500 for 10k+. Smaller values "
+                "find niche moods; larger values find broad, stable clusters."
+            ),
+            wraplength=360,
+            foreground="gray",
+        ).grid(row=3, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        ttk.Label(
+            hdb_frame,
+            text=(
+                "Leave min samples empty to match min cluster size (recommended). "
+                "Higher values require tighter musical similarity and may mark "
+                "more tracks as noise."
+            ),
+            wraplength=360,
+            foreground="gray",
+        ).grid(row=4, column=0, columnspan=2, sticky="w", pady=(4, 0))
+        ttk.Label(
+            hdb_frame,
+            text=(
+                "Epsilon rarely helps HDBSCAN. Leave blank unless you need to "
+                "merge nearby clusters: 0.01–0.05 is subtle, 0.05–0.2 is "
+                "aggressive; values above 0.2 usually ruin results."
+            ),
+            wraplength=360,
+            foreground="gray",
+        ).grid(row=5, column=0, columnspan=2, sticky="w", pady=(4, 0))
+        ttk.Label(
+            hdb_frame,
+            text=(
+                "Why HDBSCAN may show no clusters: it only reports clusters when "
+                "tracks form dense musical groupings. A smooth stylistic "
+                "continuum can appear as all noise."
+            ),
+            wraplength=360,
+            foreground="gray",
+        ).grid(row=6, column=0, columnspan=2, sticky="w", pady=(4, 0))
 
+        engine_var.trace_add("write", _update_fields)
+        method_var.trace_add("write", _update_fields)
         _update_fields()
 
         # ─── Folder Filter UI ────────────────────────────────────────────
@@ -1759,6 +1805,16 @@ class SoundVaultImporterApp(tk.Tk):
         btns = ttk.Frame(dlg)
         btns.pack(pady=(0, 10))
 
+        def _clamp_min_cluster_size(value: int) -> int:
+            return max(5, min(value, 500))
+
+        def _clamp_min_samples(value: int, min_cluster_size: int) -> int:
+            clamped = max(1, min(value, 20))
+            return min(clamped, min_cluster_size)
+
+        def _clamp_epsilon(value: float) -> float:
+            return max(0.0, min(value, 0.2))
+
         def generate():
             self.folder_filter = {
                 "include": list(inc_list.get(0, "end")),
@@ -1784,30 +1840,40 @@ class SoundVaultImporterApp(tk.Tk):
                     return
             else:
                 try:
-                    params["min_cluster_size"] = int(min_size_var.get())
+                    cs_val = int(min_size_var.get())
                 except ValueError:
                     messagebox.showerror(
                         "Invalid Value", f"{min_size_var.get()} is not a valid number"
                     )
                     return
+                cs_val = _clamp_min_cluster_size(cs_val)
+                min_size_var.set(str(cs_val))
+                params["min_cluster_size"] = cs_val
+
                 if min_samples_var.get().strip():
                     try:
-                        params["min_samples"] = int(min_samples_var.get())
+                        ms_val = int(min_samples_var.get())
                     except ValueError:
                         messagebox.showerror(
                             "Invalid Value",
                             f"{min_samples_var.get()} is not a valid number",
                         )
                         return
+                    ms_val = _clamp_min_samples(ms_val, cs_val)
+                    min_samples_var.set(str(ms_val))
+                    params["min_samples"] = ms_val
                 if epsilon_var.get().strip():
                     try:
-                        params["cluster_selection_epsilon"] = float(epsilon_var.get())
+                        eps_val = float(epsilon_var.get())
                     except ValueError:
                         messagebox.showerror(
                             "Invalid Value",
                             f"{epsilon_var.get()} is not a valid number",
                         )
                         return
+                    eps_val = _clamp_epsilon(eps_val)
+                    epsilon_var.set(f"{eps_val}")
+                    params["cluster_selection_epsilon"] = eps_val
             self._start_cluster_playlists(m, params, engine, dlg)
 
         ttk.Button(btns, text="Generate", command=generate).pack(side="left", padx=5)
