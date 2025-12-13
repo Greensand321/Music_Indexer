@@ -2676,10 +2676,10 @@ class SoundVaultImporterApp(tk.Tk):
 
         win = tk.Toplevel(self)
         win.title("Crash Log")
-            text = ScrolledText(win, width=80, height=24)
-            text.pack(fill="both", expand=True)
-            text.insert("end", "".join(lines))
-            text.configure(state="disabled")
+        text = ScrolledText(win, width=80, height=24)
+        text.pack(fill="both", expand=True)
+        text.insert("end", "".join(lines))
+        text.configure(state="disabled")
 
     def show_log_tab(self) -> None:
         """Switch to the Log tab so users can see background activity."""
