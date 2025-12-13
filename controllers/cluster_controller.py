@@ -2,7 +2,6 @@
 
 import os
 from playlist_generator import DEFAULT_EXTS
-from clustered_playlists import generate_clustered_playlists
 
 
 def gather_tracks(library_path: str, folder_filter: dict | None = None) -> list[str]:
@@ -51,6 +50,8 @@ def cluster_library(
     engine: str = "librosa",
 ) -> tuple[list[str], list]:
     """Generate clustered playlists for ``library_path`` and return features."""
+
+    from clustered_playlists import generate_clustered_playlists
 
     tracks = gather_tracks(library_path, folder_filter)
     log_path = os.path.join(library_path, f"{method}_log.txt")
