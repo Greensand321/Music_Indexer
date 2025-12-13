@@ -45,16 +45,21 @@ class ClusterGraphPanel(ttk.Frame):
         X = np.vstack(features)
         self.X2 = PCA(n_components=2).fit_transform(X)
 
-        # Layout: the canvas consumes all space in this frame so it can resize
-        # with the surrounding window/container.
+        # Layout: dedicated frame so the canvas can expand without affecting
+        # the surrounding controls.
         self.rowconfigure(0, weight=1)
         self.columnconfigure(0, weight=1)
 
-        fig = Figure(figsize=(5, 5))
-        self.ax = fig.add_subplot(111)
-        self.canvas = FigureCanvasTkAgg(fig, master=self)
-        self.canvas_widget = self.canvas.get_tk_widget()
-        self.canvas_widget.grid(row=0, column=0, sticky="nsew")
+        self.plot_frame = ttk.Frame(self)
+        self.plot_frame.grid(row=0, column=0, sticky="nsew")
+        self.plot_frame.rowconfigure(0, weight=1)
+        self.plot_frame.columnconfigure(0, weight=1)
+
+        self.figure = None
+        self.canvas = None
+        self.canvas_widget = None
+        self.ax = None
+        self._build_canvas()
 
         self.scatter = None
         self._draw_clusters(cluster_func(X, self._cluster_kwargs(cluster_params)))
@@ -62,6 +67,7 @@ class ClusterGraphPanel(ttk.Frame):
         # Track resize events so the canvas redraws to the latest geometry
         self._pending_size: tuple[int, int] | None = None
         self._resize_after_id: str | None = None
+        self.bind("<Configure>", self._on_resize)
         self.canvas_widget.bind("<Configure>", self._on_resize)
         # Force an initial layout pass once the widget is visible
         self.after_idle(self._apply_pending_resize)
@@ -86,6 +92,37 @@ class ClusterGraphPanel(ttk.Frame):
     ok_btn: ttk.Button
     gen_btn: ttk.Button
 
+    # ─── Canvas / Figure setup ─────────────────────────────────────────────
+    def _build_canvas(self):
+        """Create a fresh Matplotlib figure and embed it into the panel."""
+
+        if self.canvas_widget:
+            self.canvas_widget.destroy()
+
+        self.figure = Figure(figsize=(5, 5), constrained_layout=False)
+        self.ax = self.figure.add_subplot(111)
+        # Leave space for titles without trimming axes on resize
+        self.figure.subplots_adjust(left=0.08, right=0.98, bottom=0.1, top=0.9)
+
+        self.canvas = FigureCanvasTkAgg(self.figure, master=self.plot_frame)
+        self.canvas_widget = self.canvas.get_tk_widget()
+        self.canvas_widget.grid(row=0, column=0, sticky="nsew")
+
+    def _update_axes_limits(self):
+        """Pad axes limits so points are comfortably visible after resize."""
+
+        if self.ax is None or self.X2.size == 0:
+            return
+
+        x_vals = self.X2[:, 0]
+        y_vals = self.X2[:, 1]
+        x_range = max(np.ptp(x_vals), 1e-3)
+        y_range = max(np.ptp(y_vals), 1e-3)
+        x_pad = x_range * 0.05
+        y_pad = y_range * 0.05
+        self.ax.set_xlim(x_vals.min() - x_pad, x_vals.max() + x_pad)
+        self.ax.set_ylim(y_vals.min() - y_pad, y_vals.max() + y_pad)
+
     # ─── Lasso Handling ─────────────────────────────────────────────────────
     def toggle_lasso(self):
         """Enter or exit lasso selection mode."""
@@ -105,6 +142,8 @@ class ClusterGraphPanel(ttk.Frame):
 
     def _on_resize(self, _event):
         """Schedule a canvas redraw after geometry changes."""
+        if not self.canvas_widget:
+            return
         self._pending_size = (
             self.canvas_widget.winfo_width(),
             self.canvas_widget.winfo_height(),
@@ -120,18 +159,20 @@ class ClusterGraphPanel(ttk.Frame):
             self.canvas_widget.winfo_width(),
             self.canvas_widget.winfo_height(),
         )
+        self._pending_size = None
         if width <= 1 or height <= 1:
             return
 
-        dpi = self.canvas.figure.get_dpi()
+        dpi = self.figure.get_dpi()
         # Tk's global scaling inflates widget dimensions; compensate so the
         # Matplotlib figure matches the actual canvas pixels instead of
         # rendering larger and getting clipped to the top-left corner.
         scale = float(self.canvas_widget.tk.call("tk", "scaling"))
         scaled_w = width / scale
         scaled_h = height / scale
-        self.canvas.figure.set_size_inches(scaled_w / dpi, scaled_h / dpi, forward=True)
-        self.canvas.figure.tight_layout()
+        self.figure.set_size_inches(scaled_w / dpi, scaled_h / dpi, forward=True)
+        self.figure.subplots_adjust(left=0.08, right=0.98, bottom=0.1, top=0.9)
+        self._update_axes_limits()
         self.canvas.draw_idle()
 
     # ─── Hover Metadata Panel ────────────────────────────────────────────────
@@ -296,6 +337,7 @@ class ClusterGraphPanel(ttk.Frame):
             s=20,
         )
         self.ax.set_title("Lasso to select & generate playlist")
+        self._update_axes_limits()
         self.canvas.draw_idle()
 
     def _cluster_kwargs(self, params: dict | None = None) -> dict:
