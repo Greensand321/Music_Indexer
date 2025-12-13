@@ -712,6 +712,8 @@ class SoundVaultImporterApp(tk.Tk):
         self.style.theme_use(default_theme)
         self.theme_var = tk.StringVar(value=default_theme)
         self.scale_var = tk.StringVar(value=str(self.current_scale))
+        self._cluster_thread: threading.Thread | None = None
+        self._cluster_method: str | None = None
 
         self._configure_treeview_style()
 
@@ -953,6 +955,7 @@ class SoundVaultImporterApp(tk.Tk):
         ]:
             self.plugin_list.insert("end", name)
         self.plugin_list.bind("<<ListboxSelect>>", self.on_plugin_select)
+        self.plugin_list.bind("<ButtonRelease-1>", self._on_plugin_click)
 
         self.plugin_panel = ttk.Frame(self.playlist_tab)
         self.plugin_panel.grid(row=0, column=1, sticky="nsew", padx=10, pady=10)
@@ -1235,6 +1238,16 @@ class SoundVaultImporterApp(tk.Tk):
         panel = create_panel_for_plugin(self, sel, parent=self.plugin_panel)
         if panel:
             panel.pack(fill="both", expand=True)
+
+    def _on_plugin_click(self, event):
+        """Ensure clicks select the correct plugin even after UI resizes."""
+        lb: tk.Listbox = event.widget
+        idx = lb.nearest(event.y)
+        if idx >= 0:
+            lb.selection_clear(0, "end")
+            lb.selection_set(idx)
+            lb.activate(idx)
+        self.on_plugin_select(event)
 
     def _load_genre_mapping(self):
         """Load genre mapping from ``self.mapping_path`` if possible."""
@@ -2032,31 +2045,48 @@ class SoundVaultImporterApp(tk.Tk):
         path = self.require_library()
         if not path:
             return
-        threading.Thread(
+
+        if self._cluster_thread and self._cluster_thread.is_alive():
+            running = self._cluster_method or "another clustering job"
+            messagebox.showwarning(
+                "Clustering In Progress",
+                f"Please wait for {running} to finish before starting a new run.",
+            )
+            return
+
+        self._cluster_method = method
+        worker = threading.Thread(
             target=self._run_cluster_generation,
             args=(path, method, params, engine),
             daemon=True,
-        ).start()
+        )
+        self._cluster_thread = worker
+        worker.start()
 
     def _run_cluster_generation(
         self, path: str, method: str, params: dict, engine: str
     ):
-        tracks, feats = cluster_library(
-            path, method, params, self._log, self.folder_filter, engine
-        )
-        self._remember_cluster_settings(
-            method,
-            {"method": method, "engine": engine, **params},
-            engine,
-            tracks,
-            feats,
-        )
+        self._cluster_thread = threading.current_thread()
+        try:
+            tracks, feats = cluster_library(
+                path, method, params, self._log, self.folder_filter, engine
+            )
+            self._remember_cluster_settings(
+                method,
+                {"method": method, "engine": engine, **params},
+                engine,
+                tracks,
+                feats,
+            )
 
-        def done():
-            messagebox.showinfo("Clustered Playlists", "Generation complete")
-            self._refresh_plugin_panel()
+            def done():
+                messagebox.showinfo("Clustered Playlists", "Generation complete")
+                self._refresh_plugin_panel()
 
-        self.after(0, done)
+            self.after(0, done)
+        finally:
+            self._cluster_method = None
+            self._cluster_thread = None
 
     def _refresh_plugin_panel(self):
         """Rebuild the current plugin panel if a plugin is selected."""
