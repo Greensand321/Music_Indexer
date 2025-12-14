@@ -44,7 +44,7 @@ import fingerprint_cache
 import chromaprint_utils
 from controllers.library_index_controller import generate_index
 from controllers.genre_list_controller import list_unique_genres
-from controllers.highlight_controller import play_snippet, PYDUB_AVAILABLE
+from controllers.highlight_controller import PYDUB_AVAILABLE
 from controllers.scan_progress_controller import ScanProgressController
 from gui.audio_preview import PreviewPlayer
 from io import BytesIO
@@ -1024,14 +1024,6 @@ class SoundVaultImporterApp(tk.Tk):
             label="List Unique Genres…",
             command=lambda: list_unique_genres(self.require_library()),
         )
-        if PYDUB_AVAILABLE and self.ffmpeg_available:
-            tools_menu.add_command(
-                label="Play Highlight…", command=self.sample_song_highlight
-            )
-        else:
-            tools_menu.add_command(
-                label="Play Highlight… (requires pydub & ffmpeg)", state="disabled"
-            )
         tools_menu.add_separator()
         tools_menu.add_command(
             label="Genre Normalizer", command=self._open_genre_normalizer
@@ -2459,27 +2451,6 @@ class SoundVaultImporterApp(tk.Tk):
                 ),
                 tags=(tag,),
             )
-
-    def sample_song_highlight(self):
-        """Ask the user for an audio file and play its highlight."""
-        initial = load_last_path()
-        path = filedialog.askopenfilename(
-            title="Select Audio File",
-            initialdir=initial,
-            filetypes=[("Audio Files", "*.mp3 *.wav *.flac *.ogg"), ("All files", "*")],
-        )
-        if not path:
-            return
-
-        save_last_path(os.path.dirname(path))
-        try:
-            start_sec = play_snippet(path)
-            self._log(
-                f"Played highlight of '{os.path.basename(path)}' starting at {start_sec:.2f}s"
-            )
-        except Exception as e:
-            messagebox.showerror("Playback failed", str(e))
-            self._log(f"✘ Playback failed for {path}: {e}")
 
     def _open_tagfix_debug_window(self):
         if (
