@@ -62,7 +62,7 @@ def cluster_tracks(
         )
     else:
         min_cluster_size = int(kwargs.get("min_cluster_size", 5))
-        extra: dict = {}
+        extra: dict = {"min_samples": 1}
         if "min_samples" in kwargs:
             extra["min_samples"] = int(kwargs["min_samples"])
         if "cluster_selection_epsilon" in kwargs:
