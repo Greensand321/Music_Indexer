@@ -304,6 +304,7 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
             )
             render_stats(result.get("genres"))
             append_log(f"Exported {len(selected)} playlist(s).")
+            open_genre_folder()
 
         def start_run():
             nonlocal total_tracks
@@ -456,6 +457,7 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
         progress_var = tk.StringVar(value="Waiting to start")
         running = tk.BooleanVar(value=False)
         total_tracks = 0
+        playlists_dir: str | None = None
         q: queue.Queue = queue.Queue()
         cancel_event = threading.Event()
 
@@ -534,7 +536,7 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
             cancel_btn.config(state="normal" if running.get() else "disabled")
 
         def start_run():
-            nonlocal total_tracks
+            nonlocal total_tracks, playlists_dir
             if running.get():
                 return
             path = app.require_library()
@@ -548,6 +550,7 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
                 messagebox.showinfo("No Tracks", "No audio files found in the library.")
                 return
             total_tracks = len(tracks)
+            playlists_dir = os.path.join(path, "Playlists")
             cancel_event.clear()
             running.set(True)
             progress["value"] = 0
@@ -596,6 +599,12 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
                         progress_var.set(
                             f"{status} – processed {payload.get('processed')} of {payload.get('total')} tracks"
                         )
+                        if (
+                            not payload.get("cancelled")
+                            and playlists_dir
+                            and payload.get("buckets")
+                        ):
+                            open_path(playlists_dir)
                         update_controls()
                     elif tag == "error":
                         running.set(False)
@@ -657,6 +666,19 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
         sel = tk.StringVar()
         count_var = tk.StringVar(value="20")
 
+        def open_path(path: str) -> None:
+            if not path:
+                return
+            try:
+                if sys.platform == "win32":
+                    os.startfile(path)  # type: ignore[attr-defined]
+                elif sys.platform == "darwin":
+                    subprocess.run(["open", path], check=False)
+                else:
+                    subprocess.run(["xdg-open", path], check=False)
+            except Exception as exc:  # pragma: no cover - OS interaction
+                messagebox.showerror("Open File", f"Could not open {path}: {exc}")
+
         def browse():
             f = filedialog.askopenfilename()
             if f:
@@ -678,6 +700,7 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
             outfile = os.path.join(path, "Playlists", "autodj.m3u")
             write_playlist(order, outfile)
             messagebox.showinfo("Playlist", f"Written to {outfile}")
+            open_path(os.path.dirname(outfile))
 
         row = ttk.Frame(frame)
         row.pack(padx=10, pady=10)
