@@ -2853,7 +2853,14 @@ class SoundVaultImporterApp(tk.Tk):
                     path, start_ms=start_ms, duration_ms=duration_ms
                 )
             except Exception as e:
-                self.after(0, lambda: messagebox.showerror("Playback failed", str(e)))
+                logging.exception("Preview playback failed")
+                self.after(
+                    0,
+                    lambda: (
+                        self.player_status_var.set("Playback failed. Check logs."),
+                        messagebox.showerror("Playback failed", str(e)),
+                    ),
+                )
 
         self._preview_thread = threading.Thread(target=task, daemon=True)
         self._preview_thread.start()
