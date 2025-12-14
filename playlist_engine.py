@@ -4,7 +4,10 @@ import math
 import re
 from typing import Callable, Iterable
 
-_mutagen_available = importlib.util.find_spec("mutagen") is not None
+try:
+    _mutagen_available = importlib.util.find_spec("mutagen") is not None
+except ValueError:  # pragma: no cover - defensive for broken environments
+    _mutagen_available = False
 if _mutagen_available:
     from mutagen import File as MutagenFile
     from mutagen.easyid3 import EasyID3
@@ -152,8 +155,15 @@ def sort_tracks_by_genre(
     progress_callback=None,
     cancel_event=None,
     genre_reader: Callable[[str], list[str]] | None = None,
+    export: bool = True,
+    selected_genres: set[str] | list[str] | None = None,
 ) -> dict:
-    """Group tracks by genre and write one playlist per genre."""
+    """Group tracks by genre and optionally write playlists.
+
+    If ``export`` is False, this function will only analyze genres and return
+    stats without writing any playlists. Pass ``selected_genres`` to export a
+    subset of genres when ``export`` is True.
+    """
 
     if log_callback is None:
         log_callback = lambda m: None
@@ -162,7 +172,8 @@ def sort_tracks_by_genre(
     reader = genre_reader or extract_genres
 
     playlists_dir = os.path.join(root_path, "Playlists", "Genres")
-    os.makedirs(playlists_dir, exist_ok=True)
+    if export:
+        os.makedirs(playlists_dir, exist_ok=True)
 
     buckets: dict[str, list[str]] = {}
     processed = 0
@@ -183,19 +194,91 @@ def sort_tracks_by_genre(
 
     used_names: set[str] = set()
     stats = {}
+    planned_paths: dict[str, str] = {}
+    selected = set(selected_genres) if selected_genres else None
     for genre, items in sorted(buckets.items(), key=lambda kv: kv[0].lower()):
         fname = _sanitize_genre(genre, used_names) + ".m3u"
         out_path = os.path.join(playlists_dir, fname)
-        write_playlist(items, out_path)
-        stats[genre] = {"count": len(items), "playlist": out_path}
-        log_callback(f"→ Wrote {out_path}")
+        planned_paths[genre] = out_path
+        should_export = export and (selected is None or genre in selected)
+        if should_export:
+            write_playlist(items, out_path)
+            log_callback(f"→ Wrote {out_path}")
+        stats[genre] = {
+            "count": len(items),
+            "playlist": out_path,
+            "exported": should_export,
+        }
+        if export and not should_export:
+            log_callback(f"• Skipped exporting {genre}")
 
     return {
         "genres": stats,
         "processed": processed,
         "total": len(tracks),
         "cancelled": bool(cancel_event and cancel_event.is_set()),
+        "buckets": buckets,
+        "playlist_paths": planned_paths,
     }
+
+
+def export_genre_playlists(
+    buckets: dict[str, list[str]],
+    root_path: str,
+    selected_genres: set[str] | list[str] | None = None,
+    log_callback=None,
+    planned_paths: dict[str, str] | None = None,
+):
+    """Write playlists for the provided genre buckets.
+
+    Parameters
+    ----------
+    buckets : dict
+        Mapping of genre -> list of track paths.
+    root_path : str
+        Root music library path used to resolve playlist directory.
+    selected_genres : set | list | None
+        Optional subset of genres to export. If None, all genres are exported.
+    log_callback : callable | None
+        Callback for writing log messages.
+    planned_paths : dict | None
+        Optional mapping of genre -> playlist path generated earlier. When
+        provided, the same filenames are reused to keep the preview stable.
+    """
+
+    if log_callback is None:
+        log_callback = lambda m: None
+
+    playlists_dir = os.path.join(root_path, "Playlists", "Genres")
+    os.makedirs(playlists_dir, exist_ok=True)
+
+    selected = set(selected_genres) if selected_genres else None
+    used_names: set[str] = set()
+    stats: dict[str, dict] = {}
+
+    for genre, items in sorted(buckets.items(), key=lambda kv: kv[0].lower()):
+        if planned_paths and genre in planned_paths:
+            out_path = planned_paths[genre]
+            # Ensure later genres do not reuse the same base name
+            used_names.add(os.path.splitext(os.path.basename(out_path))[0])
+        else:
+            fname = _sanitize_genre(genre, used_names) + ".m3u"
+            out_path = os.path.join(playlists_dir, fname)
+
+        should_export = selected is None or genre in selected
+        if should_export:
+            write_playlist(items, out_path)
+            log_callback(f"→ Wrote {out_path}")
+        else:
+            log_callback(f"• Skipped exporting {genre}")
+
+        stats[genre] = {
+            "count": len(items),
+            "playlist": out_path,
+            "exported": should_export,
+        }
+
+    return {"genres": stats, "playlists_dir": playlists_dir}
 
 
 def _get_feat(path: str, cache: dict, log_callback):
