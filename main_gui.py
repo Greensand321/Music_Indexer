@@ -1011,7 +1011,9 @@ class SoundVaultImporterApp(tk.Tk):
         # Player tab state
         self.player_tracks: list[dict[str, str]] = []
         self.player_tree_paths: dict[str, str] = {}
+        self.player_tree_rows: dict[str, dict[str, str]] = {}
         self._player_load_thread: threading.Thread | None = None
+        self.player_art_image: ImageTk.PhotoImage | None = None
 
         # assume ffmpeg is available without performing checks
         self.ffmpeg_available = True
@@ -1425,8 +1427,11 @@ class SoundVaultImporterApp(tk.Tk):
         )
         self.player_reload_btn.pack(side="right")
 
-        player_table = ttk.Frame(self.player_tab)
-        player_table.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+        player_content = ttk.Frame(self.player_tab)
+        player_content.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+
+        player_table = ttk.Frame(player_content)
+        player_table.pack(side="left", fill="both", expand=True)
         p_vsb = ttk.Scrollbar(player_table, orient="vertical")
         p_vsb.pack(side="right", fill="y")
         p_hsb = ttk.Scrollbar(player_table, orient="horizontal")
@@ -1455,6 +1460,20 @@ class SoundVaultImporterApp(tk.Tk):
             )
 
         self.player_tree.bind("<ButtonRelease-1>", self._on_player_tree_click)
+        self.player_tree.bind("<<TreeviewSelect>>", self._on_player_selection_change)
+
+        art_panel = ttk.Frame(player_content)
+        art_panel.pack(side="right", fill="y", padx=(10, 0))
+        self.player_art_label = ttk.Label(art_panel)
+        self.player_art_label.pack(fill="x", pady=(0, 6))
+        self.player_art_caption = ttk.Label(
+            art_panel,
+            text="Select a track to view album art",
+            wraplength=220,
+            justify="center",
+        )
+        self.player_art_caption.pack(fill="x")
+        self._update_player_art(None)
 
         # ─── Library Sync Tab ─────────────────────────────────────────────
         self.sync_tab = ttk.Frame(self.notebook)
@@ -2931,28 +2950,65 @@ class SoundVaultImporterApp(tk.Tk):
                 self.player_tree.item(self._player_busy_item, values=values)
         self._player_busy_item = None
 
-    def _load_thumbnail(self, path: str, size: int = 100) -> ImageTk.PhotoImage:
+    def _player_art_size(self) -> int:
+        base = 200
+        scale_factor = 0.8 + (0.2 * max(self.current_scale, 1.0))
+        return int(base * min(scale_factor, 1.25))
+
+    def _load_thumbnail(self, path: str | None, size: int = 100) -> ImageTk.PhotoImage:
         img = None
-        try:
-            audio = MutagenFile(path)
-            img_data = None
-            if hasattr(audio, "tags") and audio.tags is not None:
-                for key in audio.tags.keys():
-                    if str(key).startswith("APIC"):
-                        img_data = audio.tags[key].data
+        if path:
+            try:
+                audio = MutagenFile(path)
+                img_data = None
+                if hasattr(audio, "tags") and audio.tags is not None:
+                    for key in audio.tags.keys():
+                        if str(key).startswith("APIC"):
+                            img_data = audio.tags[key].data
+                            break
+                if img_data is None and getattr(audio, "pictures", None):
+                    pics = getattr(audio, "pictures", [])
+                    if pics:
+                        img_data = pics[0].data
+                if img_data:
+                    img = Image.open(BytesIO(img_data))
+            except Exception:
+                img = None
+            if img is None:
+                candidates = []
+                folder = os.path.dirname(path)
+                for stem in ("cover", "folder", "front", "album"):
+                    for ext in ("jpg", "jpeg", "png", "webp"):
+                        candidates.append(os.path.join(folder, f"{stem}.{ext}"))
+                for candidate in candidates:
+                    if not os.path.exists(candidate):
+                        continue
+                    try:
+                        img = Image.open(candidate)
                         break
-            if img_data is None and getattr(audio, "pictures", None):
-                pics = getattr(audio, "pictures", [])
-                if pics:
-                    img_data = pics[0].data
-            if img_data:
-                img = Image.open(BytesIO(img_data))
-        except Exception:
-            img = None
+                    except Exception:
+                        img = None
         if img is None:
             img = Image.new("RGB", (size, size), "#777777")
         img.thumbnail((size, size))
         return ImageTk.PhotoImage(img)
+
+    def _update_player_art(
+        self, path: str | None, title: str | None = None, artist: str | None = None
+    ) -> None:
+        if not hasattr(self, "player_art_label"):
+            return
+        size = self._player_art_size()
+        art = self._load_thumbnail(path, size=size)
+        self.player_art_image = art
+        self.player_art_label.configure(image=art)
+        if path:
+            caption = title or os.path.basename(path)
+            if artist:
+                caption = f"{caption}\n{artist}"
+        else:
+            caption = "Select a track to view album art"
+        self.player_art_caption.configure(text=caption, wraplength=size + 20)
 
     def populate_quality_table(self, matches):
         self.clear_quality_view()
@@ -3047,6 +3103,8 @@ class SoundVaultImporterApp(tk.Tk):
         for row in self.player_tree.get_children():
             self.player_tree.delete(row)
         self.player_tree_paths.clear()
+        self.player_tree_rows.clear()
+        self._update_player_art(None)
 
     def _format_duration(self, seconds: float | None) -> str:
         if not seconds:
@@ -3133,6 +3191,7 @@ class SoundVaultImporterApp(tk.Tk):
                 ),
             )
             self.player_tree_paths[item] = row["path"]
+            self.player_tree_rows[item] = row
         total = len(rows)
         suffix = "track" if total == 1 else "tracks"
         if not self.preview_backend_available:
@@ -3145,6 +3204,13 @@ class SoundVaultImporterApp(tk.Tk):
                 f"Loaded {total} {suffix}. Click ▶ for a 30s highlight."
             )
         self.player_reload_btn.config(state="normal")
+        if rows:
+            first = rows[0]
+            self._update_player_art(
+                first.get("path"),
+                title=first.get("title"),
+                artist=first.get("artist"),
+            )
 
     def _on_player_tree_click(self, event) -> None:
         region = self.player_tree.identify_region(event.x, event.y)
@@ -3164,7 +3230,23 @@ class SoundVaultImporterApp(tk.Tk):
             return
         path = self.player_tree_paths.get(item)
         if path:
+            row = self.player_tree_rows.get(item, {})
+            self._update_player_art(
+                path, title=row.get("title"), artist=row.get("artist")
+            )
             self._play_preview(path, duration_ms=30000, player_item=item)
+
+    def _on_player_selection_change(self, _event) -> None:
+        if not hasattr(self, "player_tree"):
+            return
+        selection = self.player_tree.selection()
+        if not selection:
+            self._update_player_art(None)
+            return
+        item = selection[0]
+        path = self.player_tree_paths.get(item)
+        row = self.player_tree_rows.get(item, {})
+        self._update_player_art(path, title=row.get("title"), artist=row.get("artist"))
 
     def _send_help_query(self):
         threading.Thread(target=self._do_help_query, daemon=True).start()
