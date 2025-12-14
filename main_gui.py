@@ -927,9 +927,6 @@ class SoundVaultImporterApp(tk.Tk):
         menubar.add_cascade(label="Settings", menu=settings_menu)
 
         tools_menu = tk.Menu(menubar, tearoff=False)
-        tools_menu.add_command(
-            label="Regenerate Playlists", command=self.regenerate_playlists
-        )
         tools_menu.add_command(label="Fix Tags via AcoustID", command=self.fix_tags_gui)
         tools_menu.add_command(
             label="Generate Library Index…",
@@ -952,16 +949,6 @@ class SoundVaultImporterApp(tk.Tk):
             label="Genre Normalizer", command=self._open_genre_normalizer
         )
         tools_menu.add_command(label="Reset Tag-Fix Log", command=self.reset_tagfix_log)
-        cluster_menu = tk.Menu(tools_menu, tearoff=False)
-        cluster_menu.add_command(
-            label="K-Means…",
-            command=lambda: self.cluster_playlists_dialog("kmeans"),
-        )
-        cluster_menu.add_command(
-            label="HDBSCAN…",
-            command=lambda: self.cluster_playlists_dialog("hdbscan"),
-        )
-        tools_menu.add_cascade(label="Clustered Playlists", menu=cluster_menu)
         menubar.add_cascade(label="Tools", menu=tools_menu)
 
         debug_menu = tk.Menu(menubar, tearoff=False)
@@ -1860,16 +1847,6 @@ class SoundVaultImporterApp(tk.Tk):
             f"[stub] Would compare:\nMaster: {master}\nDevice: {device}",
         )
         self._log(f"[stub] Compare Libraries → Master: {master}, Device: {device}")
-        self.update_library_info()
-
-    def regenerate_playlists(self):
-        path = self.require_library()
-        if not path:
-            return
-        messagebox.showinfo(
-            "Regenerate Playlists", f"[stub] Would regenerate playlists in:\n{path}"
-        )
-        self._log(f"[stub] Regenerate Playlists → {path}")
         self.update_library_info()
 
     def cluster_playlists_dialog(self, method: str = "kmeans"):
