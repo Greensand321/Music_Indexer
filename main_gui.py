@@ -989,6 +989,9 @@ class SoundVaultImporterApp(tk.Tk):
         # Quality Checker state
         self._dup_logging = False
         self._preview_thread = None
+        self.player_status_var = tk.StringVar(
+            value="Select a library to load tracks."
+        )
         self.preview_player = VlcPreviewPlayer(
             on_done=lambda: self.after(0, self._preview_finished_ui)
         )
@@ -1007,7 +1010,6 @@ class SoundVaultImporterApp(tk.Tk):
         # Player tab state
         self.player_tracks: list[dict[str, str]] = []
         self.player_tree_paths: dict[str, str] = {}
-        self.player_status_var = tk.StringVar(value="Select a library to load tracks.")
         self._player_load_thread: threading.Thread | None = None
 
         # assume ffmpeg is available without performing checks
