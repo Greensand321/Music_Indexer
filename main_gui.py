@@ -1219,7 +1219,6 @@ class SoundVaultImporterApp(tk.Tk):
             "Interactive – HDBSCAN",
             "Sort by Genre",
             "Tempo/Energy Buckets",
-            "Metadata",
             "Auto-DJ",
         ]:
             self.plugin_list.insert("end", name)
