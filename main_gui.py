@@ -1946,8 +1946,11 @@ class SoundVaultImporterApp(tk.Tk):
         dlg.grab_set()
         dlg.resizable(True, True)
 
-        method_var = tk.StringVar(value=method)
-        engine_var = tk.StringVar(value="")
+        cluster_cfg = getattr(self, "cluster_params", {}) or {}
+        selected_method = cluster_cfg.get("method", method)
+
+        method_var = tk.StringVar(value=selected_method)
+        engine_var = tk.StringVar(value=cluster_cfg.get("engine", "librosa"))
 
         top = ttk.Frame(dlg)
         top.pack(fill="x", padx=10, pady=(10, 0))
@@ -1999,26 +2002,49 @@ class SoundVaultImporterApp(tk.Tk):
 
         # KMeans params
         km_frame = ttk.Frame(params_frame)
-        km_var = tk.StringVar(value="5")
+        km_var = tk.StringVar(value=str(cluster_cfg.get("n_clusters", 5)))
         ttk.Label(km_frame, text="Number of clusters:").pack(side="left")
         ttk.Entry(km_frame, textvariable=km_var, width=10).pack(
             side="left", padx=(5, 0)
         )
+        ttk.Label(
+            km_frame,
+            text="(try ~5-20 for small libraries, 50-200 for large)",
+            foreground="gray",
+        ).pack(side="left", padx=(5, 0))
 
         # HDBSCAN params
         hdb_frame = ttk.Frame(params_frame)
-        min_size_var = tk.StringVar(value="5")
+        min_size_var = tk.StringVar(value=str(cluster_cfg.get("min_cluster_size", 5)))
         ttk.Label(hdb_frame, text="Min cluster size:").grid(row=0, column=0, sticky="w")
         ttk.Entry(hdb_frame, textvariable=min_size_var, width=10).grid(
             row=0, column=1, sticky="w", padx=(5, 0)
         )
+        ttk.Label(
+            hdb_frame,
+            text="(e.g., 5-15 for small sets, 30-80 for large)",
+            foreground="gray",
+        ).grid(row=0, column=2, sticky="w", padx=(5, 0))
         ttk.Label(hdb_frame, text="Min samples:").grid(row=1, column=0, sticky="w")
-        min_samples_var = tk.StringVar(value="")
+        min_samples_var = tk.StringVar(
+            value=str(cluster_cfg.get("min_samples", ""))
+            if "min_samples" in cluster_cfg
+            else "1"
+        )
         ttk.Entry(hdb_frame, textvariable=min_samples_var, width=10).grid(
             row=1, column=1, sticky="w", padx=(5, 0)
         )
+        ttk.Label(
+            hdb_frame,
+            text="(start with 1-5; increase for stricter clusters)",
+            foreground="gray",
+        ).grid(row=1, column=2, sticky="w", padx=(5, 0))
         ttk.Label(hdb_frame, text="Epsilon:").grid(row=2, column=0, sticky="w")
-        epsilon_var = tk.StringVar(value="")
+        epsilon_var = tk.StringVar(
+            value=str(cluster_cfg.get("cluster_selection_epsilon", ""))
+            if "cluster_selection_epsilon" in cluster_cfg
+            else ""
+        )
         ttk.Entry(hdb_frame, textvariable=epsilon_var, width=10).grid(
             row=2, column=1, sticky="w", padx=(5, 0)
         )
