@@ -37,15 +37,29 @@ def compute_tempo_energy(path: str) -> tuple[float, float]:
     return tempo, rms
 
 
-def bucket_by_tempo_energy(tracks: list[str], root_path: str, log_callback=None) -> dict:
+def bucket_by_tempo_energy(
+    tracks: list[str],
+    root_path: str,
+    log_callback=None,
+    progress_callback=None,
+    cancel_event=None,
+) -> dict:
     if log_callback is None:
         log_callback = lambda m: None
+    if progress_callback is None:
+        progress_callback = lambda _count: None
     if librosa is None or np is None:
-        raise RuntimeError("librosa/numpy required for bucket generation")
+        raise RuntimeError(
+            "Tempo/Energy buckets require numpy and librosa. Install with `pip install -r requirements.txt`."
+        )
     playlists_dir = os.path.join(root_path, "Playlists")
     os.makedirs(playlists_dir, exist_ok=True)
     buckets: dict[tuple[str, str], list[str]] = {}
+    processed = 0
     for path in tracks:
+        if cancel_event and cancel_event.is_set():
+            log_callback("! Bucket generation cancelled by user.")
+            break
         try:
             tempo, rms = compute_tempo_energy(path)
             tb = categorize_tempo(tempo)
@@ -54,13 +68,24 @@ def bucket_by_tempo_energy(tracks: list[str], root_path: str, log_callback=None)
             log_callback(f"• {os.path.basename(path)} → {tb}/{eb}")
         except Exception as e:
             log_callback(f"! Failed analysis for {path}: {e}")
+        processed += 1
+        progress_callback(processed)
     out_paths = {}
     for (tb, eb), items in buckets.items():
         outfile = os.path.join(playlists_dir, f"{tb}_{eb}.m3u")
         write_playlist(items, outfile)
         out_paths[(tb, eb)] = outfile
         log_callback(f"→ Wrote {outfile}")
-    return out_paths
+    stats = {
+        (tb, eb): {"count": len(items), "playlist": out_paths[(tb, eb)]}
+        for (tb, eb), items in buckets.items()
+    }
+    return {
+        "buckets": stats,
+        "processed": processed,
+        "total": len(tracks),
+        "cancelled": bool(cancel_event and cancel_event.is_set()),
+    }
 
 
 def _get_feat(path: str, cache: dict, log_callback):
