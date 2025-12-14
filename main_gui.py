@@ -1014,6 +1014,7 @@ class SoundVaultImporterApp(tk.Tk):
         self.player_tree_rows: dict[str, dict[str, str]] = {}
         self._player_load_thread: threading.Thread | None = None
         self.player_art_image: ImageTk.PhotoImage | None = None
+        self.player_search_var = tk.StringVar(value="")
 
         # assume ffmpeg is available without performing checks
         self.ffmpeg_available = True
@@ -1419,6 +1420,12 @@ class SoundVaultImporterApp(tk.Tk):
         ttk.Label(player_controls, textvariable=self.player_status_var).pack(
             side="left"
         )
+        ttk.Label(player_controls, text="Search:").pack(side="left", padx=(10, 4))
+        player_search = ttk.Entry(
+            player_controls, textvariable=self.player_search_var, width=30
+        )
+        player_search.pack(side="left")
+        self.player_search_var.trace_add("write", lambda *_: self._apply_player_filter())
         self.player_reload_btn = ttk.Button(
             player_controls,
             text="Reload",
@@ -1612,6 +1619,8 @@ class SoundVaultImporterApp(tk.Tk):
         self.library_path_var.set(info["path"])
         self.mapping_path = os.path.join(self.library_path, ".genre_mapping.json")
         self._load_genre_mapping()
+        if hasattr(self, "player_search_var"):
+            self.player_search_var.set("")
         # Clear any cached clustering data when switching libraries
         self.cluster_data = None
         if hasattr(self, "scan_btn"):
@@ -3175,8 +3184,30 @@ class SoundVaultImporterApp(tk.Tk):
     def _update_player_table(self, rows: list[dict[str, str]], library_path: str) -> None:
         if library_path != self.library_path:
             return
-        self._clear_player_table()
         self.player_tracks = rows
+        self._apply_player_filter(total_count=len(rows))
+
+    def _apply_player_filter(self, *_args, total_count: int | None = None) -> None:
+        if not hasattr(self, "player_tree"):
+            return
+        query = self.player_search_var.get().strip().lower()
+        if query:
+            rows = [r for r in self.player_tracks if self._matches_player_query(r, query)]
+        else:
+            rows = list(self.player_tracks)
+        self._render_player_rows(rows, total_count=total_count)
+
+    def _matches_player_query(self, row: dict[str, str], query: str) -> bool:
+        for key in ("title", "artist", "album", "length", "path"):
+            val = row.get(key)
+            if val and query in str(val).lower():
+                return True
+        return False
+
+    def _render_player_rows(
+        self, rows: list[dict[str, str]], total_count: int | None = None
+    ) -> None:
+        self._clear_player_table()
         play_icon = "▶" if self.preview_backend_available else "—"
         for row in rows:
             item = self.player_tree.insert(
@@ -3192,18 +3223,7 @@ class SoundVaultImporterApp(tk.Tk):
             )
             self.player_tree_paths[item] = row["path"]
             self.player_tree_rows[item] = row
-        total = len(rows)
-        suffix = "track" if total == 1 else "tracks"
-        if not self.preview_backend_available:
-            reason = self.preview_backend_error or "Install python-vlc to enable playback."
-            self.player_status_var.set(
-                f"Loaded {total} {suffix}. Preview disabled: {reason}"
-            )
-        else:
-            self.player_status_var.set(
-                f"Loaded {total} {suffix}. Click ▶ for a 30s highlight."
-            )
-        self.player_reload_btn.config(state="normal")
+
         if rows:
             first = rows[0]
             self._update_player_art(
@@ -3211,6 +3231,21 @@ class SoundVaultImporterApp(tk.Tk):
                 title=first.get("title"),
                 artist=first.get("artist"),
             )
+        else:
+            self._update_player_art(None)
+
+        total = total_count if total_count is not None else len(rows)
+        shown = len(rows)
+        suffix = "track" if total == 1 else "tracks"
+        if not self.preview_backend_available:
+            reason = self.preview_backend_error or "Install python-vlc to enable playback."
+            status = f"Loaded {total} {suffix}. Preview disabled: {reason}"
+        else:
+            status = f"Loaded {total} {suffix}. Click ▶ for a 30s highlight."
+        if shown != total:
+            status += f" Showing {shown} match{'es' if shown != 1 else ''}."
+        self.player_status_var.set(status)
+        self.player_reload_btn.config(state="normal")
 
     def _on_player_tree_click(self, event) -> None:
         region = self.player_tree.identify_region(event.x, event.y)
