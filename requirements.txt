@@ -4,6 +4,7 @@ simpleaudio
 ffmpeg-python
 pyacoustid
 musicbrainzngs
+python-vlc
 # essentia  # disabled on Windows
 librosa
 scipy
@@ -11,7 +12,9 @@ numpy
 scikit-learn
 hdbscan
 matplotlib
+Pillow
 requests
+typing_extensions
 # optional metadata helpers
 spotipy
 tidal-dl
