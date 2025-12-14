@@ -107,6 +107,15 @@ def bucket_by_tempo_energy(
         for (tb, eb), items in buckets.items()
     }
 
+    return {
+        "buckets": buckets,
+        "playlist_paths": out_paths,
+        "stats": stats,
+        "processed": processed,
+        "total": len(tracks),
+        "cancelled": bool(cancel_event and cancel_event.is_set()),
+    }
+
 
 def _split_genres(genres: Iterable[str]) -> list[str]:
     parts: list[str] = []
