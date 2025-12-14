@@ -80,7 +80,7 @@ from plugins.assistant_plugin import AssistantPlugin
 from controllers.cluster_controller import cluster_library
 from config import load_config, save_config, DEFAULT_FP_THRESHOLDS
 import playlist_engine
-from playlist_engine import bucket_by_tempo_energy, more_like_this, autodj_playlist
+from playlist_engine import bucket_by_tempo_energy, autodj_playlist
 from controllers.cluster_controller import gather_tracks
 
 FilterFn = Callable[[FileRecord], bool]
@@ -383,30 +383,6 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
 
         update_controls()
         render_stats(None)
-        return frame
-    elif name == "More Like This":
-        sel = tk.StringVar()
-
-        def browse():
-            f = filedialog.askopenfilename()
-            if f:
-                sel.set(f)
-
-        def generate():
-            path = app.require_library()
-            if not path or not sel.get():
-                messagebox.showerror("Error", "Select a library and track")
-                return
-            app.show_log_tab()
-            tracks = gather_tracks(path)
-            res = more_like_this(sel.get(), tracks, 10, log_callback=app._log)
-            outfile = os.path.join(path, "Playlists", "more_like_this.m3u")
-            write_playlist(res, outfile)
-            messagebox.showinfo("Playlist", f"Written to {outfile}")
-
-        tk.Entry(frame, textvariable=sel, width=40).pack(side="left", padx=5, pady=5)
-        ttk.Button(frame, text="Browse", command=browse).pack(side="left")
-        ttk.Button(frame, text="Generate", command=generate).pack(side="left", padx=5)
         return frame
     elif name == "Auto-DJ":
         sel = tk.StringVar()
@@ -971,7 +947,6 @@ class SoundVaultImporterApp(tk.Tk):
             "Sort by Genre",
             "Tempo/Energy Buckets",
             "Metadata",
-            "More Like This",
             "Auto-DJ",
         ]:
             self.plugin_list.insert("end", name)
