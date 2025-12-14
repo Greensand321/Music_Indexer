@@ -2,6 +2,7 @@ import os
 import threading
 import sys
 import logging
+import webbrowser
 
 if sys.platform == "win32":
     try:
@@ -78,6 +79,7 @@ from controllers.normalize_controller import (
 from plugins.assistant_plugin import AssistantPlugin
 from controllers.cluster_controller import cluster_library
 from config import load_config, save_config, DEFAULT_FP_THRESHOLDS
+import playlist_engine
 from playlist_engine import bucket_by_tempo_energy, more_like_this, autodj_playlist
 from controllers.cluster_controller import gather_tracks
 
@@ -180,19 +182,207 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
             **extras,
         }
     elif name == "Tempo/Energy Buckets":
-        def _run():
+        lib_var = tk.StringVar(value=app.library_path or "No library selected")
+        dep_status = tk.StringVar()
+        progress_var = tk.StringVar(value="Waiting to start")
+        running = tk.BooleanVar(value=False)
+        total_tracks = 0
+        q: queue.Queue = queue.Queue()
+        cancel_event = threading.Event()
+
+        def open_path(path: str) -> None:
+            if not path:
+                return
+            try:
+                if sys.platform == "win32":
+                    os.startfile(path)  # type: ignore[attr-defined]
+                elif sys.platform == "darwin":
+                    subprocess.run(["open", path], check=False)
+                else:
+                    subprocess.run(["xdg-open", path], check=False)
+            except Exception as exc:  # pragma: no cover - OS interaction
+                messagebox.showerror("Open File", f"Could not open {path}: {exc}")
+
+        def open_instructions(_evt=None):
+            readme = os.path.abspath("README.md")
+            webbrowser.open_new(f"file://{readme}")
+
+        def dependencies_ok() -> bool:
+            missing = []
+            if playlist_engine.np is None:
+                missing.append("numpy")
+            if playlist_engine.librosa is None:
+                missing.append("librosa")
+            if missing:
+                dep_status.set(
+                    "Missing dependencies: "
+                    + ", ".join(missing)
+                    + ". Install with `pip install -r requirements.txt`."
+                )
+                return False
+            dep_status.set("Dependencies ready (numpy, librosa)")
+            return True
+
+        def append_log(msg: str) -> None:
+            log_box.configure(state="normal")
+            log_box.insert("end", msg + "\n")
+            log_box.see("end")
+            log_box.configure(state="disabled")
+
+        def render_stats(stats: dict | None):
+            for child in stats_rows.winfo_children():
+                child.destroy()
+            if not stats:
+                ttk.Label(stats_rows, text="No playlists generated yet.").pack(
+                    anchor="w", padx=5, pady=5
+                )
+                return
+            header = ttk.Frame(stats_rows)
+            header.pack(fill="x", padx=5, pady=(0, 4))
+            ttk.Label(header, text="Tempo", width=10).pack(side="left")
+            ttk.Label(header, text="Energy", width=10).pack(side="left")
+            ttk.Label(header, text="Tracks", width=8).pack(side="left")
+            ttk.Label(header, text="Playlist").pack(side="left", padx=(10, 0))
+            for (tb, eb), info in sorted(stats.items()):
+                row = ttk.Frame(stats_rows)
+                row.pack(fill="x", padx=5, pady=2)
+                ttk.Label(row, text=tb.title(), width=10).pack(side="left")
+                ttk.Label(row, text=eb.title(), width=10).pack(side="left")
+                ttk.Label(row, text=str(info.get("count", 0)), width=8).pack(side="left")
+                ttk.Label(row, text=os.path.basename(info.get("playlist", ""))).pack(
+                    side="left", padx=(10, 5)
+                )
+                ttk.Button(
+                    row,
+                    text="Open",
+                    command=lambda p=info.get("playlist", ""): open_path(p),
+                ).pack(side="left")
+
+        def update_controls():
+            lib_var.set(app.library_path or "No library selected")
+            ready = bool(app.library_path) and dependencies_ok() and not running.get()
+            run_btn.config(state="normal" if ready else "disabled")
+            cancel_btn.config(state="normal" if running.get() else "disabled")
+
+        def start_run():
+            nonlocal total_tracks
+            if running.get():
+                return
             path = app.require_library()
             if not path:
                 return
-            app.show_log_tab()
-            tracks = gather_tracks(path)
-            try:
-                bucket_by_tempo_energy(tracks, path, app._log)
-                messagebox.showinfo("Buckets", "Tempo/Energy playlists written")
-            except Exception as e:
-                messagebox.showerror("Error", str(e))
+            if not dependencies_ok():
+                messagebox.showerror("Missing Dependencies", dep_status.get())
+                return
+            tracks = gather_tracks(path, getattr(app, "folder_filter", None))
+            if not tracks:
+                messagebox.showinfo("No Tracks", "No audio files found in the library.")
+                return
+            total_tracks = len(tracks)
+            cancel_event.clear()
+            running.set(True)
+            progress["value"] = 0
+            progress["maximum"] = total_tracks
+            progress_var.set(f"0/{total_tracks} processed")
+            log_box.configure(state="normal")
+            log_box.delete("1.0", "end")
+            log_box.configure(state="disabled")
+            append_log(f"Found {total_tracks} tracks. Generating tempo/energy buckets…")
+            render_stats(None)
+            update_controls()
 
-        ttk.Button(frame, text="Generate Buckets", command=_run).pack(padx=10, pady=10)
+            def worker():
+                try:
+                    result = bucket_by_tempo_energy(
+                        tracks,
+                        path,
+                        log_callback=lambda m: q.put(("log", m)),
+                        progress_callback=lambda c: q.put(("progress", c)),
+                        cancel_event=cancel_event,
+                    )
+                    q.put(("done", result))
+                except Exception as exc:  # pragma: no cover - UI surface only
+                    q.put(("error", str(exc)))
+
+            threading.Thread(target=worker, daemon=True).start()
+            poll_queue()
+
+        def poll_queue():
+            try:
+                while True:
+                    tag, payload = q.get_nowait()
+                    if tag == "log":
+                        append_log(payload)
+                    elif tag == "progress":
+                        progress["value"] = payload
+                        progress_var.set(f"{payload}/{total_tracks} processed")
+                    elif tag == "done":
+                        running.set(False)
+                        render_stats(payload.get("buckets"))
+                        status = (
+                            "Cancelled"
+                            if payload.get("cancelled")
+                            else "Completed"
+                        )
+                        progress_var.set(
+                            f"{status} – processed {payload.get('processed')} of {payload.get('total')} tracks"
+                        )
+                        update_controls()
+                    elif tag == "error":
+                        running.set(False)
+                        update_controls()
+                        progress_var.set("Error during bucket generation")
+                        messagebox.showerror("Bucket Error", payload)
+            except queue.Empty:
+                pass
+            if running.get():
+                frame.after(200, poll_queue)
+
+        info = ttk.LabelFrame(frame, text="Tempo/Energy Buckets")
+        info.pack(fill="x", padx=10, pady=(5, 10))
+        ttk.Label(info, textvariable=lib_var).pack(anchor="w", padx=5, pady=(5, 0))
+        ttk.Label(info, textvariable=dep_status, wraplength=360).pack(
+            anchor="w", padx=5, pady=2
+        )
+        link = ttk.Label(
+            info,
+            text="View installation instructions",
+            foreground="blue",
+            cursor="hand2",
+        )
+        link.pack(anchor="w", padx=5, pady=(0, 5))
+        link.bind("<Button-1>", open_instructions)
+
+        controls = ttk.Frame(frame)
+        controls.pack(fill="x", padx=10)
+        run_btn = ttk.Button(controls, text="Generate Buckets", command=start_run)
+        run_btn.pack(side="left")
+        cancel_btn = ttk.Button(
+            controls, text="Cancel", command=cancel_event.set, state="disabled"
+        )
+        cancel_btn.pack(side="left", padx=(5, 0))
+        ttk.Button(
+            controls,
+            text="Refresh Library Path",
+            command=update_controls,
+        ).pack(side="right")
+
+        progress = ttk.Progressbar(frame, mode="determinate")
+        progress.pack(fill="x", padx=10, pady=(10, 0))
+        ttk.Label(frame, textvariable=progress_var).pack(anchor="w", padx=12)
+
+        log_group = ttk.LabelFrame(frame, text="Run Log")
+        log_group.pack(fill="both", expand=False, padx=10, pady=(10, 0))
+        log_box = ScrolledText(log_group, height=8, state="disabled")
+        log_box.pack(fill="both", expand=True, padx=5, pady=5)
+
+        stats_group = ttk.LabelFrame(frame, text="Bucket Summary")
+        stats_group.pack(fill="both", expand=True, padx=10, pady=(10, 10))
+        stats_rows = ttk.Frame(stats_group)
+        stats_rows.pack(fill="both", expand=True)
+
+        update_controls()
+        render_stats(None)
         return frame
     elif name == "More Like This":
         sel = tk.StringVar()
