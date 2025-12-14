@@ -145,9 +145,9 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
         n_clusters = 5
         if cluster_cfg and cluster_cfg.get("method") == "kmeans":
             n_clusters = int(cluster_cfg.get("num", 5))
-        engine = "librosa"
+        engine = "serial"
         if cluster_cfg and "engine" in cluster_cfg:
-            engine = cluster_cfg["engine"]
+            engine = "serial" if cluster_cfg["engine"] == "librosa" else cluster_cfg["engine"]
         params = {"n_clusters": n_clusters, "method": "kmeans", "engine": engine}
     elif name == "Interactive – HDBSCAN":
         from hdbscan import HDBSCAN
@@ -170,9 +170,9 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
                 extras["cluster_selection_epsilon"] = float(
                     cluster_cfg["cluster_selection_epsilon"]
                 )
-        engine = "librosa"
+        engine = "serial"
         if cluster_cfg and "engine" in cluster_cfg:
-            engine = cluster_cfg["engine"]
+            engine = "serial" if cluster_cfg["engine"] == "librosa" else cluster_cfg["engine"]
         params = {
             "min_cluster_size": min_cs,
             "method": "hdbscan",
@@ -1950,7 +1950,10 @@ class SoundVaultImporterApp(tk.Tk):
         selected_method = cluster_cfg.get("method", method)
 
         method_var = tk.StringVar(value=selected_method)
-        engine_var = tk.StringVar(value=cluster_cfg.get("engine", "librosa"))
+        engine_default = cluster_cfg.get("engine", "serial")
+        if engine_default == "librosa":
+            engine_default = "serial"
+        engine_var = tk.StringVar(value=engine_default)
 
         top = ttk.Frame(dlg)
         top.pack(fill="x", padx=10, pady=(10, 0))
@@ -1983,21 +1986,20 @@ class SoundVaultImporterApp(tk.Tk):
         params_frame = ttk.Frame(dlg)
         params_frame.pack(fill="x", padx=10, pady=(5, 0))
 
-        engine_frame = ttk.LabelFrame(dlg, text="Feature Extraction Engine")
+        engine_frame = ttk.LabelFrame(dlg, text="Processing Engine")
         engine_frame.pack(fill="x", padx=10, pady=(10, 0))
 
         ttk.Radiobutton(
             engine_frame,
-            text="Librosa (current)",
+            text="Standard (single process)",
             variable=engine_var,
-            value="librosa",
+            value="serial",
         ).pack(anchor="w", padx=5, pady=(2, 0))
         ttk.Radiobutton(
             engine_frame,
-            text="Essentia (coming soon)",
+            text="Parallel (multi-core)",
             variable=engine_var,
-            value="essentia",
-            state="disabled",
+            value="parallel",
         ).pack(anchor="w", padx=5, pady=(0, 5))
 
         # KMeans params
@@ -2135,7 +2137,7 @@ class SoundVaultImporterApp(tk.Tk):
             engine = engine_var.get()
             if not engine:
                 messagebox.showerror(
-                    "Select Engine", "Please select a feature extraction engine."
+                    "Select Engine", "Please select a processing engine."
                 )
                 return
 
