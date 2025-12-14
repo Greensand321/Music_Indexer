@@ -1613,7 +1613,7 @@ class SoundVaultImporterApp(tk.Tk):
         num = count_audio_files(self.library_path)
         is_valid, _ = validate_soundvault_structure(self.library_path)
         status = "Valid" if is_valid else "Invalid"
-        self.library_stats_var.set(f"Songs: {num}\nValidation: {status}")
+        self.library_stats_var.set(f"Songs: {num}    Validation: {status}")
 
     def require_library(self):
         if not self.library_path:
