@@ -1,5 +1,28 @@
+import importlib.util
 import os
 import math
+import re
+from typing import Callable, Iterable
+
+_mutagen_available = importlib.util.find_spec("mutagen") is not None
+if _mutagen_available:
+    from mutagen import File as MutagenFile
+    from mutagen.easyid3 import EasyID3
+    from mutagen.flac import FLAC
+else:  # pragma: no cover - optional dependency
+    class _DummyAudio(dict):
+        def get(self, key, default=None):
+            return []
+
+    def MutagenFile(*_a, **_k):
+        return None
+
+    class EasyID3(_DummyAudio):
+        pass
+
+    class FLAC(_DummyAudio):
+        pass
+
 try:
     import numpy as np  # type: ignore
 except Exception:  # pragma: no cover - numpy optional
@@ -80,8 +103,95 @@ def bucket_by_tempo_energy(
         (tb, eb): {"count": len(items), "playlist": out_paths[(tb, eb)]}
         for (tb, eb), items in buckets.items()
     }
+
+
+def _split_genres(genres: Iterable[str]) -> list[str]:
+    parts: list[str] = []
+    for raw in genres:
+        for chunk in re.split(r"[;,/|\\]", raw):
+            cleaned = chunk.strip()
+            if cleaned:
+                parts.append(cleaned)
+    return parts
+
+
+def extract_genres(path: str) -> list[str]:
+    ext = os.path.splitext(path)[1].lower()
+    tags: list[str] = []
+    if ext == ".mp3":
+        audio = EasyID3(path)
+        tags = [t for t in audio.get("genre", []) if isinstance(t, str)]
+    elif ext == ".flac":
+        audio = FLAC(path)
+        tags = [t for t in audio.get("genre", []) if isinstance(t, str)]
+    else:
+        audio = MutagenFile(path, easy=True)
+        if audio and audio.tags:
+            tags = [t for t in audio.tags.get("genre", []) if isinstance(t, str)]
+    return _split_genres(tags)
+
+
+def _sanitize_genre(genre: str, used: set[str]) -> str:
+    safe = re.sub(r"[^\w\- ]+", "_", genre).strip() or "Unknown"
+    candidate = safe.replace(" ", "_")
+    if candidate not in used:
+        used.add(candidate)
+        return candidate
+    counter = 2
+    while f"{candidate}_{counter}" in used:
+        counter += 1
+    final = f"{candidate}_{counter}"
+    used.add(final)
+    return final
+
+
+def sort_tracks_by_genre(
+    tracks: list[str],
+    root_path: str,
+    log_callback=None,
+    progress_callback=None,
+    cancel_event=None,
+    genre_reader: Callable[[str], list[str]] | None = None,
+) -> dict:
+    """Group tracks by genre and write one playlist per genre."""
+
+    if log_callback is None:
+        log_callback = lambda m: None
+    if progress_callback is None:
+        progress_callback = lambda _count: None
+    reader = genre_reader or extract_genres
+
+    playlists_dir = os.path.join(root_path, "Playlists", "Genres")
+    os.makedirs(playlists_dir, exist_ok=True)
+
+    buckets: dict[str, list[str]] = {}
+    processed = 0
+    for path in tracks:
+        if cancel_event and cancel_event.is_set():
+            log_callback("! Genre sorting cancelled by user.")
+            break
+        try:
+            genres = reader(path) or ["Unknown"]
+        except Exception as exc:
+            log_callback(f"! Failed to read genres from {path}: {exc}")
+            genres = ["Unknown"]
+        for g in genres:
+            buckets.setdefault(g, []).append(path)
+        log_callback(f"• {os.path.basename(path)} → {', '.join(genres)}")
+        processed += 1
+        progress_callback(processed)
+
+    used_names: set[str] = set()
+    stats = {}
+    for genre, items in sorted(buckets.items(), key=lambda kv: kv[0].lower()):
+        fname = _sanitize_genre(genre, used_names) + ".m3u"
+        out_path = os.path.join(playlists_dir, fname)
+        write_playlist(items, out_path)
+        stats[genre] = {"count": len(items), "playlist": out_path}
+        log_callback(f"→ Wrote {out_path}")
+
     return {
-        "buckets": stats,
+        "genres": stats,
         "processed": processed,
         "total": len(tracks),
         "cancelled": bool(cancel_event and cancel_event.is_set()),
