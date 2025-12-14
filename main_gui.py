@@ -144,7 +144,7 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
 
         n_clusters = 5
         if cluster_cfg and cluster_cfg.get("method") == "kmeans":
-            n_clusters = int(cluster_cfg.get("num", 5))
+            n_clusters = int(cluster_cfg.get("n_clusters", 5))
         engine = "serial"
         if cluster_cfg and "engine" in cluster_cfg:
             engine = "serial" if cluster_cfg["engine"] == "librosa" else cluster_cfg["engine"]
@@ -163,7 +163,9 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
         min_cs = 5
         extras = {}
         if cluster_cfg and cluster_cfg.get("method") == "hdbscan":
-            min_cs = int(cluster_cfg.get("min_cluster_size", cluster_cfg.get("num", 5)))
+            min_cs = int(
+                cluster_cfg.get("min_cluster_size", cluster_cfg.get("n_clusters", 5))
+            )
             if "min_samples" in cluster_cfg:
                 extras["min_samples"] = int(cluster_cfg["min_samples"])
             if "cluster_selection_epsilon" in cluster_cfg:
