@@ -43,7 +43,6 @@ import simple_duplicate_finder as sdf_mod
 import fingerprint_cache
 import chromaprint_utils
 from controllers.library_index_controller import generate_index
-from controllers.import_controller import import_new_files
 from controllers.genre_list_controller import list_unique_genres
 from controllers.highlight_controller import play_snippet, PYDUB_AVAILABLE
 from controllers.scan_progress_controller import ScanProgressController
@@ -912,10 +911,6 @@ class SoundVaultImporterApp(tk.Tk):
         file_menu = tk.Menu(menubar, tearoff=False)
         file_menu.add_command(label="Open Library…", command=self.select_library)
         file_menu.add_command(label="Validate Library", command=self.validate_library)
-        file_menu.add_command(label="Import New Songs", command=self.import_songs)
-        file_menu.add_command(label="Scan for Orphans", command=self.scan_orphans)
-        file_menu.add_command(label="Compare Libraries", command=self.compare_libraries)
-        file_menu.add_command(label="Show All Files", command=self._on_show_all)
         file_menu.add_separator()
         file_menu.add_command(label="Exit", command=self._on_exit)
         menubar.add_cascade(label="File", menu=file_menu)
@@ -1478,95 +1473,6 @@ class SoundVaultImporterApp(tk.Tk):
             self._log(f"✘ Invalid SoundVault: {path}\n" + "\n".join(errors))
         self.update_library_info()
 
-    def import_songs(self):
-        initial = load_last_path()
-        vault = filedialog.askdirectory(
-            title="Select SoundVault Root", initialdir=initial
-        )
-        if not vault:
-            return
-
-        save_last_path(vault)
-
-        is_valid, errors = validate_soundvault_structure(vault)
-        if not is_valid:
-            messagebox.showerror("Invalid SoundVault", "\n".join(errors))
-            self._log(f"✘ Invalid SoundVault: {vault}\n" + "\n".join(errors))
-            return
-
-        import_folder = filedialog.askdirectory(
-            title="Select Folder of New Songs", initialdir=vault
-        )
-        if not import_folder:
-            return
-
-        dry_run = messagebox.askyesno("Dry Run?", "Perform a dry-run preview only?")
-        estimate = messagebox.askyesno(
-            "Estimate BPM?", "Attempt BPM estimation for missing values?"
-        )
-
-        stop_on_error = False
-        if not dry_run:
-            stop_on_error = messagebox.askyesno(
-                "Stop on Error?",
-                "Stop the import if any file move fails?",
-            )
-
-        def log_line(msg: str) -> None:
-            self.after(0, lambda m=msg: self._log(m))
-
-        def task() -> None:
-            try:
-                summary = import_new_files(
-                    vault,
-                    import_folder,
-                    dry_run=dry_run,
-                    estimate_bpm=estimate,
-                    log_callback=log_line,
-                    stop_on_error=stop_on_error,
-                )
-
-                def ui_complete() -> None:
-                    if summary["dry_run"]:
-                        messagebox.showinfo(
-                            "Dry Run Complete",
-                            f"Preview written to:\n{summary['html']}",
-                        )
-                    else:
-                        moved = summary.get("moved", 0)
-                        base_msg = (
-                            f"Imported {moved} files. Preview:\n{summary['html']}"
-                        )
-                        if summary.get("errors"):
-                            err_text = "\n".join(summary["errors"])
-                            full_msg = f"{base_msg}\n\nErrors:\n{err_text}"
-                            if messagebox.askretrycancel(
-                                "Import Complete (with errors)", full_msg
-                            ):
-                                threading.Thread(target=task, daemon=True).start()
-                                return
-                        else:
-                            messagebox.showinfo("Import Complete", base_msg)
-
-                    if summary.get("errors"):
-                        for err in summary["errors"]:
-                            self._log(f"! {err}")
-
-                    self._log(
-                        f"✓ Import finished for {import_folder} → {vault}. Dry run: {dry_run}. BPM: {estimate}."
-                    )
-
-                self.after(0, ui_complete)
-            except Exception as e:
-
-                def ui_err() -> None:
-                    messagebox.showerror("Import failed", str(e))
-                    self._log(f"✘ Import failed for {import_folder}: {e}")
-
-                self.after(0, ui_err)
-
-        threading.Thread(target=task, daemon=True).start()
-
     # ── Quality Checker Actions ────────────────────────────────────────
     def scan_duplicates(self):
         folder = self.library_path_var.get()
@@ -1834,33 +1740,6 @@ class SoundVaultImporterApp(tk.Tk):
         ).pack(side="right", padx=20)
         top.wait_window()
         return proceed.get()
-
-    def scan_orphans(self):
-        path = self.require_library()
-        if not path:
-            return
-        messagebox.showinfo(
-            "Scan for Orphans", f"[stub] Would scan for orphans in:\n{path}"
-        )
-        self._log(f"[stub] Scan for Orphans → {path}")
-        self.update_library_info()
-
-    def compare_libraries(self):
-        master = self.require_library()
-        if not master:
-            return
-        device = filedialog.askdirectory(
-            title="Select Device Library Root", initialdir=master
-        )
-        if not device:
-            return
-        save_last_path(device)
-        messagebox.showinfo(
-            "Compare Libraries",
-            f"[stub] Would compare:\nMaster: {master}\nDevice: {device}",
-        )
-        self._log(f"[stub] Compare Libraries → Master: {master}, Device: {device}")
-        self.update_library_info()
 
     def regenerate_playlists(self):
         path = self.require_library()
@@ -2174,14 +2053,6 @@ class SoundVaultImporterApp(tk.Tk):
         )
         dlg.wait_window()
         return result["proceed"], var_no_diff.get(), var_skipped.get(), show_all
-
-    def _on_show_all(self):
-        """Run tag-fix scan showing every file regardless of prior log."""
-        self.tagfix_show_all.set(True)
-        try:
-            self.fix_tags_gui()
-        finally:
-            self.tagfix_show_all.set(False)
 
     def fix_tags_gui(self):
         folder = self.tagfix_folder_var.get()
