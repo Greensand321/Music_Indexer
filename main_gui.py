@@ -44,9 +44,8 @@ import fingerprint_cache
 import chromaprint_utils
 from controllers.library_index_controller import generate_index
 from controllers.genre_list_controller import list_unique_genres
-from controllers.highlight_controller import PYDUB_AVAILABLE
 from controllers.scan_progress_controller import ScanProgressController
-from gui.audio_preview import PreviewPlayer
+from gui.audio_preview import PlaybackError, VlcPreviewPlayer
 from io import BytesIO
 from PIL import Image, ImageTk
 from mutagen import File as MutagenFile
@@ -990,9 +989,20 @@ class SoundVaultImporterApp(tk.Tk):
         # Quality Checker state
         self._dup_logging = False
         self._preview_thread = None
-        self.preview_player = PreviewPlayer(
+        self.preview_player = VlcPreviewPlayer(
             on_done=lambda: self.after(0, self._preview_finished_ui)
         )
+        self.preview_backend_available = self.preview_player.available
+        self.preview_backend_error = self.preview_player.availability_error
+        if not self.preview_backend_available:
+            reason = self.preview_backend_error or "Install python-vlc to enable playback."
+            logging.error("Preview backend unavailable: %s", reason)
+            self.player_status_var.set(f"Preview disabled: {reason}")
+        else:
+            logging.info("VLC preview backend initialized")
+        self._quality_play_buttons: list[ttk.Button] = []
+        self._preview_in_progress = False
+        self._player_busy_item: str | None = None
 
         # Player tab state
         self.player_tracks: list[dict[str, str]] = []
@@ -2827,18 +2837,25 @@ class SoundVaultImporterApp(tk.Tk):
             self.scan_btn.config(state="disabled")
 
     def _play_preview(
-        self, path: str, start_ms: int = 30000, duration_ms: int = 15000
+        self,
+        path: str,
+        start_ms: int = 30000,
+        duration_ms: int = 15000,
+        player_item: str | None = None,
     ) -> None:
-        """Play an audio preview, ensuring previous playback is cleaned up."""
+        """Play an audio preview while serializing concurrent requests."""
 
-        # Stop any current preview immediately (no Tk calls inside)
-        self.preview_player.stop_preview()
+        if not self.preview_backend_available:
+            err = self.preview_backend_error or "VLC preview backend unavailable."
+            logging.error("Preview backend unavailable: %s", err)
+            if hasattr(self, "player_status_var"):
+                self.player_status_var.set(f"Preview disabled: {err}")
+            messagebox.showerror("Playback failed", err)
+            return
 
-        if not PYDUB_AVAILABLE:
-            messagebox.showerror(
-                "Playback failed",
-                "pydub/ffmpeg not available. Install requirements to enable preview.",
-            )
+        if self._preview_in_progress:
+            if hasattr(self, "player_status_var"):
+                self.player_status_var.set("Finishing current preview…")
             return
 
         if hasattr(self, "player_status_var"):
@@ -2846,27 +2863,65 @@ class SoundVaultImporterApp(tk.Tk):
             suffix = " (30s highlight)" if duration_ms >= 30000 else ""
             self.player_status_var.set(f"Playing {fname}{suffix}…")
 
+        self._preview_in_progress = True
+        self._set_preview_controls_state(enabled=False)
+        self._set_player_play_state_busy(player_item)
+
         def task() -> None:
             try:
-                self.preview_player.play_preview(
+                self.preview_player.play_clip(
                     path, start_ms=start_ms, duration_ms=duration_ms
                 )
-            except Exception as e:
+            except PlaybackError as e:
                 logging.exception("Preview playback failed")
-                self.after(
-                    0,
-                    lambda: (
-                        self.player_status_var.set("Playback failed. Check logs."),
-                        messagebox.showerror("Playback failed", str(e)),
-                    ),
-                )
+                self.after(0, lambda: self._preview_finished_ui(error=str(e)))
+            except Exception as e:  # pragma: no cover - safety net
+                logging.exception("Unexpected preview failure")
+                self.after(0, lambda: self._preview_finished_ui(error=str(e)))
 
         self._preview_thread = threading.Thread(target=task, daemon=True)
         self._preview_thread.start()
 
-    def _preview_finished_ui(self):
+    def _preview_finished_ui(self, error: str | None = None):
+        self._preview_in_progress = False
+        self._restore_player_play_icons()
+        self._set_preview_controls_state(enabled=self.preview_backend_available)
         if hasattr(self, "player_status_var"):
-            self.player_status_var.set("Ready to play another track.")
+            if error:
+                self.player_status_var.set("Playback failed. Check logs.")
+                messagebox.showerror("Playback failed", error)
+            else:
+                self.player_status_var.set("Ready to play another track.")
+
+    def _set_preview_controls_state(self, enabled: bool) -> None:
+        state = "!disabled" if enabled else "disabled"
+        for btn in getattr(self, "_quality_play_buttons", []):
+            try:
+                btn.state([state])
+            except Exception:
+                logging.exception("Failed to update preview button state")
+
+    def _set_player_play_state_busy(self, item_id: str | None) -> None:
+        if not hasattr(self, "player_tree"):
+            return
+        self._restore_player_play_icons()
+        if not item_id or not self.player_tree.exists(item_id):
+            return
+        values = list(self.player_tree.item(item_id, "values"))
+        if len(values) >= 5:
+            values[4] = "⏳"
+            self.player_tree.item(item_id, values=values)
+            self._player_busy_item = item_id
+
+    def _restore_player_play_icons(self) -> None:
+        if not hasattr(self, "player_tree"):
+            return
+        if self._player_busy_item and self.player_tree.exists(self._player_busy_item):
+            values = list(self.player_tree.item(self._player_busy_item, "values"))
+            if len(values) >= 5:
+                values[4] = "▶" if self.preview_backend_available else "—"
+                self.player_tree.item(self._player_busy_item, values=values)
+        self._player_busy_item = None
 
     def _load_thumbnail(self, path: str, size: int = 100) -> ImageTk.PhotoImage:
         img = None
@@ -2893,6 +2948,7 @@ class SoundVaultImporterApp(tk.Tk):
 
     def populate_quality_table(self, matches):
         self.clear_quality_view()
+        self._quality_play_buttons = []
         if not matches:
             ttk.Label(self.qc_inner, text="No duplicates detected in this library").pack(pady=20)
             return
@@ -2901,8 +2957,18 @@ class SoundVaultImporterApp(tk.Tk):
             row = ttk.Frame(self.qc_inner)
             row.pack(fill="x", padx=10, pady=2)
 
-            play_btn = ttk.Button(row, text="▶", width=1, command=lambda p=dup_path: self._play_preview(p))
+            btn_state = "normal"
+            if not self.preview_backend_available or self._preview_in_progress:
+                btn_state = "disabled"
+            play_btn = ttk.Button(
+                row,
+                text="▶",
+                width=1,
+                state=btn_state,
+                command=lambda p=dup_path: self._play_preview(p),
+            )
             play_btn.pack(side="left")
+            self._quality_play_buttons.append(play_btn)
 
             thumb = self._load_thumbnail(dup_path, size=40)
             img_label = ttk.Label(row, image=thumb)
@@ -3045,6 +3111,7 @@ class SoundVaultImporterApp(tk.Tk):
             return
         self._clear_player_table()
         self.player_tracks = rows
+        play_icon = "▶" if self.preview_backend_available else "—"
         for row in rows:
             item = self.player_tree.insert(
                 "",
@@ -3054,15 +3121,21 @@ class SoundVaultImporterApp(tk.Tk):
                     row["artist"],
                     row["album"],
                     row["length"],
-                    "▶",
+                    play_icon,
                 ),
             )
             self.player_tree_paths[item] = row["path"]
         total = len(rows)
         suffix = "track" if total == 1 else "tracks"
-        self.player_status_var.set(
-            f"Loaded {total} {suffix}. Click ▶ for a 30s highlight."
-        )
+        if not self.preview_backend_available:
+            reason = self.preview_backend_error or "Install python-vlc to enable playback."
+            self.player_status_var.set(
+                f"Loaded {total} {suffix}. Preview disabled: {reason}"
+            )
+        else:
+            self.player_status_var.set(
+                f"Loaded {total} {suffix}. Click ▶ for a 30s highlight."
+            )
         self.player_reload_btn.config(state="normal")
 
     def _on_player_tree_click(self, event) -> None:
@@ -3076,9 +3149,17 @@ class SoundVaultImporterApp(tk.Tk):
         item = self.player_tree.identify_row(event.y)
         if not item:
             return
+        if not self.preview_backend_available:
+            self.player_status_var.set(
+                f"Preview disabled: {self.preview_backend_error or 'Install python-vlc.'}"
+            )
+            return
+        if self._preview_in_progress:
+            self.player_status_var.set("Finishing current preview…")
+            return
         path = self.player_tree_paths.get(item)
         if path:
-            self._play_preview(path, duration_ms=30000)
+            self._play_preview(path, duration_ms=30000, player_item=item)
 
     def _send_help_query(self):
         threading.Thread(target=self._do_help_query, daemon=True).start()
