@@ -269,7 +269,7 @@ class ClusterGraphPanel(ttk.Frame):
         dlg.grab_set()
 
         cs_var = tk.StringVar(value=str(self.cluster_params.get("min_cluster_size", 5)))
-        ms_var = tk.StringVar(value=str(self.cluster_params.get("min_samples", 1)))
+        ms_var = tk.StringVar(value=str(self.cluster_params.get("min_samples", "")))
         eps_var = tk.StringVar(value=str(self.cluster_params.get("cluster_selection_epsilon", "")))
 
         ttk.Label(dlg, text="Min cluster size:").grid(row=0, column=0, sticky="w")

@@ -161,14 +161,11 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
             return HDBSCAN(**kwargs).fit_predict(X)
 
         min_cs = 5
-        extras = {"min_samples": 1}
+        extras = {}
         if cluster_cfg and cluster_cfg.get("method") == "hdbscan":
             min_cs = int(cluster_cfg.get("min_cluster_size", cluster_cfg.get("num", 5)))
-            extras = {}
             if "min_samples" in cluster_cfg:
                 extras["min_samples"] = int(cluster_cfg["min_samples"])
-            else:
-                extras["min_samples"] = 1
             if "cluster_selection_epsilon" in cluster_cfg:
                 extras["cluster_selection_epsilon"] = float(
                     cluster_cfg["cluster_selection_epsilon"]
@@ -2007,10 +2004,7 @@ class SoundVaultImporterApp(tk.Tk):
             row=0, column=1, sticky="w", padx=(5, 0)
         )
         ttk.Label(hdb_frame, text="Min samples:").grid(row=1, column=0, sticky="w")
-        min_samples_default = "1"
-        if cluster_cfg and cluster_cfg.get("method") == "hdbscan" and "min_samples" in cluster_cfg:
-            min_samples_default = str(cluster_cfg["min_samples"])
-        min_samples_var = tk.StringVar(value=min_samples_default)
+        min_samples_var = tk.StringVar(value="")
         ttk.Entry(hdb_frame, textvariable=min_samples_var, width=10).grid(
             row=1, column=1, sticky="w", padx=(5, 0)
         )
