@@ -813,6 +813,7 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
     hover_panel.place_forget()
 
     panel.setup_hover(hover_panel, art_lbl, title_lbl, artist_lbl)
+    panel.refresh_control_states()
 
     return frame
 

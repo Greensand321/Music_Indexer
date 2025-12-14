@@ -1,4 +1,5 @@
 import os
+import threading
 from datetime import datetime
 
 import numpy as np
@@ -40,8 +41,8 @@ class ClusterGraphPanel(ttk.Frame):
 
         from sklearn.decomposition import PCA
 
-        X = np.vstack(features)
-        self.X2 = PCA(n_components=2).fit_transform(X)
+        self.X = np.vstack(features)
+        self.X2 = PCA(n_components=2).fit_transform(self.X)
 
         fig = Figure(figsize=(5, 5))
         self.ax = fig.add_subplot(111)
@@ -49,7 +50,12 @@ class ClusterGraphPanel(ttk.Frame):
         self.canvas.get_tk_widget().pack(fill="both", expand=True)
 
         self.scatter = None
-        self._draw_clusters(cluster_func(X, cluster_params))
+        self._loading_var = tk.StringVar(value="Running clustering …")
+        self._loading_lbl = ttk.Label(self, textvariable=self._loading_var)
+        self._loading_lbl.pack(pady=10)
+        self._clusters_ready = False
+        self._cluster_thread: threading.Thread | None = None
+        self._start_clustering(cluster_params)
 
         self.lasso = None
         self.sel_scatter = None
@@ -70,6 +76,27 @@ class ClusterGraphPanel(ttk.Frame):
     lasso_btn: ttk.Widget
     ok_btn: ttk.Button
     gen_btn: ttk.Button
+
+    def _start_clustering(self, params: dict):
+        """Kick off clustering work in a background thread."""
+
+        def _worker():
+            try:
+                labels = self.cluster_func(self.X, params)
+            except Exception as exc:  # pragma: no cover - defensive path for GUI
+                self.after(0, lambda: self.log(f"\u2717 Clustering failed: {exc}"))
+                return
+            self.after(0, lambda: self._on_clusters_ready(labels, params))
+
+        if self._cluster_thread and self._cluster_thread.is_alive():
+            return
+
+        self._clusters_ready = False
+        self._sync_controls()
+        self._loading_var.set("Running clustering …")
+        self._loading_lbl.pack(pady=10)
+        self._cluster_thread = threading.Thread(target=_worker, daemon=True)
+        self._cluster_thread.start()
 
     # ─── Lasso Handling ─────────────────────────────────────────────────────
     def toggle_lasso(self):
@@ -252,15 +279,36 @@ class ClusterGraphPanel(ttk.Frame):
         self.ax.set_title("Lasso to select & generate playlist")
         self.canvas.draw_idle()
 
+    def _on_clusters_ready(self, labels, params: dict):
+        self.cluster_params = params
+        self._clusters_ready = True
+        if self._loading_lbl.winfo_exists():
+            self._loading_lbl.pack_forget()
+        self._draw_clusters(labels)
+        self._sync_controls()
+
     def recluster(self, params: dict):
         """Re-run clustering with new ``params`` and redraw the plot."""
-        self.cluster_params = params
         if self.lasso is not None:
             self.toggle_lasso()
         self._clear_selection()
-        X = np.vstack(self.features)
-        labels = self.cluster_func(X, params)
-        self._draw_clusters(labels)
+        self._loading_var.set("Updating clusters …")
+        self._loading_lbl.pack(pady=10)
+        self._start_clustering(params)
+
+    def _sync_controls(self):
+        """Enable/disable controls based on clustering readiness."""
+        state = "normal" if self._clusters_ready else "disabled"
+        if hasattr(self, "lasso_btn"):
+            self.lasso_btn.configure(state=state)
+        if not self._clusters_ready:
+            for attr in ("ok_btn", "gen_btn"):
+                if hasattr(self, attr):
+                    getattr(self, attr).configure(state="disabled")
+
+    def refresh_control_states(self):
+        """Public hook to sync controls after external widgets are attached."""
+        self._sync_controls()
 
     def open_param_dialog(self):
         """Show dialog to edit HDBSCAN parameters and redraw clusters."""
