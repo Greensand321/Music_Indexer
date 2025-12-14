@@ -189,6 +189,9 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
         total_tracks = 0
         q: queue.Queue = queue.Queue()
         cancel_event = threading.Event()
+        genre_vars: dict[str, tk.BooleanVar] = {}
+        current_buckets: dict[str, list[str]] = {}
+        planned_paths: dict[str, str] = {}
 
         def append_log(msg: str) -> None:
             log_box.configure(state="normal")
@@ -199,42 +202,66 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
         def render_stats(stats: dict | None):
             for child in stats_rows.winfo_children():
                 child.destroy()
+            genre_vars.clear()
             if not stats:
-                ttk.Label(stats_rows, text="No playlists generated yet.").pack(
-                    anchor="w", padx=5, pady=5
-                )
+                ttk.Label(
+                    stats_rows,
+                    text="No playlists generated yet. Run a sort to preview genres.",
+                ).pack(anchor="w", padx=5, pady=5)
+                update_controls()
                 return
             header = ttk.Frame(stats_rows)
             header.pack(fill="x", padx=5, pady=(0, 4))
-            ttk.Label(header, text="Genre", width=30, anchor="w").pack(
-                side="left"
+            ttk.Label(header, text="Export", width=8, anchor="w").pack(
+                side="left", padx=(0, 4)
             )
+            ttk.Label(header, text="Genre", width=26, anchor="w").pack(side="left")
             ttk.Label(header, text="Tracks", width=8).pack(side="left")
-            ttk.Label(header, text="Playlist").pack(side="left", padx=(10, 0))
+            ttk.Label(header, text="Playlist", width=20, anchor="w").pack(
+                side="left", padx=(10, 0)
+            )
+            ttk.Label(header, text="Status", width=12, anchor="w").pack(
+                side="left", padx=(6, 0)
+            )
             for genre, info in sorted(stats.items(), key=lambda kv: kv[0].lower()):
                 row = ttk.Frame(stats_rows)
                 row.pack(fill="x", padx=5, pady=2)
-                ttk.Label(row, text=genre, width=30, anchor="w").pack(side="left")
+                var = tk.BooleanVar(value=info.get("exported", False) or True)
+                genre_vars[genre] = var
+                ttk.Checkbutton(row, variable=var).pack(side="left", padx=(0, 6))
+                ttk.Label(row, text=genre, width=26, anchor="w").pack(side="left")
                 ttk.Label(row, text=str(info.get("count", 0)), width=8).pack(
                     side="left"
                 )
-                ttk.Label(row, text=os.path.basename(info.get("playlist", ""))).pack(
-                    side="left", padx=(10, 5)
-                )
+                ttk.Label(
+                    row, text=os.path.basename(info.get("playlist", "")), width=20
+                ).pack(side="left", padx=(10, 5))
+                status_txt = "Exported" if info.get("exported") else "Pending"
+                ttk.Label(row, text=status_txt, width=12).pack(side="left", padx=(6, 4))
                 ttk.Button(
                     row,
                     text="Open",
                     command=lambda p=info.get("playlist", ""): open_path(p),
+                    state="normal" if info.get("exported") else "disabled",
                 ).pack(side="left")
+            update_controls()
 
         def update_controls():
             lib_var.set(app.library_path or "No library selected")
             ready = bool(app.library_path) and not running.get()
+            has_results = bool(current_buckets)
             run_btn.config(state="normal" if ready else "disabled")
             cancel_btn.config(state="normal" if running.get() else "disabled")
             open_btn.config(
                 state="normal" if playlists_dir.get() or app.library_path else "disabled"
             )
+            export_btn.config(
+                state="normal"
+                if ready and has_results and any(v.get() for v in genre_vars.values())
+                else "disabled"
+            )
+            select_all_btn.config(state="normal" if has_results and ready else "disabled")
+            select_none_btn.config(state="normal" if has_results and ready else "disabled")
 
         def open_path(path: str) -> None:
             if not path:
@@ -249,6 +276,36 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
             except Exception as exc:  # pragma: no cover - OS interaction
                 messagebox.showerror("Open File", f"Could not open {path}: {exc}")
 
+        def select_all():
+            for var in genre_vars.values():
+                var.set(True)
+            update_controls()
+
+        def select_none():
+            for var in genre_vars.values():
+                var.set(False)
+            update_controls()
+
+        def export_selected():
+            if running.get() or not current_buckets:
+                return
+            selected = [g for g, var in genre_vars.items() if var.get()]
+            if not selected:
+                messagebox.showinfo(
+                    "No Genres Selected",
+                    "Select at least one genre to export playlists.",
+                )
+                return
+            result = playlist_engine.export_genre_playlists(
+                current_buckets,
+                app.library_path,
+                selected_genres=selected,
+                log_callback=append_log,
+                planned_paths=planned_paths,
+            )
+            render_stats(result.get("genres"))
+            append_log(f"Exported {len(selected)} playlist(s).")
+
         def start_run():
             nonlocal total_tracks
             if running.get():
@@ -256,6 +313,9 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
             path = app.require_library()
             if not path:
                 return
+            current_buckets.clear()
+            planned_paths.clear()
+            genre_vars.clear()
             tracks = gather_tracks(path, getattr(app, "folder_filter", None))
             if not tracks:
                 messagebox.showinfo("No Tracks", "No audio files found in the library.")
@@ -282,6 +342,7 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
                         log_callback=lambda m: q.put(("log", m)),
                         progress_callback=lambda c: q.put(("progress", c)),
                         cancel_event=cancel_event,
+                        export=False,
                     )
                     q.put(("done", result))
                 except Exception as exc:  # pragma: no cover - UI surface only
@@ -291,6 +352,7 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
             poll_queue()
 
         def poll_queue():
+            nonlocal current_buckets, planned_paths
             try:
                 while True:
                     tag, payload = q.get_nowait()
@@ -302,6 +364,8 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
                     elif tag == "done":
                         running.set(False)
                         if payload:
+                            current_buckets = payload.get("buckets", {})
+                            planned_paths = payload.get("playlist_paths", {})
                             render_stats(payload.get("genres"))
                         update_controls()
                     elif tag == "error":
@@ -348,8 +412,37 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
         progress.pack(fill="x")
         ttk.Label(prog_frame, textvariable=progress_var).pack(anchor="w")
 
-        stats_rows = ttk.Frame(frame)
-        stats_rows.pack(fill="x", pady=(0, 6))
+        selection_bar = ttk.Frame(frame)
+        selection_bar.pack(fill="x", pady=(0, 4))
+        select_all_btn = ttk.Button(
+            selection_bar, text="Select All", command=select_all, state="disabled"
+        )
+        select_all_btn.pack(side="left")
+        select_none_btn = ttk.Button(
+            selection_bar, text="Select None", command=select_none, state="disabled"
+        )
+        select_none_btn.pack(side="left", padx=(5, 0))
+        export_btn = ttk.Button(
+            selection_bar,
+            text="Export Selected Playlists",
+            command=export_selected,
+            state="disabled",
+        )
+        export_btn.pack(side="right")
+
+        stats_container = ttk.Frame(frame)
+        stats_container.pack(fill="both", pady=(0, 6), expand=True)
+        stats_canvas = tk.Canvas(stats_container, height=220)
+        stats_scroll = ttk.Scrollbar(stats_container, orient="vertical", command=stats_canvas.yview)
+        stats_rows = ttk.Frame(stats_canvas)
+        stats_rows.bind(
+            "<Configure>",
+            lambda e: stats_canvas.configure(scrollregion=stats_canvas.bbox("all")),
+        )
+        stats_canvas.create_window((0, 0), window=stats_rows, anchor="nw")
+        stats_canvas.configure(yscrollcommand=stats_scroll.set)
+        stats_canvas.pack(side="left", fill="both", expand=True)
+        stats_scroll.pack(side="right", fill="y")
         render_stats(None)
 
         ttk.Label(frame, text="Activity Log:").pack(anchor="w")
