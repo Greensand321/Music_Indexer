@@ -1,4 +1,12 @@
-from playlist_engine import categorize_tempo, categorize_energy, more_like_this, autodj_playlist
+import os
+
+from playlist_engine import (
+    categorize_tempo,
+    categorize_energy,
+    more_like_this,
+    autodj_playlist,
+    sort_tracks_by_genre,
+)
 
 
 def test_categorize_helpers():
@@ -24,3 +32,46 @@ def test_more_like_this_and_autodj():
 
     dj = autodj_playlist("a", tracks, n=3, feature_cache=feats)
     assert dj == ["a", "b", "c"]
+
+
+def test_sort_tracks_by_genre(tmp_path):
+    rock = tmp_path / "rock" / "song1.mp3"
+    jazz = tmp_path / "jazz" / "song2.flac"
+    mixed = tmp_path / "var" / "song3.wav"
+    for p in [rock, jazz, mixed]:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("test")
+
+    genre_map = {
+        str(rock): ["Rock"],
+        str(jazz): ["Jazz"],
+        str(mixed): ["Jazz", "Rock"],
+    }
+
+    logs: list[str] = []
+    progress: list[int] = []
+    result = sort_tracks_by_genre(
+        [str(rock), str(jazz), str(mixed)],
+        str(tmp_path),
+        log_callback=lambda m: logs.append(m),
+        progress_callback=lambda c: progress.append(c),
+        genre_reader=lambda p: genre_map[p],
+    )
+
+    playlists_dir = tmp_path / "Playlists" / "Genres"
+    rock_playlist = (playlists_dir / "Rock.m3u").read_text().splitlines()
+    jazz_playlist = (playlists_dir / "Jazz.m3u").read_text().splitlines()
+
+    assert result["genres"]["Rock"]["count"] == 2
+    assert result["genres"]["Jazz"]["count"] == 2
+    rock_rel = os.path.relpath(rock, playlists_dir)
+    jazz_rel = os.path.relpath(jazz, playlists_dir)
+    mixed_rel = os.path.relpath(mixed, playlists_dir)
+
+    assert rock_rel in rock_playlist
+    assert mixed_rel in rock_playlist
+    assert jazz_rel in jazz_playlist
+    assert mixed_rel in jazz_playlist
+    assert progress == [1, 2, 3]
+    assert len(logs) == 5
+    assert any("song1" in log for log in logs)

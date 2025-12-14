@@ -181,6 +181,183 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
             "engine": engine,
             **extras,
         }
+    elif name == "Sort by Genre":
+        lib_var = tk.StringVar(value=app.library_path or "No library selected")
+        progress_var = tk.StringVar(value="Waiting to start")
+        playlists_dir = tk.StringVar(value="")
+        running = tk.BooleanVar(value=False)
+        total_tracks = 0
+        q: queue.Queue = queue.Queue()
+        cancel_event = threading.Event()
+
+        def append_log(msg: str) -> None:
+            log_box.configure(state="normal")
+            log_box.insert("end", msg + "\n")
+            log_box.see("end")
+            log_box.configure(state="disabled")
+
+        def render_stats(stats: dict | None):
+            for child in stats_rows.winfo_children():
+                child.destroy()
+            if not stats:
+                ttk.Label(stats_rows, text="No playlists generated yet.").pack(
+                    anchor="w", padx=5, pady=5
+                )
+                return
+            header = ttk.Frame(stats_rows)
+            header.pack(fill="x", padx=5, pady=(0, 4))
+            ttk.Label(header, text="Genre", width=30, anchor="w").pack(
+                side="left"
+            )
+            ttk.Label(header, text="Tracks", width=8).pack(side="left")
+            ttk.Label(header, text="Playlist").pack(side="left", padx=(10, 0))
+            for genre, info in sorted(stats.items(), key=lambda kv: kv[0].lower()):
+                row = ttk.Frame(stats_rows)
+                row.pack(fill="x", padx=5, pady=2)
+                ttk.Label(row, text=genre, width=30, anchor="w").pack(side="left")
+                ttk.Label(row, text=str(info.get("count", 0)), width=8).pack(
+                    side="left"
+                )
+                ttk.Label(row, text=os.path.basename(info.get("playlist", ""))).pack(
+                    side="left", padx=(10, 5)
+                )
+                ttk.Button(
+                    row,
+                    text="Open",
+                    command=lambda p=info.get("playlist", ""): open_path(p),
+                ).pack(side="left")
+
+        def update_controls():
+            lib_var.set(app.library_path or "No library selected")
+            ready = bool(app.library_path) and not running.get()
+            run_btn.config(state="normal" if ready else "disabled")
+            cancel_btn.config(state="normal" if running.get() else "disabled")
+            open_btn.config(
+                state="normal" if playlists_dir.get() or app.library_path else "disabled"
+            )
+
+        def open_path(path: str) -> None:
+            if not path:
+                return
+            try:
+                if sys.platform == "win32":
+                    os.startfile(path)  # type: ignore[attr-defined]
+                elif sys.platform == "darwin":
+                    subprocess.run(["open", path], check=False)
+                else:
+                    subprocess.run(["xdg-open", path], check=False)
+            except Exception as exc:  # pragma: no cover - OS interaction
+                messagebox.showerror("Open File", f"Could not open {path}: {exc}")
+
+        def start_run():
+            nonlocal total_tracks
+            if running.get():
+                return
+            path = app.require_library()
+            if not path:
+                return
+            tracks = gather_tracks(path, getattr(app, "folder_filter", None))
+            if not tracks:
+                messagebox.showinfo("No Tracks", "No audio files found in the library.")
+                return
+            total_tracks = len(tracks)
+            playlists_dir.set(os.path.join(path, "Playlists", "Genres"))
+            cancel_event.clear()
+            running.set(True)
+            progress["value"] = 0
+            progress["maximum"] = total_tracks
+            progress_var.set(f"0/{total_tracks} processed")
+            log_box.configure(state="normal")
+            log_box.delete("1.0", "end")
+            log_box.configure(state="disabled")
+            append_log(f"Found {total_tracks} tracks. Sorting by genre…")
+            render_stats(None)
+            update_controls()
+
+            def worker():
+                try:
+                    result = playlist_engine.sort_tracks_by_genre(
+                        tracks,
+                        path,
+                        log_callback=lambda m: q.put(("log", m)),
+                        progress_callback=lambda c: q.put(("progress", c)),
+                        cancel_event=cancel_event,
+                    )
+                    q.put(("done", result))
+                except Exception as exc:  # pragma: no cover - UI surface only
+                    q.put(("error", str(exc)))
+
+            threading.Thread(target=worker, daemon=True).start()
+            poll_queue()
+
+        def poll_queue():
+            try:
+                while True:
+                    tag, payload = q.get_nowait()
+                    if tag == "log":
+                        append_log(payload)
+                    elif tag == "progress":
+                        progress["value"] = payload
+                        progress_var.set(f"{payload}/{total_tracks} processed")
+                    elif tag == "done":
+                        running.set(False)
+                        if payload:
+                            render_stats(payload.get("genres"))
+                        update_controls()
+                    elif tag == "error":
+                        running.set(False)
+                        messagebox.showerror("Sort by Genre", payload)
+                        update_controls()
+                    elif tag == "cancelled":
+                        running.set(False)
+                        append_log("Sorting cancelled")
+                        update_controls()
+            except queue.Empty:
+                pass
+            if running.get():
+                frame.after(200, poll_queue)
+
+        def cancel_run():
+            cancel_event.set()
+            q.put(("cancelled", None))
+
+        def open_genre_folder():
+            path = playlists_dir.get() or (
+                os.path.join(app.library_path, "Playlists", "Genres")
+                if app.library_path
+                else ""
+            )
+            if not path:
+                return
+            os.makedirs(path, exist_ok=True)
+            open_path(path)
+
+        info = ttk.Frame(frame)
+        info.pack(fill="x", pady=(0, 6))
+        ttk.Label(info, textvariable=lib_var).pack(side="left")
+        open_btn = ttk.Button(info, text="Open Genre Playlists", command=open_genre_folder)
+        open_btn.pack(side="right", padx=(5, 0))
+        run_btn = ttk.Button(info, text="Sort", command=start_run)
+        run_btn.pack(side="right", padx=(5, 0))
+        cancel_btn = ttk.Button(info, text="Cancel", command=cancel_run, state="disabled")
+        cancel_btn.pack(side="right")
+
+        prog_frame = ttk.Frame(frame)
+        prog_frame.pack(fill="x", pady=(0, 6))
+        progress = ttk.Progressbar(prog_frame, mode="determinate")
+        progress.pack(fill="x")
+        ttk.Label(prog_frame, textvariable=progress_var).pack(anchor="w")
+
+        stats_rows = ttk.Frame(frame)
+        stats_rows.pack(fill="x", pady=(0, 6))
+        render_stats(None)
+
+        ttk.Label(frame, text="Activity Log:").pack(anchor="w")
+        log_box = ScrolledText(frame, height=10, wrap="word", state="disabled")
+        log_box.pack(fill="both", expand=True)
+
+        update_controls()
+
     elif name == "Tempo/Energy Buckets":
         lib_var = tk.StringVar(value=app.library_path or "No library selected")
         dep_status = tk.StringVar()
