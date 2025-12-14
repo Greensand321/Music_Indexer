@@ -1006,6 +1006,7 @@ class SoundVaultImporterApp(tk.Tk):
         self._quality_play_buttons: list[ttk.Button] = []
         self._preview_in_progress = False
         self._player_busy_item: str | None = None
+        self._ignore_next_preview_finish = False
 
         # Player tab state
         self.player_tracks: list[dict[str, str]] = []
@@ -2856,9 +2857,10 @@ class SoundVaultImporterApp(tk.Tk):
             return
 
         if self._preview_in_progress:
-            if hasattr(self, "player_status_var"):
-                self.player_status_var.set("Finishing current preview…")
-            return
+            # Interrupt any existing playback before starting the new preview
+            self._ignore_next_preview_finish = True
+            self.preview_player.stop_preview()
+            self._preview_in_progress = False
 
         if hasattr(self, "player_status_var"):
             fname = os.path.basename(path)
@@ -2866,7 +2868,6 @@ class SoundVaultImporterApp(tk.Tk):
             self.player_status_var.set(f"Playing {fname}{suffix}…")
 
         self._preview_in_progress = True
-        self._set_preview_controls_state(enabled=False)
         self._set_player_play_state_busy(player_item)
 
         def task() -> None:
@@ -2885,6 +2886,11 @@ class SoundVaultImporterApp(tk.Tk):
         self._preview_thread.start()
 
     def _preview_finished_ui(self, error: str | None = None):
+        if self._ignore_next_preview_finish:
+            # Skip UI reset triggered by an intentionally interrupted preview
+            self._ignore_next_preview_finish = False
+            return
+
         self._preview_in_progress = False
         self._restore_player_play_icons()
         self._set_preview_controls_state(enabled=self.preview_backend_available)
@@ -3155,9 +3161,6 @@ class SoundVaultImporterApp(tk.Tk):
             self.player_status_var.set(
                 f"Preview disabled: {self.preview_backend_error or 'Install python-vlc.'}"
             )
-            return
-        if self._preview_in_progress:
-            self.player_status_var.set("Finishing current preview…")
             return
         path = self.player_tree_paths.get(item)
         if path:
