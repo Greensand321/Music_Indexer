@@ -1,7 +1,10 @@
 import logging
+import os
 import threading
 from typing import Optional
 
+
+os.environ["VLC_VERBOSE"] = "0"
 
 try:
     import vlc
@@ -35,7 +38,7 @@ class VlcPreviewPlayer:
             return
 
         try:
-            self._instance = vlc.Instance()
+            self._instance = vlc.Instance("--quiet", "--no-video-title-show", "--no-stats")
             self._player = self._instance.media_player_new()
             self._event_mgr = self._player.event_manager()
             self._event_mgr.event_attach(
