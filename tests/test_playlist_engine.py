@@ -5,6 +5,7 @@ from playlist_engine import (
     categorize_energy,
     more_like_this,
     autodj_playlist,
+    export_genre_playlists,
     sort_tracks_by_genre,
 )
 
@@ -75,3 +76,40 @@ def test_sort_tracks_by_genre(tmp_path):
     assert progress == [1, 2, 3]
     assert len(logs) == 5
     assert any("song1" in log for log in logs)
+
+
+def test_manual_genre_export(tmp_path):
+    rock = tmp_path / "rock" / "song1.mp3"
+    jazz = tmp_path / "jazz" / "song2.flac"
+    for p in [rock, jazz]:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("test")
+
+    genre_map = {str(rock): ["Rock"], str(jazz): ["Jazz"]}
+
+    result = sort_tracks_by_genre(
+        [str(rock), str(jazz)],
+        str(tmp_path),
+        log_callback=lambda _m: None,
+        genre_reader=lambda p: genre_map[p],
+        export=False,
+    )
+
+    playlists_dir = tmp_path / "Playlists" / "Genres"
+    assert not playlists_dir.exists()
+    assert "buckets" in result and "playlist_paths" in result
+
+    logs: list[str] = []
+    exported = export_genre_playlists(
+        result["buckets"],
+        str(tmp_path),
+        selected_genres={"Jazz"},
+        log_callback=lambda m: logs.append(m),
+        planned_paths=result["playlist_paths"],
+    )
+
+    assert (playlists_dir / "Jazz.m3u").exists()
+    assert not (playlists_dir / "Rock.m3u").exists()
+    assert exported["genres"]["Jazz"]["exported"] is True
+    assert exported["genres"]["Rock"]["exported"] is False
+    assert any("Jazz.m3u" in log for log in logs)
