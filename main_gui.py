@@ -971,6 +971,12 @@ class SoundVaultImporterApp(tk.Tk):
             on_done=lambda: self.after(0, self._preview_finished_ui)
         )
 
+        # Player tab state
+        self.player_tracks: list[dict[str, str]] = []
+        self.player_tree_paths: dict[str, str] = {}
+        self.player_status_var = tk.StringVar(value="Select a library to load tracks.")
+        self._player_load_thread: threading.Thread | None = None
+
         # assume ffmpeg is available without performing checks
         self.ffmpeg_available = True
 
@@ -1367,6 +1373,54 @@ class SoundVaultImporterApp(tk.Tk):
             self.scan_btn.config(state="normal")
         self._validate_threshold()
 
+        # ─── Player Tab ────────────────────────────────────────────────
+        self.player_tab = ttk.Frame(self.notebook)
+        self.notebook.add(self.player_tab, text="Player")
+
+        player_controls = ttk.Frame(self.player_tab)
+        player_controls.pack(fill="x", padx=10, pady=(10, 5))
+        ttk.Label(player_controls, textvariable=self.player_status_var).pack(
+            side="left"
+        )
+        self.player_reload_btn = ttk.Button(
+            player_controls,
+            text="Reload",
+            command=self._load_player_library_async,
+            state="disabled",
+        )
+        self.player_reload_btn.pack(side="right")
+
+        player_table = ttk.Frame(self.player_tab)
+        player_table.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+        p_vsb = ttk.Scrollbar(player_table, orient="vertical")
+        p_vsb.pack(side="right", fill="y")
+        p_hsb = ttk.Scrollbar(player_table, orient="horizontal")
+        p_hsb.pack(side="bottom", fill="x")
+
+        cols = ("Title", "Artist", "Album", "Length", "Play")
+        self.player_tree = ttk.Treeview(
+            player_table,
+            columns=cols,
+            show="headings",
+            yscrollcommand=p_vsb.set,
+            xscrollcommand=p_hsb.set,
+        )
+        p_vsb.config(command=self.player_tree.yview)
+        p_hsb.config(command=self.player_tree.xview)
+        self.player_tree.pack(fill="both", expand=True)
+
+        widths = {"Title": 220, "Artist": 140, "Album": 160, "Length": 70, "Play": 50}
+        for c in cols:
+            self.player_tree.heading(c, text=c)
+            self.player_tree.column(
+                c,
+                width=widths.get(c, 100),
+                anchor="center" if c in {"Length", "Play"} else "w",
+                stretch=c != "Play",
+            )
+
+        self.player_tree.bind("<ButtonRelease-1>", self._on_player_tree_click)
+
         # ─── Library Sync Tab ─────────────────────────────────────────────
         self.sync_tab = ttk.Frame(self.notebook)
         self.notebook.add(self.sync_tab, text="Library Sync")
@@ -1510,10 +1564,16 @@ class SoundVaultImporterApp(tk.Tk):
             self.scan_btn.config(state="normal")
             self._validate_threshold()
         self.update_library_info()
+        if hasattr(self, "player_reload_btn"):
+            self.player_reload_btn.config(state="normal")
+        self._load_player_library_async()
 
     def update_library_info(self):
         if not self.library_path:
             self.library_stats_var.set("")
+            if hasattr(self, "player_reload_btn"):
+                self.player_reload_btn.config(state="disabled")
+            self.player_status_var.set("Select a library to load tracks.")
             return
         num = count_audio_files(self.library_path)
         is_valid, _ = validate_soundvault_structure(self.library_path)
@@ -2744,7 +2804,9 @@ class SoundVaultImporterApp(tk.Tk):
         else:
             self.scan_btn.config(state="disabled")
 
-    def _play_preview(self, path: str) -> None:
+    def _play_preview(
+        self, path: str, start_ms: int = 30000, duration_ms: int = 15000
+    ) -> None:
         """Play an audio preview, ensuring previous playback is cleaned up."""
 
         # Stop any current preview immediately (no Tk calls inside)
@@ -2757,18 +2819,32 @@ class SoundVaultImporterApp(tk.Tk):
             )
             return
 
+        if hasattr(self, "player_status_var"):
+            fname = os.path.basename(path)
+            suffix = " (30s highlight)" if duration_ms >= 30000 else ""
+            self.player_status_var.set(f"Playing {fname}{suffix}…")
+
         def task() -> None:
             try:
-                self.preview_player.play_preview(path)
+                self.preview_player.play_preview(
+                    path, start_ms=start_ms, duration_ms=duration_ms
+                )
             except Exception as e:
-                self.after(0, lambda: messagebox.showerror("Playback failed", str(e)))
+                logging.exception("Preview playback failed")
+                self.after(
+                    0,
+                    lambda: (
+                        self.player_status_var.set("Playback failed. Check logs."),
+                        messagebox.showerror("Playback failed", str(e)),
+                    ),
+                )
 
         self._preview_thread = threading.Thread(target=task, daemon=True)
         self._preview_thread.start()
 
     def _preview_finished_ui(self):
-        # Placeholder for UI updates when preview completes
-        pass
+        if hasattr(self, "player_status_var"):
+            self.player_status_var.set("Ready to play another track.")
 
     def _load_thumbnail(self, path: str, size: int = 100) -> ImageTk.PhotoImage:
         img = None
@@ -2867,6 +2943,120 @@ class SoundVaultImporterApp(tk.Tk):
         ttk.Button(btn_frame, text="Cancel", command=do_cancel).pack(side="left", padx=5)
         top.wait_window()
         return result["ok"], skip_var.get()
+
+    # ── Player Tab Helpers ─────────────────────────────────────────────
+    def _clear_player_table(self) -> None:
+        if not hasattr(self, "player_tree"):
+            return
+        for row in self.player_tree.get_children():
+            self.player_tree.delete(row)
+        self.player_tree_paths.clear()
+
+    def _format_duration(self, seconds: float | None) -> str:
+        if not seconds:
+            return "—"
+        mins, secs = divmod(int(seconds), 60)
+        return f"{mins}:{secs:02d}"
+
+    def _get_track_length(self, path: str) -> float | None:
+        try:
+            audio = MutagenFile(path)
+            if audio and getattr(audio, "info", None):
+                length = getattr(audio.info, "length", None)
+                if length:
+                    return float(length)
+        except Exception:
+            return None
+        return None
+
+    def _load_player_library_async(self) -> None:
+        if not self.library_path:
+            self.player_status_var.set("Select a library to load tracks.")
+            if hasattr(self, "player_reload_btn"):
+                self.player_reload_btn.config(state="disabled")
+            return
+        if self._player_load_thread and self._player_load_thread.is_alive():
+            return
+
+        self.player_status_var.set("Loading tracks…")
+        self.player_reload_btn.config(state="disabled")
+        thread = threading.Thread(
+            target=self._load_player_library, args=(self.library_path,), daemon=True
+        )
+        self._player_load_thread = thread
+        thread.start()
+
+    def _load_player_library(self, library_path: str) -> None:
+        try:
+            tracks = gather_tracks(library_path, self.folder_filter)
+        except Exception as exc:
+            self.after(
+                0,
+                lambda: self.player_status_var.set(
+                    f"Failed to load library: {exc}"
+                ),
+            )
+            self.after(0, lambda: self.player_reload_btn.config(state="normal"))
+            return
+
+        rows = []
+        for path in tracks:
+            tags = get_tags(path)
+            title = tags.get("title") or os.path.basename(path)
+            artist = tags.get("artist") or "Unknown"
+            album = tags.get("album") or ""
+            length_sec = self._get_track_length(path)
+            rows.append(
+                {
+                    "title": title,
+                    "artist": artist,
+                    "album": album,
+                    "length": self._format_duration(length_sec),
+                    "path": path,
+                }
+            )
+
+        self.after(0, lambda: self._update_player_table(rows, library_path))
+
+    def _update_player_table(self, rows: list[dict[str, str]], library_path: str) -> None:
+        if library_path != self.library_path:
+            return
+        self._clear_player_table()
+        self.player_tracks = rows
+        for row in rows:
+            item = self.player_tree.insert(
+                "",
+                "end",
+                values=(
+                    row["title"],
+                    row["artist"],
+                    row["album"],
+                    row["length"],
+                    "▶",
+                ),
+            )
+            self.player_tree_paths[item] = row["path"]
+        total = len(rows)
+        suffix = "track" if total == 1 else "tracks"
+        self.player_status_var.set(
+            f"Loaded {total} {suffix}. Click ▶ for a 30s highlight."
+        )
+        self.player_reload_btn.config(state="normal")
+
+    def _on_player_tree_click(self, event) -> None:
+        region = self.player_tree.identify_region(event.x, event.y)
+        if region != "cell":
+            return
+        col = self.player_tree.identify_column(event.x)
+        # Play column is the fifth heading (#5 when using ``show='headings'``)
+        if col != "#5":
+            return
+        item = self.player_tree.identify_row(event.y)
+        if not item:
+            return
+        path = self.player_tree_paths.get(item)
+        if path:
+            self._play_preview(path, duration_ms=30000)
 
     def _send_help_query(self):
         threading.Thread(target=self._do_help_query, daemon=True).start()

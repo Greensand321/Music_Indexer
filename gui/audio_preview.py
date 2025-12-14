@@ -1,3 +1,4 @@
+import logging
 import simpleaudio as sa
 import threading
 import subprocess
@@ -15,9 +16,11 @@ class PreviewPlayer:
         self._play_lock = threading.RLock()
         self._is_playing = False
         self._on_done = on_done
+        self._logger = logging.getLogger(__name__)
 
     def stop_preview(self) -> None:
         with self._play_lock:
+            self._logger.debug("Stopping preview playback")
             if self._play_obj is not None:
                 try:
                     self._play_obj.stop()
@@ -49,6 +52,7 @@ class PreviewPlayer:
                 self._is_playing = False
                 self._play_obj = None
                 self._ffplay_proc = None
+            self._logger.debug("Preview playback finished")
             if self._on_done:
                 try:
                     self._on_done()
@@ -67,6 +71,12 @@ class PreviewPlayer:
             from pydub import AudioSegment
 
             clip = AudioSegment.from_file(path)[start_ms : start_ms + duration_ms]
+            self._logger.debug(
+                "Playing preview via simpleaudio: path=%s start_ms=%s duration_ms=%s",
+                path,
+                start_ms,
+                duration_ms,
+            )
             with self._play_lock:
                 self._play_obj = sa.play_buffer(
                     clip.raw_data,
@@ -83,10 +93,16 @@ class PreviewPlayer:
             if not ffplay:
                 with self._play_lock:
                     self._is_playing = False
+                self._logger.exception(
+                    "simpleaudio failed and ffplay not found: %s", sa_error
+                )
                 raise PlaybackError(
                     f"simpleaudio failed and ffplay not found: {sa_error}"
                 ) from sa_error
             try:
+                self._logger.warning(
+                    "simpleaudio failed (%s); falling back to ffplay", sa_error
+                )
                 cmd = [
                     ffplay,
                     "-nodisp",
@@ -100,7 +116,13 @@ class PreviewPlayer:
                     path,
                 ]
                 with self._play_lock:
-                    self._ffplay_proc = subprocess.Popen(cmd, start_new_session=True)
+                    self._logger.debug("Launching ffplay fallback: %s", " ".join(cmd))
+                    self._ffplay_proc = subprocess.Popen(
+                        cmd,
+                        start_new_session=True,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
                     proc = self._ffplay_proc
                 threading.Thread(
                     target=self._monitor_playback, args=(None, proc), daemon=True
@@ -108,4 +130,5 @@ class PreviewPlayer:
             except Exception as exc:
                 with self._play_lock:
                     self._is_playing = False
+                self._logger.exception("ffplay failed: %s", exc)
                 raise PlaybackError(f"ffplay failed: {exc}") from exc
