@@ -789,6 +789,7 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
     container.pack(fill="both", expand=True)
     container.rowconfigure(0, weight=1)
     container.columnconfigure(0, weight=1)
+    container.columnconfigure(1, weight=0)
 
     if cluster_manager is None:
         return frame
@@ -808,6 +809,91 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
         log_callback=app._log,
     )
     panel.grid(row=0, column=0, sticky="nsew", pady=(0, 5))
+
+    side_tools = ttk.Frame(container)
+    side_tools.grid(row=0, column=1, rowspan=3, sticky="ns", padx=(10, 0))
+    side_tools.columnconfigure(0, weight=1)
+    side_tools.rowconfigure(2, weight=1)
+
+    playlist_btn = ttk.Button(
+        side_tools, text="Current Playlists", command=panel.show_current_playlists
+    )
+    playlist_btn.grid(row=0, column=0, sticky="ew", pady=(0, 10))
+
+    cluster_box = ttk.LabelFrame(side_tools, text="Cluster Loader")
+    cluster_box.grid(row=1, column=0, sticky="nsew", pady=(0, 10))
+    cluster_box.columnconfigure(1, weight=1)
+
+    ttk.Label(cluster_box, text="Pick cluster:").grid(
+        row=0, column=0, sticky="w", padx=5, pady=(5, 2)
+    )
+    panel.cluster_select_var = tk.StringVar()
+    panel.cluster_combo = ttk.Combobox(
+        cluster_box,
+        textvariable=panel.cluster_select_var,
+        state="readonly",
+        width=10,
+    )
+    panel.cluster_combo.grid(row=0, column=1, sticky="ew", padx=5, pady=(5, 2))
+
+    ttk.Label(cluster_box, text="Or enter #:").grid(
+        row=1, column=0, sticky="w", padx=5, pady=(0, 2)
+    )
+    panel.manual_cluster_var = tk.StringVar()
+    manual_entry = ttk.Entry(
+        cluster_box, textvariable=panel.manual_cluster_var, width=10
+    )
+    manual_entry.grid(row=1, column=1, sticky="ew", padx=5, pady=(0, 2))
+
+    def _load_cluster():
+        choice = panel.manual_cluster_var.get().strip() or panel.cluster_select_var.get().strip()
+        if not choice:
+            messagebox.showinfo("Clusters", "Choose a cluster first.")
+            return
+        try:
+            cid = int(choice)
+        except ValueError:
+            messagebox.showinfo("Clusters", f"{choice} is not a valid number")
+            return
+        panel.load_cluster(cid)
+
+    ttk.Button(cluster_box, text="Load Cluster", command=_load_cluster).grid(
+        row=2, column=0, columnspan=2, sticky="ew", padx=5, pady=(0, 5)
+    )
+
+    panel.temp_status_var = tk.StringVar(value="Clusters available: 0")
+    ttk.Label(cluster_box, textvariable=panel.temp_status_var).grid(
+        row=3, column=0, columnspan=2, sticky="w", padx=5, pady=(0, 5)
+    )
+
+    temp_box = ttk.LabelFrame(side_tools, text="Temporary Playlist")
+    temp_box.grid(row=2, column=0, sticky="nsew")
+    temp_box.columnconfigure(0, weight=1)
+    temp_box.rowconfigure(0, weight=1)
+
+    list_frame = ttk.Frame(temp_box)
+    list_frame.grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
+    list_frame.columnconfigure(0, weight=1)
+
+    temp_scroll = ttk.Scrollbar(list_frame, orient="vertical")
+    panel.temp_listbox = tk.Listbox(
+        list_frame, height=12, selectmode="extended", yscrollcommand=temp_scroll.set
+    )
+    panel.temp_listbox.pack(side="left", fill="both", expand=True)
+    temp_scroll.config(command=panel.temp_listbox.yview)
+    temp_scroll.pack(side="right", fill="y")
+
+    ttk.Button(
+        temp_box, text="Add Highlighted Songs", command=panel.add_highlight_to_temp
+    ).grid(row=1, column=0, sticky="ew", padx=5, pady=(0, 5))
+
+    ttk.Button(
+        temp_box, text="Remove Selected", command=panel.remove_selected_from_temp
+    ).grid(row=2, column=0, sticky="ew", padx=5, pady=(0, 5))
+
+    ttk.Button(temp_box, text="Create Playlist", command=panel.create_temp_playlist).grid(
+        row=3, column=0, sticky="ew", padx=5, pady=(0, 5)
+    )
 
     ttk.Separator(container, orient="horizontal").grid(row=1, column=0, sticky="ew")
 
@@ -881,6 +967,7 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
     hover_panel.place_forget()
 
     panel.setup_hover(hover_panel, art_lbl, title_lbl, artist_lbl)
+    panel._refresh_cluster_options()
     panel.refresh_control_states()
 
     return frame

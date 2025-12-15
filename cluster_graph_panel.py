@@ -1,4 +1,6 @@
 import os
+import subprocess
+import sys
 import threading
 from datetime import datetime
 
@@ -67,6 +69,7 @@ class ClusterGraphPanel(ttk.Frame):
         self.sel_scatter = None
         self.selected_indices: list[int] = []
         self.selected_tracks: list[str] = []
+        self.temp_playlist: list[str] = []
 
         # Hover support widgets will be set later via ``setup_hover``
         self.hover_panel = None
@@ -77,6 +80,13 @@ class ClusterGraphPanel(ttk.Frame):
 
         # Preload album art thumbnails for snappy hover updates
         self.album_thumbnails = [self._load_thumbnail(p) for p in tracks]
+
+        # External UI widgets (wired up by main_gui)
+        self.cluster_combo: ttk.Combobox | None = None
+        self.cluster_select_var: tk.StringVar | None = None
+        self.manual_cluster_var: tk.StringVar | None = None
+        self.temp_listbox: tk.Listbox | None = None
+        self.temp_status_var: tk.StringVar | None = None
 
     # UI widgets created externally will be assigned after instantiation
     lasso_btn: ttk.Widget
@@ -249,6 +259,37 @@ class ClusterGraphPanel(ttk.Frame):
             self.log(f"\u2713 Playlist written: {out}")
             self.gen_btn.configure(state="disabled")
 
+    def create_temp_playlist(self):
+        """Write the temporary playlist to disk and open the folder."""
+        if not self.temp_playlist:
+            self.log("\u26a0 No songs in temporary playlist")
+            return
+
+        playlists_dir = os.path.join(self.library_path, "Playlists")
+        os.makedirs(playlists_dir, exist_ok=True)
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        outfile = os.path.join(playlists_dir, f"ClusterSelection_{ts}.m3u")
+        try:
+            write_playlist(self.temp_playlist, outfile)
+        except Exception as exc:  # pragma: no cover - GUI log
+            self.log(f"\u2717 Failed to write playlist: {exc}")
+            return
+
+        self.log(f"\u2713 Playlist written: {outfile}")
+        self._open_folder(playlists_dir)
+
+    def _open_folder(self, path: str) -> None:
+        """Open ``path`` with the platform default file browser."""
+        try:
+            if sys.platform == "win32":
+                os.startfile(path)  # type: ignore[attr-defined]
+            elif sys.platform == "darwin":
+                subprocess.run(["open", path], check=False)
+            else:
+                subprocess.run(["xdg-open", path], check=False)
+        except Exception as exc:  # pragma: no cover - OS interaction
+            messagebox.showerror("Open Folder", f"Could not open {path}: {exc}")
+
     # ─── Helpers ────────────────────────────────────────────────────────────
     def _clear_selection(self):
         self.selected_indices = []
@@ -315,6 +356,7 @@ class ClusterGraphPanel(ttk.Frame):
                 "[perf] clusters ready (%s) in %.1f ms", self.algo_key, duration_ms
             )
         self._sync_controls()
+        self._refresh_cluster_options()
 
     def recluster(self, params: dict):
         """Re-run clustering with new ``params`` and redraw the plot."""
@@ -338,6 +380,100 @@ class ClusterGraphPanel(ttk.Frame):
     def refresh_control_states(self):
         """Public hook to sync controls after external widgets are attached."""
         self._sync_controls()
+
+    def _refresh_cluster_options(self):
+        """Populate the cluster dropdown with discovered cluster IDs."""
+        if not hasattr(self, "labels"):
+            return
+        clusters = sorted({int(l) for l in set(self.labels) if l >= 0})
+        if self.cluster_combo is not None:
+            self.cluster_combo.configure(values=[str(c) for c in clusters])
+        if self.temp_status_var is not None:
+            self.temp_status_var.set(f"Clusters available: {len(clusters)}")
+
+    # ─── Cluster-Based Selection Helpers ───────────────────────────────────
+    def show_current_playlists(self):
+        """Display playlists located in the library's Playlists folder."""
+        if not self.library_path:
+            messagebox.showinfo("Playlists", "Select a library first.")
+            return
+
+        playlists_dir = os.path.join(self.library_path, "Playlists")
+        if not os.path.isdir(playlists_dir):
+            messagebox.showinfo("Playlists", "No Playlists folder found yet.")
+            return
+
+        entries = []
+        try:
+            entries = [
+                f
+                for f in os.listdir(playlists_dir)
+                if os.path.isfile(os.path.join(playlists_dir, f))
+            ]
+        except OSError as exc:
+            messagebox.showerror("Playlists", f"Could not read folder: {exc}")
+            return
+
+        if not entries:
+            messagebox.showinfo("Playlists", "No playlists found.")
+            return
+
+        messagebox.showinfo("Playlists", "\n".join(sorted(entries)))
+
+    def _set_temp_playlist(self, tracks: list[str]):
+        self.temp_playlist = list(dict.fromkeys(tracks))
+        self._sync_temp_listbox()
+
+    def _sync_temp_listbox(self):
+        if self.temp_listbox is None:
+            return
+        self.temp_listbox.delete(0, tk.END)
+        for path in self.temp_playlist:
+            self.temp_listbox.insert(tk.END, os.path.basename(path))
+        if self.temp_status_var is not None:
+            self.temp_status_var.set(f"Temp playlist tracks: {len(self.temp_playlist)}")
+
+    def load_cluster(self, cluster_id: int, *, replace_temp: bool = True):
+        """Highlight ``cluster_id`` and optionally seed the temp playlist."""
+        if not hasattr(self, "labels"):
+            messagebox.showinfo("Clusters", "Clusters not ready yet.")
+            return
+
+        indices = [i for i, lbl in enumerate(self.labels) if lbl == cluster_id]
+        if not indices:
+            messagebox.showinfo("Clusters", f"No songs found for cluster {cluster_id}.")
+            return
+
+        self.selected_indices = indices
+        self.selected_tracks = [self.tracks[i] for i in indices]
+        self._update_highlight()
+        self.log(f"→ Loaded cluster {cluster_id}: {len(indices)} songs")
+
+        if replace_temp:
+            self._set_temp_playlist(self.selected_tracks)
+
+    def add_highlight_to_temp(self):
+        """Append currently highlighted songs to the temp playlist."""
+        if not self.selected_indices:
+            messagebox.showinfo("Selection", "No highlighted songs to add.")
+            return
+        current = list(self.temp_playlist)
+        for idx in self.selected_indices:
+            track = self.tracks[idx]
+            if track not in current:
+                current.append(track)
+        self._set_temp_playlist(current)
+
+    def remove_selected_from_temp(self):
+        """Remove highlighted entries from the temp playlist listbox."""
+        if self.temp_listbox is None:
+            return
+        selected = list(self.temp_listbox.curselection())
+        if not selected:
+            return
+        remaining = [t for i, t in enumerate(self.temp_playlist) if i not in selected]
+        self._set_temp_playlist(remaining)
+
 
     def open_param_dialog(self):
         """Show dialog to edit HDBSCAN parameters and redraw clusters."""
