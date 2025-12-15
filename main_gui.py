@@ -866,12 +866,16 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
     if tracks is None:
         msg = ttk.Frame(frame)
         msg.pack(padx=10, pady=10)
-        ttk.Label(msg, text="Run clustering once first").pack()
-        ttk.Button(
-            msg,
-            text="Run Clustering",
-            command=lambda: app.cluster_playlists_dialog(params["method"]),
-        ).pack(pady=(5, 0))
+        if getattr(app, "cluster_generation_running", False):
+            ttk.Label(msg, text="Clustering in progress…").pack()
+            ttk.Label(msg, text="Check the log tab for updates.").pack()
+        else:
+            ttk.Label(msg, text="Run clustering once first").pack()
+            ttk.Button(
+                msg,
+                text="Run Clustering",
+                command=lambda: app.cluster_playlists_dialog(params["method"]),
+            ).pack(pady=(5, 0))
         return frame
 
     # Container ensures the graph resizes while keeping controls visible
@@ -2521,6 +2525,8 @@ class SoundVaultImporterApp(tk.Tk):
         path = self.require_library()
         if not path:
             return
+        self.cluster_generation_running = True
+        self._refresh_plugin_panel()
         self.show_log_tab()
         threading.Thread(
             target=self._run_cluster_generation,
@@ -2531,26 +2537,36 @@ class SoundVaultImporterApp(tk.Tk):
     def _run_cluster_generation(
         self, path: str, method: str, params: dict, engine: str
     ):
-        tracks, feats = cluster_library(
-            path, method, params, self._log, self.folder_filter, engine
-        )
-        self.cluster_data = (tracks, feats)
-        self.cluster_params = {"method": method, "engine": engine, **params}
-        self.cluster_manager = ClusterComputationManager(tracks, feats, self._log)
+        try:
+            tracks, feats = cluster_library(
+                path, method, params, self._log, self.folder_filter, engine
+            )
+            self.cluster_data = (tracks, feats)
+            self.cluster_params = {"method": method, "engine": engine, **params}
+            self.cluster_manager = ClusterComputationManager(tracks, feats, self._log)
 
-        for name in ("Interactive – KMeans", "Interactive – HDBSCAN"):
-            if name in self.plugin_views:
-                try:
-                    self.plugin_views[name].destroy()
-                except Exception:
-                    pass
-                self.plugin_views.pop(name, None)
+            for name in ("Interactive – KMeans", "Interactive – HDBSCAN"):
+                if name in self.plugin_views:
+                    try:
+                        self.plugin_views[name].destroy()
+                    except Exception:
+                        pass
+                    self.plugin_views.pop(name, None)
 
-        def done():
-            messagebox.showinfo("Clustered Playlists", "Generation complete")
-            self._refresh_plugin_panel()
+            def done():
+                self.cluster_generation_running = False
+                messagebox.showinfo("Clustered Playlists", "Generation complete")
+                self._refresh_plugin_panel()
 
-        self.after(0, done)
+            self.after(0, done)
+        except Exception as exc:
+            def fail():
+                self.cluster_generation_running = False
+                messagebox.showerror("Cluster Generation Failed", str(exc))
+                self._log(f"✘ Cluster generation failed: {exc}")
+                self._refresh_plugin_panel()
+
+            self.after(0, fail)
 
     def _refresh_plugin_panel(self):
         """Rebuild the current plugin panel if a plugin is selected."""
