@@ -21,6 +21,17 @@ python -m venv .venv
 source .venv/bin/activate  # or "Scripts\activate" on Windows
 pip install -r requirements.txt
 ```
+Essentia is only needed if you plan to use the optional tempo engine
+(`engine="essentia"` in the playlist tools). Prebuilt wheels are not
+published for every platform, so Windows users in particular may need to
+install a specific wheel manually:
+
+```bash
+pip install "essentia==2.1b6.dev1034"
+```
+
+If you skip Essentia, the default `librosa`-based engine continues to work.
+
 
 The indexer will exit with an error if the real `mutagen` package is missing,
 so ensure all dependencies are installed before running.

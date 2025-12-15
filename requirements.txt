@@ -5,7 +5,6 @@ ffmpeg-python
 pyacoustid
 musicbrainzngs
 python-vlc
-essentia
 librosa
 scipy
 numpy
@@ -15,6 +14,10 @@ matplotlib
 Pillow
 requests
 typing_extensions
+# optional audio analysis engines
+# Essentia wheels are not available on all platforms (notably Windows).
+# Install manually if you want to use the Essentia tempo engine:
+# pip install "essentia==2.1b6.dev1034"
 # optional metadata helpers
 spotipy
 tidal-dl
