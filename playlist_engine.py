@@ -2,7 +2,7 @@ import importlib.util
 import os
 import math
 import re
-from typing import Callable, Iterable
+from typing import Callable, Iterable, Literal
 
 try:
     _mutagen_available = importlib.util.find_spec("mutagen") is not None
@@ -35,6 +35,17 @@ try:
 except Exception:  # pragma: no cover - librosa optional
     librosa = None
 
+try:
+    _essentia_available = importlib.util.find_spec("essentia") is not None
+except ValueError:  # pragma: no cover - defensive for broken environments
+    _essentia_available = False
+if _essentia_available:
+    import essentia  # type: ignore
+    from essentia.standard import MonoLoader, RhythmExtractor2013
+else:  # pragma: no cover - optional dependency
+    essentia = None
+    MonoLoader = RhythmExtractor2013 = None  # type: ignore
+
 from playlist_generator import write_playlist, DEFAULT_EXTS
 
 
@@ -54,13 +65,33 @@ def categorize_energy(rms: float) -> str:
     return "high"
 
 
-def compute_tempo_energy(path: str) -> tuple[float, float]:
+TempoEngine = Literal["librosa", "essentia"]
+
+
+def compute_tempo_energy(path: str, engine: TempoEngine = "librosa") -> tuple[float, float]:
+    if engine == "librosa":
+        return _compute_tempo_energy_librosa(path)
+    if engine == "essentia":
+        return _compute_tempo_energy_essentia(path)
+    raise ValueError(f"Unknown tempo engine: {engine}")
+
+
+def _compute_tempo_energy_librosa(path: str) -> tuple[float, float]:
     if librosa is None or np is None:
-        raise RuntimeError("librosa/numpy required for tempo analysis")
+        raise RuntimeError("librosa/numpy required for tempo analysis (engine='librosa')")
     y, sr = librosa.load(path, mono=True, sr=None)
     tempo, _ = librosa.beat.beat_track(y=y, sr=sr)
     rms = float(np.mean(librosa.feature.rms(y=y)))
     return tempo, rms
+
+
+def _compute_tempo_energy_essentia(path: str) -> tuple[float, float]:
+    if essentia is None or np is None or MonoLoader is None or RhythmExtractor2013 is None:
+        raise RuntimeError("Essentia/numpy required for tempo analysis (engine='essentia')")
+    audio = np.asarray(MonoLoader(filename=path)(), dtype=np.float32)
+    tempo, *_ = RhythmExtractor2013(method="multifeature")(audio)
+    rms = float(np.sqrt(np.mean(np.square(audio)))) if audio.size else 0.0
+    return float(tempo), rms
 
 
 def bucket_by_tempo_energy(
@@ -69,14 +100,19 @@ def bucket_by_tempo_energy(
     log_callback=None,
     progress_callback=None,
     cancel_event=None,
+    engine: TempoEngine = "librosa",
 ) -> dict:
     if log_callback is None:
         log_callback = lambda m: None
     if progress_callback is None:
         progress_callback = lambda _count: None
-    if librosa is None or np is None:
+    if engine == "librosa" and (librosa is None or np is None):
         raise RuntimeError(
             "Tempo/Energy buckets require numpy and librosa. Install with `pip install -r requirements.txt`."
+        )
+    if engine == "essentia" and (essentia is None or np is None):
+        raise RuntimeError(
+            "Tempo/Energy buckets require numpy and Essentia when engine='essentia'. Install Essentia to continue."
         )
     playlists_dir = os.path.join(root_path, "Playlists")
     os.makedirs(playlists_dir, exist_ok=True)
@@ -87,7 +123,7 @@ def bucket_by_tempo_energy(
             log_callback("! Bucket generation cancelled by user.")
             break
         try:
-            tempo, rms = compute_tempo_energy(path)
+            tempo, rms = compute_tempo_energy(path, engine=engine)
             tb = categorize_tempo(tempo)
             eb = categorize_energy(rms)
             buckets.setdefault((tb, eb), []).append(path)
