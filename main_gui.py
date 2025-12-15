@@ -76,6 +76,7 @@ from controllers.normalize_controller import (
 )
 from plugins.assistant_plugin import AssistantPlugin
 from controllers.cluster_controller import cluster_library
+from controllers.cluster_view_controller import ClusterComputationManager
 from config import load_config, save_config, DEFAULT_FP_THRESHOLDS
 import playlist_engine
 from playlist_engine import bucket_by_tempo_energy, autodj_playlist
@@ -131,10 +132,14 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
 
     cluster_data = getattr(app, "cluster_data", None)
     cluster_cfg = getattr(app, "cluster_params", None)
+    cluster_manager = getattr(app, "cluster_manager", None)
     if cluster_data is None:
         tracks = features = None
     else:
         tracks, features = cluster_data
+        if cluster_manager is None or getattr(cluster_manager, "tracks", None) != tracks:
+            app.cluster_manager = ClusterComputationManager(tracks, features, app._log)
+            cluster_manager = app.cluster_manager
 
     if name == "Interactive – KMeans":
         from sklearn.cluster import KMeans
@@ -149,6 +154,7 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
         if cluster_cfg and "engine" in cluster_cfg:
             engine = "serial" if cluster_cfg["engine"] == "librosa" else cluster_cfg["engine"]
         params = {"n_clusters": n_clusters, "method": "kmeans", "engine": engine}
+        algo_key = "kmeans"
     elif name == "Interactive – HDBSCAN":
         from hdbscan import HDBSCAN
 
@@ -181,6 +187,7 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
             "engine": engine,
             **extras,
         }
+        algo_key = "hdbscan"
     elif name == "Sort by Genre":
         lib_var = tk.StringVar(value=app.library_path or "No library selected")
         progress_var = tk.StringVar(value="Waiting to start")
@@ -732,12 +739,20 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
     container.rowconfigure(0, weight=1)
     container.columnconfigure(0, weight=1)
 
+    if cluster_manager is None:
+        return frame
+
+    X, X2 = cluster_manager.get_projection()
+
     panel = ClusterGraphPanel(
         container,
         tracks,
-        features,
+        X,
+        X2,
         cluster_func=km_func,
         cluster_params=params,
+        cluster_manager=cluster_manager,
+        algo_key=algo_key,
         library_path=app.library_path,
         log_callback=app._log,
     )
@@ -958,7 +973,12 @@ class SoundVaultImporterApp(tk.Tk):
 
         # Cached tracks and feature vectors for interactive clustering
         self.cluster_data = None
+        self.cluster_manager = None
         self.folder_filter = {"include": [], "exclude": []}
+
+        # Cached plugin panels to avoid teardown/rebuild churn
+        self.plugin_views: dict[str, ttk.Frame] = {}
+        self.active_plugin: str | None = None
 
         # Library Sync state
         self.sync_debug_var = tk.BooleanVar(value=False)
@@ -1586,15 +1606,28 @@ class SoundVaultImporterApp(tk.Tk):
 
     def on_plugin_select(self, event):
         """Swap in the UI panel for the selected playlist plugin."""
-        for w in self.plugin_panel.winfo_children():
-            w.destroy()
+        switch_start = time.perf_counter()
         try:
             sel = self.plugin_list.get(self.plugin_list.curselection())
         except tk.TclError:
             return
-        panel = create_panel_for_plugin(self, sel, parent=self.plugin_panel)
+        logging.info("[perf] tool switch -> %s", sel)
+
+        if self.active_plugin and self.active_plugin in self.plugin_views:
+            logging.info("[perf] hide panel %s", self.active_plugin)
+            self.plugin_views[self.active_plugin].pack_forget()
+
+        panel = self.plugin_views.get(sel)
+        if panel is None:
+            panel = create_panel_for_plugin(self, sel, parent=self.plugin_panel)
+            if panel:
+                self.plugin_views[sel] = panel
         if panel:
+            logging.info("[perf] show panel %s", sel)
             panel.pack(fill="both", expand=True)
+            self.active_plugin = sel
+        duration = (time.perf_counter() - switch_start) * 1000
+        logging.info("[perf] tool switch complete in %.1f ms", duration)
 
     def _load_genre_mapping(self):
         """Load genre mapping from ``self.mapping_path`` if possible."""
@@ -1626,6 +1659,9 @@ class SoundVaultImporterApp(tk.Tk):
             self.player_search_var.set("")
         # Clear any cached clustering data when switching libraries
         self.cluster_data = None
+        self.cluster_manager = None
+        self.plugin_views.clear()
+        self.active_plugin = None
         if hasattr(self, "scan_btn"):
             self.scan_btn.config(state="normal")
             self._validate_threshold()
@@ -2205,6 +2241,15 @@ class SoundVaultImporterApp(tk.Tk):
         )
         self.cluster_data = (tracks, feats)
         self.cluster_params = {"method": method, "engine": engine, **params}
+        self.cluster_manager = ClusterComputationManager(tracks, feats, self._log)
+
+        for name in ("Interactive – KMeans", "Interactive – HDBSCAN"):
+            if name in self.plugin_views:
+                try:
+                    self.plugin_views[name].destroy()
+                except Exception:
+                    pass
+                self.plugin_views.pop(name, None)
 
         def done():
             messagebox.showinfo("Clustered Playlists", "Generation complete")
@@ -2220,11 +2265,14 @@ class SoundVaultImporterApp(tk.Tk):
             sel = self.plugin_list.get(self.plugin_list.curselection())
         except tk.TclError:
             return
-        for w in self.plugin_panel.winfo_children():
-            w.destroy()
-        panel = create_panel_for_plugin(self, sel, parent=self.plugin_panel)
-        if panel:
-            panel.pack(fill="both", expand=True)
+        if sel in self.plugin_views:
+            try:
+                self.plugin_views[sel].destroy()
+            except Exception:
+                pass
+            self.plugin_views.pop(sel, None)
+        self.active_plugin = None
+        self.on_plugin_select(None)
 
     def _tagfix_filter_dialog(self):
         dlg = tk.Toplevel(self)
