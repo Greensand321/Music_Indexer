@@ -132,6 +132,17 @@ def bucket_by_tempo_energy(
     processed = 0
     updated_cache = False
     for path in tracks:
+        try:
+            path = os.fspath(path)
+        except TypeError:
+            # Handle unexpected iterable inputs (e.g., lists from GUI selections)
+            if isinstance(path, (list, tuple)) and path:
+                path = os.fspath(path[0])
+            else:
+                log_callback(f"! Skipping unsupported path value: {path!r}")
+                processed += 1
+                progress_callback(processed)
+                continue
         if cancel_event and cancel_event.is_set():
             log_callback("! Bucket generation cancelled by user.")
             break
