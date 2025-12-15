@@ -920,9 +920,10 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
         temp_box, text="Add Highlighted Songs", command=panel.add_highlight_to_temp
     ).grid(row=2, column=0, sticky="ew", padx=5, pady=(0, 5))
 
-    ttk.Button(
+    panel.temp_remove_btn = ttk.Button(
         temp_box, text="Remove Selected", command=panel.remove_selected_from_temp
-    ).grid(row=3, column=0, sticky="ew", padx=5, pady=(0, 5))
+    )
+    panel.temp_remove_btn.grid(row=3, column=0, sticky="ew", padx=5, pady=(0, 5))
 
     ttk.Button(temp_box, text="Create Playlist", command=panel.create_temp_playlist).grid(
         row=4, column=0, sticky="ew", padx=5, pady=(0, 5)
