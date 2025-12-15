@@ -275,7 +275,7 @@ def generate_clustered_playlists(
     engine: str = "serial",
     feature_engine: AudioFeatureEngine = "librosa",
 ) -> None:
-    """Create clustered playlists for the given tracks."""
+    """Create clustered data for the given tracks without writing playlists."""
     if log_callback is None:
         log_callback = lambda msg: None
 
@@ -338,21 +338,6 @@ def generate_clustered_playlists(
     )
     log_cluster_summary(labels, log_callback)
 
-    playlists_dir = os.path.join(root_path, "Playlists")
-    os.makedirs(playlists_dir, exist_ok=True)
+    log_callback("→ Automatic playlist export disabled; manage selections manually.")
 
-    for cluster_id in sorted(set(labels)):
-        if cluster_id < 0:
-            continue
-        playlist = [tracks[i] for i, lbl in enumerate(labels) if lbl == cluster_id]
-        outfile = os.path.join(playlists_dir, f"{method}_cluster_{cluster_id}.m3u")
-        try:
-            with open(outfile, "w", encoding="utf-8") as pf:
-                for p in playlist:
-                    pf.write(os.path.relpath(p, playlists_dir) + "\n")
-            log_callback(f"→ Writing clustered playlist: {outfile}")
-        except Exception as e:
-            log_callback(f"\u2717 Failed to write {outfile}: {e}")
-
-    log_callback("✓ Clustered playlist generation finished")
     return feats
