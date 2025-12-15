@@ -591,6 +591,22 @@ if __name__ == "__main__":
     <li>Wireframe: <code>playlist_wireframe.png</code></li>
 </ul>
 
+<h3>2.10 Optional Essentia Audio Engine</h3>
+<p>Essentia can replace <code>librosa</code> for tempo analysis and audio feature extraction. It is optional—<code>librosa</code> remains supported—but Essentia offers faster C++ implementations when installed.</p>
+<ul>
+  <li><strong>Prerequisites</strong> (Linux builds compile C++ code and may take several minutes):
+    <ul>
+      <li><strong>Debian/Ubuntu</strong>: <code>sudo apt-get install build-essential libfftw3-dev liblapack-dev libblas-dev libyaml-dev libtag1-dev libchromaprint-dev libsamplerate0-dev libavcodec-dev libavformat-dev libavutil-dev libavresample-dev</code></li>
+      <li><strong>macOS</strong>: <code>brew install essentia</code> (installs the formula and dependencies)</li>
+      <li><strong>Windows</strong>: no official wheel; use WSL/Linux if you need Essentia.</li>
+    </ul>
+  </li>
+  <li><strong>Installation</strong> (after prerequisites):
+    <pre><code>pip install essentia==2.1b6</code></pre>
+  </li>
+  <li>Expect longer build times on Linux the first time you install Essentia. If you prefer the pure-Python stack, keep using <code>librosa</code> without this extra dependency.</li>
+</ul>
+
 <h3>2.y GUI Front-end (<code>main_gui.py</code>)</h3>
 <ul>
   <li>New menu item <strong>Fix Tags</strong>.</li>
