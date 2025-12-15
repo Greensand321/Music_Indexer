@@ -86,6 +86,8 @@ from controllers.cluster_controller import gather_tracks
 FilterFn = Callable[[FileRecord], bool]
 _cached_filters = None
 
+logger = logging.getLogger(__name__)
+
 
 def make_filters(ex_no_diff: bool, ex_skipped: bool, show_all: bool) -> List[FilterFn]:
     global _cached_filters
@@ -146,7 +148,15 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
         from sklearn.cluster import KMeans
 
         def km_func(X, p):
-            return KMeans(n_clusters=p["n_clusters"]).fit_predict(X)
+            requested = max(1, int(p["n_clusters"]))
+            effective = min(requested, len(X))
+            if effective != requested:
+                logger.info(
+                    "Adjusting kmeans clusters from %s to %s due to dataset size",
+                    requested,
+                    effective,
+                )
+            return KMeans(n_clusters=effective).fit_predict(X)
 
         n_clusters = 5
         if cluster_cfg and cluster_cfg.get("method") == "kmeans":
@@ -160,11 +170,30 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
         from hdbscan import HDBSCAN
 
         def km_func(X, p):
-            kwargs = {"min_cluster_size": p["min_cluster_size"]}
+            min_cluster_size = max(2, int(p["min_cluster_size"]))
+            if min_cluster_size > len(X):
+                logger.info(
+                    "Adjusting min_cluster_size from %s to %s due to dataset size",
+                    min_cluster_size,
+                    len(X),
+                )
+                min_cluster_size = len(X)
+
+            kwargs = {"min_cluster_size": min_cluster_size}
             if "min_samples" in p:
-                kwargs["min_samples"] = p["min_samples"]
+                min_samples = max(1, int(p["min_samples"]))
+                if min_samples > len(X):
+                    logger.info(
+                        "Adjusting min_samples from %s to %s due to dataset size",
+                        min_samples,
+                        len(X),
+                    )
+                    min_samples = len(X)
+                kwargs["min_samples"] = min_samples
             if "cluster_selection_epsilon" in p:
-                kwargs["cluster_selection_epsilon"] = p["cluster_selection_epsilon"]
+                kwargs["cluster_selection_epsilon"] = float(
+                    p["cluster_selection_epsilon"]
+                )
             return HDBSCAN(**kwargs).fit_predict(X)
 
         min_cs = 5

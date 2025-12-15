@@ -15,6 +15,7 @@ from matplotlib.widgets import LassoSelector
 from matplotlib.path import Path
 
 from playlist_generator import write_playlist
+from clustered_playlists import log_cluster_summary
 
 from io import BytesIO
 from PIL import Image, ImageTk
@@ -351,6 +352,7 @@ class ClusterGraphPanel(ttk.Frame):
         if self._loading_lbl.winfo_exists():
             self._loading_lbl.pack_forget()
         self._draw_clusters(labels)
+        log_cluster_summary(labels, self.log)
         if duration_ms is not None:
             logger.info(
                 "[perf] clusters ready (%s) in %.1f ms", self.algo_key, duration_ms
