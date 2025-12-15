@@ -1,5 +1,6 @@
 import importlib.util
 import os
+from collections import Counter
 from concurrent.futures import ProcessPoolExecutor, as_completed
 import multiprocessing
 from typing import Literal
@@ -194,7 +195,13 @@ def cluster_tracks(
         log_callback = lambda msg: None
 
     if method == "kmeans":
-        n_clusters = int(kwargs.get("n_clusters", 5))
+        n_clusters = max(1, int(kwargs.get("n_clusters", 5)))
+        if n_clusters > len(feature_matrix):
+            log_callback(
+                f"→ Requested {n_clusters} clusters but only "
+                f"{len(feature_matrix)} tracks; reducing to {len(feature_matrix)}"
+            )
+            n_clusters = len(feature_matrix)
         log_callback(
             f"⚙ Clustering {len(feature_matrix)} tracks into {n_clusters} groups …"
         )
@@ -202,10 +209,23 @@ def cluster_tracks(
             feature_matrix
         )
     else:
-        min_cluster_size = int(kwargs.get("min_cluster_size", 5))
+        min_cluster_size = max(2, int(kwargs.get("min_cluster_size", 5)))
+        if min_cluster_size > len(feature_matrix):
+            log_callback(
+                f"→ Min cluster size {min_cluster_size} exceeds track count "
+                f"{len(feature_matrix)}; reducing to {len(feature_matrix)}"
+            )
+            min_cluster_size = len(feature_matrix)
         extra: dict = {}
         if "min_samples" in kwargs:
-            extra["min_samples"] = int(kwargs["min_samples"])
+            min_samples = max(1, int(kwargs["min_samples"]))
+            if min_samples > len(feature_matrix):
+                log_callback(
+                    f"→ Min samples {min_samples} exceeds track count "
+                    f"{len(feature_matrix)}; reducing to {len(feature_matrix)}"
+                )
+                min_samples = len(feature_matrix)
+            extra["min_samples"] = min_samples
         if "cluster_selection_epsilon" in kwargs:
             extra["cluster_selection_epsilon"] = float(
                 kwargs["cluster_selection_epsilon"]
@@ -219,6 +239,31 @@ def cluster_tracks(
 
     log_callback("✓ Clustering complete")
     return labels
+
+
+def log_cluster_summary(labels: "np.ndarray", log_callback) -> None:
+    """Log a compact summary of cluster counts and noise."""
+
+    if log_callback is None:
+        return
+
+    total = len(labels)
+    noise = sum(1 for l in labels if l < 0)
+    clusters = Counter(int(l) for l in labels if l >= 0)
+    if not clusters:
+        log_callback(
+            f"→ All {total} tracks were marked as noise; try adjusting parameters"
+        )
+        return
+
+    cluster_count = len(clusters)
+    log_callback(
+        f"→ Cluster summary: {cluster_count} clusters, {noise} noise tracks"
+    )
+    top_sizes = ", ".join(
+        f"{cid}: {size}" for cid, size in clusters.most_common(5)
+    )
+    log_callback(f"→ Largest clusters (id: size): {top_sizes}")
 
 
 def generate_clustered_playlists(
@@ -291,6 +336,7 @@ def generate_clustered_playlists(
     log_callback(
         f"✓ Clustering complete: found {len(set([l for l in labels if l >= 0]) )} clusters"
     )
+    log_cluster_summary(labels, log_callback)
 
     playlists_dir = os.path.join(root_path, "Playlists")
     os.makedirs(playlists_dir, exist_ok=True)
