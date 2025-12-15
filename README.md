@@ -166,7 +166,6 @@ controllers/
   cluster_controller.py        - Gather tracks and run clustering
   library_index_controller.py  - Build HTML index of your library
   highlight_controller.py      - Play short audio snippets
-  genre_list_controller.py     - Scan library for unique genres
   playlist_controller.py       - Playlist export placeholder
 
 plugins/
