@@ -49,6 +49,7 @@ def cluster_library(
     log_callback,
     folder_filter: dict | None = None,
     engine: str = "serial",
+    feature_engine: str = "librosa",
 ) -> tuple[list[str], list]:
     """Generate clustered playlists for ``library_path`` and return features."""
 
@@ -71,5 +72,6 @@ def cluster_library(
         cluster_params,
         log,
         engine=engine,
+        feature_engine=feature_engine,
     )
     return tracks, feats

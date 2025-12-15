@@ -1,29 +1,75 @@
+import importlib.util
 import os
 from concurrent.futures import ProcessPoolExecutor, as_completed
 import multiprocessing
-import numpy as np
-import librosa
+from typing import Literal
+
 from sklearn.cluster import KMeans
 from sklearn.preprocessing import StandardScaler
 import hdbscan
 
 
+def _module_available(name: str) -> bool:
+    try:
+        return importlib.util.find_spec(name) is not None
+    except ValueError:  # pragma: no cover - defensive for broken environments
+        return False
+
+
+if _module_available("numpy"):
+    import numpy as np  # type: ignore
+else:  # pragma: no cover - optional dependency
+    np = None  # type: ignore
+
+if _module_available("librosa"):
+    import librosa  # type: ignore
+else:  # pragma: no cover - optional dependency
+    librosa = None  # type: ignore
+
+if _module_available("essentia"):
+    import essentia  # type: ignore
+    from essentia.standard import MonoLoader, MusicExtractor
+else:  # pragma: no cover - optional dependency
+    essentia = None  # type: ignore
+    MonoLoader = MusicExtractor = None  # type: ignore
+
+AudioFeatureEngine = Literal["librosa", "essentia"]
+
+
 def _ensure_1d(a):
     """Return ``a`` flattened to 1-D for feature stacking."""
+    if np is None:
+        raise RuntimeError("numpy required for audio feature extraction")
     a = np.asarray(a)
     if a.ndim > 1:
         a = a.ravel()
     return a
 
 
-def extract_audio_features(file_path: str, log_callback=None) -> np.ndarray:
-    """Return a simple feature vector for ``file_path`` using librosa."""
+def extract_audio_features(
+    file_path: str, log_callback=None, engine: AudioFeatureEngine = "librosa"
+) -> "np.ndarray":
+    """Return a simple feature vector for ``file_path`` using the requested engine."""
+
     if log_callback is None:
         log_callback = lambda msg: None
 
+    if np is None:
+        raise RuntimeError("numpy required for audio feature extraction")
+
+    if engine == "librosa":
+        return _extract_audio_features_librosa(file_path, log_callback)
+    if engine == "essentia":
+        return _extract_audio_features_essentia(file_path, log_callback)
+    raise ValueError(f"Unknown feature extraction engine: {engine}")
+
+
+def _extract_audio_features_librosa(file_path: str, log_callback) -> "np.ndarray":
+    if librosa is None:
+        raise RuntimeError("librosa required for feature extraction (engine='librosa')")
+
     y, sr = librosa.load(file_path, sr=None, mono=True)
     mfcc = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=13)
-    # Log raw MFCC shape for debugging
     log_callback(
         f"   \u00b7 MFCC shape for {os.path.basename(file_path)}: {mfcc.shape}"
     )
@@ -33,9 +79,38 @@ def extract_audio_features(file_path: str, log_callback=None) -> np.ndarray:
     std_mfcc = _ensure_1d(np.std(mfcc, axis=1))
     tempo_arr = _ensure_1d(np.array([tempo], dtype=np.float32))
 
+    return _assemble_feature_vector(mean_mfcc, std_mfcc, tempo_arr)
+
+
+def _extract_audio_features_essentia(file_path: str, log_callback) -> "np.ndarray":
+    if (
+        essentia is None
+        or MonoLoader is None
+        or MusicExtractor is None
+    ):
+        raise RuntimeError("Essentia required for feature extraction (engine='essentia')")
+
+    extractor = MusicExtractor(
+        lowlevelStats=["mean", "stdev"],
+        rhythmStats=["mean"],
+        numberMfccCoefficients=13,
+    )
+    features = extractor(file_path)
+
+    mfcc_mean = _ensure_1d(np.asarray(features["lowlevel.mfcc.mean"], dtype=np.float32))
+    mfcc_std = _ensure_1d(np.asarray(features["lowlevel.mfcc.stdev"], dtype=np.float32))
+    tempo_arr = _ensure_1d(np.array([features["rhythm.bpm"]], dtype=np.float32))
+
+    log_callback(
+        f"   \u00b7 Essentia MFCC lengths for {os.path.basename(file_path)}: {mfcc_mean.shape}"
+    )
+
+    return _assemble_feature_vector(mfcc_mean, mfcc_std, tempo_arr)
+
+
+def _assemble_feature_vector(mean_mfcc, std_mfcc, tempo_arr) -> "np.ndarray":
     vec = np.hstack([mean_mfcc, std_mfcc, tempo_arr]).astype(np.float32)
 
-    # Validate length and ensure we have exactly 27 values
     if vec.shape[0] != 27:
         raise RuntimeError(
             f"Feature vector has wrong length {vec.shape[0]}, expected 27"
@@ -43,19 +118,20 @@ def extract_audio_features(file_path: str, log_callback=None) -> np.ndarray:
     return vec
 
 
-def _extract_worker(path: str) -> tuple[str, np.ndarray, str | None]:
+def _extract_worker(path: str, engine: AudioFeatureEngine) -> tuple[str, "np.ndarray", str | None]:
     """Process-pool friendly wrapper around :func:`extract_audio_features`."""
 
     try:
-        return path, extract_audio_features(path), None
+        return path, extract_audio_features(path, engine=engine), None
     except Exception as exc:  # pragma: no cover - defensive logging path
-        return path, np.zeros(27, dtype=np.float32), str(exc)
+        zeros = np.zeros(27, dtype=np.float32) if np is not None else None
+        return path, zeros, str(exc)
 
 
-def _extract_features_parallel(tracks, cache, log_callback):
+def _extract_features_parallel(tracks, cache, log_callback, engine: AudioFeatureEngine):
     """Fill ``cache`` for ``tracks`` using a bounded process pool."""
 
-    feats: list[np.ndarray] = []
+    feats: list["np.ndarray"] = []
     missing = [p for p in tracks if p not in cache]
 
     if missing:
@@ -64,7 +140,9 @@ def _extract_features_parallel(tracks, cache, log_callback):
             f"⚙ Parallel feature extraction for {len(missing)} files ({workers} workers)"
         )
         with ProcessPoolExecutor(max_workers=workers) as ex:
-            future_map = {ex.submit(_extract_worker, path): path for path in missing}
+            future_map = {
+                ex.submit(_extract_worker, path, engine): path for path in missing
+            }
             for done, fut in enumerate(as_completed(future_map), 1):
                 path, vec, err = fut.result()
                 if err:
@@ -83,10 +161,10 @@ def _extract_features_parallel(tracks, cache, log_callback):
     return feats, bool(missing)
 
 
-def _extract_features_serial(tracks, cache, log_callback):
+def _extract_features_serial(tracks, cache, log_callback, engine: AudioFeatureEngine):
     """Sequential feature extraction (original behavior)."""
 
-    feats: list[np.ndarray] = []
+    feats: list["np.ndarray"] = []
     updated = False
     for idx, path in enumerate(tracks, 1):
         if path in cache:
@@ -94,7 +172,7 @@ def _extract_features_serial(tracks, cache, log_callback):
         else:
             log_callback(f"• Extracting features {idx}/{len(tracks)}")
             try:
-                cache[path] = extract_audio_features(path, log_callback)
+                cache[path] = extract_audio_features(path, log_callback, engine=engine)
             except Exception as e:  # pragma: no cover - defensive path
                 log_callback(f"! Failed features for {path}: {e}")
                 cache[path] = np.zeros(27, dtype=np.float32)
@@ -105,12 +183,12 @@ def _extract_features_serial(tracks, cache, log_callback):
 
 
 def cluster_tracks(
-    feature_matrix: np.ndarray,
+    feature_matrix: "np.ndarray",
     method: str = "kmeans",
     log_callback=None,
     engine: str = "serial",
     **kwargs,
-) -> np.ndarray:
+) -> "np.ndarray":
     """Cluster a matrix of feature vectors using KMeans or HDBSCAN."""
     if log_callback is None:
         log_callback = lambda msg: None
@@ -150,10 +228,26 @@ def generate_clustered_playlists(
     params: dict,
     log_callback=None,
     engine: str = "serial",
+    feature_engine: AudioFeatureEngine = "librosa",
 ) -> None:
     """Create clustered playlists for the given tracks."""
     if log_callback is None:
         log_callback = lambda msg: None
+
+    if np is None:
+        raise RuntimeError(
+            "numpy required for clustered playlist feature extraction and clustering"
+        )
+    if feature_engine == "librosa" and librosa is None:
+        raise RuntimeError(
+            "librosa required for feature extraction (engine='librosa')"
+        )
+    if feature_engine == "essentia" and (
+        essentia is None or MonoLoader is None or MusicExtractor is None
+    ):
+        raise RuntimeError(
+            "Essentia required for feature extraction (engine='essentia')"
+        )
 
     # ------------------------------------------------------------------
     # Feature cache setup
@@ -171,12 +265,18 @@ def generate_clustered_playlists(
 
     engine_mode = "serial" if engine in (None, "librosa", "serial") else "parallel"
 
-    log_callback(f"⚙ Extracting audio features with {engine_mode} engine …")
+    log_callback(
+        f"⚙ Extracting audio features with {engine_mode} engine ({feature_engine}) …"
+    )
 
     if engine_mode == "parallel":
-        feats, updated = _extract_features_parallel(tracks, cache, log_callback)
+        feats, updated = _extract_features_parallel(
+            tracks, cache, log_callback, feature_engine
+        )
     else:
-        feats, updated = _extract_features_serial(tracks, cache, log_callback)
+        feats, updated = _extract_features_serial(
+            tracks, cache, log_callback, feature_engine
+        )
 
     if updated:
         np.save(cache_file, cache)
