@@ -145,6 +145,8 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
             app.cluster_manager = ClusterComputationManager(tracks, features, app._log)
             cluster_manager = app.cluster_manager
 
+    requires_clustering = name in {"Interactive – KMeans", "Interactive – HDBSCAN"}
+
     if name == "Interactive – KMeans":
         from sklearn.cluster import KMeans
 
@@ -866,7 +868,7 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
         ttk.Label(frame, text=f"{name} panel coming soon…").pack(padx=10, pady=10)
         return frame
 
-    if tracks is None:
+    if requires_clustering and tracks is None:
         msg = ttk.Frame(frame)
         msg.pack(padx=10, pady=10)
         if getattr(app, "cluster_generation_running", False):
