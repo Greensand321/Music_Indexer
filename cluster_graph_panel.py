@@ -71,6 +71,9 @@ class ClusterGraphPanel(ttk.Frame):
         self.selected_indices: list[int] = []
         self.selected_tracks: list[str] = []
         self.temp_playlist: list[str] = []
+        self._remove_lasso_started = False
+        self._remove_lasso_prev_state = False
+        self._remove_lasso_confirm_pending = False
 
         # Hover support widgets will be set later via ``setup_hover``
         self.hover_panel = None
@@ -88,6 +91,9 @@ class ClusterGraphPanel(ttk.Frame):
         self.manual_cluster_var: tk.StringVar | None = None
         self.temp_listbox: tk.Listbox | None = None
         self.temp_status_var: tk.StringVar | None = None
+        self.temp_remove_btn: ttk.Button | None = None
+
+        self.canvas.mpl_connect("button_press_event", self._on_canvas_click)
 
     # UI widgets created externally will be assigned after instantiation
     lasso_btn: ttk.Widget
@@ -131,16 +137,27 @@ class ClusterGraphPanel(ttk.Frame):
     # ─── Lasso Handling ─────────────────────────────────────────────────────
     def toggle_lasso(self):
         """Enter or exit lasso selection mode."""
-        if self.lasso is None:
-            self._clear_selection()
-            self.lasso = LassoSelector(self.ax, onselect=self._on_lasso_select)
+        self._cancel_temp_lasso_removal()
+        self._set_lasso_enabled(self.lasso is None)
+
+    def _set_lasso_enabled(self, active: bool):
+        """Toggle matplotlib lasso state and sync UI controls."""
+
+        self._clear_selection()
+        if active:
+            if self.lasso is None:
+                self.lasso = LassoSelector(self.ax, onselect=self._on_lasso_select)
             self.log("Lasso mode enabled – draw a shape")
         else:
-            self.lasso.disconnect_events()
-            self.lasso = None
-            self.log("Lasso mode disabled")
-            self._clear_selection()
+            if self.lasso is not None:
+                self.lasso.disconnect_events()
+                self.lasso = None
+                self.log("Lasso mode disabled")
+            else:
+                return
 
+        if hasattr(self, "lasso_var"):
+            self.lasso_var.set(active)
         self.ok_btn.configure(state="disabled")
         self.gen_btn.configure(state="disabled")
         self.canvas.draw_idle()
@@ -221,6 +238,14 @@ class ClusterGraphPanel(ttk.Frame):
         self.selected_indices = [i for i, v in enumerate(mask) if v]
         self.log(f"\u2192 {len(self.selected_indices)} songs selected")
         self._update_highlight()
+        if self._remove_lasso_started:
+            self._remove_lasso_confirm_pending = bool(self.selected_indices)
+            if self.temp_remove_btn is not None:
+                text = "Press to Confirm" if self.selected_indices else "Lasso Selection"
+                self.temp_remove_btn.configure(text=text)
+            if not self.selected_indices:
+                self.ok_btn.configure(state="disabled")
+            return
         if self.selected_indices:
             self.ok_btn.configure(state="normal")
         else:
@@ -298,6 +323,10 @@ class ClusterGraphPanel(ttk.Frame):
         if self.sel_scatter is not None:
             self.sel_scatter.remove()
             self.sel_scatter = None
+
+    def _on_canvas_click(self, _event) -> None:
+        if self._remove_lasso_started and self._remove_lasso_confirm_pending:
+            self._cancel_temp_lasso_removal()
 
     def _update_highlight(self):
         if self.sel_scatter is not None:
@@ -490,11 +519,63 @@ class ClusterGraphPanel(ttk.Frame):
         """Remove highlighted entries from the temp playlist listbox."""
         if self.temp_listbox is None:
             return
-        selected = list(self.temp_listbox.curselection())
-        if not selected:
+
+        if self._remove_lasso_confirm_pending:
+            self._confirm_temp_lasso_removal()
             return
-        remaining = [t for i, t in enumerate(self.temp_playlist) if i not in selected]
+
+        selected = list(self.temp_listbox.curselection())
+        if selected:
+            self._cancel_temp_lasso_removal()
+            remaining = [t for i, t in enumerate(self.temp_playlist) if i not in selected]
+            self._set_temp_playlist(remaining)
+            return
+
+        self._begin_temp_lasso_removal()
+
+    def _begin_temp_lasso_removal(self) -> None:
+        """Switch to lasso mode to pick songs for removal."""
+
+        self._remove_lasso_started = True
+        self._remove_lasso_prev_state = self.lasso is not None
+        self._remove_lasso_confirm_pending = False
+        if self.temp_remove_btn is not None:
+            self.temp_remove_btn.configure(text="Lasso Selection")
+        self._set_lasso_enabled(True)
+        self.log("Use lasso to select songs to remove from the playlist")
+
+    def _confirm_temp_lasso_removal(self) -> None:
+        """Remove any lasso-selected points that exist in the temp playlist."""
+
+        if not self.selected_indices:
+            self.log("⚠ No points selected; removal cancelled")
+            self._cancel_temp_lasso_removal()
+            return
+
+        selected_tracks = [self.tracks[i] for i in self.selected_indices]
+        temp_set = set(self.temp_playlist)
+        to_remove = [t for t in selected_tracks if t in temp_set]
+        if not to_remove:
+            self.log("⚠ None of the lassoed songs are in the temporary playlist")
+            self._cancel_temp_lasso_removal()
+            return
+
+        remaining = [t for t in self.temp_playlist if t not in set(to_remove)]
         self._set_temp_playlist(remaining)
+        self.log(f"→ Removed {len(to_remove)} songs from the temporary playlist")
+        self._cancel_temp_lasso_removal()
+
+    def _cancel_temp_lasso_removal(self) -> None:
+        """Reset state for lasso-driven removal."""
+
+        if self._remove_lasso_started and not self._remove_lasso_prev_state:
+            self._set_lasso_enabled(False)
+        self._remove_lasso_started = False
+        self._remove_lasso_prev_state = False
+        self._remove_lasso_confirm_pending = False
+        if self.temp_remove_btn is not None:
+            self.temp_remove_btn.configure(text="Remove Selected")
+        self._clear_selection()
 
 
     def open_param_dialog(self):
