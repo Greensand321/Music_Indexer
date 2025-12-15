@@ -912,16 +912,20 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
     temp_scroll.config(command=panel.temp_listbox.yview)
     temp_scroll.pack(side="right", fill="y")
 
+    ttk.Button(temp_box, text="Show All", command=panel.highlight_temp_playlist).grid(
+        row=1, column=0, sticky="ew", padx=5, pady=(0, 5)
+    )
+
     ttk.Button(
         temp_box, text="Add Highlighted Songs", command=panel.add_highlight_to_temp
-    ).grid(row=1, column=0, sticky="ew", padx=5, pady=(0, 5))
+    ).grid(row=2, column=0, sticky="ew", padx=5, pady=(0, 5))
 
     ttk.Button(
         temp_box, text="Remove Selected", command=panel.remove_selected_from_temp
-    ).grid(row=2, column=0, sticky="ew", padx=5, pady=(0, 5))
+    ).grid(row=3, column=0, sticky="ew", padx=5, pady=(0, 5))
 
     ttk.Button(temp_box, text="Create Playlist", command=panel.create_temp_playlist).grid(
-        row=3, column=0, sticky="ew", padx=5, pady=(0, 5)
+        row=4, column=0, sticky="ew", padx=5, pady=(0, 5)
     )
 
     ttk.Separator(container, orient="horizontal").grid(row=1, column=0, sticky="ew")

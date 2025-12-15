@@ -454,6 +454,26 @@ class ClusterGraphPanel(ttk.Frame):
         if replace_temp:
             self._set_temp_playlist(self.selected_tracks)
 
+    def highlight_temp_playlist(self):
+        """Highlight all points currently stored in the temp playlist."""
+        if not self.temp_playlist:
+            messagebox.showinfo("Selection", "No songs in the temporary playlist.")
+            return
+
+        temp_set = set(self.temp_playlist)
+        indices = [i for i, track in enumerate(self.tracks) if track in temp_set]
+        if not indices:
+            messagebox.showinfo(
+                "Selection",
+                "No matching songs from the temporary playlist were found in this view.",
+            )
+            return
+
+        self.selected_indices = indices
+        self.selected_tracks = [self.tracks[i] for i in indices]
+        self._update_highlight()
+        self.log(f"→ Highlighted {len(indices)} songs from the temporary playlist")
+
     def add_highlight_to_temp(self):
         """Append currently highlighted songs to the temp playlist."""
         if not self.selected_indices:
