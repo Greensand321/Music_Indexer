@@ -326,10 +326,11 @@ def export_genre_playlists(
     return {"genres": stats, "playlists_dir": playlists_dir}
 
 
-def _get_feat(path: str, cache: dict, log_callback):
+def _get_feat(path: str, cache: dict, log_callback, engine: TempoEngine = "librosa"):
     if path not in cache:
         from clustered_playlists import extract_audio_features
-        cache[path] = extract_audio_features(path, log_callback)
+
+        cache[path] = extract_audio_features(path, log_callback, engine=engine)
     return cache[path]
 
 
@@ -339,32 +340,48 @@ def _dist(a, b) -> float:
     return math.sqrt(sum((x - y) ** 2 for x, y in zip(a, b)))
 
 
-def more_like_this(ref_track: str, tracks: list[str], n: int = 10, feature_cache=None, log_callback=None) -> list[str]:
+def more_like_this(
+    ref_track: str,
+    tracks: list[str],
+    n: int = 10,
+    feature_cache=None,
+    log_callback=None,
+    engine: TempoEngine = "librosa",
+) -> list[str]:
     if log_callback is None:
         log_callback = lambda m: None
     feature_cache = feature_cache or {}
-    ref_vec = _get_feat(ref_track, feature_cache, log_callback)
+    ref_vec = _get_feat(ref_track, feature_cache, log_callback, engine)
     others = [t for t in tracks if t != ref_track]
     dist = []
     for t in others:
-        vec = _get_feat(t, feature_cache, log_callback)
+        vec = _get_feat(t, feature_cache, log_callback, engine)
         d = _dist(ref_vec, vec)
         dist.append((d, t))
     dist.sort()
     return [t for _d, t in dist[:n]]
 
 
-def autodj_playlist(start_track: str, tracks: list[str], n: int = 20, feature_cache=None, log_callback=None) -> list[str]:
+def autodj_playlist(
+    start_track: str,
+    tracks: list[str],
+    n: int = 20,
+    feature_cache=None,
+    log_callback=None,
+    engine: TempoEngine = "librosa",
+) -> list[str]:
     if log_callback is None:
         log_callback = lambda m: None
     feature_cache = feature_cache or {}
     order = [start_track]
     remaining = [t for t in tracks if t != start_track]
     while remaining and len(order) < n:
-        cur_feat = _get_feat(order[-1], feature_cache, log_callback)
+        cur_feat = _get_feat(order[-1], feature_cache, log_callback, engine)
         next_track = min(
             remaining,
-            key=lambda t: _dist(cur_feat, _get_feat(t, feature_cache, log_callback)),
+            key=lambda t: _dist(
+                cur_feat, _get_feat(t, feature_cache, log_callback, engine)
+            ),
         )
         order.append(next_track)
         remaining.remove(next_track)

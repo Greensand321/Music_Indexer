@@ -469,6 +469,8 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
         playlists_dir: str | None = None
         q: queue.Queue = queue.Queue()
         cancel_event = threading.Event()
+        engine_var = getattr(app, "feature_engine_var", tk.StringVar(value="librosa"))
+        app.feature_engine_var = engine_var
 
         def open_path(path: str) -> None:
             if not path:
@@ -488,19 +490,33 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
             webbrowser.open_new(f"file://{readme}")
 
         def dependencies_ok() -> bool:
+            engine = engine_var.get() or "librosa"
             missing = []
             if playlist_engine.np is None:
                 missing.append("numpy")
-            if playlist_engine.librosa is None:
+            if engine == "librosa" and playlist_engine.librosa is None:
                 missing.append("librosa")
+            if engine == "essentia" and playlist_engine.essentia is None:
+                missing.append("Essentia")
+
+            essentia_note = (
+                "Essentia unavailable; install Essentia to enable the Essentia engine."
+                if playlist_engine.essentia is None
+                else "Essentia available."
+            )
+
             if missing:
                 dep_status.set(
-                    "Missing dependencies: "
+                    f"Missing dependencies for {engine}: "
                     + ", ".join(missing)
-                    + ". Install with `pip install -r requirements.txt`."
+                    + f". {essentia_note}"
                 )
                 return False
-            dep_status.set("Dependencies ready (numpy, librosa)")
+
+            deps = ["numpy", "Essentia" if engine == "essentia" else "librosa"]
+            dep_status.set(
+                f"Dependencies ready ({', '.join(deps)}). {essentia_note}"
+            )
             return True
 
         def append_log(msg: str) -> None:
@@ -544,6 +560,8 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
             run_btn.config(state="normal" if ready else "disabled")
             cancel_btn.config(state="normal" if running.get() else "disabled")
 
+        engine_var.trace_add("write", lambda *_: update_controls())
+
         def start_run():
             nonlocal total_tracks, playlists_dir
             if running.get():
@@ -554,6 +572,7 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
             if not dependencies_ok():
                 messagebox.showerror("Missing Dependencies", dep_status.get())
                 return
+            engine = engine_var.get() or "librosa"
             tracks = gather_tracks(path, getattr(app, "folder_filter", None))
             if not tracks:
                 messagebox.showinfo("No Tracks", "No audio files found in the library.")
@@ -580,6 +599,7 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
                         log_callback=lambda m: q.put(("log", m)),
                         progress_callback=lambda c: q.put(("progress", c)),
                         cancel_event=cancel_event,
+                        engine=engine,
                     )
                     q.put(("done", result))
                 except Exception as exc:  # pragma: no cover - UI surface only
@@ -631,6 +651,22 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
         ttk.Label(info, textvariable=dep_status, wraplength=360).pack(
             anchor="w", padx=5, pady=2
         )
+        engine_frame = ttk.LabelFrame(info, text="Tempo Engine")
+        engine_frame.pack(fill="x", padx=5, pady=(2, 5))
+        ttk.Radiobutton(
+            engine_frame,
+            text="Librosa (default)",
+            variable=engine_var,
+            value="librosa",
+            command=update_controls,
+        ).pack(anchor="w", padx=5, pady=(2, 0))
+        ttk.Radiobutton(
+            engine_frame,
+            text="Essentia",
+            variable=engine_var,
+            value="essentia",
+            command=update_controls,
+        ).pack(anchor="w", padx=5, pady=(0, 2))
         link = ttk.Label(
             info,
             text="View installation instructions",
@@ -674,6 +710,17 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
     elif name == "Auto-DJ":
         sel = tk.StringVar()
         count_var = tk.StringVar(value="20")
+        engine_var = getattr(app, "feature_engine_var", tk.StringVar(value="librosa"))
+        app.feature_engine_var = engine_var
+
+        def resolve_engine() -> str:
+            engine = engine_var.get()
+            cluster_cfg = getattr(app, "cluster_params", {}) or {}
+            if not engine:
+                engine = cluster_cfg.get("feature_engine") or cluster_cfg.get("engine")
+            if engine in (None, "", "serial", "parallel"):
+                engine = "librosa"
+            return engine
 
         def open_path(path: str) -> None:
             if not path:
@@ -705,7 +752,10 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
                 return
             app.show_log_tab()
             tracks = gather_tracks(path)
-            order = autodj_playlist(sel.get(), tracks, n, log_callback=app._log)
+            engine = resolve_engine()
+            order = autodj_playlist(
+                sel.get(), tracks, n, log_callback=app._log, engine=engine
+            )
             outfile = os.path.join(path, "Playlists", "autodj.m3u")
             write_playlist(order, outfile)
             messagebox.showinfo("Playlist", f"Written to {outfile}")
@@ -976,6 +1026,9 @@ class SoundVaultImporterApp(tk.Tk):
         self.cluster_data = None
         self.cluster_manager = None
         self.folder_filter = {"include": [], "exclude": []}
+
+        # Shared audio feature/analysis engine selection
+        self.feature_engine_var = tk.StringVar(value="librosa")
 
         # Cached plugin panels to avoid teardown/rebuild churn
         self.plugin_views: dict[str, ttk.Frame] = {}
