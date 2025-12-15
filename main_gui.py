@@ -75,6 +75,7 @@ from controllers.normalize_controller import (
     scan_raw_genres,
 )
 from plugins.assistant_plugin import AssistantPlugin
+from plugins.acoustid_plugin import AcoustIDService, MusicBrainzService
 from controllers.cluster_controller import cluster_library
 from controllers.cluster_view_controller import ClusterComputationManager
 from config import load_config, save_config, DEFAULT_FP_THRESHOLDS
@@ -1000,6 +1001,7 @@ class SoundVaultImporterApp(tk.Tk):
         self.tf_apply_genres = tk.BooleanVar(value=False)
         self.tagfix_db_path = ""
         self.tagfix_debug_var = tk.BooleanVar(value=False)
+        self.tagfix_api_status = tk.StringVar(value="")
 
         self.dup_debug_var = tk.BooleanVar(value=False)
 
@@ -1310,6 +1312,13 @@ class SoundVaultImporterApp(tk.Tk):
             text="Verbose Debug",
             variable=self.tagfix_debug_var,
         ).pack(side="left", padx=(5, 0))
+        api_status = ttk.Frame(opts)
+        api_status.pack(side="left", padx=(10, 0))
+        self.tagfix_api_indicator = tk.Label(api_status, text="●", fg="#d68a00")
+        self.tagfix_api_indicator.pack(side="left")
+        ttk.Label(api_status, textvariable=self.tagfix_api_status).pack(
+            side="left", padx=(4, 0)
+        )
 
         self.tagfix_progress = ttk.Progressbar(
             self.tagfix_tab, orient="horizontal", mode="determinate"
@@ -1433,6 +1442,7 @@ class SoundVaultImporterApp(tk.Tk):
         if self.library_path_var.get():
             self.scan_btn.config(state="normal")
         self._validate_threshold()
+        self._check_tagfix_api_status()
 
         # ─── Player Tab ────────────────────────────────────────────────
         self.player_tab = ttk.Frame(self.notebook)
@@ -2538,6 +2548,37 @@ class SoundVaultImporterApp(tk.Tk):
             save_last_path(folder)
             self.tagfix_folder_var.set(folder)
 
+    def _check_tagfix_api_status(self) -> None:
+        cfg = load_config()
+        service = cfg.get("metadata_service", "AcoustID")
+        self.tagfix_api_indicator.configure(fg="#d68a00")
+        self.tagfix_api_status.set(f"{service}: Checking…")
+
+        def worker() -> None:
+            ok, msg = self._test_metadata_service(service)
+
+            def done() -> None:
+                if not self.winfo_exists():
+                    return
+                color = "green" if ok else "red"
+                label = "Connected" if ok else (msg or "Unavailable")
+                self.tagfix_api_indicator.configure(fg=color)
+                self.tagfix_api_status.set(f"{service}: {label}")
+
+            self.after(0, done)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _test_metadata_service(self, service: str) -> tuple[bool, str]:
+        try:
+            if service == "MusicBrainz":
+                return MusicBrainzService().test_connection()
+            if service == "AcoustID":
+                return AcoustIDService().test_connection()
+            return False, "Not supported"
+        except Exception as exc:  # pragma: no cover - defensive UI guard
+            return False, str(exc)
+
     # ── Library Quality Helpers ───────────────────────────────────────
 
     def _browse_dup_folder(self) -> None:
@@ -3399,6 +3440,14 @@ class SoundVaultImporterApp(tk.Tk):
 
         frame = MetadataServiceConfigFrame(win)
         frame.pack(fill="both", expand=True, padx=10, pady=10)
+        win.bind(
+            "<Destroy>",
+            lambda e: (
+                self._check_tagfix_api_status()
+                if e.widget is win and self.winfo_exists()
+                else None
+            ),
+        )
         self._metadata_win = win
 
     def _on_exit(self) -> None:
