@@ -116,14 +116,35 @@ def bucket_by_tempo_energy(
         )
     playlists_dir = os.path.join(root_path, "Playlists")
     os.makedirs(playlists_dir, exist_ok=True)
+
+    # Cached results setup (mirrors clustering tools for faster re-runs)
+    docs_dir = os.path.join(root_path, "Docs")
+    os.makedirs(docs_dir, exist_ok=True)
+    cache_file = os.path.join(docs_dir, "tempo_energy.npy")
+    try:
+        cache = dict(np.load(cache_file, allow_pickle=True).item())
+        log_callback(f"→ Loaded {len(cache)} cached tempo/energy entries")
+    except FileNotFoundError:
+        cache = {}
+        log_callback("→ No tempo/energy cache found; analyzing all tracks")
+
     buckets: dict[tuple[str, str], list[str]] = {}
     processed = 0
+    updated_cache = False
     for path in tracks:
         if cancel_event and cancel_event.is_set():
             log_callback("! Bucket generation cancelled by user.")
             break
+        cached = cache.get(path)
         try:
-            tempo, rms = compute_tempo_energy(path, engine=engine)
+            if cached and cached.get("engine") == engine:
+                tempo = float(cached["tempo"])
+                rms = float(cached["rms"])
+                log_callback(f"• Using cached tempo/energy for {os.path.basename(path)}")
+            else:
+                tempo, rms = compute_tempo_energy(path, engine=engine)
+                cache[path] = {"engine": engine, "tempo": tempo, "rms": rms}
+                updated_cache = True
             tb = categorize_tempo(tempo)
             eb = categorize_energy(rms)
             buckets.setdefault((tb, eb), []).append(path)
@@ -132,6 +153,10 @@ def bucket_by_tempo_energy(
             log_callback(f"! Failed analysis for {path}: {e}")
         processed += 1
         progress_callback(processed)
+
+    if updated_cache:
+        np.save(cache_file, cache)
+        log_callback(f"✓ Saved tempo/energy cache ({len(cache)} entries) to {cache_file}")
     out_paths = {}
     for (tb, eb), items in buckets.items():
         outfile = os.path.join(playlists_dir, f"{tb}_{eb}.m3u")
