@@ -128,40 +128,64 @@ def bucket_by_tempo_energy(
         cache = {}
         log_callback("→ No tempo/energy cache found; analyzing all tracks")
 
+    # Normalize cache keys to absolute paths so repeated runs can reuse results
+    # even if callers pass in different path representations.
+    normalized_cache: dict[str, dict] = {}
+    for key, value in cache.items():
+        abs_key = os.path.abspath(os.fspath(key))
+        normalized_cache[abs_key] = value
+    cache_normalized_changed = cache != normalized_cache
+    cache = normalized_cache
+
     buckets: dict[tuple[str, str], list[str]] = {}
     processed = 0
-    updated_cache = False
+    updated_cache = cache_normalized_changed
+
+    normalized_tracks: list[tuple[str, str]] = []
     for path in tracks:
         try:
-            path = os.fspath(path)
+            path_str = os.fspath(path)
         except TypeError:
             # Handle unexpected iterable inputs (e.g., lists from GUI selections)
             if isinstance(path, (list, tuple)) and path:
-                path = os.fspath(path[0])
+                path_str = os.fspath(path[0])
             else:
                 log_callback(f"! Skipping unsupported path value: {path!r}")
                 processed += 1
                 progress_callback(processed)
                 continue
+        normalized_tracks.append((path_str, os.path.abspath(path_str)))
+
+    all_cached = bool(normalized_tracks) and all(
+        (entry := cache.get(abs_path)) and entry.get("engine") == engine
+        for _, abs_path in normalized_tracks
+    )
+    if all_cached:
+        log_callback(
+            f"→ All {len(normalized_tracks)} tracks already cached with engine='{engine}'. Skipping re-analysis."
+        )
+
+    for path_str, cache_key in normalized_tracks:
         if cancel_event and cancel_event.is_set():
             log_callback("! Bucket generation cancelled by user.")
             break
-        cached = cache.get(path)
+        cached = cache.get(cache_key)
         try:
             if cached and cached.get("engine") == engine:
                 tempo = float(cached["tempo"])
                 rms = float(cached["rms"])
-                log_callback(f"• Using cached tempo/energy for {os.path.basename(path)}")
+                if not all_cached:
+                    log_callback(f"• Using cached tempo/energy for {os.path.basename(path_str)}")
             else:
-                tempo, rms = compute_tempo_energy(path, engine=engine)
-                cache[path] = {"engine": engine, "tempo": tempo, "rms": rms}
+                tempo, rms = compute_tempo_energy(path_str, engine=engine)
+                cache[cache_key] = {"engine": engine, "tempo": tempo, "rms": rms}
                 updated_cache = True
             tb = categorize_tempo(tempo)
             eb = categorize_energy(rms)
-            buckets.setdefault((tb, eb), []).append(path)
-            log_callback(f"• {os.path.basename(path)} → {tb}/{eb}")
+            buckets.setdefault((tb, eb), []).append(path_str)
+            log_callback(f"• {os.path.basename(path_str)} → {tb}/{eb}")
         except Exception as e:
-            log_callback(f"! Failed analysis for {path}: {e}")
+            log_callback(f"! Failed analysis for {path_str}: {e}")
         processed += 1
         progress_callback(processed)
 
