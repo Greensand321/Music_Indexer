@@ -32,6 +32,7 @@ from unsorted_popup import UnsortedPopup
 from tkinter.scrolledtext import ScrolledText
 import textwrap
 import time
+from datetime import datetime
 
 from validator import validate_soundvault_structure
 from music_indexer_api import (
@@ -82,6 +83,7 @@ from config import load_config, save_config, DEFAULT_FP_THRESHOLDS
 import playlist_engine
 from playlist_engine import bucket_by_tempo_energy, autodj_playlist
 from controllers.cluster_controller import gather_tracks
+from playlist_generator import write_playlist
 
 FilterFn = Callable[[FileRecord], bool]
 _cached_filters = None
@@ -1259,6 +1261,11 @@ class SoundVaultImporterApp(tk.Tk):
         self._player_load_thread: threading.Thread | None = None
         self.player_art_image: ImageTk.PhotoImage | None = None
         self.player_search_var = tk.StringVar(value="")
+        self.player_temp_playlist: list[str] = []
+        self.player_playlist_status_var = tk.StringVar(
+            value="No songs in the playlist builder yet."
+        )
+        self.player_playlist_listbox: tk.Listbox | None = None
 
         # assume ffmpeg is available without performing checks
         self.ffmpeg_available = True
@@ -1731,6 +1738,51 @@ class SoundVaultImporterApp(tk.Tk):
         self.player_art_caption.pack(fill="x")
         self._update_player_art(None)
 
+        playlist_box = ttk.LabelFrame(art_panel, text="Playlist Builder")
+        playlist_box.pack(fill="both", expand=True, pady=(10, 0))
+        ttk.Label(
+            playlist_box, textvariable=self.player_playlist_status_var
+        ).pack(anchor="w", padx=5, pady=(5, 2))
+
+        pl_list_frame = ttk.Frame(playlist_box)
+        pl_list_frame.pack(fill="both", expand=True, padx=5)
+        pl_scroll = ttk.Scrollbar(pl_list_frame, orient="vertical")
+        self.player_playlist_listbox = tk.Listbox(
+            pl_list_frame,
+            selectmode="extended",
+            height=10,
+            yscrollcommand=pl_scroll.set,
+        )
+        self.player_playlist_listbox.pack(side="left", fill="both", expand=True)
+        pl_scroll.config(command=self.player_playlist_listbox.yview)
+        pl_scroll.pack(side="right", fill="y")
+
+        btn_row1 = ttk.Frame(playlist_box)
+        btn_row1.pack(fill="x", padx=5, pady=(5, 0))
+        ttk.Button(
+            btn_row1, text="Add Selected", command=self._player_add_selection_to_temp
+        ).pack(side="left", expand=True, fill="x")
+        ttk.Button(
+            btn_row1,
+            text="Remove Selected",
+            command=self._player_remove_selected_from_temp,
+        ).pack(side="left", expand=True, fill="x", padx=(5, 0))
+
+        btn_row2 = ttk.Frame(playlist_box)
+        btn_row2.pack(fill="x", padx=5, pady=(5, 5))
+        ttk.Button(btn_row2, text="Clear", command=self._player_clear_temp_playlist).pack(
+            side="left", fill="x"
+        )
+        ttk.Button(
+            btn_row2, text="Save Playlist", command=self._player_save_temp_playlist
+        ).pack(side="left", expand=True, fill="x", padx=(5, 0))
+        ttk.Button(
+            btn_row2,
+            text="Current Playlists",
+            command=self._player_show_current_playlists,
+        ).pack(side="left", expand=True, fill="x", padx=(5, 0))
+        self._sync_player_playlist()
+
         # ─── Library Sync Tab ─────────────────────────────────────────────
         self.sync_tab = ttk.Frame(self.notebook)
         self.notebook.add(self.sync_tab, text="Library Sync")
@@ -1883,6 +1935,8 @@ class SoundVaultImporterApp(tk.Tk):
         self._load_genre_mapping()
         if hasattr(self, "player_search_var"):
             self.player_search_var.set("")
+        if hasattr(self, "player_playlist_listbox"):
+            self._player_set_temp_playlist([])
         # Clear any cached clustering data when switching libraries
         self.cluster_data = None
         self.cluster_manager = None
@@ -3355,6 +3409,142 @@ class SoundVaultImporterApp(tk.Tk):
         else:
             caption = "Select a track to view album art"
         self.player_art_caption.configure(text=caption, wraplength=size + 20)
+
+    def _get_selected_player_paths(self) -> list[str]:
+        if not hasattr(self, "player_tree"):
+            return []
+        selection = self.player_tree.selection()
+        return [
+            self.player_tree_paths[item]
+            for item in selection
+            if item in self.player_tree_paths
+        ]
+
+    def _player_set_temp_playlist(self, tracks: list[str]) -> None:
+        self.player_temp_playlist = list(dict.fromkeys(tracks))
+        self._sync_player_playlist()
+
+    def _sync_player_playlist(self) -> None:
+        if self.player_playlist_listbox is None:
+            return
+        self.player_playlist_listbox.delete(0, tk.END)
+        for path in self.player_temp_playlist:
+            self.player_playlist_listbox.insert(tk.END, os.path.basename(path))
+
+        count = len(self.player_temp_playlist)
+        suffix = "song" if count == 1 else "songs"
+        self.player_playlist_status_var.set(f"Playlist builder items: {count} {suffix}")
+
+    def _player_add_selection_to_temp(self) -> None:
+        selected_paths = self._get_selected_player_paths()
+        if not selected_paths:
+            messagebox.showinfo(
+                "Playlist Builder", "Select one or more songs to add first."
+            )
+            return
+
+        combined = list(self.player_temp_playlist)
+        for path in selected_paths:
+            if path not in combined:
+                combined.append(path)
+        self._player_set_temp_playlist(combined)
+
+    def _player_remove_selected_from_temp(self) -> None:
+        if self.player_playlist_listbox is None:
+            return
+        selected = list(self.player_playlist_listbox.curselection())
+        if not selected:
+            messagebox.showinfo("Playlist Builder", "Select songs in the list to remove.")
+            return
+
+        remaining = [
+            track for i, track in enumerate(self.player_temp_playlist) if i not in selected
+        ]
+        self._player_set_temp_playlist(remaining)
+
+    def _player_clear_temp_playlist(self) -> None:
+        if not self.player_temp_playlist:
+            return
+        self._player_set_temp_playlist([])
+
+    def _player_save_temp_playlist(self) -> None:
+        if not self.player_temp_playlist:
+            messagebox.showinfo("Playlist Builder", "Add songs before saving a playlist.")
+            return
+        if not self.library_path:
+            messagebox.showwarning("No Library", "Select a library before saving.")
+            return
+
+        outfile = self._player_prompt_playlist_destination()
+        if not outfile:
+            return
+
+        try:
+            write_playlist(self.player_temp_playlist, outfile)
+        except Exception as exc:
+            messagebox.showerror("Playlist", f"Failed to save playlist: {exc}")
+            return
+
+        messagebox.showinfo("Playlist", f"Playlist saved to {outfile}")
+        self._open_folder(os.path.dirname(outfile))
+
+    def _player_prompt_playlist_destination(self) -> str | None:
+        playlists_dir = os.path.join(self.library_path, "Playlists")
+        os.makedirs(playlists_dir, exist_ok=True)
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        default_name = f"PlayerSelection_{ts}.m3u"
+
+        chosen = filedialog.asksaveasfilename(
+            parent=self,
+            title="Save Playlist As",
+            defaultextension=".m3u",
+            initialdir=playlists_dir,
+            initialfile=default_name,
+            filetypes=[("M3U Playlist", "*.m3u"), ("All Files", "*.*")],
+        )
+
+        if not chosen:
+            return None
+
+        return os.path.join(playlists_dir, os.path.basename(chosen))
+
+    def _player_show_current_playlists(self) -> None:
+        if not self.library_path:
+            messagebox.showwarning("No Library", "Select a library first.")
+            return
+
+        playlists_dir = os.path.join(self.library_path, "Playlists")
+        if not os.path.isdir(playlists_dir):
+            messagebox.showinfo(
+                "Playlists", "No playlists folder found yet. Save one to get started."
+            )
+            return
+        try:
+            entries = [
+                f
+                for f in os.listdir(playlists_dir)
+                if os.path.isfile(os.path.join(playlists_dir, f))
+            ]
+        except OSError as exc:
+            messagebox.showerror("Playlists", f"Could not read folder: {exc}")
+            return
+
+        if not entries:
+            messagebox.showinfo("Playlists", "No playlists found.")
+            return
+
+        messagebox.showinfo("Playlists", "\n".join(sorted(entries)))
+
+    def _open_folder(self, path: str) -> None:
+        try:
+            if sys.platform == "win32":
+                os.startfile(path)  # type: ignore[attr-defined]
+            elif sys.platform == "darwin":
+                subprocess.run(["open", path], check=False)
+            else:
+                subprocess.run(["xdg-open", path], check=False)
+        except Exception as exc:
+            messagebox.showerror("Open Folder", f"Could not open {path}: {exc}")
 
     def populate_quality_table(self, matches):
         self.clear_quality_view()
