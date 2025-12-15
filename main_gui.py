@@ -44,7 +44,6 @@ import simple_duplicate_finder as sdf_mod
 import fingerprint_cache
 import chromaprint_utils
 from controllers.library_index_controller import generate_index
-from controllers.genre_list_controller import list_unique_genres
 from controllers.scan_progress_controller import ScanProgressController
 from gui.audio_preview import PlaybackError, VlcPreviewPlayer
 from io import BytesIO
@@ -1337,10 +1336,6 @@ class SoundVaultImporterApp(tk.Tk):
         tools_menu.add_command(
             label="Generate Library Index…",
             command=lambda: generate_index(self.require_library()),
-        )
-        tools_menu.add_command(
-            label="List Unique Genres…",
-            command=lambda: list_unique_genres(self.require_library()),
         )
         tools_menu.add_separator()
         tools_menu.add_command(label="Reset Tag-Fix Log", command=self.reset_tagfix_log)

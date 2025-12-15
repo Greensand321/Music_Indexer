@@ -150,94 +150,7 @@ faster. Schema upgrades are handled automatically.</p>
 
 <hr>
 
-<h3>2.4 Unique Genre Lister (<code>genre_list_controller.py</code>)</h3>
-<p>Scans a folder for audio files and builds a deduplicated, sorted list of all <code>genre</code> tags found. Writes <code>genres.html</code> so you can review every raw genre:</p>
-
-<pre><code>
-#!/usr/bin/env python3
-"""
-genre_list_controller.py
-
-Scan audio files, extract their genre tags, deduplicate them and output genres.html.
-"""
-
-import os
-import sys
-import tkinter as tk
-from tkinter import filedialog
-from mutagen import File as MutagenFile
-
-SUPPORTED_EXTS = {".flac", ".m4a", ".aac", ".mp3", ".wav", ".ogg"}
-
-def sanitize(text: str) -> str:
-    # Escape HTML: &lt;, &gt;, &amp;
-    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-
-def extract_genre(filepath: str) -> str:
-    """
-    Return the first 'genre' tag (string) from the audio file, or None.
-    """
-    try:
-        audio = MutagenFile(filepath, easy=True)
-        if not audio or not audio.tags:
-            return None
-        raw = audio.tags.get("genre", [None])[0]
-        if raw:
-            return raw.strip()
-        return None
-    except Exception:
-        return None
-
-def gather_unique_genres(root_path: str) -> set:
-    unique = set()
-    for dirpath, _, filenames in os.walk(root_path):
-        for fname in filenames:
-            ext = os.path.splitext(fname)[1].lower()
-            if ext in SUPPORTED_EXTS:
-                fullpath = os.path.join(dirpath, fname)
-                genre = extract_genre(fullpath)
-                if genre:
-                    unique.add(genre)
-    return unique
-
-def write_genres_html(root_path: str, genres: set, output_filename: str = "genres.html"):
-    sorted_genres = sorted(genres, key=lambda s: s.lower())
-    lines = []
-    lines.append("<!DOCTYPE html>")
-    lines.append("<html lang='en'>")
-    lines.append("<head><meta charset='UTF-8'><title>Unique Genres</title>")
-    lines.append("<style>body { font-family: Arial, sans-serif; background: #f7f7f7; color: #333; } ul { list-style: none; padding-left: 0; } li { margin: 4px 0; }</style>")
-    lines.append("</head><body>")
-    lines.append(f"<h1>Unique Genres in “{sanitize(os.path.basename(root_path) or root_path)}”</h1>")
-    lines.append("<ul>")
-    if sorted_genres:
-        for genre in sorted_genres:
-            lines.append(f"<li>{sanitize(genre)}</li>")
-    else:
-        lines.append("<li><em>No genre tags found</em></li>")
-    lines.append("</ul>")
-    lines.append("</body></html>")
-
-    out_path = os.path.join(root_path, output_filename)
-    with open(out_path, "w", encoding="utf-8") as f:
-        f.write("\n".join(lines))
-
-def main():
-    root = tk.Tk()
-    root.withdraw()
-    folder = filedialog.askdirectory(title="Select Folder to Scan for Genres")
-    if not folder:
-        sys.exit(0)
-    genres = gather_unique_genres(folder)
-    write_genres_html(folder, genres)
-
-if __name__ == "__main__":
-    main()
-</code></pre>
-
-<hr>
-
-<h3>2.5 Genre Updater via MusicBrainz (<code>update_genres.py</code>)</h3>
+<h3>2.4 Genre Updater via MusicBrainz (<code>update_genres.py</code>)</h3>
 <p>Walks your music folder, reads each file’s <code>artist</code> and <code>title</code>, queries MusicBrainz for a matching recording, grabs the top 3 tags by popularity, and writes them back into each file’s <code>genre</code> field. Logs all actions into <code>genre_update_log.txt</code>. Rate-limited at 1 request/second.</p>
 
 <pre><code>
@@ -624,8 +537,8 @@ if __name__ == "__main__":
   <li><strong>Indexer</strong>: Fully implemented as <code>music_indexer_api.py</code>, tested on sample folders. It correctly reorganizes by artist, year, album, singles, and remixes, preserving cover-art groups.</li>
   <li><strong>Fingerprint Generator</strong>: <code>fingerprint_generator.py</code> stores AcoustID hashes for each track.</li>
   <li><strong>Fingerprint Cache</strong>: <code>fingerprint_cache.py</code> keeps computed fingerprints in SQLite.</li>
-  <li><strong>Unique Genre Lister</strong>: <code>genre_list_controller.py</code> creates <code>genres.html</code> showing all distinct raw genre tags in one place.</li>
   <li><strong>Genre Updater</strong>: <code>update_genres.py</code> connects to MusicBrainz, pulls top 3 tags per track, and writes them into files—skipping files that already have ≥ 2 genres.</li>
+  <li><strong>Genre Normalizer</strong>: <code>normalize_controller.py</code> scans raw genre tags, suggests clean mappings, and writes normalized genres back to your files.</li>
   <li><strong>Library Index</strong>: <code>library_index_controller.py</code> builds <code>library_index.html</code>, a table listing path, artist, title, album, year, track, and genre(s) for every audio file. Useful for quick review.</li>
   <li><strong>Near-Duplicate Detector</strong>: integrated into <code>music_indexer_api.py</code> to remove fuzzy duplicates.</li>
   <li><strong>Clustered Playlists</strong>: interactive K-Means and HDBSCAN clustering with a graph-based panel.</li>
@@ -719,7 +632,6 @@ soundvault/
   gui/
     main_gui.py
   controllers/
-    genre_list_controller.py
     library_index_controller.py
     import_controller.py
     tagfix_controller.py
