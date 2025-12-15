@@ -229,6 +229,8 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
         genre_vars: dict[str, tk.BooleanVar] = {}
         current_buckets: dict[str, list[str]] = {}
         planned_paths: dict[str, str] = {}
+        norm_status = tk.StringVar(value="Select a library to enable normalization.")
+        norm_btn: ttk.Button | None = None
 
         def append_log(msg: str) -> None:
             log_box.configure(state="normal")
@@ -299,6 +301,15 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
             )
             select_all_btn.config(state="normal" if has_results and ready else "disabled")
             select_none_btn.config(state="normal" if has_results and ready else "disabled")
+            norm_status.set(
+                os.path.join(app.library_path, ".genre_mapping.json")
+                if app.library_path
+                else "Select a library to enable normalization."
+            )
+            if norm_btn:
+                norm_btn.config(
+                    state="normal" if app.library_path and not running.get() else "disabled"
+                )
 
         def open_path(path: str) -> None:
             if not path:
@@ -434,7 +445,15 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
             os.makedirs(path, exist_ok=True)
             open_path(path)
 
-        info = ttk.Frame(frame)
+        paned = ttk.Panedwindow(frame, orient="horizontal")
+        paned.pack(fill="both", expand=True)
+
+        main_area = ttk.Frame(paned)
+        side_panel = ttk.Frame(paned, width=280)
+        paned.add(main_area, weight=3)
+        paned.add(side_panel, weight=2)
+
+        info = ttk.Frame(main_area)
         info.pack(fill="x", pady=(0, 6))
         ttk.Label(info, textvariable=lib_var).pack(side="left")
         open_btn = ttk.Button(info, text="Open Genre Playlists", command=open_genre_folder)
@@ -444,13 +463,13 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
         cancel_btn = ttk.Button(info, text="Cancel", command=cancel_run, state="disabled")
         cancel_btn.pack(side="right")
 
-        prog_frame = ttk.Frame(frame)
+        prog_frame = ttk.Frame(main_area)
         prog_frame.pack(fill="x", pady=(0, 6))
         progress = ttk.Progressbar(prog_frame, mode="determinate")
         progress.pack(fill="x")
         ttk.Label(prog_frame, textvariable=progress_var).pack(anchor="w")
 
-        selection_bar = ttk.Frame(frame)
+        selection_bar = ttk.Frame(main_area)
         selection_bar.pack(fill="x", pady=(0, 4))
         select_all_btn = ttk.Button(
             selection_bar, text="Select All", command=select_all, state="disabled"
@@ -468,7 +487,7 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
         )
         export_btn.pack(side="right")
 
-        stats_container = ttk.Frame(frame)
+        stats_container = ttk.Frame(main_area)
         stats_container.pack(fill="both", pady=(0, 6), expand=True)
         stats_canvas = tk.Canvas(stats_container, height=220)
         stats_scroll = ttk.Scrollbar(stats_container, orient="vertical", command=stats_canvas.yview)
@@ -483,9 +502,35 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
         stats_scroll.pack(side="right", fill="y")
         render_stats(None)
 
-        ttk.Label(frame, text="Activity Log:").pack(anchor="w")
-        log_box = ScrolledText(frame, height=10, wrap="word", state="disabled")
+        ttk.Label(main_area, text="Activity Log:").pack(anchor="w")
+        log_box = ScrolledText(main_area, height=10, wrap="word", state="disabled")
         log_box.pack(fill="both", expand=True)
+
+        # ── Genre Normalizer Side Panel ─────────────────────────────────
+        normalizer_box = ttk.LabelFrame(side_panel, text="Genre Normalizer")
+        normalizer_box.pack(fill="both", expand=True, padx=(10, 0))
+
+        ttk.Label(
+            normalizer_box,
+            text=(
+                "Create or edit a mapping file before exporting playlists. "
+                "The mapping will normalize genres during sorting."
+            ),
+            wraplength=240,
+            justify="left",
+        ).pack(fill="x", padx=8, pady=(8, 6))
+
+        ttk.Label(normalizer_box, text="Mapping file:").pack(anchor="w", padx=8)
+        ttk.Label(normalizer_box, textvariable=norm_status, wraplength=240).pack(
+            fill="x", padx=8
+        )
+
+        norm_btn = ttk.Button(
+            normalizer_box,
+            text="Open Genre Normalizer",
+            command=lambda: app._open_genre_normalizer(),
+        )
+        norm_btn.pack(pady=8, padx=8, anchor="e")
 
         update_controls()
 
@@ -1269,9 +1314,6 @@ class SoundVaultImporterApp(tk.Tk):
             command=lambda: list_unique_genres(self.require_library()),
         )
         tools_menu.add_separator()
-        tools_menu.add_command(
-            label="Genre Normalizer", command=self._open_genre_normalizer
-        )
         tools_menu.add_command(label="Reset Tag-Fix Log", command=self.reset_tagfix_log)
         menubar.add_cascade(label="Tools", menu=tools_menu)
 
