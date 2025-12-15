@@ -2411,6 +2411,7 @@ class SoundVaultImporterApp(tk.Tk):
         path = self.require_library()
         if not path:
             return
+        self.show_log_tab()
         threading.Thread(
             target=self._run_cluster_generation,
             args=(path, method, params, engine),
