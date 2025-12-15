@@ -1,6 +1,7 @@
 import logging
 import os
 import threading
+import time
 from typing import Optional
 
 
@@ -29,6 +30,7 @@ class VlcPreviewPlayer:
         self._player: Optional["vlc.MediaPlayer"] = None
         self._event_mgr = None
         self._is_playing = False
+        self._stop_timer: threading.Timer | None = None
         self._init_error: Exception | None = VLC_IMPORT_ERROR
         self._setup_player()
 
@@ -69,6 +71,9 @@ class VlcPreviewPlayer:
         with self._play_lock:
             if not self._player:
                 return
+            if self._stop_timer:
+                self._stop_timer.cancel()
+                self._stop_timer = None
             try:
                 self._logger.debug("Stopping VLC preview playback")
                 self._player.stop()
@@ -98,7 +103,18 @@ class VlcPreviewPlayer:
             )
             self._player.set_media(media)
             try:
+                # Start muted to avoid leaking audio before the preview offset.
+                self._player.audio_set_mute(True)
                 self._player.play()
+                threading.Thread(
+                    target=self._unmute_when_ready,
+                    daemon=True,
+                ).start()
+                if duration_ms > 0:
+                    self._stop_timer = threading.Timer(
+                        duration_ms / 1000, self.stop_preview
+                    )
+                    self._stop_timer.start()
             except Exception as exc:
                 self._is_playing = False
                 self._logger.exception("Failed to start VLC playback")
@@ -107,6 +123,8 @@ class VlcPreviewPlayer:
     def _handle_end(self, event=None) -> None:  # pragma: no cover - event driven
         with self._play_lock:
             self._is_playing = False
+            if self._stop_timer:
+                self._stop_timer = None
         self._logger.debug("VLC preview finished")
         if self._on_done:
             try:
@@ -117,9 +135,38 @@ class VlcPreviewPlayer:
     def _handle_error(self, event=None) -> None:  # pragma: no cover - event driven
         with self._play_lock:
             self._is_playing = False
+            if self._stop_timer:
+                self._stop_timer = None
         self._logger.error("VLC reported an error during preview playback")
         if self._on_done:
             try:
                 self._on_done()
             except Exception:
                 self._logger.exception("Error in preview error callback")
+
+    def _unmute_when_ready(self) -> None:
+        """Unmute once VLC has reached a stable playback state."""
+
+        if not self._player:
+            return
+
+        for _ in range(40):
+            with self._play_lock:
+                if not self._is_playing:
+                    return
+            state = self._player.get_state()
+            if state in (vlc.State.Playing, vlc.State.Paused):
+                break
+            time.sleep(0.025)
+
+        # Give VLC a brief moment to settle at the start-time offset.
+        time.sleep(0.05)
+
+        with self._play_lock:
+            if not self._is_playing:
+                return
+
+        try:
+            self._player.audio_set_mute(False)
+        except Exception:
+            self._logger.exception("Failed to unmute VLC preview")
