@@ -3,6 +3,8 @@ import threading
 from datetime import datetime
 
 import numpy as np
+import time
+import logging
 import tkinter as tk
 from tkinter import ttk, messagebox
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
@@ -17,6 +19,8 @@ from PIL import Image, ImageTk
 from mutagen import File as MutagenFile
 from music_indexer_api import get_tags
 
+logger = logging.getLogger(__name__)
+
 
 class ClusterGraphPanel(ttk.Frame):
     """Interactive scatter plot with lasso selection for playlist creation."""
@@ -25,24 +29,25 @@ class ClusterGraphPanel(ttk.Frame):
         self,
         parent,
         tracks,
-        features,
+        X: np.ndarray,
+        X2: np.ndarray,
         cluster_func,
         cluster_params,
+        cluster_manager,
+        algo_key: str,
         library_path,
         log_callback,
     ):
         super().__init__(parent)
         self.tracks = tracks
-        self.features = features
+        self.X = X
+        self.X2 = X2
         self.cluster_func = cluster_func
         self.cluster_params = cluster_params
         self.library_path = library_path
         self.log = log_callback
-
-        from sklearn.decomposition import PCA
-
-        self.X = np.vstack(features)
-        self.X2 = PCA(n_components=2).fit_transform(self.X)
+        self.cluster_manager = cluster_manager
+        self.algo_key = algo_key
 
         fig = Figure(figsize=(5, 5))
         self.ax = fig.add_subplot(111)
@@ -55,6 +60,7 @@ class ClusterGraphPanel(ttk.Frame):
         self._loading_lbl.pack(pady=10)
         self._clusters_ready = False
         self._cluster_thread: threading.Thread | None = None
+        self._cluster_start_ts: float | None = None
         self._start_clustering(cluster_params)
 
         self.lasso = None
@@ -82,7 +88,13 @@ class ClusterGraphPanel(ttk.Frame):
 
         def _worker():
             try:
-                labels = self.cluster_func(self.X, params)
+                cached = self.cluster_manager.get_cached_labels(self.algo_key, params)
+                if cached is None:
+                    labels = self.cluster_manager.compute_labels(
+                        self.algo_key, params, self.cluster_func
+                    )
+                else:
+                    labels = cached
             except Exception as exc:  # pragma: no cover - defensive path for GUI
                 self.after(0, lambda: self.log(f"\u2717 Clustering failed: {exc}"))
                 return
@@ -91,10 +103,17 @@ class ClusterGraphPanel(ttk.Frame):
         if self._cluster_thread and self._cluster_thread.is_alive():
             return
 
+        cached = self.cluster_manager.get_cached_labels(self.algo_key, params)
+        if cached is not None:
+            self._on_clusters_ready(cached, params)
+            return
+
         self._clusters_ready = False
         self._sync_controls()
         self._loading_var.set("Running clustering …")
         self._loading_lbl.pack(pady=10)
+        self._cluster_start_ts = time.perf_counter()
+        logger.info("[perf] start clustering %s params=%s", self.algo_key, params)
         self._cluster_thread = threading.Thread(target=_worker, daemon=True)
         self._cluster_thread.start()
 
@@ -269,22 +288,32 @@ class ClusterGraphPanel(ttk.Frame):
     def _draw_clusters(self, labels):
         point_colors, self.label_colors = self._compute_colors(labels)
         self.labels = labels
-        self.ax.clear()
-        self.scatter = self.ax.scatter(
-            self.X2[:, 0],
-            self.X2[:, 1],
-            c=point_colors,
-            s=20,
-        )
-        self.ax.set_title("Lasso to select & generate playlist")
+        if self.scatter is None:
+            self.scatter = self.ax.scatter(
+                self.X2[:, 0],
+                self.X2[:, 1],
+                c=point_colors,
+                s=20,
+            )
+            self.ax.set_title("Lasso to select & generate playlist")
+        else:
+            self.scatter.set_offsets(self.X2)
+            self.scatter.set_color(point_colors)
         self.canvas.draw_idle()
 
     def _on_clusters_ready(self, labels, params: dict):
+        duration_ms = None
+        if self._cluster_start_ts is not None:
+            duration_ms = (time.perf_counter() - self._cluster_start_ts) * 1000
         self.cluster_params = params
         self._clusters_ready = True
         if self._loading_lbl.winfo_exists():
             self._loading_lbl.pack_forget()
         self._draw_clusters(labels)
+        if duration_ms is not None:
+            logger.info(
+                "[perf] clusters ready (%s) in %.1f ms", self.algo_key, duration_ms
+            )
         self._sync_controls()
 
     def recluster(self, params: dict):
