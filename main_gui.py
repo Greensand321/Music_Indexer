@@ -721,7 +721,21 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
             if running.get():
                 frame.after(200, poll_queue)
 
-        info = ttk.LabelFrame(frame, text="Tempo/Energy Buckets")
+        canvas = tk.Canvas(frame)
+        scrollbar = ttk.Scrollbar(frame, orient="vertical", command=canvas.yview)
+        content = ttk.Frame(canvas)
+
+        content.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all")),
+        )
+        canvas.create_window((0, 0), window=content, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        info = ttk.LabelFrame(content, text="Tempo/Energy Buckets")
         info.pack(fill="x", padx=10, pady=(5, 10))
         ttk.Label(info, textvariable=lib_var).pack(anchor="w", padx=5, pady=(5, 0))
         ttk.Label(info, textvariable=dep_status, wraplength=360).pack(
@@ -752,7 +766,7 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
         link.pack(anchor="w", padx=5, pady=(0, 5))
         link.bind("<Button-1>", open_instructions)
 
-        controls = ttk.Frame(frame)
+        controls = ttk.Frame(content)
         controls.pack(fill="x", padx=10)
         run_btn = ttk.Button(controls, text="Generate Buckets", command=start_run)
         run_btn.pack(side="left")
@@ -766,16 +780,16 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
             command=update_controls,
         ).pack(side="right")
 
-        progress = ttk.Progressbar(frame, mode="determinate")
+        progress = ttk.Progressbar(content, mode="determinate")
         progress.pack(fill="x", padx=10, pady=(10, 0))
-        ttk.Label(frame, textvariable=progress_var).pack(anchor="w", padx=12)
+        ttk.Label(content, textvariable=progress_var).pack(anchor="w", padx=12)
 
-        log_group = ttk.LabelFrame(frame, text="Run Log")
+        log_group = ttk.LabelFrame(content, text="Run Log")
         log_group.pack(fill="both", expand=False, padx=10, pady=(10, 0))
         log_box = ScrolledText(log_group, height=8, state="disabled")
         log_box.pack(fill="both", expand=True, padx=5, pady=5)
 
-        stats_group = ttk.LabelFrame(frame, text="Bucket Summary")
+        stats_group = ttk.LabelFrame(content, text="Bucket Summary")
         stats_group.pack(fill="both", expand=True, padx=10, pady=(10, 10))
         stats_rows = ttk.Frame(stats_group)
         stats_rows.pack(fill="both", expand=True)
