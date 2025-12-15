@@ -8,7 +8,7 @@ import numpy as np
 import time
 import logging
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, filedialog
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
 from matplotlib.widgets import LassoSelector
@@ -267,22 +267,18 @@ class ClusterGraphPanel(ttk.Frame):
             self.log("\u26a0 No songs selected")
             return
 
-        playlists_dir = os.path.join(self.library_path, "Playlists")
-        os.makedirs(playlists_dir, exist_ok=True)
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        base = os.path.join(playlists_dir, f"CustomLasso_{ts}.m3u")
-        out = base
-        idx = 1
-        while os.path.exists(out):
-            out = base.replace(".m3u", f"_{idx}.m3u")
-            idx += 1
+        outfile = self._prompt_playlist_destination("CustomLasso")
+        if not outfile:
+            self.log("\u26a0 Playlist save cancelled")
+            return
 
         try:
-            write_playlist(self.selected_tracks, out)
+            write_playlist(self.selected_tracks, outfile)
         except Exception as e:  # pragma: no cover - simple GUI log
             self.log(f"\u2717 Failed to write playlist: {e}")
         else:
-            self.log(f"\u2713 Playlist written: {out}")
+            self.log(f"\u2713 Playlist written: {outfile}")
+            self._open_folder(os.path.dirname(outfile))
             self.gen_btn.configure(state="disabled")
 
     def create_temp_playlist(self):
@@ -291,10 +287,10 @@ class ClusterGraphPanel(ttk.Frame):
             self.log("\u26a0 No songs in temporary playlist")
             return
 
-        playlists_dir = os.path.join(self.library_path, "Playlists")
-        os.makedirs(playlists_dir, exist_ok=True)
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        outfile = os.path.join(playlists_dir, f"ClusterSelection_{ts}.m3u")
+        outfile = self._prompt_playlist_destination("ClusterSelection")
+        if not outfile:
+            self.log("\u26a0 Playlist save cancelled")
+            return
         try:
             write_playlist(self.temp_playlist, outfile)
         except Exception as exc:  # pragma: no cover - GUI log
@@ -302,7 +298,29 @@ class ClusterGraphPanel(ttk.Frame):
             return
 
         self.log(f"\u2713 Playlist written: {outfile}")
-        self._open_folder(playlists_dir)
+        self._open_folder(os.path.dirname(outfile))
+
+    def _prompt_playlist_destination(self, default_prefix: str) -> str | None:
+        """Open a save dialog and return the chosen playlist path in Playlists."""
+
+        playlists_dir = os.path.join(self.library_path, "Playlists")
+        os.makedirs(playlists_dir, exist_ok=True)
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        default_name = f"{default_prefix}_{ts}.m3u"
+
+        chosen = filedialog.asksaveasfilename(
+            parent=self,
+            title="Save Playlist As",
+            defaultextension=".m3u",
+            initialdir=playlists_dir,
+            initialfile=default_name,
+            filetypes=[("M3U Playlist", "*.m3u"), ("All Files", "*.*")],
+        )
+
+        if not chosen:
+            return None
+
+        return os.path.join(playlists_dir, os.path.basename(chosen))
 
     def _open_folder(self, path: str) -> None:
         """Open ``path`` with the platform default file browser."""
