@@ -30,6 +30,26 @@ module. Make sure the Music Indexer package itself is installed (e.g.
 `pip install .`) so this dependency is available when running the Quality
 Checker.
 
+### Optional: Essentia audio engine
+
+Essentia can be used instead of `librosa` for tempo and feature extraction. It
+is optional—stick with `librosa` if you don't need it—but enables faster C++
+implementations when available.
+
+- **Prerequisites** (Linux builds compile C++ code and can take several
+  minutes):
+  - Debian/Ubuntu: `sudo apt-get install build-essential libfftw3-dev liblapack-dev libblas-dev libyaml-dev libtag1-dev libchromaprint-dev libsamplerate0-dev libavcodec-dev libavformat-dev libavutil-dev libavresample-dev`
+  - macOS: `brew install essentia` (installs prebuilt formula with dependencies)
+  - Windows: no official wheel; use WSL/Linux if you need Essentia.
+- **Install** (after prerequisites):
+  ```bash
+  pip install essentia==2.1b6
+  ```
+
+Expect longer build times on Linux the first time you install Essentia. If you
+prefer the pure-Python stack, you can continue using `librosa` without this
+extra dependency.
+
 ## Quickstart
 
 ```bash
