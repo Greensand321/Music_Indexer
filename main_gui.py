@@ -636,6 +636,18 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
             messagebox.showinfo("Playlist Saved", f"Playlist saved to {chosen}")
             open_path(os.path.dirname(chosen))
 
+        def preview_bucket(bucket_key: tuple[str, str]) -> None:
+            tracks = bucket_tracks.get(bucket_key)
+            if not tracks:
+                messagebox.showinfo(
+                    "Playlist Preview", "No tracks available for this bucket yet."
+                )
+                return
+
+            app.preview_tracks_in_player(
+                tracks, f"{bucket_key[0].title()} / {bucket_key[1].title()}"
+            )
+
         def render_stats(result: dict | None):
             nonlocal bucket_result, bucket_tracks
             bucket_result = result
@@ -667,7 +679,7 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
                 ttk.Button(
                     row,
                     text="Open",
-                    command=lambda p=playlist_path: open_path(p),
+                    command=lambda key=(tb, eb): preview_bucket(key),
                 ).pack(side="left", padx=(0, 5))
                 ttk.Button(
                     row,
@@ -749,12 +761,6 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
                         progress_var.set(
                             f"{status} – processed {payload.get('processed')} of {payload.get('total')} tracks"
                         )
-                        if (
-                            not payload.get("cancelled")
-                            and playlists_dir
-                            and payload.get("buckets")
-                        ):
-                            open_path(playlists_dir)
                         update_controls()
                     elif tag == "error":
                         running.set(False)
@@ -1339,6 +1345,7 @@ class SoundVaultImporterApp(tk.Tk):
             value="No songs in the playlist builder yet."
         )
         self.player_playlist_listbox: tk.Listbox | None = None
+        self.player_view_label: str | None = None
 
         # assume ffmpeg is available without performing checks
         self.ffmpeg_available = True
@@ -3723,6 +3730,25 @@ class SoundVaultImporterApp(tk.Tk):
         self.player_tree_rows.clear()
         self._update_player_art(None)
 
+    def _prepare_player_rows(self, tracks: list[str]) -> list[dict[str, str]]:
+        rows = []
+        for path in tracks:
+            tags = get_tags(path)
+            title = tags.get("title") or os.path.basename(path)
+            artist = tags.get("artist") or "Unknown"
+            album = tags.get("album") or ""
+            length_sec = self._get_track_length(path)
+            rows.append(
+                {
+                    "title": title,
+                    "artist": artist,
+                    "album": album,
+                    "length": self._format_duration(length_sec),
+                    "path": path,
+                }
+            )
+        return rows
+
     def _format_duration(self, seconds: float | None) -> str:
         if not seconds:
             return "—"
@@ -3770,28 +3796,32 @@ class SoundVaultImporterApp(tk.Tk):
             self.after(0, lambda: self.player_reload_btn.config(state="normal"))
             return
 
-        rows = []
-        for path in tracks:
-            tags = get_tags(path)
-            title = tags.get("title") or os.path.basename(path)
-            artist = tags.get("artist") or "Unknown"
-            album = tags.get("album") or ""
-            length_sec = self._get_track_length(path)
-            rows.append(
-                {
-                    "title": title,
-                    "artist": artist,
-                    "album": album,
-                    "length": self._format_duration(length_sec),
-                    "path": path,
-                }
-            )
+        rows = self._prepare_player_rows(tracks)
 
         self.after(0, lambda: self._update_player_table(rows, library_path))
+
+    def preview_tracks_in_player(self, tracks: list[str], label: str) -> None:
+        if not tracks:
+            messagebox.showinfo("Playlist Preview", "No tracks available to preview.")
+            return
+
+        def worker() -> None:
+            rows = self._prepare_player_rows(tracks)
+            self.after(0, lambda: self._show_player_preview(rows, label))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _show_player_preview(self, rows: list[dict[str, str]], label: str) -> None:
+        self.player_view_label = f"Previewing {label}"
+        self.player_tracks = rows
+        self._apply_player_filter(total_count=len(rows))
+        if hasattr(self, "notebook"):
+            self.notebook.select(self.player_tab)
 
     def _update_player_table(self, rows: list[dict[str, str]], library_path: str) -> None:
         if library_path != self.library_path:
             return
+        self.player_view_label = f"Library – {os.path.basename(library_path)}"
         self.player_tracks = rows
         self._apply_player_filter(total_count=len(rows))
 
@@ -3845,11 +3875,12 @@ class SoundVaultImporterApp(tk.Tk):
         total = total_count if total_count is not None else len(rows)
         shown = len(rows)
         suffix = "track" if total == 1 else "tracks"
+        prefix = f"{self.player_view_label}. " if self.player_view_label else ""
         if not self.preview_backend_available:
             reason = self.preview_backend_error or "Install python-vlc to enable playback."
-            status = f"Loaded {total} {suffix}. Preview disabled: {reason}"
+            status = f"{prefix}Loaded {total} {suffix}. Preview disabled: {reason}"
         else:
-            status = f"Loaded {total} {suffix}. Click ▶ for a 30s highlight."
+            status = f"{prefix}Loaded {total} {suffix}. Click ▶ for a 30s highlight."
         if shown != total:
             status += f" Showing {shown} match{'es' if shown != 1 else ''}."
         self.player_status_var.set(status)
