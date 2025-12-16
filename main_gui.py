@@ -2742,15 +2742,15 @@ class SoundVaultImporterApp(tk.Tk):
             self.cluster_params = {"method": method, "engine": engine, **params}
             self.cluster_manager = ClusterComputationManager(tracks, feats, self._log)
 
-            for name in ("Interactive – KMeans", "Interactive – HDBSCAN"):
-                if name in self.plugin_views:
-                    try:
-                        self.plugin_views[name].destroy()
-                    except Exception:
-                        pass
-                    self.plugin_views.pop(name, None)
-
             def done():
+                for name in ("Interactive – KMeans", "Interactive – HDBSCAN"):
+                    if name in self.plugin_views:
+                        try:
+                            self.plugin_views[name].destroy()
+                        except Exception:
+                            pass
+                        self.plugin_views.pop(name, None)
+
                 self.cluster_generation_running = False
                 messagebox.showinfo("Clustered Playlists", "Generation complete")
                 self._refresh_plugin_panel()
