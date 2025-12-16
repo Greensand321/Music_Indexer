@@ -469,6 +469,25 @@ class ClusterGraphPanel(ttk.Frame):
 
         self._draw_clusters(labels)
 
+        def final_redraw():
+            try:
+                self.winfo_toplevel().update_idletasks()
+            except Exception:
+                pass
+
+            try:
+                self.canvas.resize_event()
+            except Exception:
+                pass
+
+            try:
+                self.canvas.draw_idle()
+            except Exception:
+                pass
+
+        self.after_idle(final_redraw)
+        self.after(30, final_redraw)
+
     def _sync_controls(self):
         """Enable/disable controls based on clustering readiness."""
         state = "normal" if self._clusters_ready else "disabled"
