@@ -931,34 +931,6 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
     graph_area.columnconfigure(0, weight=1)
 
     panel: ClusterGraphPanel | None = None
-    placeholder_text: str | None = None
-    cluster_generation_running = getattr(app, "cluster_generation_running", False)
-    cluster_ready = cluster_manager is not None and cluster_data is not None
-
-    if cluster_generation_running:
-        placeholder_text = "Clustering in progress…"
-    elif not cluster_ready:
-        placeholder_text = "Run clustering once first"
-    else:
-        X, X2 = cluster_manager.get_projection()
-
-        panel = ClusterGraphPanel(
-            graph_area,
-            tracks,
-            X,
-            X2,
-            cluster_func=km_func,
-            cluster_params=params,
-            cluster_manager=cluster_manager,
-            algo_key=algo_key,
-            library_path=app.library_path,
-            log_callback=app._log,
-        )
-        panel.grid(row=0, column=0, sticky="nsew", pady=(0, 5))
-
-    if placeholder_text:
-        placeholder = ttk.Label(graph_area, text=placeholder_text, anchor="center")
-        placeholder.grid(row=0, column=0, sticky="nsew")
 
     side_tools = ttk.Frame(container)
     side_tools.grid(row=0, column=1, rowspan=3, sticky="ns", padx=(10, 0))
@@ -987,7 +959,6 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
         side_tools,
         text="Current Playlists",
         command=lambda: panel and panel.show_current_playlists(),
-        state="normal" if panel is not None else "disabled",
     )
     playlist_btn.grid(row=1, column=0, sticky="ew", pady=(0, 10))
 
@@ -1002,7 +973,6 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
     cluster_combo = ttk.Combobox(
         cluster_box,
         textvariable=cluster_select_var,
-        state="readonly" if panel is not None else "disabled",
         width=10,
     )
     cluster_combo.grid(row=0, column=1, sticky="ew", padx=5, pady=(5, 2))
@@ -1015,7 +985,6 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
         cluster_box,
         textvariable=manual_cluster_var,
         width=10,
-        state="normal" if panel is not None else "disabled",
     )
     manual_entry.grid(row=1, column=1, sticky="ew", padx=5, pady=(0, 2))
 
@@ -1037,7 +1006,6 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
         cluster_box,
         text="Load Cluster",
         command=_load_cluster,
-        state="normal" if panel is not None else "disabled",
     )
     load_btn.grid(row=2, column=0, columnspan=2, sticky="ew", padx=5, pady=(0, 5))
 
@@ -1061,95 +1029,71 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
         height=12,
         selectmode="extended",
         yscrollcommand=temp_scroll.set,
-        state="normal" if panel is not None else "disabled",
     )
     temp_listbox.pack(side="left", fill="both", expand=True)
     temp_scroll.config(command=temp_listbox.yview)
     temp_scroll.pack(side="right", fill="y")
 
-    ttk.Button(
+    show_all_btn = ttk.Button(
         temp_box,
         text="Show All",
         command=lambda: panel and panel.highlight_temp_playlist(),
-        state="normal" if panel is not None else "disabled",
-    ).grid(row=1, column=0, sticky="ew", padx=5, pady=(0, 5))
+    )
+    show_all_btn.grid(row=1, column=0, sticky="ew", padx=5, pady=(0, 5))
 
-    ttk.Button(
+    add_highlight_btn = ttk.Button(
         temp_box,
         text="Add Highlighted Songs",
         command=lambda: panel and panel.add_highlight_to_temp(),
-        state="normal" if panel is not None else "disabled",
-    ).grid(row=2, column=0, sticky="ew", padx=5, pady=(0, 5))
+    )
+    add_highlight_btn.grid(row=2, column=0, sticky="ew", padx=5, pady=(0, 5))
 
     temp_remove_btn = ttk.Button(
         temp_box,
         text="Remove Selected",
         command=lambda: panel and panel.remove_selected_from_temp(),
-        state="normal" if panel is not None else "disabled",
     )
     temp_remove_btn.grid(row=3, column=0, sticky="ew", padx=5, pady=(0, 5))
 
-    ttk.Button(
+    create_playlist_btn = ttk.Button(
         temp_box,
         text="Create Playlist",
         command=lambda: panel and panel.create_temp_playlist(),
-        state="normal" if panel is not None else "disabled",
-    ).grid(row=4, column=0, sticky="ew", padx=5, pady=(0, 5))
-
-    if cluster_generation_running:
-        status.config(text="Clustering in progress…")
-        run_btn.state(["disabled"])
-    elif not cluster_ready:
-        status.config(text="Run clustering once first")
-    else:
-        status.config(text="Clusters loaded")
-
-    if panel is not None:
-        panel.cluster_select_var = cluster_select_var
-        panel.cluster_combo = cluster_combo
-        panel.manual_cluster_var = manual_cluster_var
-        panel.temp_status_var = temp_status_var
-        panel.temp_listbox = temp_listbox
-        panel.temp_remove_btn = temp_remove_btn
-        panel.refresh_control_states()
-        panel._refresh_cluster_options()
-
-    if panel is None:
-        return frame
+    )
+    create_playlist_btn.grid(row=4, column=0, sticky="ew", padx=5, pady=(0, 5))
 
     ttk.Separator(container, orient="horizontal").grid(row=1, column=0, sticky="ew")
 
     btn_frame = ttk.Frame(container)
     btn_frame.grid(row=2, column=0, sticky="ew", pady=5)
 
-    panel.lasso_var = tk.BooleanVar(value=False)
+    lasso_var = tk.BooleanVar(value=False)
 
     lasso_btn = ttk.Checkbutton(
         btn_frame,
         text="Lasso Mode",
-        variable=panel.lasso_var,
-        command=panel.toggle_lasso,
+        variable=lasso_var,
+        command=lambda: panel and panel.toggle_lasso(),
     )
     lasso_btn.pack(side="left")
-    panel.lasso_btn = lasso_btn
 
-    panel.ok_btn = ttk.Button(
+    ok_btn = ttk.Button(
         btn_frame,
         text="OK",
-        command=panel.finalize_lasso,
-        state="disabled",
+        command=lambda: panel and panel.finalize_lasso(),
     )
-    panel.ok_btn.pack(side="left", padx=(5, 0))
+    ok_btn.pack(side="left", padx=(5, 0))
 
-    panel.gen_btn = ttk.Button(
+    gen_btn = ttk.Button(
         btn_frame,
         text="Generate Playlist",
-        command=panel.create_playlist,
-        state="disabled",
+        command=lambda: panel and panel.create_playlist(),
     )
-    panel.gen_btn.pack(side="left", padx=(5, 0))
+    gen_btn.pack(side="left", padx=(5, 0))
 
     def _auto_create_all():
+        if panel is None or not getattr(panel, "cluster_params", None):
+            return
         method = panel.cluster_params.get("method")
         params = {
             k: v
@@ -1169,28 +1113,131 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
     auto_btn = ttk.Button(btn_frame, text="Auto-Create", command=_auto_create_all)
     auto_btn.pack(side="left", padx=(5, 0))
 
+    redo_btn: ttk.Button | None = None
     if name == "Interactive – HDBSCAN":
         redo_btn = ttk.Button(
-            btn_frame, text="Redo Values", command=panel.open_param_dialog
+            btn_frame, text="Redo Values", command=lambda: panel and panel.open_param_dialog()
         )
         redo_btn.pack(side="left", padx=(5, 0))
 
-    # ─── Hover Metadata Panel ────────────────────────────────────────────
-    hover_panel = ttk.Frame(panel, relief="solid", borderwidth=1)
-    art_lbl = tk.Label(hover_panel)
-    art_lbl.pack(side="left")
-    text_frame = ttk.Frame(hover_panel)
-    text_frame.pack(side="left", padx=5)
-    title_lbl = ttk.Label(text_frame, font=("TkDefaultFont", 10, "bold"))
-    title_lbl.pack(anchor="w")
-    artist_lbl = ttk.Label(text_frame, font=("TkDefaultFont", 8))
-    artist_lbl.pack(anchor="w")
-    hover_panel.place(relx=1.0, rely=1.0, anchor="se", x=-10, y=-10)
-    hover_panel.place_forget()
+    def _update_control_states():
+        running = getattr(app, "cluster_generation_running", False)
+        ready = panel is not None
 
-    panel.setup_hover(hover_panel, art_lbl, title_lbl, artist_lbl)
-    panel._refresh_cluster_options()
-    panel.refresh_control_states()
+        for widget in (
+            playlist_btn,
+            cluster_combo,
+            manual_entry,
+            load_btn,
+            temp_listbox,
+            show_all_btn,
+            add_highlight_btn,
+            temp_remove_btn,
+            create_playlist_btn,
+            lasso_btn,
+            ok_btn,
+            gen_btn,
+            auto_btn,
+        ):
+            widget_state = "normal" if ready and not running else "disabled"
+            widget.config(state=widget_state)
+
+        if redo_btn is not None:
+            redo_btn_state = "normal" if ready and not running else "disabled"
+            redo_btn.config(state=redo_btn_state)
+
+        run_btn.state(["disabled"] if running else ["!disabled"])
+
+        if running:
+            status.config(text="Clustering in progress…")
+        elif not ready:
+            status.config(text="Run clustering once first")
+        else:
+            status.config(text="Clusters loaded")
+
+    def refresh_graph_area():
+        nonlocal panel, cluster_manager, cluster_data
+
+        cluster_data = getattr(app, "cluster_data", None)
+        cluster_manager = getattr(app, "cluster_manager", None)
+        if cluster_data is None:
+            tracks_local = features_local = None
+        else:
+            tracks_local, features_local = cluster_data
+            if cluster_manager is None or getattr(cluster_manager, "tracks", None) != tracks_local:
+                app.cluster_manager = ClusterComputationManager(tracks_local, features_local, app._log)
+                cluster_manager = app.cluster_manager
+
+        cluster_generation_running = getattr(app, "cluster_generation_running", False)
+        cluster_ready = cluster_manager is not None and cluster_data is not None
+
+        for child in graph_area.winfo_children():
+            child.destroy()
+
+        panel = None
+        placeholder_text: str | None = None
+
+        if cluster_generation_running:
+            placeholder_text = "Clustering in progress…"
+        elif not cluster_ready:
+            placeholder_text = "Run clustering once first"
+        else:
+            X, X2 = cluster_manager.get_projection()
+
+            panel = ClusterGraphPanel(
+                graph_area,
+                tracks_local,
+                X,
+                X2,
+                cluster_func=km_func,
+                cluster_params=params,
+                cluster_manager=cluster_manager,
+                algo_key=algo_key,
+                library_path=app.library_path,
+                log_callback=app._log,
+            )
+            panel.grid(row=0, column=0, sticky="nsew", pady=(0, 5))
+
+        if placeholder_text:
+            overlay = ttk.Label(graph_area, text=placeholder_text, anchor="center")
+            overlay.grid(row=0, column=0, sticky="nsew")
+
+        if panel is not None:
+            panel.cluster_select_var = cluster_select_var
+            panel.cluster_combo = cluster_combo
+            panel.manual_cluster_var = manual_cluster_var
+            panel.temp_status_var = temp_status_var
+            panel.temp_listbox = temp_listbox
+            panel.temp_remove_btn = temp_remove_btn
+            panel.lasso_var = lasso_var
+            panel.lasso_btn = lasso_btn
+            panel.ok_btn = ok_btn
+            panel.gen_btn = gen_btn
+            panel.refresh_control_states()
+            panel._refresh_cluster_options()
+
+            hover_panel = ttk.Frame(panel, relief="solid", borderwidth=1)
+            art_lbl = tk.Label(hover_panel)
+            art_lbl.pack(side="left")
+            text_frame = ttk.Frame(hover_panel)
+            text_frame.pack(side="left", padx=5)
+            title_lbl = ttk.Label(text_frame, font=("TkDefaultFont", 10, "bold"))
+            title_lbl.pack(anchor="w")
+            artist_lbl = ttk.Label(text_frame, font=("TkDefaultFont", 8))
+            artist_lbl.pack(anchor="w")
+            hover_panel.place(relx=1.0, rely=1.0, anchor="se", x=-10, y=-10)
+            hover_panel.place_forget()
+
+            panel.setup_hover(hover_panel, art_lbl, title_lbl, artist_lbl)
+
+        _update_control_states()
+
+    refresh_graph_area()
+
+    def refresh_cluster_panel():
+        refresh_graph_area()
+
+    frame.refresh_cluster_panel = refresh_cluster_panel  # type: ignore[attr-defined]
 
     return frame
 
@@ -2698,8 +2745,13 @@ class SoundVaultImporterApp(tk.Tk):
         except tk.TclError:
             return
         if sel in self.plugin_views:
+            panel = self.plugin_views[sel]
+            refresh = getattr(panel, "refresh_cluster_panel", None)
+            if callable(refresh):
+                refresh()
+                return
             try:
-                self.plugin_views[sel].destroy()
+                panel.destroy()
             except Exception:
                 pass
             self.plugin_views.pop(sel, None)
