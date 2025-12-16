@@ -1419,6 +1419,7 @@ class SoundVaultImporterApp(tk.Tk):
         self.cluster_data = None
         self.cluster_manager = None
         self.cluster_generation_running = False
+        self.cluster_params = None
         self.folder_filter = {"include": [], "exclude": []}
 
         # Shared audio feature/analysis engine selection
@@ -1710,6 +1711,9 @@ class SoundVaultImporterApp(tk.Tk):
         ]:
             self.plugin_list.insert("end", name)
         self.plugin_list.bind("<<ListboxSelect>>", self.on_plugin_select)
+
+        self._select_default_plugin()
+        self.on_plugin_select(None)
 
         self.plugin_panel = ttk.Frame(self.playlist_tab)
         self.plugin_panel.grid(row=0, column=1, sticky="nsew", padx=10, pady=10)
@@ -2111,7 +2115,9 @@ class SoundVaultImporterApp(tk.Tk):
         try:
             sel = self.plugin_list.get(self.plugin_list.curselection())
         except tk.TclError:
-            return
+            sel = self._select_default_plugin()
+            if not sel:
+                return
         logging.info("[perf] tool switch -> %s", sel)
 
         if self.active_plugin and self.active_plugin in self.plugin_views:
@@ -2794,6 +2800,35 @@ class SoundVaultImporterApp(tk.Tk):
             self.plugin_views.pop(sel, None)
         self.active_plugin = None
         self.on_plugin_select(None)
+
+    def _select_default_plugin(self) -> str | None:
+        """Ensure a playlist plugin is selected and return its name."""
+        if not hasattr(self, "plugin_list"):
+            return None
+
+        preferred = None
+        method = (self.cluster_params or {}).get("method") if hasattr(self, "cluster_params") else None
+        if method == "hdbscan":
+            preferred = "Interactive – HDBSCAN"
+        elif method == "kmeans":
+            preferred = "Interactive – KMeans"
+
+        names = list(self.plugin_list.get(0, "end"))
+        if not preferred and names:
+            preferred = names[0]
+
+        if preferred is None:
+            return None
+
+        try:
+            self.plugin_list.selection_clear(0, "end")
+            index = names.index(preferred)
+            self.plugin_list.selection_set(index)
+            self.plugin_list.activate(index)
+            self.plugin_list.see(index)
+            return preferred
+        except (tk.TclError, ValueError):
+            return None
 
     def _tagfix_filter_dialog(self):
         dlg = tk.Toplevel(self)
