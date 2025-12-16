@@ -960,6 +960,10 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
     side_tools.columnconfigure(0, weight=1)
     side_tools.rowconfigure(3, weight=1)
 
+    # Keep the control column stable while the graph updates
+    side_tools.update_idletasks()
+    container.columnconfigure(1, minsize=side_tools.winfo_reqwidth())
+
     control_banner = ttk.Frame(side_tools)
     control_banner.grid(row=0, column=0, sticky="ew", pady=(0, 10))
     control_banner.columnconfigure(1, weight=1)
