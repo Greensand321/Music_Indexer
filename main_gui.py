@@ -1178,34 +1178,6 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
         )
         redo_btn.pack(side="left", padx=(5, 0))
 
-    guidance_messages = {
-        "Interactive – KMeans": (
-            "Guide:\n"
-            "• Run Clusters to generate or refresh KMeans groups.\n"
-            "• Load Cluster or click Add Highlighted Songs to auto-enable the lasso and pick songs for the temp playlist.\n"
-            "• Show All re-highlights the temp playlist; Remove Selected uses lasso to prune; Create Playlist saves it."
-        ),
-        "Interactive – HDBSCAN": (
-            "Guide:\n"
-            "• Run Clusters (or Redo Values) to explore HDBSCAN groupings.\n"
-            "• Load Cluster or use Add Highlighted Songs to turn on lasso mode and add a custom selection to the temp playlist.\n"
-            "• Show All re-highlights the temp playlist; Remove Selected lasso-removes songs; Create Playlist exports it."
-        ),
-    }
-
-    guidance_text = guidance_messages.get(name)
-    if guidance_text:
-        _set_message(guidance_text)
-
-    guide_lbl = ttk.Label(
-        side_tools,
-        textvariable=message_var,
-        justify="left",
-        wraplength=250,
-        foreground="gray",
-    )
-    guide_lbl.grid(row=4, column=0, sticky="ew", padx=5, pady=(5, 0))
-
     placeholder: ttk.Label | None = None
 
     def _sync_cluster_controls(cluster_ready: bool, running: bool) -> None:
