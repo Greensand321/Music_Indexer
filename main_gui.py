@@ -868,20 +868,38 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
         ttk.Label(frame, text=f"{name} panel coming soon…").pack(padx=10, pady=10)
         return frame
 
-    if requires_clustering and tracks is None:
+    if requires_clustering:
         msg = ttk.Frame(frame)
-        msg.pack(padx=10, pady=10)
+        msg.pack(fill="x", padx=10, pady=10)
+
+        def _reserve_button_width(btn: ttk.Button) -> None:
+            btn.pack(side="left")
+            msg.update_idletasks()
+            width = btn.winfo_reqwidth()
+            btn.pack_forget()
+            ttk.Frame(msg, width=width).pack(side="left")
+
+        run_btn = ttk.Button(
+            msg,
+            text="Run Clustering",
+            command=lambda: app.cluster_playlists_dialog(params["method"]),
+        )
+
+        status = ttk.Label(msg)
+
         if getattr(app, "cluster_generation_running", False):
-            ttk.Label(msg, text="Clustering in progress…").pack()
-            ttk.Label(msg, text="Check the log tab for updates.").pack()
+            _reserve_button_width(run_btn)
+            status.config(text="Clustering in progress…")
+            status.pack(side="left", padx=(8, 0))
+        elif tracks is None:
+            run_btn.pack(side="left")
+            status.config(text="Run clustering once first")
+            status.pack(side="left", padx=(8, 0))
+            return frame
         else:
-            ttk.Label(msg, text="Run clustering once first").pack()
-            ttk.Button(
-                msg,
-                text="Run Clustering",
-                command=lambda: app.cluster_playlists_dialog(params["method"]),
-            ).pack(pady=(5, 0))
-        return frame
+            _reserve_button_width(run_btn)
+            status.config(text="Clusters ready")
+            status.pack(side="left", padx=(8, 0))
 
     # Container ensures the graph resizes while keeping controls visible
     container = ttk.Frame(frame)
