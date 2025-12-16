@@ -18,7 +18,6 @@ if sys.platform == "win32":
             pass
 
 import tkinter as tk
-import tkinter.font as tkfont
 from tkinter import ttk
 
 Style = ttk.Style  # Default built-in themes
@@ -941,53 +940,12 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
     panel: ClusterGraphPanel | None = None
 
     message_var = tk.StringVar(value="")
-    action_message = ""
-    status_message = ""
-    message_label: ttk.Label | None = None
-
-    def _normalize_message(text: str) -> str:
-        return " ".join(text.split())
-
-    def _refresh_banner_message(event: tk.Event | None = None) -> None:  # type: ignore[name-defined]
-        active_text = action_message
-        if status_message:
-            active_text = f"{active_text} — {status_message}" if active_text else status_message
-        if not active_text:
-            message_var.set("")
-            return
-
-        if message_label is None or not message_label.winfo_exists():
-            message_var.set(active_text)
-            return
-
-        label_width = message_label.winfo_width()
-        if label_width <= 1:
-            message_var.set(active_text)
-            return
-
-        font = tkfont.nametofont(message_label.cget("font"))
-        if font.measure(active_text) <= label_width:
-            message_var.set(active_text)
-            return
-
-        truncated = active_text
-        ellipsis = "…"
-        while truncated and font.measure(truncated + ellipsis) > label_width:
-            truncated = truncated[:-1]
-        message_var.set(truncated + ellipsis if truncated else ellipsis)
 
     def _set_message(text: str) -> None:
-        nonlocal action_message
-        action_message = _normalize_message(text)
-        _refresh_banner_message()
-
-    def _set_status(text: str) -> None:
-        nonlocal status_message
-        status_message = _normalize_message(text)
-        _refresh_banner_message()
+        message_var.set(text)
 
     def _clear_message(event: tk.Event | None = None) -> None:  # type: ignore[name-defined]
-        _set_message("")
+        message_var.set("")
 
     def _message_action(text: str, action: Callable[[], Any]) -> Callable[[], Any]:
         def wrapped() -> Any:
@@ -1009,6 +967,7 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
 
     control_banner = ttk.Frame(side_tools)
     control_banner.grid(row=0, column=0, sticky="ew", pady=(0, 10))
+    control_banner.columnconfigure(1, weight=1)
 
     run_btn = ttk.Button(
         control_banner,
@@ -1019,6 +978,9 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
         ),
     )
     run_btn.grid(row=0, column=0, padx=5, pady=5, sticky="ew")
+
+    status = ttk.Label(control_banner)
+    status.grid(row=0, column=1, padx=5, pady=5, sticky="w")
 
     playlist_btn = ttk.Button(
         side_tools,
@@ -1145,12 +1107,8 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
 
     ttk.Separator(container, orient="horizontal").grid(row=1, column=0, sticky="ew")
 
-    btn_frame = ttk.Frame(container, height=40)
+    btn_frame = ttk.Frame(container)
     btn_frame.grid(row=2, column=0, sticky="ew", pady=5)
-    btn_frame.grid_propagate(False)
-    for col in range(4):
-        btn_frame.columnconfigure(col, weight=0)
-    btn_frame.columnconfigure(4, weight=1)
 
     lasso_var = tk.BooleanVar(value=False)
 
@@ -1163,7 +1121,7 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
             lambda: panel and panel.toggle_lasso(),
         ),
     )
-    lasso_btn.grid(row=0, column=0, padx=(0, 5), pady=5, sticky="w")
+    lasso_btn.pack(side="left")
 
     ok_btn = ttk.Button(
         btn_frame,
@@ -1173,7 +1131,7 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
             lambda: panel and panel.finalize_lasso(),
         ),
     )
-    ok_btn.grid(row=0, column=1, padx=(0, 5), pady=5, sticky="w")
+    ok_btn.pack(side="left", padx=(5, 0))
 
     gen_btn = ttk.Button(
         btn_frame,
@@ -1183,7 +1141,7 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
             lambda: panel and panel.create_playlist(),
         ),
     )
-    gen_btn.grid(row=0, column=2, padx=(0, 5), pady=5, sticky="w")
+    gen_btn.pack(side="left", padx=(5, 0))
 
     def _auto_create_all():
         _set_message("Auto-creating playlists for every available cluster.")
@@ -1206,12 +1164,19 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
         ).start()
 
     auto_btn = ttk.Button(btn_frame, text="Auto-Create", command=_auto_create_all)
-    auto_btn.grid(row=0, column=3, padx=(0, 10), pady=5, sticky="w")
+    auto_btn.pack(side="left", padx=(5, 0))
 
-    message_label = ttk.Label(btn_frame, textvariable=message_var, anchor="w")
-    message_label.grid(row=0, column=4, padx=(0, 5), pady=5, sticky="ew")
-    message_label.bind("<Configure>", _refresh_banner_message)
-    _refresh_banner_message()
+    redo_btn: ttk.Button | None = None
+    if name == "Interactive – HDBSCAN":
+        redo_btn = ttk.Button(
+            btn_frame,
+            text="Redo Values",
+            command=_message_action(
+                "Reopen the clustering parameters to tweak HDBSCAN values.",
+                lambda: panel and panel.open_param_dialog(),
+            ),
+        )
+        redo_btn.pack(side="left", padx=(5, 0))
 
     guidance_messages = {
         "Interactive – KMeans": (
@@ -1222,7 +1187,7 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
         ),
         "Interactive – HDBSCAN": (
             "Guide:\n"
-            "• Run Clusters to explore HDBSCAN groupings.\n"
+            "• Run Clusters (or Redo Values) to explore HDBSCAN groupings.\n"
             "• Load Cluster or use Add Highlighted Songs to turn on lasso mode and add a custom selection to the temp playlist.\n"
             "• Show All re-highlights the temp playlist; Remove Selected lasso-removes songs; Create Playlist exports it."
         ),
@@ -1231,6 +1196,15 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
     guidance_text = guidance_messages.get(name)
     if guidance_text:
         _set_message(guidance_text)
+
+    guide_lbl = ttk.Label(
+        side_tools,
+        textvariable=message_var,
+        justify="left",
+        wraplength=250,
+        foreground="gray",
+    )
+    guide_lbl.grid(row=4, column=0, sticky="ew", padx=5, pady=(5, 0))
 
     placeholder: ttk.Label | None = None
 
@@ -1255,14 +1229,17 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
         ):
             widget.config(state=state)
 
+        if redo_btn is not None:
+            redo_btn.config(state=state)
+
         run_btn.state(["disabled"] if running else ["!disabled"])
 
         if running:
-            _set_status("Clustering in progress…")
+            status.config(text="Clustering in progress…")
         elif not ready:
-            _set_status("Run clustering once first")
+            status.config(text="Run clustering once first")
         else:
-            _set_status("Clusters loaded")
+            status.config(text="Clusters loaded")
 
     def _ensure_placeholder(message: str) -> ttk.Label:
         nonlocal placeholder
