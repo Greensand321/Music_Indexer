@@ -951,8 +951,13 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
 
     X, X2 = cluster_manager.get_projection()
 
+    graph_area = ttk.Frame(container)
+    graph_area.grid(row=0, column=0, sticky="nsew")
+    graph_area.rowconfigure(0, weight=1)
+    graph_area.columnconfigure(0, weight=1)
+
     panel = ClusterGraphPanel(
-        container,
+        graph_area,
         tracks,
         X,
         X2,
@@ -965,10 +970,17 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
     )
     panel.grid(row=0, column=0, sticky="nsew", pady=(0, 5))
 
+    # Let Tk settle sizes before showing the side panel so the graph owns space
+    container.update_idletasks()
+
     side_tools = ttk.Frame(container)
     side_tools.grid(row=0, column=1, rowspan=3, sticky="ns", padx=(10, 0))
     side_tools.columnconfigure(0, weight=1)
     side_tools.rowconfigure(2, weight=1)
+
+    # Once the side panel is present, refresh geometry and redraw the graph
+    container.update_idletasks()
+    panel.canvas.draw_idle()
 
     playlist_btn = ttk.Button(
         side_tools, text="Current Playlists", command=panel.show_current_playlists
