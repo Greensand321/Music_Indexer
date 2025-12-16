@@ -137,6 +137,7 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
     cluster_data = getattr(app, "cluster_data", None)
     cluster_cfg = getattr(app, "cluster_params", None)
     cluster_manager = getattr(app, "cluster_manager", None)
+    cluster_running = getattr(app, "cluster_generation_running", False)
     if cluster_data is None:
         tracks = features = None
     else:
@@ -918,6 +919,25 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
         ttk.Label(frame, text=f"{name} panel coming soon…").pack(padx=10, pady=10)
         return frame
 
+    has_cluster_data = cluster_manager is not None and cluster_data is not None
+
+    if cluster_running or not has_cluster_data:
+        banner = ttk.Frame(frame)
+        banner.pack(fill="both", expand=True, padx=10, pady=10)
+        banner.columnconfigure(1, weight=1)
+
+        run_btn = ttk.Button(
+            banner,
+            text="Run Clusters",
+            command=lambda: app.cluster_playlists_dialog(params["method"]),
+            state="disabled" if cluster_running else "normal",
+        )
+        run_btn.grid(row=0, column=0, padx=5, pady=5, sticky="ew")
+
+        msg = "Clustering in progress…" if cluster_running else "Run clustering once first"
+        ttk.Label(banner, text=msg).grid(row=0, column=1, padx=5, pady=5, sticky="w")
+        return frame
+
     # Container ensures the graph resizes while keeping controls visible
     container = ttk.Frame(frame)
     container.pack(fill="both", expand=True)
@@ -931,29 +951,21 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
     graph_area.columnconfigure(0, weight=1)
 
     panel: ClusterGraphPanel | None = None
-    if cluster_manager is not None:
-        X, X2 = cluster_manager.get_projection()
+    X, X2 = cluster_manager.get_projection()
 
-        panel = ClusterGraphPanel(
-            graph_area,
-            tracks,
-            X,
-            X2,
-            cluster_func=km_func,
-            cluster_params=params,
-            cluster_manager=cluster_manager,
-            algo_key=algo_key,
-            library_path=app.library_path,
-            log_callback=app._log,
-        )
-        panel.grid(row=0, column=0, sticky="nsew", pady=(0, 5))
-    else:
-        placeholder = ttk.Label(
-            graph_area,
-            text="Run clustering once to view the interactive graph.",
-            anchor="center",
-        )
-        placeholder.grid(row=0, column=0, sticky="nsew")
+    panel = ClusterGraphPanel(
+        graph_area,
+        tracks,
+        X,
+        X2,
+        cluster_func=km_func,
+        cluster_params=params,
+        cluster_manager=cluster_manager,
+        algo_key=algo_key,
+        library_path=app.library_path,
+        log_callback=app._log,
+    )
+    panel.grid(row=0, column=0, sticky="nsew", pady=(0, 5))
 
     side_tools = ttk.Frame(container)
     side_tools.grid(row=0, column=1, rowspan=3, sticky="ns", padx=(10, 0))
@@ -1091,13 +1103,7 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
         state="normal" if panel is not None else "disabled",
     ).grid(row=4, column=0, sticky="ew", padx=5, pady=(0, 5))
 
-    if getattr(app, "cluster_generation_running", False):
-        status.config(text="Clustering in progress…")
-        run_btn.state(["disabled"])
-    elif panel is None:
-        status.config(text="Run clustering once first")
-    else:
-        status.config(text="Clusters loaded")
+    status.config(text="Clusters loaded")
 
     if panel is not None:
         panel.cluster_select_var = cluster_select_var
@@ -1154,12 +1160,7 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
         engine = panel.cluster_params.get("engine", "librosa")
         if not params:
             return
-        app.show_log_tab()
-        threading.Thread(
-            target=app._run_cluster_generation,
-            args=(app.library_path, method, params, engine),
-            daemon=True,
-        ).start()
+        app._start_cluster_playlists(method, params, engine, None)
 
     auto_btn = ttk.Button(btn_frame, text="Auto-Create", command=_auto_create_all)
     auto_btn.pack(side="left", padx=(5, 0))
@@ -1329,6 +1330,7 @@ class SoundVaultImporterApp(tk.Tk):
         # Cached tracks and feature vectors for interactive clustering
         self.cluster_data = None
         self.cluster_manager = None
+        self.cluster_generation_running = False
         self.folder_filter = {"include": [], "exclude": []}
 
         # Shared audio feature/analysis engine selection
@@ -2073,6 +2075,7 @@ class SoundVaultImporterApp(tk.Tk):
         # Clear any cached clustering data when switching libraries
         self.cluster_data = None
         self.cluster_manager = None
+        self.cluster_generation_running = False
         self.plugin_views.clear()
         self.active_plugin = None
         if hasattr(self, "scan_btn"):
