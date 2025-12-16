@@ -1102,6 +1102,8 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
         panel.temp_status_var = temp_status_var
         panel.temp_listbox = temp_listbox
         panel.temp_remove_btn = temp_remove_btn
+        panel.refresh_control_states()
+        panel._refresh_cluster_options()
 
     if panel is None:
         return frame
