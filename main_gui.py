@@ -931,7 +931,15 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
     graph_area.columnconfigure(0, weight=1)
 
     panel: ClusterGraphPanel | None = None
-    if cluster_manager is not None:
+    placeholder_text: str | None = None
+    cluster_generation_running = getattr(app, "cluster_generation_running", False)
+    cluster_ready = cluster_manager is not None and cluster_data is not None
+
+    if cluster_generation_running:
+        placeholder_text = "Clustering in progress…"
+    elif not cluster_ready:
+        placeholder_text = "Run clustering once first"
+    else:
         X, X2 = cluster_manager.get_projection()
 
         panel = ClusterGraphPanel(
@@ -947,12 +955,9 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
             log_callback=app._log,
         )
         panel.grid(row=0, column=0, sticky="nsew", pady=(0, 5))
-    else:
-        placeholder = ttk.Label(
-            graph_area,
-            text="Run clustering once to view the interactive graph.",
-            anchor="center",
-        )
+
+    if placeholder_text:
+        placeholder = ttk.Label(graph_area, text=placeholder_text, anchor="center")
         placeholder.grid(row=0, column=0, sticky="nsew")
 
     side_tools = ttk.Frame(container)
@@ -1091,10 +1096,10 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
         state="normal" if panel is not None else "disabled",
     ).grid(row=4, column=0, sticky="ew", padx=5, pady=(0, 5))
 
-    if getattr(app, "cluster_generation_running", False):
+    if cluster_generation_running:
         status.config(text="Clustering in progress…")
         run_btn.state(["disabled"])
-    elif panel is None:
+    elif not cluster_ready:
         status.config(text="Run clustering once first")
     else:
         status.config(text="Clusters loaded")
@@ -1329,6 +1334,7 @@ class SoundVaultImporterApp(tk.Tk):
         # Cached tracks and feature vectors for interactive clustering
         self.cluster_data = None
         self.cluster_manager = None
+        self.cluster_generation_running = False
         self.folder_filter = {"include": [], "exclude": []}
 
         # Shared audio feature/analysis engine selection
