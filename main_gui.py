@@ -930,6 +930,13 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
     graph_area.rowconfigure(0, weight=1)
     graph_area.columnconfigure(0, weight=1)
 
+    # Keep the controls outside the graph container so they remain visible
+    # while the graph refreshes.
+    graph_stack = ttk.Frame(graph_area)
+    graph_stack.grid(row=0, column=0, sticky="nsew")
+    graph_stack.rowconfigure(0, weight=1)
+    graph_stack.columnconfigure(0, weight=1)
+
     panel: ClusterGraphPanel | None = None
 
     side_tools = ttk.Frame(container)
@@ -1159,7 +1166,7 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
         nonlocal placeholder
 
         if placeholder is None:
-            placeholder = ttk.Label(graph_area, anchor="center")
+            placeholder = ttk.Label(graph_stack, anchor="center")
             placeholder.grid(row=0, column=0, sticky="nsew")
         placeholder.configure(text=message)
         placeholder.lift()
@@ -1184,16 +1191,16 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
         cluster_ready = cluster_manager is not None and cluster_data is not None
 
         if cluster_generation_running:
-            if panel is not None:
-                panel.grid_remove()
             _ensure_placeholder("Clustering in progress…")
+            if panel is not None:
+                panel.grid()
             _sync_cluster_controls(False, True)
             return
 
         if not cluster_ready:
-            if panel is not None:
-                panel.grid_remove()
             _ensure_placeholder("Run clustering once first")
+            if panel is not None:
+                panel.grid()
             _sync_cluster_controls(False, False)
             return
 
@@ -1204,7 +1211,7 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
             X, X2 = cluster_manager.get_projection()
 
             panel = ClusterGraphPanel(
-                graph_area,
+                graph_stack,
                 tracks_local,
                 X,
                 X2,
@@ -1245,10 +1252,10 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
                 if panel is not None:
                     panel.on_resize(event.width, event.height)
 
-            graph_area.bind("<Configure>", _handle_resize, add="+")
+            graph_stack.bind("<Configure>", _handle_resize, add="+")
             panel.grid(row=0, column=0, sticky="nsew", pady=(0, 5))
-            graph_area.after_idle(
-                lambda: panel.on_resize(graph_area.winfo_width(), graph_area.winfo_height())
+            graph_stack.after_idle(
+                lambda: panel.on_resize(graph_stack.winfo_width(), graph_stack.winfo_height())
             )
         else:
             panel.grid()
