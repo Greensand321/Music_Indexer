@@ -912,7 +912,7 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
         ttk.Label(frame, text=f"{name} panel coming soon…").pack(padx=10, pady=10)
         return frame
 
-    if requires_clustering:
+    if requires_clustering and tracks is None:
         msg = ttk.Frame(frame)
         msg.pack(fill="x", padx=10, pady=10)
 
@@ -929,11 +929,9 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
         if getattr(app, "cluster_generation_running", False):
             status.config(text="Clustering in progress…")
             run_btn.state(["disabled"])
-        elif tracks is None:
-            status.config(text="Run clustering once first")
-            return frame
         else:
-            status.config(text="Clusters ready")
+            status.config(text="Run clustering once first")
+        return frame
 
     # Container ensures the graph resizes while keeping controls visible
     container = ttk.Frame(frame)
