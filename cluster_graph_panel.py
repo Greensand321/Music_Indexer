@@ -398,7 +398,7 @@ class ClusterGraphPanel(ttk.Frame):
         self._clusters_ready = True
         if self._loading_lbl.winfo_exists():
             self._loading_lbl.pack_forget()
-        self._draw_clusters(labels)
+        self._render_clusters(labels)
         log_cluster_summary(labels, self.log)
         if duration_ms is not None:
             logger.info(
@@ -415,6 +415,28 @@ class ClusterGraphPanel(ttk.Frame):
         self._loading_var.set("Updating clusters …")
         self._loading_lbl.pack(pady=10)
         self._start_clustering(params)
+
+    def _render_clusters(self, labels) -> None:
+        """Finalize layout before drawing clusters to avoid oversized renders."""
+
+        def _do_draw() -> None:
+            layout_owner = self.master if self.master is not None else self
+            try:
+                layout_owner.update_idletasks()
+            except Exception:
+                pass
+            try:
+                self.winfo_toplevel().update_idletasks()
+            except Exception:
+                pass
+            try:
+                self.canvas.resize_event()
+            except Exception:
+                pass
+            self._draw_clusters(labels)
+
+        # Defer to idle to ensure geometry managers finish placing the widgets
+        self.after_idle(_do_draw)
 
     def _sync_controls(self):
         """Enable/disable controls based on clustering readiness."""
