@@ -407,6 +407,7 @@ class ClusterGraphPanel(ttk.Frame):
         if self._loading_lbl.winfo_exists():
             self._loading_lbl.pack_forget()
         self._render_clusters(labels)
+        self._force_post_cluster_resize()
         log_cluster_summary(labels, self.log)
         if duration_ms is not None:
             logger.info(
@@ -489,6 +490,26 @@ class ClusterGraphPanel(ttk.Frame):
 
         self.after_idle(final_redraw)
         self.after(30, final_redraw)
+
+    def _force_post_cluster_resize(self) -> None:
+        """Trigger a resize after clustering to avoid oversized initial renders."""
+
+        widget = self.canvas.get_tk_widget()
+
+        def _resize_once() -> None:
+            try:
+                widget.update_idletasks()
+            except Exception:
+                pass
+
+            w = widget.winfo_width()
+            h = widget.winfo_height()
+            if w <= 1 or h <= 1:
+                return
+            self.on_resize(w, h)
+
+        self.after_idle(_resize_once)
+        self.after(30, _resize_once)
 
     def on_resize(self, width: int, height: int) -> None:
         """Resize the matplotlib canvas to the given dimensions."""
