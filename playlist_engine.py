@@ -195,9 +195,10 @@ def bucket_by_tempo_energy(
     out_paths = {}
     for (tb, eb), items in buckets.items():
         outfile = os.path.join(playlists_dir, f"{tb}_{eb}.m3u")
-        write_playlist(items, outfile)
         out_paths[(tb, eb)] = outfile
-        log_callback(f"→ Wrote {outfile}")
+        log_callback(
+            f"→ Prepared {len(items)} track(s) for {tb}/{eb} (playlist not yet saved)"
+        )
     stats = {
         (tb, eb): {
             "count": len(items),
