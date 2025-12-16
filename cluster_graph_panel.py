@@ -81,6 +81,7 @@ class ClusterGraphPanel(ttk.Frame):
         self._remove_lasso_started = False
         self._remove_lasso_prev_state = False
         self._remove_lasso_confirm_pending = False
+        self._add_highlight_pending = False
 
         # Hover support widgets will be set later via ``setup_hover``
         self.hover_panel = None
@@ -151,6 +152,8 @@ class ClusterGraphPanel(ttk.Frame):
         """Toggle matplotlib lasso state and sync UI controls."""
 
         self._clear_selection()
+        if not active:
+            self._add_highlight_pending = False
         if active:
             if self.lasso is None:
                 self.lasso = LassoSelector(self.ax, onselect=self._on_lasso_select)
@@ -252,6 +255,12 @@ class ClusterGraphPanel(ttk.Frame):
                 self.temp_remove_btn.configure(text=text)
             if not self.selected_indices:
                 self.ok_btn.configure(state="disabled")
+            return
+        if self._add_highlight_pending and self.selected_indices:
+            self.selected_tracks = [self.tracks[i] for i in self.selected_indices]
+            self.add_highlight_to_temp()
+            self._add_highlight_pending = False
+            self._set_lasso_enabled(False)
             return
         if self.selected_indices:
             self.ok_btn.configure(state="normal")
@@ -677,6 +686,25 @@ class ClusterGraphPanel(ttk.Frame):
             return
 
         self._begin_temp_lasso_removal()
+
+    def begin_add_highlight_flow(self) -> None:
+        """Activate lasso (if needed) before adding highlights to the temp list."""
+
+        if self._remove_lasso_started:
+            self._cancel_temp_lasso_removal()
+
+        if not self.selected_indices:
+            self._add_highlight_pending = True
+            self._set_lasso_enabled(True)
+            self.log(
+                "Lasso enabled – draw around songs to add to the temporary playlist"
+            )
+            return
+
+        self.selected_tracks = [self.tracks[i] for i in self.selected_indices]
+        self.add_highlight_to_temp()
+        if self.lasso is not None:
+            self._set_lasso_enabled(False)
 
     def _begin_temp_lasso_removal(self) -> None:
         """Switch to lasso mode to pick songs for removal."""
