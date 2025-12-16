@@ -199,7 +199,11 @@ def bucket_by_tempo_energy(
         out_paths[(tb, eb)] = outfile
         log_callback(f"→ Wrote {outfile}")
     stats = {
-        (tb, eb): {"count": len(items), "playlist": out_paths[(tb, eb)]}
+        (tb, eb): {
+            "count": len(items),
+            "playlist": out_paths[(tb, eb)],
+            "tracks": list(items),
+        }
         for (tb, eb), items in buckets.items()
     }
 

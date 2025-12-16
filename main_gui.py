@@ -544,6 +544,8 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
         running = tk.BooleanVar(value=False)
         total_tracks = 0
         playlists_dir: str | None = None
+        bucket_result: dict | None = None
+        bucket_tracks: dict[tuple[str, str], list[str]] = {}
         q: queue.Queue = queue.Queue()
         cancel_event = threading.Event()
         engine_var = getattr(app, "feature_engine_var", tk.StringVar(value="librosa"))
@@ -602,7 +604,43 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
             log_box.see("end")
             log_box.configure(state="disabled")
 
-        def render_stats(stats: dict | None):
+        def prompt_save_bucket(bucket_key: tuple[str, str]):
+            tracks = bucket_tracks.get(bucket_key)
+            if not tracks:
+                messagebox.showinfo(
+                    "Save Playlist",
+                    "No tracks available for this bucket yet.",
+                )
+                return
+
+            playlists_root = playlists_dir or app.library_path or os.getcwd()
+            os.makedirs(playlists_root, exist_ok=True)
+            default_name = f"{bucket_key[0]}_{bucket_key[1]}.m3u"
+            chosen = filedialog.asksaveasfilename(
+                parent=frame,
+                title="Save Bucket Playlist As",
+                defaultextension=".m3u",
+                initialdir=playlists_root,
+                initialfile=default_name,
+                filetypes=[("M3U Playlist", "*.m3u"), ("All Files", "*.*")],
+            )
+            if not chosen:
+                return
+
+            try:
+                write_playlist(tracks, chosen)
+            except Exception as exc:
+                messagebox.showerror("Save Playlist", f"Could not save playlist: {exc}")
+                return
+
+            messagebox.showinfo("Playlist Saved", f"Playlist saved to {chosen}")
+            open_path(os.path.dirname(chosen))
+
+        def render_stats(result: dict | None):
+            nonlocal bucket_result, bucket_tracks
+            bucket_result = result
+            bucket_tracks = (result or {}).get("buckets", {}) if isinstance(result, dict) else {}
+            stats = (result or {}).get("stats") if isinstance(result, dict) else None
             for child in stats_rows.winfo_children():
                 child.destroy()
             if not stats:
@@ -622,13 +660,19 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
                 ttk.Label(row, text=tb.title(), width=10).pack(side="left")
                 ttk.Label(row, text=eb.title(), width=10).pack(side="left")
                 ttk.Label(row, text=str(info.get("count", 0)), width=8).pack(side="left")
-                ttk.Label(row, text=os.path.basename(info.get("playlist", ""))).pack(
+                playlist_path = info.get("playlist", "")
+                ttk.Label(row, text=os.path.basename(playlist_path)).pack(
                     side="left", padx=(10, 5)
                 )
                 ttk.Button(
                     row,
                     text="Open",
-                    command=lambda p=info.get("playlist", ""): open_path(p),
+                    command=lambda p=playlist_path: open_path(p),
+                ).pack(side="left", padx=(0, 5))
+                ttk.Button(
+                    row,
+                    text="Save As…",
+                    command=lambda key=(tb, eb): prompt_save_bucket(key),
                 ).pack(side="left")
 
         def update_controls():
@@ -696,7 +740,7 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
                         progress_var.set(f"{payload}/{total_tracks} processed")
                     elif tag == "done":
                         running.set(False)
-                        render_stats(payload.get("buckets"))
+                        render_stats(payload)
                         status = (
                             "Cancelled"
                             if payload.get("cancelled")
