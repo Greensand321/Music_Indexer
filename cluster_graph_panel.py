@@ -395,6 +395,7 @@ class ClusterGraphPanel(ttk.Frame):
             self.scatter.set_offsets(self.X2)
             self.scatter.set_color(point_colors)
         self.canvas.draw_idle()
+        self._refresh_cluster_options()
 
     def _on_clusters_ready(self, labels, params: dict):
         duration_ms = None
@@ -508,7 +509,12 @@ class ClusterGraphPanel(ttk.Frame):
             return
         clusters = sorted({int(l) for l in set(self.labels) if l >= 0})
         if self.cluster_combo is not None:
-            self.cluster_combo.configure(values=[str(c) for c in clusters])
+            values = [str(c) for c in clusters]
+            self.cluster_combo.configure(values=values)
+            if self.cluster_select_var is not None:
+                current = self.cluster_select_var.get()
+                if current not in values and values:
+                    self.cluster_select_var.set(values[0])
         if self.temp_status_var is not None:
             self.temp_status_var.set(f"Clusters available: {len(clusters)}")
 
