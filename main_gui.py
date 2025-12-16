@@ -50,7 +50,7 @@ from io import BytesIO
 from PIL import Image, ImageTk
 from mutagen import File as MutagenFile
 from tag_fixer import MIN_INTERACTIVE_SCORE, FileRecord
-from typing import Callable, List
+from typing import Any, Callable, List
 from indexer_control import cancel_event, IndexCancelled
 import library_sync
 import playlist_generator
@@ -939,6 +939,23 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
 
     panel: ClusterGraphPanel | None = None
 
+    message_var = tk.StringVar(value="")
+
+    def _set_message(text: str) -> None:
+        message_var.set(text)
+
+    def _clear_message(event: tk.Event | None = None) -> None:  # type: ignore[name-defined]
+        message_var.set("")
+
+    def _message_action(text: str, action: Callable[[], Any]) -> Callable[[], Any]:
+        def wrapped() -> Any:
+            _set_message(text)
+            return action()
+
+        return wrapped
+
+    frame.bind_all("<Escape>", _clear_message)
+
     side_tools = ttk.Frame(container)
     side_tools.grid(row=0, column=1, rowspan=3, sticky="ns", padx=(10, 0))
     side_tools.columnconfigure(0, weight=1)
@@ -955,7 +972,10 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
     run_btn = ttk.Button(
         control_banner,
         text="Run Clusters",
-        command=lambda: app.cluster_playlists_dialog(params["method"]),
+        command=_message_action(
+            "Running clustering will refresh your groups based on the current settings.",
+            lambda: app.cluster_playlists_dialog(params["method"]),
+        ),
     )
     run_btn.grid(row=0, column=0, padx=5, pady=5, sticky="ew")
 
@@ -965,7 +985,10 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
     playlist_btn = ttk.Button(
         side_tools,
         text="Current Playlists",
-        command=lambda: panel and panel.show_current_playlists(),
+        command=_message_action(
+            "Listing the playlists you already have for quick review.",
+            lambda: panel and panel.show_current_playlists(),
+        ),
     )
     playlist_btn.grid(row=1, column=0, sticky="ew", pady=(0, 10))
 
@@ -996,6 +1019,7 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
     manual_entry.grid(row=1, column=1, sticky="ew", padx=5, pady=(0, 2))
 
     def _load_cluster():
+        _set_message("Loading the selected cluster and preparing lasso controls.")
         if panel is None:
             return
         choice = manual_cluster_var.get().strip() or cluster_select_var.get().strip()
@@ -1044,28 +1068,40 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
     show_all_btn = ttk.Button(
         temp_box,
         text="Show All",
-        command=lambda: panel and panel.highlight_temp_playlist(),
+        command=_message_action(
+            "Highlighting all songs currently in the temporary playlist.",
+            lambda: panel and panel.highlight_temp_playlist(),
+        ),
     )
     show_all_btn.grid(row=1, column=0, sticky="ew", padx=5, pady=(0, 5))
 
     add_highlight_btn = ttk.Button(
         temp_box,
         text="Add Highlighted Songs",
-        command=lambda: panel and panel.begin_add_highlight_flow(),
+        command=_message_action(
+            "Enable lasso mode to add the highlighted graph selection to the temp playlist.",
+            lambda: panel and panel.begin_add_highlight_flow(),
+        ),
     )
     add_highlight_btn.grid(row=2, column=0, sticky="ew", padx=5, pady=(0, 5))
 
     temp_remove_btn = ttk.Button(
         temp_box,
         text="Remove Selected",
-        command=lambda: panel and panel.remove_selected_from_temp(),
+        command=_message_action(
+            "Removing the selected songs from the temporary playlist.",
+            lambda: panel and panel.remove_selected_from_temp(),
+        ),
     )
     temp_remove_btn.grid(row=3, column=0, sticky="ew", padx=5, pady=(0, 5))
 
     create_playlist_btn = ttk.Button(
         temp_box,
         text="Create Playlist",
-        command=lambda: panel and panel.create_temp_playlist(),
+        command=_message_action(
+            "Saving the current temporary playlist as a new playlist.",
+            lambda: panel and panel.create_temp_playlist(),
+        ),
     )
     create_playlist_btn.grid(row=4, column=0, sticky="ew", padx=5, pady=(0, 5))
 
@@ -1080,25 +1116,35 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
         btn_frame,
         text="Lasso Mode",
         variable=lasso_var,
-        command=lambda: panel and panel.toggle_lasso(),
+        command=_message_action(
+            "Toggling lasso mode for manual graph selection.",
+            lambda: panel and panel.toggle_lasso(),
+        ),
     )
     lasso_btn.pack(side="left")
 
     ok_btn = ttk.Button(
         btn_frame,
         text="OK",
-        command=lambda: panel and panel.finalize_lasso(),
+        command=_message_action(
+            "Finalizing the current lasso selection into the temp playlist.",
+            lambda: panel and panel.finalize_lasso(),
+        ),
     )
     ok_btn.pack(side="left", padx=(5, 0))
 
     gen_btn = ttk.Button(
         btn_frame,
         text="Generate Playlist",
-        command=lambda: panel and panel.create_playlist(),
+        command=_message_action(
+            "Building a playlist from the current selection.",
+            lambda: panel and panel.create_playlist(),
+        ),
     )
     gen_btn.pack(side="left", padx=(5, 0))
 
     def _auto_create_all():
+        _set_message("Auto-creating playlists for every available cluster.")
         if panel is None or not getattr(panel, "cluster_params", None):
             return
         method = panel.cluster_params.get("method")
@@ -1123,7 +1169,12 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
     redo_btn: ttk.Button | None = None
     if name == "Interactive – HDBSCAN":
         redo_btn = ttk.Button(
-            btn_frame, text="Redo Values", command=lambda: panel and panel.open_param_dialog()
+            btn_frame,
+            text="Redo Values",
+            command=_message_action(
+                "Reopen the clustering parameters to tweak HDBSCAN values.",
+                lambda: panel and panel.open_param_dialog(),
+            ),
         )
         redo_btn.pack(side="left", padx=(5, 0))
 
@@ -1144,14 +1195,16 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
 
     guidance_text = guidance_messages.get(name)
     if guidance_text:
-        guide_lbl = ttk.Label(
-            side_tools,
-            text=guidance_text,
-            justify="left",
-            wraplength=250,
-            foreground="gray",
-        )
-        guide_lbl.grid(row=4, column=0, sticky="ew", padx=5, pady=(5, 0))
+        _set_message(guidance_text)
+
+    guide_lbl = ttk.Label(
+        side_tools,
+        textvariable=message_var,
+        justify="left",
+        wraplength=250,
+        foreground="gray",
+    )
+    guide_lbl.grid(row=4, column=0, sticky="ew", padx=5, pady=(5, 0))
 
     placeholder: ttk.Label | None = None
 
