@@ -1134,7 +1134,75 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
     btn_frame = ttk.Frame(container)
     btn_frame.grid(row=2, column=0, sticky="ew", pady=5)
 
+    lasso_var = tk.BooleanVar(value=False)
+
+    lasso_btn = ttk.Checkbutton(
+        btn_frame,
+        text="Lasso Mode",
+        variable=lasso_var,
+        command=_message_action(
+            "Toggling lasso mode for manual graph selection.",
+            lambda: panel and panel.toggle_lasso(),
+        ),
+    )
+    lasso_btn.pack(side="left")
+
+    ok_btn = ttk.Button(
+        btn_frame,
+        text="OK",
+        command=_message_action(
+            "Finalizing the current lasso selection into the temp playlist.",
+            lambda: panel and panel.finalize_lasso(),
+        ),
+    )
+    ok_btn.pack(side="left", padx=(5, 0))
+
+    gen_btn = ttk.Button(
+        btn_frame,
+        text="Generate Playlist",
+        command=_message_action(
+            "Building a playlist from the current selection.",
+            lambda: panel and panel.create_playlist(),
+        ),
+    )
+    gen_btn.pack(side="left", padx=(5, 0))
+
+    def _auto_create_all():
+        _set_message("Auto-creating playlists for every available cluster.")
+        if panel is None or not getattr(panel, "cluster_params", None):
+            return
+        method = panel.cluster_params.get("method")
+        params = {
+            k: v
+            for k, v in panel.cluster_params.items()
+            if k not in {"method", "engine"}
+        }
+        engine = panel.cluster_params.get("engine", "librosa")
+        if not params:
+            return
+        app.show_log_tab()
+        threading.Thread(
+            target=app._run_cluster_generation,
+            args=(app.library_path, method, params, engine),
+            daemon=True,
+        ).start()
+
+    auto_btn = ttk.Button(btn_frame, text="Auto-Create", command=_auto_create_all)
+    auto_btn.pack(side="left", padx=(5, 0))
+
     ttk.Label(btn_frame, textvariable=banner_var).pack(side="left", padx=(5, 0))
+
+    redo_btn: ttk.Button | None = None
+    if name == "Interactive – HDBSCAN":
+        redo_btn = ttk.Button(
+            btn_frame,
+            text="Redo Values",
+            command=_message_action(
+                "Reopen the clustering parameters to tweak HDBSCAN values.",
+                lambda: panel and panel.open_param_dialog(),
+            ),
+        )
+        redo_btn.pack(side="left", padx=(5, 0))
 
     placeholder: ttk.Label | None = None
 
@@ -1152,8 +1220,15 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
             add_highlight_btn,
             temp_remove_btn,
             create_playlist_btn,
+            lasso_btn,
+            ok_btn,
+            gen_btn,
+            auto_btn,
         ):
             widget.config(state=state)
+
+        if redo_btn is not None:
+            redo_btn.config(state=state)
 
         run_btn.state(["disabled"] if running else ["!disabled"])
 
@@ -1235,6 +1310,11 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
             panel.temp_status_var = temp_status_var
             panel.temp_listbox = temp_listbox
             panel.temp_remove_btn = temp_remove_btn
+            panel.lasso_var = lasso_var
+            panel.lasso_btn = lasso_btn
+            panel.ok_btn = ok_btn
+            panel.gen_btn = gen_btn
+
             hover_panel = ttk.Frame(panel, relief="solid", borderwidth=1)
             art_lbl = tk.Label(hover_panel)
             art_lbl.pack(side="left")
