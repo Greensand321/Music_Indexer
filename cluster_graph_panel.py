@@ -52,10 +52,16 @@ class ClusterGraphPanel(ttk.Frame):
         self.cluster_manager = cluster_manager
         self.algo_key = algo_key
 
+        self._geometry_ready = False
+        self._pending_draw_labels: np.ndarray | None = None
+        self._configure_binding = None
+        self._map_binding = None
+
         fig = Figure(figsize=(5, 5))
         self.ax = fig.add_subplot(111)
         self.canvas = FigureCanvasTkAgg(fig, master=self)
         self.canvas.get_tk_widget().pack(fill="both", expand=True)
+        self._bind_first_geometry_event()
 
         self.scatter = None
         self._loading_var = tk.StringVar(value="Running clustering …")
@@ -418,25 +424,48 @@ class ClusterGraphPanel(ttk.Frame):
 
     def _render_clusters(self, labels) -> None:
         """Finalize layout before drawing clusters to avoid oversized renders."""
+        def _queue_draw() -> None:
+            self._pending_draw_labels = labels
+            self._maybe_draw_after_geometry()
 
-        def _do_draw() -> None:
-            layout_owner = self.master if self.master is not None else self
-            try:
-                layout_owner.update_idletasks()
-            except Exception:
-                pass
-            try:
-                self.winfo_toplevel().update_idletasks()
-            except Exception:
-                pass
-            try:
-                self.canvas.resize_event()
-            except Exception:
-                pass
-            self._draw_clusters(labels)
+        self.after_idle(_queue_draw)
 
-        # Defer to idle to ensure geometry managers finish placing the widgets
-        self.after_idle(_do_draw)
+    def _bind_first_geometry_event(self) -> None:
+        widget = self.canvas.get_tk_widget()
+
+        def _on_geometry(event):
+            if self._geometry_ready:
+                return
+            if event.width <= 1 or event.height <= 1:
+                return
+            self._geometry_ready = True
+            if self._configure_binding:
+                widget.unbind("<Configure>", self._configure_binding)
+            if self._map_binding:
+                widget.unbind("<Map>", self._map_binding)
+            self._maybe_draw_after_geometry()
+
+        self._configure_binding = widget.bind("<Configure>", _on_geometry)
+        self._map_binding = widget.bind("<Map>", _on_geometry, add="+")
+
+    def _maybe_draw_after_geometry(self) -> None:
+        if not self._geometry_ready or self._pending_draw_labels is None:
+            return
+
+        labels = self._pending_draw_labels
+        self._pending_draw_labels = None
+
+        try:
+            self.winfo_toplevel().update_idletasks()
+        except Exception:
+            pass
+
+        try:
+            self.canvas.resize_event()
+        except Exception:
+            pass
+
+        self._draw_clusters(labels)
 
     def _sync_controls(self):
         """Enable/disable controls based on clustering readiness."""

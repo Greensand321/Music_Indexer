@@ -955,31 +955,23 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
         )
         placeholder.grid(row=0, column=0, sticky="nsew")
 
-    # Let Tk settle sizes before showing the side panel so the graph owns space
-    container.update_idletasks()
-
     side_tools = ttk.Frame(container)
     side_tools.grid(row=0, column=1, rowspan=3, sticky="ns", padx=(10, 0))
     side_tools.columnconfigure(0, weight=1)
     side_tools.rowconfigure(3, weight=1)
 
-    # Once the side panel is present, refresh geometry and redraw the graph
-    container.update_idletasks()
-    if panel is not None:
-        panel.canvas.draw_idle()
-
-    run_box = ttk.LabelFrame(side_tools, text="Clustering")
-    run_box.grid(row=0, column=0, sticky="ew", pady=(0, 10))
-    run_box.columnconfigure(1, weight=1)
+    control_banner = ttk.Frame(side_tools)
+    control_banner.grid(row=0, column=0, sticky="ew", pady=(0, 10))
+    control_banner.columnconfigure(1, weight=1)
 
     run_btn = ttk.Button(
-        run_box,
+        control_banner,
         text="Run Clusters",
         command=lambda: app.cluster_playlists_dialog(params["method"]),
     )
     run_btn.grid(row=0, column=0, padx=5, pady=5, sticky="ew")
 
-    status = ttk.Label(run_box)
+    status = ttk.Label(control_banner)
     status.grid(row=0, column=1, padx=5, pady=5, sticky="w")
 
     playlist_btn = ttk.Button(
