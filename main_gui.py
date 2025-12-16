@@ -943,6 +943,11 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
     banner_var = tk.StringVar(value="")
     press_counter = 0
 
+    def _update_banner() -> None:
+        nonlocal press_counter
+        press_counter += 1
+        banner_var.set(str(press_counter))
+
     def _set_message(text: str) -> None:
         message_var.set(text)
 
@@ -958,9 +963,7 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
 
     def _right_panel_action(action: Callable[[], Any] | None) -> Callable[[], Any]:
         def wrapped() -> Any:
-            nonlocal press_counter
-            press_counter += 1
-            banner_var.set(str(press_counter))
+            _update_banner()
             if action is not None:
                 return action()
 
