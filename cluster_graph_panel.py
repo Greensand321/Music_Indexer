@@ -390,16 +390,6 @@ class ClusterGraphPanel(ttk.Frame):
             self.scatter.set_color(point_colors)
         self.canvas.draw_idle()
 
-    def _finalize_graph_layout(self):
-        """Force geometry updates so the canvas sizes itself correctly."""
-
-        if not self.canvas.get_tk_widget().winfo_exists():
-            return
-
-        widget = self.canvas.get_tk_widget()
-        widget.update_idletasks()
-        widget.event_generate("<Configure>")
-
     def _on_clusters_ready(self, labels, params: dict):
         duration_ms = None
         if self._cluster_start_ts is not None:
@@ -408,7 +398,6 @@ class ClusterGraphPanel(ttk.Frame):
         self._clusters_ready = True
         if self._loading_lbl.winfo_exists():
             self._loading_lbl.pack_forget()
-        self.after(0, self._finalize_graph_layout)
         self._draw_clusters(labels)
         log_cluster_summary(labels, self.log)
         if duration_ms is not None:
