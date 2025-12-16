@@ -1166,18 +1166,6 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
     auto_btn = ttk.Button(btn_frame, text="Auto-Create", command=_auto_create_all)
     auto_btn.pack(side="left", padx=(5, 0))
 
-    redo_btn: ttk.Button | None = None
-    if name == "Interactive – HDBSCAN":
-        redo_btn = ttk.Button(
-            btn_frame,
-            text="Redo Values",
-            command=_message_action(
-                "Reopen the clustering parameters to tweak HDBSCAN values.",
-                lambda: panel and panel.open_param_dialog(),
-            ),
-        )
-        redo_btn.pack(side="left", padx=(5, 0))
-
     guidance_messages = {
         "Interactive – KMeans": (
             "Guide:\n"
@@ -1187,7 +1175,7 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
         ),
         "Interactive – HDBSCAN": (
             "Guide:\n"
-            "• Run Clusters (or Redo Values) to explore HDBSCAN groupings.\n"
+            "• Run Clusters to explore HDBSCAN groupings.\n"
             "• Load Cluster or use Add Highlighted Songs to turn on lasso mode and add a custom selection to the temp playlist.\n"
             "• Show All re-highlights the temp playlist; Remove Selected lasso-removes songs; Create Playlist exports it."
         ),
@@ -1197,14 +1185,15 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
     if guidance_text:
         _set_message(guidance_text)
 
-    guide_lbl = ttk.Label(
-        side_tools,
+    message_lbl = ttk.Label(
+        btn_frame,
         textvariable=message_var,
         justify="left",
-        wraplength=250,
+        wraplength=450,
         foreground="gray",
+        anchor="w",
     )
-    guide_lbl.grid(row=4, column=0, sticky="ew", padx=5, pady=(5, 0))
+    message_lbl.pack(side="left", padx=(10, 0), fill="x", expand=True)
 
     placeholder: ttk.Label | None = None
 
@@ -1228,9 +1217,6 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
             auto_btn,
         ):
             widget.config(state=state)
-
-        if redo_btn is not None:
-            redo_btn.config(state=state)
 
         run_btn.state(["disabled"] if running else ["!disabled"])
 
