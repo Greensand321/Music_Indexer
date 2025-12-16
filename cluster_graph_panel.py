@@ -436,7 +436,9 @@ class ClusterGraphPanel(ttk.Frame):
         def _on_geometry(event):
             if self._geometry_ready:
                 return
-            if event.width <= 1 or event.height <= 1:
+            w = getattr(event, "width", widget.winfo_width())
+            h = getattr(event, "height", widget.winfo_height())
+            if w <= 1 or h <= 1:
                 return
             self._geometry_ready = True
             if self._configure_binding:
@@ -445,7 +447,7 @@ class ClusterGraphPanel(ttk.Frame):
                 widget.unbind("<Map>", self._map_binding)
             self._maybe_draw_after_geometry()
 
-        self._configure_binding = widget.bind("<Configure>", _on_geometry)
+        self._configure_binding = widget.bind("<Configure>", _on_geometry, add="+")
         self._map_binding = widget.bind("<Map>", _on_geometry, add="+")
 
     def _maybe_draw_after_geometry(self) -> None:
