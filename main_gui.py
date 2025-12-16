@@ -1190,6 +1190,10 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
         cluster_generation_running = getattr(app, "cluster_generation_running", False)
         cluster_ready = cluster_manager is not None and cluster_data is not None
 
+        if panel is not None and cluster_manager is not None and panel.cluster_manager != cluster_manager:
+            panel.destroy()
+            panel = None
+
         if cluster_generation_running:
             _ensure_placeholder("Clustering in progress…")
             if panel is not None:
@@ -1259,6 +1263,10 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
             )
         else:
             panel.grid()
+
+        # Keep panel state in sync with the latest clustering run
+        panel.cluster_params = params
+        panel.cluster_manager = cluster_manager
 
         panel.refresh_control_states()
         panel._refresh_cluster_options()
@@ -2741,14 +2749,6 @@ class SoundVaultImporterApp(tk.Tk):
             self.cluster_data = (tracks, feats)
             self.cluster_params = {"method": method, "engine": engine, **params}
             self.cluster_manager = ClusterComputationManager(tracks, feats, self._log)
-
-            for name in ("Interactive – KMeans", "Interactive – HDBSCAN"):
-                if name in self.plugin_views:
-                    try:
-                        self.plugin_views[name].destroy()
-                    except Exception:
-                        pass
-                    self.plugin_views.pop(name, None)
 
             def done():
                 self.cluster_generation_running = False
