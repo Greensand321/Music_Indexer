@@ -51,6 +51,7 @@ class ClusterGraphPanel(ttk.Frame):
         self.log = log_callback
         self.cluster_manager = cluster_manager
         self.algo_key = algo_key
+        self._last_size: tuple[int, int] | None = None
 
         self._geometry_ready = False
         self._pending_draw_labels: np.ndarray | None = None
@@ -488,6 +489,33 @@ class ClusterGraphPanel(ttk.Frame):
 
         self.after_idle(final_redraw)
         self.after(30, final_redraw)
+
+    def on_resize(self, width: int, height: int) -> None:
+        """Resize the matplotlib canvas to the given dimensions."""
+
+        if width <= 1 or height <= 1:
+            return
+
+        size = (width, height)
+        if size == self._last_size:
+            return
+        self._last_size = size
+
+        widget = self.canvas.get_tk_widget()
+        widget.configure(width=width, height=height)
+
+        fig = self.canvas.figure
+        dpi = fig.dpi or 72
+        fig.set_size_inches(max(width / dpi, 1e-2), max(height / dpi, 1e-2), forward=False)
+
+        try:
+            self.canvas.resize_event()
+        except Exception:
+            pass
+        try:
+            self.canvas.draw_idle()
+        except Exception:
+            pass
 
     def _sync_controls(self):
         """Enable/disable controls based on clustering readiness."""

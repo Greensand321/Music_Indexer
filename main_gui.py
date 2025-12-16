@@ -1120,9 +1120,11 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
         )
         redo_btn.pack(side="left", padx=(5, 0))
 
-    def _update_control_states():
-        running = getattr(app, "cluster_generation_running", False)
-        ready = panel is not None
+    placeholder: ttk.Label | None = None
+
+    def _sync_cluster_controls(cluster_ready: bool, running: bool) -> None:
+        ready = cluster_ready and panel is not None
+        state = "normal" if ready and not running else "disabled"
 
         for widget in (
             playlist_btn,
@@ -1139,12 +1141,10 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
             gen_btn,
             auto_btn,
         ):
-            widget_state = "normal" if ready and not running else "disabled"
-            widget.config(state=widget_state)
+            widget.config(state=state)
 
         if redo_btn is not None:
-            redo_btn_state = "normal" if ready and not running else "disabled"
-            redo_btn.config(state=redo_btn_state)
+            redo_btn.config(state=state)
 
         run_btn.state(["disabled"] if running else ["!disabled"])
 
@@ -1155,7 +1155,17 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
         else:
             status.config(text="Clusters loaded")
 
-    def refresh_graph_area():
+    def _ensure_placeholder(message: str) -> ttk.Label:
+        nonlocal placeholder
+
+        if placeholder is None:
+            placeholder = ttk.Label(graph_area, anchor="center")
+            placeholder.grid(row=0, column=0, sticky="nsew")
+        placeholder.configure(text=message)
+        placeholder.lift()
+        return placeholder
+
+    def refresh_cluster_panel():
         nonlocal panel, cluster_manager, cluster_data
 
         cluster_data = getattr(app, "cluster_data", None)
@@ -1165,23 +1175,32 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
         else:
             tracks_local, features_local = cluster_data
             if cluster_manager is None or getattr(cluster_manager, "tracks", None) != tracks_local:
-                app.cluster_manager = ClusterComputationManager(tracks_local, features_local, app._log)
+                app.cluster_manager = ClusterComputationManager(
+                    tracks_local, features_local, app._log
+                )
                 cluster_manager = app.cluster_manager
 
         cluster_generation_running = getattr(app, "cluster_generation_running", False)
         cluster_ready = cluster_manager is not None and cluster_data is not None
 
-        for child in graph_area.winfo_children():
-            child.destroy()
-
-        panel = None
-        placeholder_text: str | None = None
-
         if cluster_generation_running:
-            placeholder_text = "Clustering in progress…"
-        elif not cluster_ready:
-            placeholder_text = "Run clustering once first"
-        else:
+            if panel is not None:
+                panel.grid_remove()
+            _ensure_placeholder("Clustering in progress…")
+            _sync_cluster_controls(False, True)
+            return
+
+        if not cluster_ready:
+            if panel is not None:
+                panel.grid_remove()
+            _ensure_placeholder("Run clustering once first")
+            _sync_cluster_controls(False, False)
+            return
+
+        if placeholder is not None:
+            placeholder.grid_remove()
+
+        if panel is None:
             X, X2 = cluster_manager.get_projection()
 
             panel = ClusterGraphPanel(
@@ -1196,13 +1215,7 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
                 library_path=app.library_path,
                 log_callback=app._log,
             )
-            panel.grid(row=0, column=0, sticky="nsew", pady=(0, 5))
 
-        if placeholder_text:
-            overlay = ttk.Label(graph_area, text=placeholder_text, anchor="center")
-            overlay.grid(row=0, column=0, sticky="nsew")
-
-        if panel is not None:
             panel.cluster_select_var = cluster_select_var
             panel.cluster_combo = cluster_combo
             panel.manual_cluster_var = manual_cluster_var
@@ -1213,8 +1226,6 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
             panel.lasso_btn = lasso_btn
             panel.ok_btn = ok_btn
             panel.gen_btn = gen_btn
-            panel.refresh_control_states()
-            panel._refresh_cluster_options()
 
             hover_panel = ttk.Frame(panel, relief="solid", borderwidth=1)
             art_lbl = tk.Label(hover_panel)
@@ -1230,12 +1241,23 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
 
             panel.setup_hover(hover_panel, art_lbl, title_lbl, artist_lbl)
 
-        _update_control_states()
+            def _handle_resize(event):
+                if panel is not None:
+                    panel.on_resize(event.width, event.height)
 
-    refresh_graph_area()
+            graph_area.bind("<Configure>", _handle_resize, add="+")
+            panel.grid(row=0, column=0, sticky="nsew", pady=(0, 5))
+            graph_area.after_idle(
+                lambda: panel.on_resize(graph_area.winfo_width(), graph_area.winfo_height())
+            )
+        else:
+            panel.grid()
 
-    def refresh_cluster_panel():
-        refresh_graph_area()
+        panel.refresh_control_states()
+        panel._refresh_cluster_options()
+        _sync_cluster_controls(True, False)
+
+    refresh_cluster_panel()
 
     frame.refresh_cluster_panel = refresh_cluster_panel  # type: ignore[attr-defined]
 
