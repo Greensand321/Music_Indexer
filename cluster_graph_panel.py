@@ -105,8 +105,6 @@ class ClusterGraphPanel(ttk.Frame):
 
     # UI widgets created externally will be assigned after instantiation
     lasso_btn: ttk.Widget
-    ok_btn: ttk.Button
-    gen_btn: ttk.Button
 
     def _start_clustering(self, params: dict):
         """Kick off clustering work in a background thread."""
@@ -168,8 +166,6 @@ class ClusterGraphPanel(ttk.Frame):
 
         if hasattr(self, "lasso_var"):
             self.lasso_var.set(active)
-        self.ok_btn.configure(state="disabled")
-        self.gen_btn.configure(state="disabled")
         self.canvas.draw_idle()
 
     # ─── Hover Metadata Panel ────────────────────────────────────────────────
@@ -253,8 +249,6 @@ class ClusterGraphPanel(ttk.Frame):
             if self.temp_remove_btn is not None:
                 text = "Press to Confirm" if self.selected_indices else "Lasso Selection"
                 self.temp_remove_btn.configure(text=text)
-            if not self.selected_indices:
-                self.ok_btn.configure(state="disabled")
             return
         if self._add_highlight_pending and self.selected_indices:
             self.selected_tracks = [self.tracks[i] for i in self.selected_indices]
@@ -262,40 +256,6 @@ class ClusterGraphPanel(ttk.Frame):
             self._add_highlight_pending = False
             self._set_lasso_enabled(False)
             return
-        if self.selected_indices:
-            self.ok_btn.configure(state="normal")
-        else:
-            self.ok_btn.configure(state="disabled")
-
-    def finalize_lasso(self):
-        """Lock selection and enable playlist creation."""
-        if not self.selected_indices:
-            self.log("\u26a0 No points selected; please try again.")
-            self.gen_btn.configure(state="disabled")
-            return
-
-        self.selected_tracks = [self.tracks[i] for i in self.selected_indices]
-        self.gen_btn.configure(state="normal")
-
-    # ─── Playlist Creation ──────────────────────────────────────────────────
-    def create_playlist(self):
-        if not self.selected_tracks:
-            self.log("\u26a0 No songs selected")
-            return
-
-        outfile = self._prompt_playlist_destination("CustomLasso")
-        if not outfile:
-            self.log("\u26a0 Playlist save cancelled")
-            return
-
-        try:
-            write_playlist(self.selected_tracks, outfile)
-        except Exception as e:  # pragma: no cover - simple GUI log
-            self.log(f"\u2717 Failed to write playlist: {e}")
-        else:
-            self.log(f"\u2713 Playlist written: {outfile}")
-            self._open_folder(os.path.dirname(outfile))
-            self.gen_btn.configure(state="disabled")
 
     def create_temp_playlist(self):
         """Write the temporary playlist to disk and open the folder."""
@@ -400,7 +360,7 @@ class ClusterGraphPanel(ttk.Frame):
                 c=point_colors,
                 s=20,
             )
-            self.ax.set_title("Lasso to select & generate playlist")
+            self.ax.set_title("Lasso to select text")
         else:
             self.scatter.set_offsets(self.X2)
             self.scatter.set_color(point_colors)
@@ -552,10 +512,6 @@ class ClusterGraphPanel(ttk.Frame):
         state = "normal" if self._clusters_ready else "disabled"
         if hasattr(self, "lasso_btn"):
             self.lasso_btn.configure(state=state)
-        if not self._clusters_ready:
-            for attr in ("ok_btn", "gen_btn"):
-                if hasattr(self, attr):
-                    getattr(self, attr).configure(state="disabled")
 
     def refresh_control_states(self):
         """Public hook to sync controls after external widgets are attached."""
