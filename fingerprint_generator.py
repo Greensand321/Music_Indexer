@@ -1,6 +1,6 @@
 import os
 import sqlite3
-from typing import Callable, Iterable, List, Tuple
+from typing import Callable, Tuple
 import tempfile
 from pydub import AudioSegment, silence
 
@@ -62,48 +62,16 @@ def compute_fingerprint_for_file(args: Tuple[str, str, bool]) -> Tuple[str, int 
         return path, None, None, str(e)
 
 
-def _load_cached_entries(conn: sqlite3.Connection) -> dict[str, Tuple[float, int | None, str | None]]:
-    """Return a mapping of path -> (mtime, duration, fingerprint)."""
-
-    cursor = conn.execute(
-        "SELECT path, mtime, duration, fingerprint FROM fingerprints"
-    )
-    return {row[0]: (row[1], row[2], row[3]) for row in cursor.fetchall()}
-
-
-def _gather_audio_files(root_path: str | Iterable[str]) -> List[str]:
-    """Return a list of audio files either from a directory walk or iterable."""
-
-    if isinstance(root_path, str):
-        audio_files: List[str] = []
-        for dirpath, _, files in os.walk(root_path):
-            rel_dir = os.path.relpath(dirpath, root_path)
-            if {"not sorted", "playlists"} & {p.lower() for p in rel_dir.split(os.sep)}:
-                continue
-            for fname in files:
-                ext = os.path.splitext(fname)[1].lower()
-                if ext in SUPPORTED_EXTS:
-                    audio_files.append(os.path.join(dirpath, fname))
-        return audio_files
-
-    return [p for p in root_path if os.path.splitext(p)[1].lower() in SUPPORTED_EXTS]
-
-
 def compute_fingerprints_parallel(
-    root_path: str | Iterable[str],
+    root_path: str,
     db_path: str,
     log_callback: Callable[[str], None] | None = None,
     progress_callback: Callable[[int, int, str, str], None] | None = None,
     max_workers: int | None = None,
     trim_silence: bool = False,
     phase: str = "A",
-) -> list[tuple[str, int | None, str | None]]:
-    """Compute fingerprints and return ``(path, duration, fingerprint)`` results.
-
-    ``root_path`` may be a directory or an iterable of specific file paths. Existing
-    fingerprints in ``db_path`` are reused when their mtime matches, allowing
-    subsequent scans to skip unchanged files without sacrificing quality.
-    """
+) -> None:
+    """Walk ``root_path`` and compute fingerprints using multiple processes."""
     if log_callback is None:
         log_callback = print
 
@@ -128,55 +96,41 @@ def compute_fingerprints_parallel(
         """
     )
 
-    results: list[tuple[str, int | None, str | None]] = []
-    audio_files = _gather_audio_files(root_path)
+    audio_files = []
+    idx = 0
+    for dirpath, _, files in os.walk(root_path):
+        rel_dir = os.path.relpath(dirpath, root_path)
+        if {"not sorted", "playlists"} & {p.lower() for p in rel_dir.split(os.sep)}:
+            continue
+        for fname in files:
+            ext = os.path.splitext(fname)[1].lower()
+            if ext in SUPPORTED_EXTS:
+                full = os.path.join(dirpath, fname)
+                audio_files.append(full)
+                idx += 1
+                progress_callback(idx, 0, os.path.relpath(full, root_path), phase)
 
     total = len(audio_files)
     progress_callback(0, total, "Fingerprinting", phase)
+    work_items = [(p, db_path, trim_silence) for p in audio_files]
 
-    cached = _load_cached_entries(conn)
-    pending: list[str] = []
-    completed = 0
-
-    for path in audio_files:
-        mtime = os.path.getmtime(ensure_long_path(path))
-        cache_entry = cached.get(path)
-        if cache_entry and cache_entry[2] is not None and cache_entry[0] == mtime:
-            duration, fp_hash = cache_entry[1], cache_entry[2]
-            results.append((path, duration, fp_hash))
-            completed += 1
-            progress_callback(completed, total, path, phase)
-            continue
-        pending.append(path)
-
-    work_items = [(p, db_path, trim_silence) for p in pending]
-
-    if pending:
-        with ProcessPoolExecutor(max_workers=max_workers) as exe:
-            for path, duration, fp_hash, err in exe.map(
-                compute_fingerprint_for_file, work_items
-            ):
-                completed += 1
-                if err:
-                    log_callback(f"   ! Failed fingerprint {path}: {err}")
-                    progress_callback(completed, total, path, phase)
-                    continue
-                mtime = os.path.getmtime(ensure_long_path(path))
-                conn.execute(
-                    "INSERT OR REPLACE INTO fingerprints (path, mtime, duration, fingerprint) VALUES (?, ?, ?, ?)",
-                    (path, mtime, duration, fp_hash),
-                )
-                results.append((path, duration, fp_hash))
-                log_callback(f"Fingerprinted {path}")
-                progress_callback(completed, total, path, phase)
-                if completed % 50 == 0 or completed == total:
-                    log_callback(f"   • Fingerprinting {completed}/{total}")
-    else:
-        log_callback("All fingerprints loaded from cache")
+    with ProcessPoolExecutor(max_workers=max_workers) as exe:
+        for idx, (path, duration, fp_hash, err) in enumerate(exe.map(compute_fingerprint_for_file, work_items), start=1):
+            if err:
+                log_callback(f"   ! Failed fingerprint {path}: {err}")
+                continue
+            mtime = os.path.getmtime(ensure_long_path(path))
+            conn.execute(
+                "INSERT OR REPLACE INTO fingerprints (path, mtime, duration, fingerprint) VALUES (?, ?, ?, ?)",
+                (path, mtime, duration, fp_hash),
+            )
+            log_callback(f"Fingerprinted {path}")
+            progress_callback(idx, total, path, phase)
+            if idx % 50 == 0 or idx == total:
+                log_callback(f"   • Fingerprinting {idx}/{total}")
 
     conn.commit()
     conn.close()
-    return results
 
 
 
@@ -190,13 +144,5 @@ def compute_fingerprints(
     phase: str = "A",
 ) -> None:
     """Backward-compatible wrapper around :func:`compute_fingerprints_parallel`."""
-    return compute_fingerprints_parallel(
-        root_path,
-        db_path,
-        log_callback,
-        progress_callback,
-        max_workers,
-        trim_silence,
-        phase,
-    )
+    compute_fingerprints_parallel(root_path, db_path, log_callback, progress_callback, max_workers, trim_silence, phase)
 
