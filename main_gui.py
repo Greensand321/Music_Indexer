@@ -1138,7 +1138,10 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
 
     lasso_btn = ttk.Checkbutton(
         btn_frame,
-        text="text",
+        text=(
+            "To begin, press the \"Run Clusters\" button, select library folders, "
+            "and run. You'll then see the music visually."
+        ),
         variable=lasso_var,
         command=_message_action(
             "Toggling lasso mode for manual graph selection.",
