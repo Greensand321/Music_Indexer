@@ -2573,6 +2573,9 @@ class SoundVaultImporterApp(tk.Tk):
         if engine_default == "librosa":
             engine_default = "serial"
         engine_var = tk.StringVar(value=engine_default)
+        use_max_workers_var = tk.BooleanVar(
+            value=bool(cluster_cfg.get("use_max_workers", False))
+        )
 
         top = ttk.Frame(dlg)
         top.pack(fill="x", padx=10, pady=(10, 0))
@@ -2620,6 +2623,22 @@ class SoundVaultImporterApp(tk.Tk):
             variable=engine_var,
             value="parallel",
         ).pack(anchor="w", padx=5, pady=(0, 5))
+
+        use_max_workers_chk = ttk.Checkbutton(
+            engine_frame,
+            text="Aggressive parallelism (use all cores minus one)",
+            variable=use_max_workers_var,
+        )
+        use_max_workers_chk.pack(anchor="w", padx=22, pady=(0, 5))
+
+        def _update_engine_state(*_args):
+            if engine_var.get() == "parallel":
+                use_max_workers_chk.state(["!disabled"])
+            else:
+                use_max_workers_chk.state(["disabled"])
+
+        engine_var.trace_add("write", _update_engine_state)
+        _update_engine_state()
 
         # KMeans params
         km_frame = ttk.Frame(params_frame)
@@ -2796,12 +2815,16 @@ class SoundVaultImporterApp(tk.Tk):
                             f"{epsilon_var.get()} is not a valid number",
                         )
                         return
-            self._start_cluster_playlists(m, params, engine, dlg)
+            self._start_cluster_playlists(
+                m, params, engine, dlg, use_max_workers_var.get()
+            )
 
         ttk.Button(btns, text="Generate", command=generate).pack(side="left", padx=5)
         ttk.Button(btns, text="Cancel", command=dlg.destroy).pack(side="left", padx=5)
 
-    def _start_cluster_playlists(self, method: str, params: dict, engine: str, dlg):
+    def _start_cluster_playlists(
+        self, method: str, params: dict, engine: str, dlg, use_max_workers: bool
+    ):
         if dlg is not None:
             dlg.destroy()
         path = self.require_library()
@@ -2812,19 +2835,30 @@ class SoundVaultImporterApp(tk.Tk):
         self.show_log_tab()
         threading.Thread(
             target=self._run_cluster_generation,
-            args=(path, method, params, engine),
+            args=(path, method, params, engine, use_max_workers),
             daemon=True,
         ).start()
 
     def _run_cluster_generation(
-        self, path: str, method: str, params: dict, engine: str
+        self, path: str, method: str, params: dict, engine: str, use_max_workers: bool
     ):
         try:
             tracks, feats = cluster_library(
-                path, method, params, self._log, self.folder_filter, engine
+                path,
+                method,
+                params,
+                self._log,
+                self.folder_filter,
+                engine,
+                use_max_workers=use_max_workers,
             )
             self.cluster_data = (tracks, feats)
-            self.cluster_params = {"method": method, "engine": engine, **params}
+            self.cluster_params = {
+                "method": method,
+                "engine": engine,
+                "use_max_workers": use_max_workers,
+                **params,
+            }
             self.cluster_manager = ClusterComputationManager(tracks, feats, self._log)
 
             def done():

@@ -129,14 +129,23 @@ def _extract_worker(path: str, engine: AudioFeatureEngine) -> tuple[str, "np.nda
         return path, zeros, str(exc)
 
 
-def _extract_features_parallel(tracks, cache, log_callback, engine: AudioFeatureEngine):
+def _extract_features_parallel(
+    tracks,
+    cache,
+    log_callback,
+    engine: AudioFeatureEngine,
+    use_max_workers: bool = False,
+):
     """Fill ``cache`` for ``tracks`` using a bounded process pool."""
 
     feats: list["np.ndarray"] = []
     missing = [p for p in tracks if p not in cache]
 
     if missing:
-        workers = max(1, min(multiprocessing.cpu_count(), 4))
+        if use_max_workers:
+            workers = max(1, multiprocessing.cpu_count() - 1)
+        else:
+            workers = max(1, min(multiprocessing.cpu_count(), 4))
         log_callback(
             f"⚙ Parallel feature extraction for {len(missing)} files ({workers} workers)"
         )
@@ -274,6 +283,7 @@ def generate_clustered_playlists(
     log_callback=None,
     engine: str = "serial",
     feature_engine: AudioFeatureEngine = "librosa",
+    use_max_workers: bool = False,
 ) -> None:
     """Create clustered data for the given tracks without writing playlists."""
     if log_callback is None:
@@ -316,7 +326,7 @@ def generate_clustered_playlists(
 
     if engine_mode == "parallel":
         feats, updated = _extract_features_parallel(
-            tracks, cache, log_callback, feature_engine
+            tracks, cache, log_callback, feature_engine, use_max_workers=use_max_workers
         )
     else:
         feats, updated = _extract_features_serial(
