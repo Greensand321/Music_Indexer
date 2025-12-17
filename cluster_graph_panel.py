@@ -475,6 +475,9 @@ class ClusterGraphPanel(ttk.Frame):
             h = widget.winfo_height()
             if w <= 1 or h <= 1:
                 return
+            # Reset cached size so ``on_resize`` always triggers a redraw,
+            # mimicking a manual window wiggle even if the dimensions are unchanged.
+            self._last_size = None
             self.on_resize(w, h)
 
         self.after_idle(_resize_once)
