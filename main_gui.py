@@ -1890,7 +1890,7 @@ class SoundVaultImporterApp(tk.Tk):
         self.notebook.add(self.player_tab, text="Player")
 
         player_controls = ttk.Frame(self.player_tab)
-        player_controls.pack(fill="x", padx=10, pady=(10, 0))
+        player_controls.pack(fill="x", padx=10, pady=(10, 5))
         ttk.Label(player_controls, textvariable=self.player_status_var).pack(
             side="left"
         )
@@ -1944,7 +1944,7 @@ class SoundVaultImporterApp(tk.Tk):
         self.player_tree.bind("<<TreeviewSelect>>", self._on_player_selection_change)
 
         art_panel = ttk.Frame(player_content)
-        art_panel.pack(side="right", padx=(10, 0), anchor="n")
+        art_panel.pack(side="right", fill="y", padx=(10, 0))
         self.player_art_caption = ttk.Label(
             art_panel,
             text="Select a track to view album art",
