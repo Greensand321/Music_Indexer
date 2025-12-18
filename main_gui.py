@@ -221,322 +221,66 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
             **extras,
         }
         algo_key = "hdbscan"
-    elif name == "Sort by Genre":
+    elif name == "Genre Normalizer":
         lib_var = tk.StringVar(value=app.library_path or "No library selected")
-        progress_var = tk.StringVar(value="Waiting to start")
-        playlists_dir = tk.StringVar(value="")
-        running = tk.BooleanVar(value=False)
-        total_tracks = 0
-        q: queue.Queue = queue.Queue()
-        cancel_event = threading.Event()
-        genre_vars: dict[str, tk.BooleanVar] = {}
-        current_buckets: dict[str, list[str]] = {}
-        planned_paths: dict[str, str] = {}
         norm_status = tk.StringVar(value="Select a library to enable normalization.")
-        norm_btn: ttk.Button | None = None
-
-        def append_log(msg: str) -> None:
-            log_box.configure(state="normal")
-            log_box.insert("end", msg + "\n")
-            log_box.see("end")
-            log_box.configure(state="disabled")
-
-        def render_stats(stats: dict | None):
-            for child in stats_rows.winfo_children():
-                child.destroy()
-            genre_vars.clear()
-            if not stats:
-                ttk.Label(
-                    stats_rows,
-                    text="No playlists generated yet. Run a sort to preview genres.",
-                ).pack(anchor="w", padx=5, pady=5)
-                update_controls()
-                return
-            header = ttk.Frame(stats_rows)
-            header.pack(fill="x", padx=5, pady=(0, 4))
-            ttk.Label(header, text="Export", width=8, anchor="w").pack(
-                side="left", padx=(0, 4)
-            )
-            ttk.Label(header, text="Genre", width=26, anchor="w").pack(side="left")
-            ttk.Label(header, text="Tracks", width=8).pack(side="left")
-            ttk.Label(header, text="Playlist", width=20, anchor="w").pack(
-                side="left", padx=(10, 0)
-            )
-            ttk.Label(header, text="Status", width=12, anchor="w").pack(
-                side="left", padx=(6, 0)
-            )
-            for genre, info in sorted(stats.items(), key=lambda kv: kv[0].lower()):
-                row = ttk.Frame(stats_rows)
-                row.pack(fill="x", padx=5, pady=2)
-                var = tk.BooleanVar(value=info.get("exported", False) or True)
-                genre_vars[genre] = var
-                ttk.Checkbutton(row, variable=var).pack(side="left", padx=(0, 6))
-                ttk.Label(row, text=genre, width=26, anchor="w").pack(side="left")
-                ttk.Label(row, text=str(info.get("count", 0)), width=8).pack(
-                    side="left"
-                )
-                ttk.Label(
-                    row, text=os.path.basename(info.get("playlist", "")), width=20
-                ).pack(side="left", padx=(10, 5))
-                status_txt = "Exported" if info.get("exported") else "Pending"
-                ttk.Label(row, text=status_txt, width=12).pack(side="left", padx=(6, 4))
-                ttk.Button(
-                    row,
-                    text="Open",
-                    command=lambda p=info.get("playlist", ""): open_path(p),
-                    state="normal" if info.get("exported") else "disabled",
-                ).pack(side="left")
-            update_controls()
 
         def update_controls():
             lib_var.set(app.library_path or "No library selected")
-            ready = bool(app.library_path) and not running.get()
-            has_results = bool(current_buckets)
-            run_btn.config(state="normal" if ready else "disabled")
-            cancel_btn.config(state="normal" if running.get() else "disabled")
-            open_btn.config(
-                state="normal" if playlists_dir.get() or app.library_path else "disabled"
-            )
-            export_btn.config(
-                state="normal"
-                if ready and has_results and any(v.get() for v in genre_vars.values())
-                else "disabled"
-            )
-            select_all_btn.config(state="normal" if has_results and ready else "disabled")
-            select_none_btn.config(state="normal" if has_results and ready else "disabled")
             norm_status.set(
                 os.path.join(app.library_path, ".genre_mapping.json")
                 if app.library_path
                 else "Select a library to enable normalization."
             )
-            if norm_btn:
-                norm_btn.config(
-                    state="normal" if app.library_path and not running.get() else "disabled"
-                )
+            open_btn.config(state="normal" if app.library_path else "disabled")
 
-        def open_path(path: str) -> None:
-            if not path:
-                return
-            try:
-                if sys.platform == "win32":
-                    os.startfile(path)  # type: ignore[attr-defined]
-                elif sys.platform == "darwin":
-                    subprocess.run(["open", path], check=False)
-                else:
-                    subprocess.run(["xdg-open", path], check=False)
-            except Exception as exc:  # pragma: no cover - OS interaction
-                messagebox.showerror("Open File", f"Could not open {path}: {exc}")
-
-        def select_all():
-            for var in genre_vars.values():
-                var.set(True)
-            update_controls()
-
-        def select_none():
-            for var in genre_vars.values():
-                var.set(False)
-            update_controls()
-
-        def export_selected():
-            if running.get() or not current_buckets:
-                return
-            selected = [g for g, var in genre_vars.items() if var.get()]
-            if not selected:
-                messagebox.showinfo(
-                    "No Genres Selected",
-                    "Select at least one genre to export playlists.",
-                )
-                return
-            result = playlist_engine.export_genre_playlists(
-                current_buckets,
-                app.library_path,
-                selected_genres=selected,
-                log_callback=append_log,
-                planned_paths=planned_paths,
-            )
-            render_stats(result.get("genres"))
-            append_log(f"Exported {len(selected)} playlist(s).")
-            open_genre_folder()
-
-        def start_run():
-            nonlocal total_tracks
-            if running.get():
-                return
-            path = app.require_library()
-            if not path:
-                return
-            current_buckets.clear()
-            planned_paths.clear()
-            genre_vars.clear()
-            tracks = gather_tracks(path, getattr(app, "folder_filter", None))
-            if not tracks:
-                messagebox.showinfo("No Tracks", "No audio files found in the library.")
-                return
-            total_tracks = len(tracks)
-            playlists_dir.set(os.path.join(path, "Playlists", "Genres"))
-            cancel_event.clear()
-            running.set(True)
-            progress["value"] = 0
-            progress["maximum"] = total_tracks
-            progress_var.set(f"0/{total_tracks} processed")
-            log_box.configure(state="normal")
-            log_box.delete("1.0", "end")
-            log_box.configure(state="disabled")
-            append_log(f"Found {total_tracks} tracks. Sorting by genre…")
-            render_stats(None)
-            update_controls()
-
-            def worker():
-                try:
-                    result = playlist_engine.sort_tracks_by_genre(
-                        tracks,
-                        path,
-                        log_callback=lambda m: q.put(("log", m)),
-                        progress_callback=lambda c: q.put(("progress", c)),
-                        cancel_event=cancel_event,
-                        export=False,
-                    )
-                    q.put(("done", result))
-                except Exception as exc:  # pragma: no cover - UI surface only
-                    q.put(("error", str(exc)))
-
-            threading.Thread(target=worker, daemon=True).start()
-            poll_queue()
-
-        def poll_queue():
-            nonlocal current_buckets, planned_paths
-            try:
-                while True:
-                    tag, payload = q.get_nowait()
-                    if tag == "log":
-                        append_log(payload)
-                    elif tag == "progress":
-                        progress["value"] = payload
-                        progress_var.set(f"{payload}/{total_tracks} processed")
-                    elif tag == "done":
-                        running.set(False)
-                        if payload:
-                            current_buckets = payload.get("buckets", {})
-                            planned_paths = payload.get("playlist_paths", {})
-                            render_stats(payload.get("genres"))
-                        update_controls()
-                    elif tag == "error":
-                        running.set(False)
-                        messagebox.showerror("Sort by Genre", payload)
-                        update_controls()
-                    elif tag == "cancelled":
-                        running.set(False)
-                        append_log("Sorting cancelled")
-                        update_controls()
-            except queue.Empty:
-                pass
-            if running.get():
-                frame.after(200, poll_queue)
-
-        def cancel_run():
-            cancel_event.set()
-            q.put(("cancelled", None))
-
-        def open_genre_folder():
-            path = playlists_dir.get() or (
-                os.path.join(app.library_path, "Playlists", "Genres")
-                if app.library_path
-                else ""
-            )
-            if not path:
-                return
-            os.makedirs(path, exist_ok=True)
-            open_path(path)
-
-        paned = ttk.Panedwindow(frame, orient="horizontal")
-        paned.pack(fill="both", expand=True)
-
-        main_area = ttk.Frame(paned)
-        side_panel = ttk.Frame(paned, width=280)
-        paned.add(main_area, weight=3)
-        paned.add(side_panel, weight=2)
-
-        info = ttk.Frame(main_area)
-        info.pack(fill="x", pady=(0, 6))
-        ttk.Label(info, textvariable=lib_var).pack(side="left")
-        open_btn = ttk.Button(info, text="Open Genre Playlists", command=open_genre_folder)
-        open_btn.pack(side="right", padx=(5, 0))
-        run_btn = ttk.Button(info, text="Sort", command=start_run)
-        run_btn.pack(side="right", padx=(5, 0))
-        cancel_btn = ttk.Button(info, text="Cancel", command=cancel_run, state="disabled")
-        cancel_btn.pack(side="right")
-
-        prog_frame = ttk.Frame(main_area)
-        prog_frame.pack(fill="x", pady=(0, 6))
-        progress = ttk.Progressbar(prog_frame, mode="determinate")
-        progress.pack(fill="x")
-        ttk.Label(prog_frame, textvariable=progress_var).pack(anchor="w")
-
-        selection_bar = ttk.Frame(main_area)
-        selection_bar.pack(fill="x", pady=(0, 4))
-        select_all_btn = ttk.Button(
-            selection_bar, text="Select All", command=select_all, state="disabled"
-        )
-        select_all_btn.pack(side="left")
-        select_none_btn = ttk.Button(
-            selection_bar, text="Select None", command=select_none, state="disabled"
-        )
-        select_none_btn.pack(side="left", padx=(5, 0))
-        export_btn = ttk.Button(
-            selection_bar,
-            text="Export Selected Playlists",
-            command=export_selected,
-            state="disabled",
-        )
-        export_btn.pack(side="right")
-
-        stats_container = ttk.Frame(main_area)
-        stats_container.pack(fill="both", pady=(0, 6), expand=True)
-        stats_canvas = tk.Canvas(stats_container, height=220)
-        stats_scroll = ttk.Scrollbar(stats_container, orient="vertical", command=stats_canvas.yview)
-        stats_rows = ttk.Frame(stats_canvas)
-        stats_rows.bind(
-            "<Configure>",
-            lambda e: stats_canvas.configure(scrollregion=stats_canvas.bbox("all")),
-        )
-        stats_canvas.create_window((0, 0), window=stats_rows, anchor="nw")
-        stats_canvas.configure(yscrollcommand=stats_scroll.set)
-        stats_canvas.pack(side="left", fill="both", expand=True)
-        stats_scroll.pack(side="right", fill="y")
-        render_stats(None)
-
-        ttk.Label(main_area, text="Activity Log:").pack(anchor="w")
-        log_box = ScrolledText(main_area, height=10, wrap="word", state="disabled")
-        log_box.pack(fill="both", expand=True)
-
-        # ── Genre Normalizer Side Panel ─────────────────────────────────
-        normalizer_box = ttk.LabelFrame(side_panel, text="Genre Normalizer")
-        normalizer_box.pack(fill="both", expand=True, padx=(10, 0))
+        intro = ttk.Frame(frame)
+        intro.pack(fill="both", expand=True, padx=10, pady=10)
 
         ttk.Label(
-            normalizer_box,
+            intro,
             text=(
-                "Create or edit a mapping file before exporting playlists. "
-                "The mapping will normalize genres during sorting."
+                "Normalize genre labels across your library by generating or "
+                "updating the .genre_mapping.json file."
             ),
-            wraplength=240,
+            wraplength=480,
             justify="left",
-        ).pack(fill="x", padx=8, pady=(8, 6))
+        ).pack(anchor="w", pady=(0, 10))
 
-        ttk.Label(normalizer_box, text="Mapping file:").pack(anchor="w", padx=8)
-        ttk.Label(normalizer_box, textvariable=norm_status, wraplength=240).pack(
-            fill="x", padx=8
+        status_row = ttk.Frame(intro)
+        status_row.pack(fill="x", pady=(0, 6))
+        ttk.Label(status_row, text="Library:", width=10).pack(side="left")
+        ttk.Label(status_row, textvariable=lib_var).pack(side="left", fill="x", expand=True)
+
+        map_row = ttk.Frame(intro)
+        map_row.pack(fill="x", pady=(0, 12))
+        ttk.Label(map_row, text="Mapping file:", width=10).pack(side="left")
+        ttk.Label(map_row, textvariable=norm_status, wraplength=360).pack(
+            side="left", fill="x", expand=True
         )
 
-        norm_btn = ttk.Button(
-            normalizer_box,
+        ttk.Label(
+            intro,
+            text=(
+                "Use the Genre Normalization Assistant to scan raw genres, copy "
+                "the suggested prompt, and paste or edit your mapping JSON."
+            ),
+            wraplength=480,
+            justify="left",
+        ).pack(anchor="w", pady=(0, 10))
+
+        open_btn = ttk.Button(
+            intro,
             text="Open Genre Normalizer",
             command=lambda: app._open_genre_normalizer(),
         )
-        norm_btn.pack(pady=8, padx=8, anchor="e")
+        open_btn.pack(anchor="e")
 
+        def refresh_panel():
+            update_controls()
+
+        frame.refresh_cluster_panel = refresh_panel
         update_controls()
-
     elif name == "Tempo/Energy Buckets":
         lib_var = tk.StringVar(value=app.library_path or "No library selected")
         dep_status = tk.StringVar()
@@ -1719,7 +1463,7 @@ class SoundVaultImporterApp(tk.Tk):
         for name in [
             "Interactive – KMeans",
             "Interactive – HDBSCAN",
-            "Sort by Genre",
+            "Genre Normalizer",
             "Tempo/Energy Buckets",
             "Auto-DJ",
         ]:
