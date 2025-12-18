@@ -266,6 +266,27 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
             side="left", fill="x", expand=True
         )
 
+        init_status = tk.StringVar(
+            value="Paste JSON and initialize to rewrite library genres."
+        )
+        apply_status = tk.StringVar(
+            value="Apply a saved or pasted mapping to embedded genres."
+        )
+
+        action_bar = ttk.Frame(frame)
+        action_bar.pack(fill="x", padx=10, pady=(6, 6))
+        init_btn = ttk.Button(action_bar, text="Initialize Normalizer")
+        init_btn.pack(side="left")
+        save_btn = ttk.Button(action_bar, text="Save Mapping", command=app.apply_mapping)
+        save_btn.pack(side="left", padx=(6, 0))
+        apply_btn = ttk.Button(action_bar, text="Apply To Songs")
+        apply_btn.pack(side="left", padx=(6, 0))
+
+        status_col = ttk.Frame(action_bar)
+        status_col.pack(side="left", padx=12, expand=True, fill="x")
+        ttk.Label(status_col, textvariable=init_status).pack(anchor="w")
+        ttk.Label(status_col, textvariable=apply_status).pack(anchor="w")
+
         control_row = ttk.Frame(intro)
         control_row.pack(fill="x", pady=(4, 0))
         scan_btn = ttk.Button(control_row, text="Scan Genres")
@@ -306,26 +327,6 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
         map_box.pack(fill="both", expand=True, padx=10, pady=(0, 10))
         app.text_map = ScrolledText(map_box, width=50, height=10)
         app.text_map.pack(fill="both", expand=True, padx=8, pady=6)
-
-        init_status = tk.StringVar(
-            value="Paste JSON and initialize to rewrite library genres."
-        )
-        apply_status = tk.StringVar(
-            value="Apply a saved or pasted mapping to embedded genres."
-        )
-
-        btn_frame = ttk.Frame(map_box)
-        btn_frame.pack(fill="x", padx=8, pady=(0, 6))
-        init_btn = ttk.Button(btn_frame, text="Initialize Normalizer")
-        init_btn.pack(side="left")
-        save_btn = ttk.Button(btn_frame, text="Save Mapping", command=app.apply_mapping)
-        save_btn.pack(side="left", padx=(6, 0))
-        apply_btn = ttk.Button(btn_frame, text="Apply To Songs")
-        apply_btn.pack(side="right")
-        status_col = ttk.Frame(btn_frame)
-        status_col.pack(side="left", padx=8, expand=True, fill="x")
-        ttk.Label(status_col, textvariable=init_status).pack(anchor="w")
-        ttk.Label(status_col, textvariable=apply_status).pack(anchor="w")
 
         def populate_raw_genres(genres: list[str]):
             app.text_raw.configure(state="normal")
