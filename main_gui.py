@@ -377,6 +377,7 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
 
         frame.refresh_cluster_panel = refresh_panel
         refresh_panel()
+        return frame
     elif name == "Tempo/Energy Buckets":
         lib_var = tk.StringVar(value=app.library_path or "No library selected")
         dep_status = tk.StringVar()
