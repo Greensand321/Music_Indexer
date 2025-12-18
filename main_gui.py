@@ -3609,15 +3609,28 @@ class SoundVaultImporterApp(tk.Tk):
         threading.Thread(target=task, daemon=True).start()
 
     def _render_sync_results(self):
+        def _display_name(path: str, root: str) -> str:
+            """Return a user-friendly path relative to ``root`` when possible."""
+            if not root:
+                return os.path.basename(path)
+            try:
+                return os.path.relpath(path, root)
+            except Exception:
+                return os.path.basename(path)
+
+        incoming_root = self.sync_incoming_var.get()
+        library_root = self.sync_library_var.get()
         self.sync_new_list.delete(0, "end")
         self.sync_existing_list.delete(0, "end")
         self.sync_improved_list.delete(0, "end")
         for p in self.sync_new:
-            self.sync_new_list.insert("end", os.path.basename(p))
-        for inc, _lib in self.sync_existing:
-            self.sync_existing_list.insert("end", os.path.basename(inc))
-        for inc, _lib in self.sync_improved:
-            self.sync_improved_list.insert("end", os.path.basename(inc))
+            self.sync_new_list.insert("end", _display_name(p, incoming_root))
+        for inc, lib in self.sync_existing:
+            label = f"{_display_name(inc, incoming_root)} · existing: {_display_name(lib, library_root)}"
+            self.sync_existing_list.insert("end", label)
+        for inc, lib in self.sync_improved:
+            label = f"{_display_name(inc, incoming_root)} → {_display_name(lib, library_root)}"
+            self.sync_improved_list.insert("end", label)
 
     def _copy_new_tracks(self):
         idxs = self.sync_new_list.curselection()
