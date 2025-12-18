@@ -1873,9 +1873,11 @@ class SoundVaultImporterApp(tk.Tk):
             return
         logging.info("[perf] tool switch -> %s", sel)
 
-        if self.active_plugin and self.active_plugin in self.plugin_views:
-            logging.info("[perf] hide panel %s", self.active_plugin)
-            self.plugin_views[self.active_plugin].pack_forget()
+        # Ensure any previously displayed plugin panels are hidden before showing the
+        # newly selected tool. This avoids orphaned UIs sticking around when
+        # switching between tools (e.g., the Tempo/Energy Buckets view).
+        for panel in self.plugin_views.values():
+            panel.pack_forget()
 
         panel = self.plugin_views.get(sel)
         if panel is None:
