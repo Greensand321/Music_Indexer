@@ -1488,6 +1488,12 @@ class SoundVaultImporterApp(tk.Tk):
         )
         self.player_playlist_listbox: tk.Listbox | None = None
         self.player_view_label: str | None = None
+        self.player_playlist_mode = False
+        self.player_playlist_rows: list[dict[str, str]] = []
+        self.player_playlist_tree_paths: dict[str, str] = {}
+        self.player_playlist_tree_rows: dict[str, dict[str, str]] = {}
+        self.player_playlist_tree: ttk.Treeview | None = None
+        self.player_playlist_frame: ttk.Frame | None = None
 
         # assume ffmpeg is available without performing checks
         self.ffmpeg_available = True
@@ -1911,37 +1917,12 @@ class SoundVaultImporterApp(tk.Tk):
         player_content = ttk.Frame(self.player_tab)
         player_content.pack(fill="both", expand=True, padx=10, pady=(0, 10))
 
-        player_table = ttk.Frame(player_content)
-        player_table.pack(side="left", fill="both", expand=True)
-        p_vsb = ttk.Scrollbar(player_table, orient="vertical")
-        p_vsb.pack(side="right", fill="y")
-        p_hsb = ttk.Scrollbar(player_table, orient="horizontal")
-        p_hsb.pack(side="bottom", fill="x")
-
-        cols = ("Title", "Artist", "Album", "Length", "Play")
-        self.player_tree = ttk.Treeview(
-            player_table,
-            columns=cols,
-            show="headings",
-            yscrollcommand=p_vsb.set,
-            xscrollcommand=p_hsb.set,
+        self.player_table_region = ttk.Frame(player_content)
+        self.player_table_region.pack(side="left", fill="both", expand=True)
+        self.player_library_frame = self._create_player_library_table(
+            self.player_table_region
         )
-        p_vsb.config(command=self.player_tree.yview)
-        p_hsb.config(command=self.player_tree.xview)
-        self.player_tree.pack(fill="both", expand=True)
-
-        widths = {"Title": 220, "Artist": 140, "Album": 160, "Length": 70, "Play": 50}
-        for c in cols:
-            self.player_tree.heading(c, text=c)
-            self.player_tree.column(
-                c,
-                width=widths.get(c, 100),
-                anchor="center" if c in {"Length", "Play"} else "w",
-                stretch=c != "Play",
-            )
-
-        self.player_tree.bind("<ButtonRelease-1>", self._on_player_tree_click)
-        self.player_tree.bind("<<TreeviewSelect>>", self._on_player_selection_change)
+        self.player_library_frame.pack(fill="both", expand=True)
 
         art_panel = ttk.Frame(player_content)
         art_panel.pack(side="right", fill="y", padx=(10, 0))
@@ -1954,6 +1935,10 @@ class SoundVaultImporterApp(tk.Tk):
         self.player_art_caption.pack(fill="x", pady=(0, 6))
         self.player_art_label = ttk.Label(art_panel)
         self.player_art_label.pack(fill="x")
+        self.player_playlist_toggle_btn = ttk.Button(
+            art_panel, text="Add Playlist", command=self._toggle_player_playlist_view
+        )
+        self.player_playlist_toggle_btn.pack(fill="x", pady=(0, 6))
         ttk.Button(
             art_panel, text="Load Playlist", command=self._player_load_playlist
         ).pack(fill="x", pady=(6, 6))
@@ -3862,6 +3847,209 @@ class SoundVaultImporterApp(tk.Tk):
         ttk.Button(btn_frame, text="Cancel", command=do_cancel).pack(side="left", padx=5)
         top.wait_window()
         return result["ok"], skip_var.get()
+
+    def _create_player_library_table(self, parent: tk.Widget) -> ttk.Frame:
+        table = ttk.Frame(parent)
+        p_vsb = ttk.Scrollbar(table, orient="vertical")
+        p_vsb.pack(side="right", fill="y")
+        p_hsb = ttk.Scrollbar(table, orient="horizontal")
+        p_hsb.pack(side="bottom", fill="x")
+
+        cols = ("Title", "Artist", "Album", "Length", "Play")
+        self.player_tree = ttk.Treeview(
+            table,
+            columns=cols,
+            show="headings",
+            yscrollcommand=p_vsb.set,
+            xscrollcommand=p_hsb.set,
+        )
+        p_vsb.config(command=self.player_tree.yview)
+        p_hsb.config(command=self.player_tree.xview)
+        self.player_tree.pack(fill="both", expand=True)
+
+        widths = {"Title": 220, "Artist": 140, "Album": 160, "Length": 70, "Play": 50}
+        for c in cols:
+            self.player_tree.heading(c, text=c)
+            self.player_tree.column(
+                c,
+                width=widths.get(c, 100),
+                anchor="center" if c in {"Length", "Play"} else "w",
+                stretch=c != "Play",
+            )
+
+        self.player_tree.bind("<ButtonRelease-1>", self._on_player_tree_click)
+        self.player_tree.bind("<<TreeviewSelect>>", self._on_player_selection_change)
+        return table
+
+    def _create_playlist_table(self, parent: tk.Widget) -> ttk.Treeview:
+        frame = ttk.Frame(parent)
+        frame.pack(fill="both", expand=True)
+        p_vsb = ttk.Scrollbar(frame, orient="vertical")
+        p_vsb.pack(side="right", fill="y")
+        p_hsb = ttk.Scrollbar(frame, orient="horizontal")
+        p_hsb.pack(side="bottom", fill="x")
+
+        cols = ("Title", "Artist", "Play")
+        tree = ttk.Treeview(
+            frame,
+            columns=cols,
+            show="headings",
+            yscrollcommand=p_vsb.set,
+            xscrollcommand=p_hsb.set,
+        )
+        p_vsb.config(command=tree.yview)
+        p_hsb.config(command=tree.xview)
+        tree.pack(fill="both", expand=True)
+
+        widths = {"Title": 220, "Artist": 160, "Play": 50}
+        for c in cols:
+            tree.heading(c, text=c)
+            tree.column(
+                c,
+                width=widths.get(c, 100),
+                anchor="center" if c == "Play" else "w",
+                stretch=c != "Play",
+            )
+
+        tree.bind("<ButtonRelease-1>", self._on_playlist_tree_click)
+        tree.bind("<<TreeviewSelect>>", self._on_playlist_selection_change)
+        return tree
+
+    def _toggle_player_playlist_view(self) -> None:
+        if self.player_playlist_mode:
+            self._unload_player_playlist_view()
+            return
+
+        tracks = self._prompt_playlist_tracks()
+        if not tracks:
+            return
+        self.player_playlist_rows = self._prepare_player_rows(tracks)
+        self._enter_player_playlist_view()
+
+    def _prompt_playlist_tracks(self) -> list[str] | None:
+        playlists_dir = os.path.join(self.library_path, "Playlists")
+        initial_dir = (
+            playlists_dir
+            if os.path.isdir(playlists_dir)
+            else self.library_path
+            if self.library_path
+            else os.getcwd()
+        )
+        chosen = filedialog.askopenfilename(
+            title="Add Playlist",
+            initialdir=initial_dir,
+            defaultextension=".m3u",
+            filetypes=[("M3U Playlist", "*.m3u"), ("All Files", "*.*")],
+        )
+        if not chosen:
+            return None
+
+        try:
+            with open(chosen, "r", encoding="utf-8") as f:
+                entries = [line.strip() for line in f if line.strip()]
+        except Exception as exc:
+            messagebox.showerror("Playlist", f"Could not read playlist: {exc}")
+            return None
+
+        base_dir = os.path.dirname(chosen)
+        resolved: list[str] = []
+        for entry in entries:
+            candidate = entry if os.path.isabs(entry) else os.path.join(base_dir, entry)
+            candidate = os.path.normpath(candidate)
+            if os.path.exists(candidate):
+                resolved.append(candidate)
+
+        if not resolved:
+            messagebox.showinfo(
+                "Playlist", "No valid tracks found in the selected playlist."
+            )
+            return None
+        return resolved
+
+    def _enter_player_playlist_view(self) -> None:
+        self.player_playlist_mode = True
+        self.player_playlist_toggle_btn.config(text="Unload Playlist")
+        self.player_library_frame.pack_forget()
+        self.player_library_frame.pack(
+            side="left", fill="both", expand=True, padx=(0, 10), pady=(0, 0)
+        )
+
+        self.player_playlist_frame = ttk.LabelFrame(
+            self.player_table_region, text="Playlist Preview"
+        )
+        self.player_playlist_frame.pack(side="left", fill="both", expand=True)
+        self.player_playlist_tree = self._create_playlist_table(
+            self.player_playlist_frame
+        )
+        self._render_playlist_rows(self.player_playlist_rows)
+
+    def _unload_player_playlist_view(self) -> None:
+        self.player_playlist_mode = False
+        self.player_playlist_toggle_btn.config(text="Add Playlist")
+        self.player_playlist_rows = []
+        self._clear_playlist_table()
+        if getattr(self, "player_playlist_frame", None):
+            self.player_playlist_frame.destroy()
+            self.player_playlist_frame = None
+        self.player_library_frame.pack_forget()
+        self.player_library_frame.pack(fill="both", expand=True)
+        self._update_player_art(None)
+
+    def _render_playlist_rows(self, rows: list[dict[str, str]]) -> None:
+        self._clear_playlist_table()
+        if not self.player_playlist_tree:
+            return
+        play_icon = "▶" if self.preview_backend_available else "—"
+        for row in rows:
+            item = self.player_playlist_tree.insert(
+                "",
+                "end",
+                values=(
+                    row.get("title", ""),
+                    row.get("artist", ""),
+                    play_icon,
+                ),
+            )
+            path = row.get("path", "")
+            self.player_playlist_tree_paths[item] = path
+            self.player_playlist_tree_rows[item] = row
+
+    def _clear_playlist_table(self) -> None:
+        if self.player_playlist_tree:
+            for row in self.player_playlist_tree.get_children():
+                self.player_playlist_tree.delete(row)
+        self.player_playlist_tree_paths.clear()
+        self.player_playlist_tree_rows.clear()
+
+    def _on_playlist_tree_click(self, event) -> None:
+        if not self.player_playlist_tree:
+            return
+        region = self.player_playlist_tree.identify_region(event.x, event.y)
+        if region != "cell":
+            return
+        col = self.player_playlist_tree.identify_column(event.x)
+        if col != "#3":
+            return
+        item = self.player_playlist_tree.identify_row(event.y)
+        if not item:
+            return
+        path = self.player_playlist_tree_paths.get(item)
+        if not path:
+            return
+        row = self.player_playlist_tree_rows.get(item, {})
+        self._update_player_art(path, title=row.get("title"), artist=row.get("artist"))
+        self._play_preview(path, duration_ms=30000, player_item=None)
+
+    def _on_playlist_selection_change(self, _event) -> None:
+        if not self.player_playlist_tree:
+            return
+        selection = self.player_playlist_tree.selection()
+        if not selection:
+            return
+        item = selection[0]
+        path = self.player_playlist_tree_paths.get(item)
+        row = self.player_playlist_tree_rows.get(item, {})
+        self._update_player_art(path, title=row.get("title"), artist=row.get("artist"))
 
     # ── Player Tab Helpers ─────────────────────────────────────────────
     def _clear_player_table(self) -> None:
