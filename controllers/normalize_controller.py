@@ -46,8 +46,17 @@ def save_mapping(folder: str, mapping: Dict[str, str]) -> str:
 
 
 def normalize_genres(genres: list[str], mapping: Dict[str, str]) -> list[str]:
-    """Return list of genres normalized via mapping."""
-    return [mapping.get(g, g) for g in genres]
+    """Return list of genres normalized via mapping (supports list values)."""
+    normalized: list[str] = []
+    for g in genres:
+        mapped = mapping.get(g, g)
+        if isinstance(mapped, list):
+            normalized.extend(mapped)
+        elif mapped is None:
+            continue
+        else:
+            normalized.append(mapped)
+    return normalized
 
 
 def get_raw_genres(records):
