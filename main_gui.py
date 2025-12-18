@@ -1806,15 +1806,18 @@ class SoundVaultImporterApp(tk.Tk):
 
         art_panel = ttk.Frame(player_content)
         art_panel.pack(side="right", fill="y", padx=(10, 0))
-        self.player_art_label = ttk.Label(art_panel)
-        self.player_art_label.pack(fill="x", pady=(0, 6))
         self.player_art_caption = ttk.Label(
             art_panel,
             text="Select a track to view album art",
             wraplength=220,
             justify="center",
         )
-        self.player_art_caption.pack(fill="x")
+        self.player_art_caption.pack(fill="x", pady=(0, 6))
+        self.player_art_label = ttk.Label(art_panel)
+        self.player_art_label.pack(fill="x")
+        ttk.Button(
+            art_panel, text="Load Playlist", command=self._player_load_playlist
+        ).pack(fill="x", pady=(6, 6))
         self._update_player_art(None)
 
         playlist_box = ttk.LabelFrame(art_panel, text="Playlist Builder")
@@ -3514,6 +3517,47 @@ class SoundVaultImporterApp(tk.Tk):
         if not self.player_temp_playlist:
             return
         self._player_set_temp_playlist([])
+
+    def _player_load_playlist(self) -> None:
+        playlists_dir = os.path.join(self.library_path, "Playlists")
+        initial_dir = (
+            playlists_dir
+            if os.path.isdir(playlists_dir)
+            else self.library_path
+            if self.library_path
+            else os.getcwd()
+        )
+        chosen = filedialog.askopenfilename(
+            title="Load Playlist",
+            initialdir=initial_dir,
+            defaultextension=".m3u",
+            filetypes=[("M3U Playlist", "*.m3u"), ("All Files", "*.*")],
+        )
+        if not chosen:
+            return
+
+        try:
+            with open(chosen, "r", encoding="utf-8") as f:
+                entries = [line.strip() for line in f if line.strip()]
+        except Exception as exc:
+            messagebox.showerror("Load Playlist", f"Could not read playlist: {exc}")
+            return
+
+        base_dir = os.path.dirname(chosen)
+        resolved: list[str] = []
+        for entry in entries:
+            candidate = entry if os.path.isabs(entry) else os.path.join(base_dir, entry)
+            candidate = os.path.normpath(candidate)
+            if os.path.exists(candidate):
+                resolved.append(candidate)
+
+        if not resolved:
+            messagebox.showinfo(
+                "Load Playlist", "No valid tracks found in the selected playlist."
+            )
+            return
+
+        self._player_set_temp_playlist(resolved)
 
     def _player_save_temp_playlist(self) -> None:
         if not self.player_temp_playlist:
