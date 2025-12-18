@@ -1603,6 +1603,9 @@ class SoundVaultImporterApp(tk.Tk):
             label="Generate Library Index…",
             command=lambda: generate_index(self.require_library()),
         )
+        tools_menu.add_command(
+            label="Playlist Artwork", command=self.open_playlist_artwork_folder
+        )
         tools_menu.add_separator()
         tools_menu.add_command(label="Reset Tag-Fix Log", command=self.reset_tagfix_log)
         menubar.add_cascade(label="Tools", menu=tools_menu)
@@ -2234,6 +2237,48 @@ class SoundVaultImporterApp(tk.Tk):
             messagebox.showwarning("No Library", "Please select a library first.")
             return None
         return self.library_path
+
+    def _open_path(self, path: str) -> None:
+        if not path:
+            return
+        try:
+            if sys.platform == "win32":
+                os.startfile(path)  # type: ignore[attr-defined]
+            elif sys.platform == "darwin":
+                subprocess.run(["open", path], check=False)
+            else:
+                subprocess.run(["xdg-open", path], check=False)
+        except Exception as exc:  # pragma: no cover - OS interaction
+            messagebox.showerror("Open Folder", f"Could not open {path}: {exc}")
+
+    def open_playlist_artwork_folder(self) -> None:
+        """Ensure the playlist artwork folder exists and open it for the user."""
+
+        library = self.require_library()
+        if not library:
+            return
+
+        playlists_dir = os.path.join(library, "Playlists")
+        artwork_dir = os.path.join(playlists_dir, "artwork")
+
+        try:
+            os.makedirs(artwork_dir, exist_ok=True)
+        except Exception as exc:
+            messagebox.showerror(
+                "Playlist Artwork",
+                f"Could not create the artwork folder:\n{exc}",
+            )
+            self._log(f"✘ Failed to prepare playlist artwork folder: {exc}")
+            return
+
+        info = (
+            "Playlist artwork folder is ready.\n\n"
+            f"Location:\n{artwork_dir}\n\n"
+            "Drop cover images here to accompany your playlists."
+        )
+        messagebox.showinfo("Playlist Artwork", info)
+        self._log(f"🎨 Playlist artwork folder ready at {artwork_dir}")
+        self._open_path(artwork_dir)
 
     def _set_status(self, text: str) -> None:
         self._full_status = text
