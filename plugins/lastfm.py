@@ -1,5 +1,4 @@
 import os
-import logging
 from typing import List
 
 import requests
@@ -9,8 +8,6 @@ from utils.path_helpers import ensure_long_path
 from plugins.base import MetadataPlugin
 
 API_KEY = os.getenv("LASTFM_API_KEY")
-if not API_KEY:
-    logging.getLogger(__name__).warning("LASTFM_API_KEY not set; Last.fm plugin disabled")
 
 class LastfmPlugin(MetadataPlugin):
     def identify(self, file_path: str) -> dict:
