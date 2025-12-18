@@ -3,6 +3,7 @@ import threading
 import sys
 import logging
 import webbrowser
+import re
 
 if sys.platform == "win32":
     try:
@@ -305,10 +306,19 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
         app.text_map = ScrolledText(map_box, width=50, height=10)
         app.text_map.pack(fill="both", expand=True, padx=8, pady=6)
 
+        init_status = tk.StringVar(
+            value="Paste JSON and initialize to rewrite library genres."
+        )
+
         btn_frame = ttk.Frame(map_box)
         btn_frame.pack(fill="x", padx=8, pady=(0, 6))
+        init_btn = ttk.Button(btn_frame, text="Initialize Normalizer")
+        init_btn.pack(side="left")
         apply_btn = ttk.Button(btn_frame, text="Apply Mapping", command=app.apply_mapping)
         apply_btn.pack(side="right")
+        ttk.Label(btn_frame, textvariable=init_status).pack(
+            side="left", padx=8, expand=True, fill="x"
+        )
 
         def populate_raw_genres(genres: list[str]):
             app.text_raw.configure(state="normal")
@@ -367,7 +377,56 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
             scan_btn.config(state="disabled")
             threading.Thread(target=scan_task, args=(folder,), daemon=True).start()
 
+        def finish_init(changed: int, total: int):
+            init_status.set(f"Rewrote genres for {changed} of {total} files.")
+            init_btn.config(state="normal")
+            apply_btn.config(state="normal" if app.library_path else "disabled")
+            scan_btn.config(state="normal" if app.library_path else "disabled")
+            if getattr(app, "raw_genre_list", None):
+                populate_raw_genres(app.raw_genre_list)
+
+        def start_init():
+            if not app.library_path:
+                messagebox.showwarning("No Library", "Select a library to initialize.")
+                return
+            raw_json = app.text_map.get("1.0", "end").strip()
+            if not raw_json:
+                messagebox.showwarning(
+                    "No JSON Provided", "Paste JSON mapping from the assistant first."
+                )
+                return
+            try:
+                mapping = json.loads(raw_json)
+            except json.JSONDecodeError as exc:
+                messagebox.showerror("Invalid JSON", str(exc))
+                return
+
+            init_status.set("Initializing and rewriting genres…")
+            init_btn.config(state="disabled")
+            apply_btn.config(state="disabled")
+            scan_btn.config(state="disabled")
+            prog["value"] = 0
+
+            def worker():
+                try:
+                    changed, total = app.initialize_genre_normalizer(
+                        mapping, on_progress
+                    )
+                except Exception as exc:
+                    app.after(
+                        0,
+                        lambda: messagebox.showerror(
+                            "Initialization Failed", str(exc)
+                        ),
+                    )
+                    app.after(0, lambda: finish_init(0, 0))
+                    return
+                app.after(0, lambda: finish_init(changed, total))
+
+            threading.Thread(target=worker, daemon=True).start()
+
         scan_btn.config(command=start_scan)
+        init_btn.config(command=start_init)
 
         def refresh_panel():
             update_controls()
@@ -3243,6 +3302,75 @@ class SoundVaultImporterApp(tk.Tk):
         if widget:
             widget.insert("end", msg + "\n")
             widget.see("end")
+
+    def initialize_genre_normalizer(self, mapping: dict, progress_callback=None):
+        """Persist mapping JSON and rewrite genre tags across the library."""
+        if not self.library_path or not getattr(self, "mapping_path", None):
+            raise ValueError("Library must be selected before initializing the normalizer.")
+
+        normalized_map: dict[str, list[str]] = {}
+        for raw, value in mapping.items():
+            if value is None:
+                continue
+            key = str(raw).strip()
+            if not key:
+                continue
+            if isinstance(value, list):
+                cleaned = [str(v).strip() for v in value if str(v).strip()]
+            else:
+                cleaned = [str(value).strip()] if str(value).strip() else []
+            if cleaned:
+                normalized_map[key] = cleaned
+
+        os.makedirs(os.path.dirname(self.mapping_path), exist_ok=True)
+        with open(self.mapping_path, "w", encoding="utf-8") as f:
+            json.dump(normalized_map, f, indent=2)
+        self.genre_mapping = normalized_map
+
+        files = discover_files(self.library_path)
+        total = len(files)
+        if progress_callback:
+            progress_callback(0, total)
+
+        changed = 0
+        for idx, path in enumerate(files, start=1):
+            if progress_callback:
+                progress_callback(idx, total)
+            try:
+                audio = MutagenFile(path, easy=True)
+            except Exception:
+                continue
+            if not audio:
+                continue
+
+            existing_genres = audio.get("genre", []) or []
+            rewritten: list[str] = []
+            seen: set[str] = set()
+            for entry in existing_genres:
+                parts = re.split(r"[;,/]", entry)
+                for part in parts:
+                    part = part.strip()
+                    if not part:
+                        continue
+                    mapped = normalized_map.get(part, [part])
+                    values = mapped if isinstance(mapped, list) else [mapped]
+                    for m in values:
+                        val = str(m).strip()
+                        if val and val not in seen:
+                            seen.add(val)
+                            rewritten.append(val)
+
+            if not rewritten or sorted(rewritten) == sorted(existing_genres):
+                continue
+
+            try:
+                audio["genre"] = rewritten
+                audio.save()
+                changed += 1
+            except Exception:
+                continue
+
+        return changed, total
 
     def _open_dup_debug_window(self) -> None:
         if (
