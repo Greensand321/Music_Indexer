@@ -321,10 +321,9 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
         save_btn = ttk.Button(btn_frame, text="Save Mapping", command=app.apply_mapping)
         save_btn.pack(side="left", padx=(6, 0))
         apply_btn = ttk.Button(btn_frame, text="Apply To Songs")
-        apply_btn.pack(side="left", padx=(6, 0))
-
-        status_col = ttk.Frame(map_box)
-        status_col.pack(fill="x", padx=8, pady=(0, 6))
+        apply_btn.pack(side="right")
+        status_col = ttk.Frame(btn_frame)
+        status_col.pack(side="left", padx=8, expand=True, fill="x")
         ttk.Label(status_col, textvariable=init_status).pack(anchor="w")
         ttk.Label(status_col, textvariable=apply_status).pack(anchor="w")
 
