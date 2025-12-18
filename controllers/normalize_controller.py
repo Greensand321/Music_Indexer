@@ -22,6 +22,8 @@ Follow these guidelines:
 • Ask clarifying questions if any terms are ambiguous.
 """
 
+_SKIP = object()
+
 
 def load_mapping(folder: str) -> tuple[Dict[str, str], str]:
     """Return genre mapping dict and path."""
@@ -45,17 +47,74 @@ def save_mapping(folder: str, mapping: Dict[str, str]) -> str:
     return path
 
 
-def normalize_genres(genres: list[str], mapping: Dict[str, str]) -> list[str]:
-    """Return list of genres normalized via mapping (supports list values)."""
-    normalized: list[str] = []
-    for g in genres:
-        mapped = mapping.get(g, g)
-        if isinstance(mapped, list):
-            normalized.extend(mapped)
-        elif mapped is None:
+def _split_and_clean(raw: str) -> list[str]:
+    """Split a raw genre string on common delimiters and return cleaned parts."""
+
+    if not isinstance(raw, str):
+        return []
+
+    parts = re.split(r"[;,/]+", raw)
+    cleaned = []
+    for part in parts:
+        part = part.strip()
+        if part:
+            cleaned.append(part)
+    return cleaned
+
+
+def _prepare_mapping(mapping: Dict[str, str | list[str] | None]) -> Dict[str, list[str] | None | object]:
+    """Return a cleaned, case-insensitive mapping ready for normalization."""
+
+    prepared: Dict[str, list[str] | None] = {}
+    for raw_key, raw_value in mapping.items():
+        if not isinstance(raw_key, str):
             continue
-        else:
-            normalized.append(mapped)
+
+        key = raw_key.strip().casefold()
+        if not key:
+            continue
+
+        if raw_value is None:
+            prepared[key] = _SKIP
+            continue
+
+        values: list[str] = []
+        raw_values = raw_value if isinstance(raw_value, list) else [raw_value]
+        for value in raw_values:
+            values.extend(_split_and_clean(value))
+
+        prepared[key] = values or _SKIP
+    return prepared
+
+
+def normalize_genres(genres: list[str], mapping: Dict[str, str | list[str] | None]) -> list[str]:
+    """Return list of genres normalized via mapping with sensible defaults."""
+
+    normalized: list[str] = []
+    seen: set[str] = set()
+    prepared_mapping = _prepare_mapping(mapping)
+
+    for raw in genres:
+        if not isinstance(raw, str):
+            continue
+
+        cleaned = raw.strip()
+        if not cleaned:
+            continue
+
+        lookup_key = cleaned.casefold()
+        mapped = prepared_mapping.get(lookup_key)
+        if mapped is _SKIP:
+            continue
+
+        values = mapped if mapped is not None else _split_and_clean(cleaned)
+
+        for value in values:
+            key = value.casefold()
+            if value and key not in seen:
+                normalized.append(value)
+                seen.add(key)
+
     return normalized
 
 
