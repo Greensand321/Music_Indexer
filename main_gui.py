@@ -1550,6 +1550,10 @@ class SoundVaultImporterApp(tk.Tk):
         self.sync_new = []
         self.sync_existing = []
         self.sync_improved = []
+        self.sync_playlist_suggestions: list[str] = []
+        self.sync_playlist_queue: dict[str, list[str]] = {}
+        self.sync_playlist_name_var = tk.StringVar(value="")
+        self.sync_playlist_choice = tk.StringVar(value="")
 
         # ── Tag Fixer state ──
         self.tagfix_folder_var = tk.StringVar(value="")
@@ -2155,6 +2159,12 @@ class SoundVaultImporterApp(tk.Tk):
         self.sync_existing_list.grid(row=1, column=1, sticky="nsew")
         self.sync_improved_list = tk.Listbox(lists, selectmode="extended")
         self.sync_improved_list.grid(row=1, column=2, sticky="nsew")
+        for lb in (
+            self.sync_new_list,
+            self.sync_existing_list,
+            self.sync_improved_list,
+        ):
+            lb.bind("<<ListboxSelect>>", self._refresh_sync_playlist_suggestions)
 
         actions = ttk.Frame(self.sync_tab)
         actions.pack(fill="x", padx=10, pady=(0, 10))
@@ -2167,6 +2177,114 @@ class SoundVaultImporterApp(tk.Tk):
         ttk.Button(
             actions, text="Replace Selected", command=self._replace_selected
         ).pack(side="left", padx=(5, 0))
+
+        playlist_helper = ttk.LabelFrame(
+            self.sync_tab, text="Playlist Suggestions & Manual Control"
+        )
+        playlist_helper.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+
+        suggestion_row = ttk.Frame(playlist_helper)
+        suggestion_row.pack(fill="both", expand=True, pady=(5, 5))
+
+        suggestion_col = ttk.Frame(suggestion_row)
+        suggestion_col.pack(side="left", fill="both", expand=True, padx=(0, 8))
+        ttk.Label(
+            suggestion_col,
+            text="Suggestions are based on artist, album, and genres for the selected tracks.",
+            wraplength=320,
+            justify="left",
+        ).pack(anchor="w")
+        self.sync_suggestion_list = tk.Listbox(
+            suggestion_col, selectmode="extended", height=6
+        )
+        self.sync_suggestion_list.pack(fill="both", expand=True, pady=(4, 4))
+        ttk.Button(
+            suggestion_col,
+            text="Add to Suggested Playlists",
+            command=lambda: self._add_selection_to_playlists(from_suggestions=True),
+        ).pack(anchor="e", pady=(0, 4))
+
+        available_col = ttk.Frame(suggestion_row)
+        available_col.pack(side="left", fill="both", expand=True, padx=(8, 0))
+        ttk.Label(
+            available_col,
+            text="Select existing playlists or type a new name to add selected tracks.",
+            wraplength=320,
+            justify="left",
+        ).pack(anchor="w")
+        self.sync_existing_playlists = tk.Listbox(
+            available_col, selectmode="extended", height=6
+        )
+        self.sync_existing_playlists.pack(fill="both", expand=True, pady=(4, 2))
+        name_row = ttk.Frame(available_col)
+        name_row.pack(fill="x", pady=(2, 4))
+        ttk.Label(name_row, text="New playlist name:").pack(side="left")
+        ttk.Entry(name_row, textvariable=self.sync_playlist_name_var).pack(
+            side="left", fill="x", expand=True, padx=(4, 4)
+        )
+        ttk.Button(
+            available_col,
+            text="Add to Selected Playlists",
+            command=lambda: self._add_selection_to_playlists(from_suggestions=False),
+        ).pack(anchor="e")
+
+        editor = ttk.Frame(playlist_helper)
+        editor.pack(fill="both", expand=True, pady=(6, 0))
+        ttk.Label(
+            editor,
+            text=(
+                "Manual ordering here overrides the indexer’s automatic sorting. "
+                "Move items to set the exact order you want saved."
+            ),
+            wraplength=660,
+            justify="left",
+        ).pack(anchor="w", pady=(0, 4))
+
+        chooser = ttk.Frame(editor)
+        chooser.pack(fill="x", pady=(0, 6))
+        ttk.Label(chooser, text="Playlist to edit:").pack(side="left")
+        self.sync_playlist_selector = ttk.Combobox(
+            chooser,
+            textvariable=self.sync_playlist_choice,
+            state="readonly",
+            values=[],
+        )
+        self.sync_playlist_selector.pack(side="left", fill="x", expand=True, padx=(6, 6))
+        self.sync_playlist_selector.bind(
+            "<<ComboboxSelected>>", lambda *_: self._load_playlist_into_editor()
+        )
+        ttk.Button(
+            chooser, text="Save Playlist", command=self._save_current_sync_playlist
+        ).pack(side="right")
+
+        editor_body = ttk.Frame(editor)
+        editor_body.pack(fill="both", expand=True)
+
+        self.sync_playlist_editor = tk.Listbox(
+            editor_body, selectmode="extended", height=8
+        )
+        self.sync_playlist_editor.pack(side="left", fill="both", expand=True)
+        editor_scroll = ttk.Scrollbar(editor_body, orient="vertical")
+        editor_scroll.config(command=self.sync_playlist_editor.yview)
+        self.sync_playlist_editor.config(yscrollcommand=editor_scroll.set)
+        editor_scroll.pack(side="left", fill="y")
+
+        btns = ttk.Frame(editor_body)
+        btns.pack(side="left", fill="y", padx=(8, 0))
+        ttk.Button(btns, text="Move Up", command=lambda: self._move_sync_playlist_item(-1)).pack(
+            fill="x", pady=(0, 4)
+        )
+        ttk.Button(btns, text="Move Down", command=lambda: self._move_sync_playlist_item(1)).pack(
+            fill="x", pady=(0, 4)
+        )
+        ttk.Button(btns, text="Remove", command=self._remove_sync_playlist_items).pack(
+            fill="x"
+        )
+
+        self.sync_playlist_status = tk.StringVar(value="No playlist loaded.")
+        ttk.Label(editor, textvariable=self.sync_playlist_status).pack(
+            anchor="w", pady=(6, 0)
+        )
 
         # after your other tabs
         help_frame = ttk.Frame(self.notebook)
@@ -2279,6 +2397,7 @@ class SoundVaultImporterApp(tk.Tk):
         if hasattr(self, "player_reload_btn"):
             self.player_reload_btn.config(state="normal")
         self._load_player_library_async()
+        self._refresh_sync_existing_playlists()
 
     def update_library_info(self):
         if not self.library_path:
@@ -3618,6 +3737,8 @@ class SoundVaultImporterApp(tk.Tk):
             self.sync_existing_list.insert("end", os.path.basename(inc))
         for inc, _lib in self.sync_improved:
             self.sync_improved_list.insert("end", os.path.basename(inc))
+        self._refresh_sync_existing_playlists()
+        self._refresh_sync_playlist_suggestions()
 
     def _copy_new_tracks(self):
         idxs = self.sync_new_list.curselection()
@@ -3642,6 +3763,263 @@ class SoundVaultImporterApp(tk.Tk):
         if self.sync_auto_var.get():
             playlist_generator.update_playlists(dests)
         messagebox.showinfo("Replace", f"Replaced {len(dests)} files")
+
+    def _get_selected_sync_tracks(self) -> list[str]:
+        selections: list[str] = []
+
+        sync_sources = [
+            (self.sync_new_list, self.sync_new),
+            (self.sync_existing_list, [inc for inc, _ in self.sync_existing]),
+            (self.sync_improved_list, [inc for inc, _ in self.sync_improved]),
+        ]
+
+        for listbox, data in sync_sources:
+            if not listbox.curselection():
+                continue
+            for idx in listbox.curselection():
+                try:
+                    selections.append(data[int(idx)])
+                except (IndexError, ValueError):
+                    continue
+
+        return selections
+
+    def _list_sync_playlists(self) -> list[str]:
+        root = self.sync_library_var.get() or self.library_path
+        if not root:
+            return []
+        playlists_dir = os.path.join(root, "Playlists")
+        try:
+            entries = [
+                os.path.splitext(f)[0]
+                for f in os.listdir(playlists_dir)
+                if os.path.isfile(os.path.join(playlists_dir, f))
+                and f.lower().endswith(".m3u")
+            ]
+        except OSError:
+            return []
+        return sorted(entries)
+
+    def _refresh_sync_existing_playlists(self) -> None:
+        if not hasattr(self, "sync_existing_playlists"):
+            return
+        current = self._list_sync_playlists()
+        queued = list(self.sync_playlist_queue.keys())
+        merged = sorted(set(current + queued))
+
+        self.sync_existing_playlists.delete(0, "end")
+        for name in current:
+            self.sync_existing_playlists.insert("end", name)
+
+        self.sync_playlist_selector.configure(values=merged)
+        if merged and self.sync_playlist_choice.get() not in merged:
+            self.sync_playlist_choice.set(merged[0])
+            self._load_playlist_into_editor()
+
+    def _build_sync_playlist_suggestions(self, tracks: list[str]) -> list[str]:
+        artists: set[str] = set()
+        albums: set[str] = set()
+        genres: set[str] = set()
+        for path in tracks:
+            try:
+                tags = get_tags(path)
+            except Exception:
+                tags = {}
+            artist = tags.get("artist")
+            album = tags.get("album")
+            track_genres = tags.get("genre") or tags.get("genres") or []
+            if isinstance(track_genres, str):
+                track_genres = [track_genres]
+            if artist:
+                artists.add(str(artist))
+            if album:
+                albums.add(str(album))
+            for g in track_genres:
+                g = str(g).strip()
+                if g:
+                    genres.add(g)
+
+        tokens = {t.lower() for t in (*artists, *albums, *genres) if t}
+        suggestions: list[str] = []
+        for existing in self._list_sync_playlists():
+            if not tokens:
+                break
+            lower = existing.lower()
+            if any(tok in lower for tok in tokens):
+                suggestions.append(existing)
+
+        for artist in sorted(artists):
+            suggestions.append(f"{artist} Essentials")
+        for album in sorted(albums):
+            suggestions.append(album)
+        for genre in sorted(genres):
+            suggestions.append(f"{genre} Mix")
+
+        deduped: list[str] = []
+        seen: set[str] = set()
+        for s in suggestions:
+            key = s.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(s)
+        return deduped
+
+    def _refresh_sync_playlist_suggestions(self, event=None) -> None:
+        if not hasattr(self, "sync_suggestion_list"):
+            return
+        tracks = self._get_selected_sync_tracks()
+        suggestions = self._build_sync_playlist_suggestions(tracks) if tracks else []
+        self.sync_playlist_suggestions = suggestions
+        self.sync_suggestion_list.delete(0, "end")
+        for suggestion in suggestions:
+            self.sync_suggestion_list.insert("end", suggestion)
+        if suggestions and not self.sync_playlist_name_var.get():
+            self.sync_playlist_name_var.set(suggestions[0])
+        self._refresh_sync_existing_playlists()
+
+    def _get_sync_playlist_path(self, name: str) -> str | None:
+        root = self.sync_library_var.get() or self.library_path
+        if not root:
+            return None
+        playlists_dir = os.path.join(root, "Playlists")
+        os.makedirs(playlists_dir, exist_ok=True)
+        fname = name if name.lower().endswith(".m3u") else f"{name}.m3u"
+        return os.path.join(playlists_dir, os.path.basename(fname))
+
+    def _ensure_sync_playlist_queue(self, name: str) -> list[str]:
+        if name in self.sync_playlist_queue:
+            return self.sync_playlist_queue[name]
+
+        entries: list[str] = []
+        path = self._get_sync_playlist_path(name)
+        if path and os.path.exists(path):
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if line:
+                            entries.append(os.path.normpath(os.path.join(os.path.dirname(path), line)))
+            except Exception:
+                entries = []
+
+        self.sync_playlist_queue[name] = entries
+        return entries
+
+    def _add_selection_to_playlists(self, from_suggestions: bool) -> None:
+        tracks = self._get_selected_sync_tracks()
+        if not tracks:
+            messagebox.showinfo(
+                "Playlist Suggestions", "Select one or more tracks first."
+            )
+            return
+
+        targets: list[str] = []
+        if from_suggestions:
+            for idx in self.sync_suggestion_list.curselection():
+                try:
+                    targets.append(self.sync_playlist_suggestions[int(idx)])
+                except (IndexError, ValueError):
+                    continue
+        else:
+            for idx in self.sync_existing_playlists.curselection():
+                try:
+                    targets.append(self.sync_existing_playlists.get(int(idx)))
+                except Exception:
+                    continue
+            manual = self.sync_playlist_name_var.get().strip()
+            if manual:
+                targets.append(manual)
+
+        targets = [t for t in dict.fromkeys([t.strip() for t in targets]) if t]
+        if not targets:
+            messagebox.showinfo(
+                "Playlist Suggestions", "Choose at least one playlist destination."
+            )
+            return
+
+        for name in targets:
+            queue = self._ensure_sync_playlist_queue(name)
+            for track in tracks:
+                if track not in queue:
+                    queue.append(track)
+            self.sync_playlist_queue[name] = queue
+
+        if targets and not self.sync_playlist_choice.get():
+            self.sync_playlist_choice.set(targets[0])
+        self._refresh_sync_existing_playlists()
+        self._load_playlist_into_editor()
+        self.sync_playlist_status.set(
+            f"Queued {len(tracks)} track(s) for {len(targets)} playlist(s)."
+        )
+
+    def _load_playlist_into_editor(self) -> None:
+        name = self.sync_playlist_choice.get().strip()
+        if not name:
+            self.sync_playlist_editor.delete(0, "end")
+            self.sync_playlist_status.set("No playlist loaded.")
+            return
+        entries = self._ensure_sync_playlist_queue(name)
+        self.sync_playlist_editor.delete(0, "end")
+        for track in entries:
+            self.sync_playlist_editor.insert("end", os.path.basename(track))
+        suffix = "song" if len(entries) == 1 else "songs"
+        self.sync_playlist_status.set(
+            f"Editing '{name}' ({len(entries)} {suffix}). Drag or use the buttons to reorder."
+        )
+
+    def _move_sync_playlist_item(self, direction: int) -> None:
+        name = self.sync_playlist_choice.get().strip()
+        if not name or name not in self.sync_playlist_queue:
+            return
+        selection = list(self.sync_playlist_editor.curselection())
+        if not selection:
+            return
+        queue = self.sync_playlist_queue[name]
+        for idx in selection:
+            new_idx = idx + direction
+            if new_idx < 0 or new_idx >= len(queue):
+                continue
+            queue[idx], queue[new_idx] = queue[new_idx], queue[idx]
+        self.sync_playlist_queue[name] = queue
+        self._load_playlist_into_editor()
+        try:
+            self.sync_playlist_editor.selection_set(
+                *[i + direction for i in selection if 0 <= i + direction < len(queue)]
+            )
+        except Exception:
+            pass
+
+    def _remove_sync_playlist_items(self) -> None:
+        name = self.sync_playlist_choice.get().strip()
+        if not name or name not in self.sync_playlist_queue:
+            return
+        selection = set(self.sync_playlist_editor.curselection())
+        if not selection:
+            return
+        queue = [track for idx, track in enumerate(self.sync_playlist_queue[name]) if idx not in selection]
+        self.sync_playlist_queue[name] = queue
+        self._load_playlist_into_editor()
+
+    def _save_current_sync_playlist(self) -> None:
+        name = self.sync_playlist_choice.get().strip()
+        if not name:
+            messagebox.showinfo("Playlists", "Select a playlist to save.")
+            return
+        path = self._get_sync_playlist_path(name)
+        if not path:
+            messagebox.showwarning("Playlists", "Select a library before saving.")
+            return
+        tracks = self.sync_playlist_queue.get(name, [])
+        try:
+            write_playlist(tracks, path)
+        except Exception as exc:
+            messagebox.showerror("Playlists", f"Failed to save playlist: {exc}")
+            return
+        self.sync_playlist_status.set(
+            f"Saved {len(tracks)} track(s) to {os.path.basename(path)}."
+        )
+        self._refresh_sync_existing_playlists()
 
     # ── Quality Checker Helpers ─────────────────────────────────────────
     def clear_quality_view(self) -> None:
