@@ -3588,12 +3588,27 @@ class SoundVaultImporterApp(tk.Tk):
     def _get_selected_player_paths(self) -> list[str]:
         if not hasattr(self, "player_tree"):
             return []
+
+        selections: list[str] = []
+
+        # Include selections from the main library table.
         selection = self.player_tree.selection()
-        return [
-            self.player_tree_paths[item]
-            for item in selection
-            if item in self.player_tree_paths
-        ]
+        selections.extend(
+            [self.player_tree_paths[item] for item in selection if item in self.player_tree_paths]
+        )
+
+        # Include selections from the optional playlist preview table when visible.
+        if getattr(self, "player_playlist_tree", None):
+            pl_selection = self.player_playlist_tree.selection()
+            selections.extend(
+                [
+                    self.player_playlist_tree_paths[item]
+                    for item in pl_selection
+                    if item in self.player_playlist_tree_paths
+                ]
+            )
+
+        return selections
 
     def _player_set_temp_playlist(self, tracks: list[str]) -> None:
         self.player_temp_playlist = list(dict.fromkeys(tracks))
