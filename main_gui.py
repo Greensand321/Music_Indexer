@@ -224,6 +224,8 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
     elif name == "Genre Normalizer":
         lib_var = tk.StringVar(value=app.library_path or "No library selected")
         norm_status = tk.StringVar(value="Select a library to enable normalization.")
+        scan_status = tk.StringVar(value="Scan genres to populate the assistant.")
+        scanning = tk.BooleanVar(value=False)
 
         def update_controls():
             lib_var.set(app.library_path or "No library selected")
@@ -232,10 +234,11 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
                 if app.library_path
                 else "Select a library to enable normalization."
             )
-            open_btn.config(state="normal" if app.library_path else "disabled")
+            scan_btn.config(state="normal" if app.library_path else "disabled")
+            apply_btn.config(state="normal" if app.library_path else "disabled")
 
         intro = ttk.Frame(frame)
-        intro.pack(fill="both", expand=True, padx=10, pady=10)
+        intro.pack(fill="x", padx=10, pady=10)
 
         ttk.Label(
             intro,
@@ -249,38 +252,131 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
 
         status_row = ttk.Frame(intro)
         status_row.pack(fill="x", pady=(0, 6))
-        ttk.Label(status_row, text="Library:", width=10).pack(side="left")
-        ttk.Label(status_row, textvariable=lib_var).pack(side="left", fill="x", expand=True)
+        ttk.Label(status_row, text="Library:", width=12).pack(side="left")
+        ttk.Label(status_row, textvariable=lib_var).pack(
+            side="left", fill="x", expand=True
+        )
 
         map_row = ttk.Frame(intro)
-        map_row.pack(fill="x", pady=(0, 12))
-        ttk.Label(map_row, text="Mapping file:", width=10).pack(side="left")
+        map_row.pack(fill="x", pady=(0, 6))
+        ttk.Label(map_row, text="Mapping file:", width=12).pack(side="left")
         ttk.Label(map_row, textvariable=norm_status, wraplength=360).pack(
             side="left", fill="x", expand=True
         )
 
-        ttk.Label(
-            intro,
-            text=(
-                "Use the Genre Normalization Assistant to scan raw genres, copy "
-                "the suggested prompt, and paste or edit your mapping JSON."
-            ),
-            wraplength=480,
-            justify="left",
-        ).pack(anchor="w", pady=(0, 10))
-
-        open_btn = ttk.Button(
-            intro,
-            text="Open Genre Normalizer",
-            command=lambda: app._open_genre_normalizer(),
+        control_row = ttk.Frame(intro)
+        control_row.pack(fill="x", pady=(4, 0))
+        scan_btn = ttk.Button(control_row, text="Scan Genres")
+        scan_btn.pack(side="left")
+        ttk.Label(control_row, textvariable=scan_status).pack(
+            side="left", padx=(8, 0)
         )
-        open_btn.pack(anchor="e")
+        prog = ttk.Progressbar(
+            control_row, orient="horizontal", length=160, mode="determinate"
+        )
+        prog.pack(side="right")
+
+        prompt_box = ttk.LabelFrame(frame, text="LLM Prompt Template")
+        prompt_box.pack(fill="both", expand=False, padx=10, pady=(0, 10))
+        app.text_prompt = ScrolledText(prompt_box, height=8, wrap="word")
+        app.text_prompt.pack(fill="both", expand=True, padx=8, pady=6)
+        app.text_prompt.insert("1.0", PROMPT_TEMPLATE.strip())
+        app.text_prompt.configure(state="disabled")
+        ttk.Button(
+            prompt_box,
+            text="Copy Prompt",
+            command=lambda: app.clipboard_append(PROMPT_TEMPLATE.strip()),
+        ).pack(anchor="e", padx=8, pady=(0, 6))
+
+        raw_box = ttk.LabelFrame(frame, text="Raw Genre List")
+        raw_box.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+        app.text_raw = ScrolledText(raw_box, width=50, height=12)
+        app.text_raw.pack(fill="both", expand=True, padx=8, pady=6)
+        app.text_raw.insert("1.0", "Scan the library to populate raw genres.")
+        app.text_raw.configure(state="disabled")
+        ttk.Button(
+            raw_box,
+            text="Copy Raw List",
+            command=lambda: app.clipboard_append("\n".join(getattr(app, "raw_genre_list", []))),
+        ).pack(anchor="e", padx=8, pady=(0, 6))
+
+        map_box = ttk.LabelFrame(frame, text="Paste JSON Mapping Here")
+        map_box.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+        app.text_map = ScrolledText(map_box, width=50, height=10)
+        app.text_map.pack(fill="both", expand=True, padx=8, pady=6)
+
+        btn_frame = ttk.Frame(map_box)
+        btn_frame.pack(fill="x", padx=8, pady=(0, 6))
+        apply_btn = ttk.Button(btn_frame, text="Apply Mapping", command=app.apply_mapping)
+        apply_btn.pack(side="right")
+
+        def populate_raw_genres(genres: list[str]):
+            app.text_raw.configure(state="normal")
+            app.text_raw.delete("1.0", "end")
+            if genres:
+                app.text_raw.insert("1.0", "\n".join(genres))
+            else:
+                app.text_raw.insert("1.0", "No genres found.")
+            app.text_raw.configure(state="disabled")
+
+        def load_existing_mapping():
+            if not app.library_path:
+                app.text_map.delete("1.0", "end")
+                return
+            try:
+                with open(norm_status.get(), "r", encoding="utf-8") as f:
+                    existing = json.load(f)
+            except Exception:
+                existing = {}
+            app.text_map.delete("1.0", "end")
+            app.text_map.insert("1.0", json.dumps(existing, indent=2))
+
+        def on_progress(idx, total):
+            try:
+                prog["value"] = idx
+                prog["maximum"] = max(total, 1)
+            except Exception:
+                pass
+
+        def scan_task(folder: str):
+            try:
+                app.raw_genre_list = scan_raw_genres(folder, on_progress)
+            finally:
+                app.after(0, lambda: finish_scan(folder))
+
+        def finish_scan(folder: str):
+            scanning.set(False)
+            scan_btn.config(state="normal")
+            scan_status.set(f"Found {len(getattr(app, 'raw_genre_list', []))} genres.")
+            populate_raw_genres(getattr(app, "raw_genre_list", []))
+            prog["value"] = prog["maximum"]
+            app.mapping_path = os.path.join(folder, ".genre_mapping.json")
+
+        def start_scan():
+            folder = app.require_library()
+            if not folder or scanning.get():
+                return
+            files = discover_files(folder)
+            if not files:
+                messagebox.showinfo("No audio files", "No supported audio found.")
+                return
+            scanning.set(True)
+            scan_status.set("Scanning genres…")
+            prog["value"] = 0
+            prog["maximum"] = len(files)
+            scan_btn.config(state="disabled")
+            threading.Thread(target=scan_task, args=(folder,), daemon=True).start()
+
+        scan_btn.config(command=start_scan)
 
         def refresh_panel():
             update_controls()
+            if getattr(app, "raw_genre_list", None):
+                populate_raw_genres(app.raw_genre_list)
+            load_existing_mapping()
 
         frame.refresh_cluster_panel = refresh_panel
-        update_controls()
+        refresh_panel()
     elif name == "Tempo/Energy Buckets":
         lib_var = tk.StringVar(value=app.library_path or "No library selected")
         dep_status = tk.StringVar()
@@ -3033,98 +3129,18 @@ class SoundVaultImporterApp(tk.Tk):
         self.dup_debug_win = win
         self.dup_text = text
 
-    def _open_genre_normalizer(self, _show_dialog: bool = False):
-        """Open a dialog to assist with genre normalization."""
-        folder = self.require_library()
-        if not folder:
-            return
-
-        # Always refresh mapping path
-        self.mapping_path = os.path.join(folder, ".genre_mapping.json")
-
-        if not _show_dialog:
-            # ── Show progress bar and run raw-only scan ──
-            files = discover_files(folder)
-            if not files:
-                messagebox.showinfo("No audio files", "No supported audio found.")
-                return
-
-            prog_win = tk.Toplevel(self)
-            prog_win.title("Scanning Genres…")
-            prog_bar = ttk.Progressbar(
-                prog_win, orient="horizontal", length=300, mode="determinate"
-            )
-            prog_bar.pack(padx=20, pady=20)
-            prog_bar["maximum"] = len(files)
-
-            def on_progress(idx, total):
-                prog_bar["value"] = idx
-                prog_win.update_idletasks()
-
-            def scan_task():
-                self.raw_genre_list = scan_raw_genres(folder, on_progress)
-                prog_win.destroy()
-                # reopen dialog to show panels
-                self.after(0, lambda: self._open_genre_normalizer(True))
-
-            threading.Thread(target=scan_task, daemon=True).start()
-            return
-
-        # ── Now _show_dialog == True: build the three-panel dialog ──
-        win = tk.Toplevel(self)
-        win.title("Genre Normalization Assistant")
-        win.grab_set()
-
-        # 1) LLM Prompt
-        tk.Label(win, text="LLM Prompt Template:").pack(
-            anchor="w", padx=10, pady=(10, 0)
-        )
-        self.text_prompt = ScrolledText(win, height=8, wrap="word")
-        self.text_prompt.pack(fill="both", padx=10)
-        self.text_prompt.insert("1.0", PROMPT_TEMPLATE.strip())
-        self.text_prompt.configure(state="disabled")
-        ttk.Button(
-            win,
-            text="Copy Prompt",
-            command=lambda: self.clipboard_append(PROMPT_TEMPLATE.strip()),
-        ).pack(anchor="e", padx=10, pady=(0, 10))
-
-        # 2) Raw Genre List
-        tk.Label(win, text="Raw Genre List:").pack(anchor="w", padx=10)
-        self.text_raw = ScrolledText(win, width=50, height=15)
-        self.text_raw.pack(fill="both", padx=10, pady=(0, 10))
-        self.text_raw.insert("1.0", "\n".join(self.raw_genre_list))
-        self.text_raw.configure(state="disabled")
-        ttk.Button(
-            win,
-            text="Copy Raw List",
-            command=lambda: self.clipboard_append("\n".join(self.raw_genre_list)),
-        ).pack(anchor="e", padx=10, pady=(0, 10))
-
-        # 3) Mapping JSON Input
-        tk.Label(win, text="Paste JSON Mapping Here:").pack(anchor="w", padx=10)
-        self.text_map = ScrolledText(win, width=50, height=10)
-        self.text_map.pack(fill="both", padx=10, pady=(0, 10))
-        # pre-load existing mapping
-        try:
-            with open(self.mapping_path, "r", encoding="utf-8") as f:
-                existing = json.load(f)
-        except Exception:
-            existing = {}
-        self.text_map.insert("1.0", json.dumps(existing, indent=2))
-
-        # Buttons: Apply Mapping & Close
-        btn_frame = ttk.Frame(win)
-        btn_frame.pack(fill="x", padx=10, pady=(0, 10))
-        ttk.Button(btn_frame, text="Apply Mapping", command=self.apply_mapping).pack(
-            side="right"
-        )
-        ttk.Button(btn_frame, text="Close", command=win.destroy).pack(
-            side="right", padx=(0, 5)
-        )
-
     def apply_mapping(self):
         """Persist mapping JSON from text box and apply normalization."""
+        if not hasattr(self, "text_map"):
+            messagebox.showwarning(
+                "No Mapping Editor", "Open the Genre Normalizer to edit mappings."
+            )
+            return
+
+        if not getattr(self, "mapping_path", None):
+            messagebox.showwarning("No Library", "Select a library before applying.")
+            return
+
         try:
             with open(self.mapping_path, "r", encoding="utf-8") as f:
                 existing_map = json.load(f)
@@ -3162,15 +3178,11 @@ class SoundVaultImporterApp(tk.Tk):
         if hasattr(self, "filtered_records") and hasattr(self, "_prop_tv"):
             self._render_table(self.filtered_records)
 
-        # Confirm success and close the normalization dialog
+        # Confirm success and keep the editor open
         messagebox.showinfo(
             "Mapping Applied",
             "Your genre mapping has been successfully saved and applied to the library.",
         )
-        try:
-            self.text_map.winfo_toplevel().destroy()
-        except Exception:
-            pass
 
     def reset_tagfix_log(self):
         initial = self.library_path or load_last_path()
