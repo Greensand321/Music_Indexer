@@ -698,6 +698,11 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
         count_var = tk.StringVar(value="20")
         engine_var = getattr(app, "feature_engine_var", tk.StringVar(value="librosa"))
         app.feature_engine_var = engine_var
+        playlist_name_var = tk.StringVar(value="Auto DJ Mix")
+        playlist_file_var = tk.StringVar(value="autodj.m3u")
+        progress_var = tk.StringVar(value="Waiting to start")
+        running = tk.BooleanVar(value=False)
+        cancel_event = threading.Event()
 
         def resolve_engine() -> str:
             engine = engine_var.get()
@@ -726,7 +731,42 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
             if f:
                 sel.set(f)
 
+        def append_log(msg: str) -> None:
+            def _append() -> None:
+                app._log(msg)
+                log_box.configure(state="normal")
+                log_box.insert("end", msg + "\n")
+                log_box.see("end")
+                log_box.configure(state="disabled")
+
+            app.after(0, _append)
+
+        def set_progress(value: int, maximum: int, message: str | None = None) -> None:
+            def _update() -> None:
+                progress["maximum"] = max(1, maximum)
+                progress["value"] = value
+                if message:
+                    progress_var.set(message)
+
+            app.after(0, _update)
+
+        def reset_ui(status: str) -> None:
+            running.set(False)
+            cancel_event.clear()
+            progress["value"] = 0
+            progress_var.set(status)
+            generate_btn.config(state="normal")
+            cancel_btn.config(state="disabled")
+
+        def cancel_generation() -> None:
+            cancel_event.set()
+            append_log("⚠ Cancelling Auto-DJ run…")
+            progress_var.set("Cancelling…")
+            cancel_btn.config(state="disabled")
+
         def generate():
+            if running.get():
+                return
             path = app.require_library()
             if not path or not sel.get():
                 messagebox.showerror("Error", "Select a library and track")
@@ -736,24 +776,123 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
             except ValueError:
                 messagebox.showerror("Error", "Invalid count")
                 return
-            app.show_log_tab()
-            tracks = gather_tracks(path)
-            engine = resolve_engine()
-            order = autodj_playlist(
-                sel.get(), tracks, n, log_callback=app._log, engine=engine
-            )
-            outfile = os.path.join(path, "Playlists", "autodj.m3u")
-            write_playlist(order, outfile)
-            messagebox.showinfo("Playlist", f"Written to {outfile}")
-            open_path(os.path.dirname(outfile))
 
-        row = ttk.Frame(frame)
-        row.pack(padx=10, pady=10)
-        tk.Entry(row, textvariable=sel, width=40).pack(side="left")
-        ttk.Button(row, text="Browse", command=browse).pack(side="left", padx=5)
-        ttk.Entry(row, textvariable=count_var, width=5).pack(side="left")
-        ttk.Label(row, text="songs").pack(side="left")
-        ttk.Button(row, text="Generate", command=generate).pack(side="left", padx=5)
+            playlist_name = playlist_name_var.get().strip() or "Auto DJ Mix"
+            filename = playlist_file_var.get().strip() or "autodj.m3u"
+            if not filename.lower().endswith(".m3u"):
+                filename += ".m3u"
+
+            app.show_log_tab()
+            running.set(True)
+            cancel_event.clear()
+            generate_btn.config(state="disabled")
+            cancel_btn.config(state="normal")
+            progress_var.set("Gathering tracks…")
+            log_box.configure(state="normal")
+            log_box.delete("1.0", "end")
+            log_box.configure(state="disabled")
+
+            def worker() -> None:
+                try:
+                    append_log("→ Gathering tracks from library…")
+                    tracks = gather_tracks(path)
+                    if cancel_event.is_set():
+                        raise IndexCancelled()
+                    if not tracks:
+                        raise RuntimeError("No tracks found in library")
+                    if sel.get() not in tracks:
+                        raise RuntimeError("Selected start track is not in the library")
+
+                    engine = resolve_engine()
+
+                    def progress_cb(current: int, total: int, message: str | None = None):
+                        set_progress(current, total, message)
+
+                    append_log(
+                        f"→ Generating {playlist_name} with {n} songs using {engine} features"
+                    )
+                    order = autodj_playlist(
+                        sel.get(),
+                        tracks,
+                        n,
+                        log_callback=append_log,
+                        engine=engine,
+                        progress_callback=progress_cb,
+                        cancel_event=cancel_event,
+                    )
+                    if cancel_event.is_set():
+                        raise IndexCancelled()
+
+                    outfile = os.path.join(path, "Playlists", filename)
+                    write_playlist(order, outfile)
+                    append_log(f"✓ {playlist_name} written to {outfile}")
+                    set_progress(len(order), max(len(order), 1), "Complete")
+                    app.after(
+                        0,
+                        lambda: messagebox.showinfo(
+                            "Playlist", f"{playlist_name} written to {outfile}"
+                        ),
+                    )
+                    app.after(0, lambda: open_path(os.path.dirname(outfile)))
+                except IndexCancelled:
+                    append_log("✖ Auto-DJ cancelled.")
+                    app.after(0, lambda: progress_var.set("Cancelled"))
+                except Exception as exc:
+                    append_log(f"✖ Error during Auto-DJ: {exc}")
+                    app.after(0, lambda: messagebox.showerror("Playlist", str(exc)))
+                finally:
+                    app.after(0, lambda: reset_ui("Ready"))
+
+            threading.Thread(target=worker, daemon=True).start()
+
+        row = ttk.LabelFrame(frame, text="Auto-DJ Settings")
+        row.pack(fill="x", padx=10, pady=(10, 5))
+        path_row = ttk.Frame(row)
+        path_row.pack(fill="x", pady=5)
+        ttk.Label(path_row, text="Start track:").pack(side="left")
+        tk.Entry(path_row, textvariable=sel, width=40).pack(side="left", padx=(5, 0))
+        ttk.Button(path_row, text="Browse", command=browse).pack(side="left", padx=5)
+
+        controls_row = ttk.Frame(row)
+        controls_row.pack(fill="x", pady=5)
+        ttk.Label(controls_row, text="Songs:").pack(side="left")
+        ttk.Entry(controls_row, textvariable=count_var, width=5).pack(side="left", padx=(5, 10))
+        ttk.Label(controls_row, text="Playlist name:").pack(side="left")
+        ttk.Entry(controls_row, textvariable=playlist_name_var, width=20).pack(
+            side="left", padx=(5, 10)
+        )
+        ttk.Label(controls_row, text="File name:").pack(side="left")
+        ttk.Entry(controls_row, textvariable=playlist_file_var, width=18).pack(
+            side="left", padx=(5, 10)
+        )
+        ttk.Label(controls_row, text="Engine:").pack(side="left")
+        ttk.Combobox(
+            controls_row,
+            textvariable=engine_var,
+            values=["librosa", "essentia"],
+            width=10,
+            state="readonly",
+        ).pack(side="left")
+
+        action_row = ttk.Frame(row)
+        action_row.pack(fill="x", pady=(5, 0))
+        generate_btn = ttk.Button(action_row, text="Generate", command=generate)
+        generate_btn.pack(side="left")
+        cancel_btn = ttk.Button(
+            action_row, text="Cancel", command=cancel_generation, state="disabled"
+        )
+        cancel_btn.pack(side="left", padx=5)
+
+        progress = ttk.Progressbar(frame, mode="determinate")
+        progress.pack(fill="x", padx=10, pady=(5, 0))
+        ttk.Label(frame, textvariable=progress_var).pack(anchor="w", padx=12)
+
+        log_group = ttk.LabelFrame(frame, text="Auto-DJ Log")
+        log_group.pack(fill="both", expand=True, padx=10, pady=(5, 10))
+        log_box = ScrolledText(log_group, height=8, state="disabled")
+        log_box.pack(fill="both", expand=True, padx=5, pady=5)
+
+        reset_ui("Ready")
         return frame
     else:
         ttk.Label(frame, text=f"{name} panel coming soon…").pack(padx=10, pady=10)

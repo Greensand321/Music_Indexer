@@ -47,6 +47,7 @@ else:  # pragma: no cover - optional dependency
     MonoLoader = RhythmExtractor2013 = None  # type: ignore
 
 from playlist_generator import write_playlist, DEFAULT_EXTS
+from indexer_control import IndexCancelled
 
 
 def categorize_tempo(bpm: float) -> str:
@@ -434,13 +435,21 @@ def autodj_playlist(
     feature_cache=None,
     log_callback=None,
     engine: TempoEngine = "librosa",
+    progress_callback=None,
+    cancel_event=None,
 ) -> list[str]:
     if log_callback is None:
         log_callback = lambda m: None
+    if progress_callback is None:
+        progress_callback = lambda _c, _t, _m=None: None
     feature_cache = feature_cache or {}
     order = [start_track]
     remaining = [t for t in tracks if t != start_track]
+    total = min(n, len(tracks))
+    progress_callback(1, total, "Seed track selected")
     while remaining and len(order) < n:
+        if cancel_event is not None and cancel_event.is_set():
+            raise IndexCancelled()
         cur_feat = _get_feat(order[-1], feature_cache, log_callback, engine)
         next_track = min(
             remaining,
@@ -450,4 +459,5 @@ def autodj_playlist(
         )
         order.append(next_track)
         remaining.remove(next_track)
+        progress_callback(len(order), total, f"Added track {len(order)} of {total}")
     return order
