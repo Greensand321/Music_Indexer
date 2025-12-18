@@ -236,6 +236,7 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
                 else "Select a library to enable normalization."
             )
             scan_btn.config(state="normal" if app.library_path else "disabled")
+            save_btn.config(state="normal" if app.library_path else "disabled")
             apply_btn.config(state="normal" if app.library_path else "disabled")
 
         intro = ttk.Frame(frame)
@@ -309,16 +310,23 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
         init_status = tk.StringVar(
             value="Paste JSON and initialize to rewrite library genres."
         )
+        apply_status = tk.StringVar(
+            value="Apply a saved or pasted mapping to embedded genres."
+        )
 
         btn_frame = ttk.Frame(map_box)
         btn_frame.pack(fill="x", padx=8, pady=(0, 6))
         init_btn = ttk.Button(btn_frame, text="Initialize Normalizer")
         init_btn.pack(side="left")
-        apply_btn = ttk.Button(btn_frame, text="Apply Mapping", command=app.apply_mapping)
-        apply_btn.pack(side="right")
-        ttk.Label(btn_frame, textvariable=init_status).pack(
-            side="left", padx=8, expand=True, fill="x"
-        )
+        save_btn = ttk.Button(btn_frame, text="Save Mapping", command=app.apply_mapping)
+        save_btn.pack(side="left", padx=(6, 0))
+        apply_btn = ttk.Button(btn_frame, text="Apply To Songs")
+        apply_btn.pack(side="left", padx=(6, 0))
+
+        status_col = ttk.Frame(map_box)
+        status_col.pack(fill="x", padx=8, pady=(0, 6))
+        ttk.Label(status_col, textvariable=init_status).pack(anchor="w")
+        ttk.Label(status_col, textvariable=apply_status).pack(anchor="w")
 
         def populate_raw_genres(genres: list[str]):
             app.text_raw.configure(state="normal")
@@ -380,6 +388,7 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
         def finish_init(changed: int, total: int):
             init_status.set(f"Rewrote genres for {changed} of {total} files.")
             init_btn.config(state="normal")
+            save_btn.config(state="normal" if app.library_path else "disabled")
             apply_btn.config(state="normal" if app.library_path else "disabled")
             scan_btn.config(state="normal" if app.library_path else "disabled")
             if getattr(app, "raw_genre_list", None):
@@ -403,6 +412,7 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
 
             init_status.set("Initializing and rewriting genres…")
             init_btn.config(state="disabled")
+            save_btn.config(state="disabled")
             apply_btn.config(state="disabled")
             scan_btn.config(state="disabled")
             prog["value"] = 0
@@ -427,6 +437,56 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
 
         scan_btn.config(command=start_scan)
         init_btn.config(command=start_init)
+
+        def finish_apply(changed: int, total: int):
+            apply_status.set(f"Applied mapping to {changed} of {total} files.")
+            init_btn.config(state="normal" if app.library_path else "disabled")
+            save_btn.config(state="normal" if app.library_path else "disabled")
+            apply_btn.config(state="normal" if app.library_path else "disabled")
+            scan_btn.config(state="normal" if app.library_path else "disabled")
+            if getattr(app, "raw_genre_list", None):
+                populate_raw_genres(app.raw_genre_list)
+
+        def start_apply():
+            if not app.library_path:
+                messagebox.showwarning("No Library", "Select a library to apply mappings.")
+                return
+            raw_json = app.text_map.get("1.0", "end").strip()
+            if not raw_json:
+                messagebox.showwarning(
+                    "No JSON Provided", "Paste JSON mapping from the assistant first."
+                )
+                return
+            try:
+                mapping = json.loads(raw_json)
+            except json.JSONDecodeError as exc:
+                messagebox.showerror("Invalid JSON", str(exc))
+                return
+
+            apply_status.set("Applying mapping to songs…")
+            init_btn.config(state="disabled")
+            save_btn.config(state="disabled")
+            apply_btn.config(state="disabled")
+            scan_btn.config(state="disabled")
+            prog["value"] = 0
+
+            def worker():
+                try:
+                    changed, total = app.initialize_genre_normalizer(
+                        mapping, on_progress
+                    )
+                except Exception as exc:
+                    app.after(
+                        0,
+                        lambda: messagebox.showerror("Apply Failed", str(exc)),
+                    )
+                    app.after(0, lambda: finish_apply(0, 0))
+                    return
+                app.after(0, lambda: finish_apply(changed, total))
+
+            threading.Thread(target=worker, daemon=True).start()
+
+        apply_btn.config(command=start_apply)
 
         def refresh_panel():
             update_controls()
