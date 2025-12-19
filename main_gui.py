@@ -1550,6 +1550,8 @@ class SoundVaultImporterApp(tk.Tk):
         self.sync_new = []
         self.sync_existing = []
         self.sync_improved = []
+        self.sync_existing_matches = []
+        self.sync_unmatched_new = []
 
         # ── Tag Fixer state ──
         self.tagfix_folder_var = tk.StringVar(value="")
@@ -3599,9 +3601,11 @@ class SoundVaultImporterApp(tk.Tk):
                 res = library_sync.compare_libraries(
                     lib, inc, db, thresholds=thresholds
                 )
-                self.sync_new = res["new"]
+                self.sync_new = res["new_tracks"]
                 self.sync_existing = res["existing"]
                 self.sync_improved = res["improved"]
+                self.sync_existing_matches = res.get("existing_matches", [])
+                self.sync_unmatched_new = res.get("new", [])
                 self.after(0, self._render_sync_results)
             except Exception as e:
                 self.after(0, lambda: messagebox.showerror("Scan Failed", str(e)))
@@ -3614,8 +3618,8 @@ class SoundVaultImporterApp(tk.Tk):
         self.sync_improved_list.delete(0, "end")
         for p in self.sync_new:
             self.sync_new_list.insert("end", os.path.basename(p))
-        for inc, _lib in self.sync_existing:
-            self.sync_existing_list.insert("end", os.path.basename(inc))
+        for lib in self.sync_existing:
+            self.sync_existing_list.insert("end", os.path.basename(lib))
         for inc, _lib in self.sync_improved:
             self.sync_improved_list.insert("end", os.path.basename(inc))
 

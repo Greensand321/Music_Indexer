@@ -164,8 +164,11 @@ def compare_libraries(
     lib_infos = _scan_folder(library_folder, db_path, log_callback)
     inc_infos = _scan_folder(incoming_folder, db_path, log_callback)
 
+    existing_tracks: List[str] = list(lib_infos.keys())
+    new_tracks: List[str] = list(inc_infos.keys())
+
     new: List[str] = []
-    existing: List[Tuple[str, str]] = []
+    existing_matches: List[Tuple[str, str]] = []
     improved: List[Tuple[str, str]] = []
 
     for inc_path, inc_info in inc_infos.items():
@@ -210,15 +213,26 @@ def compare_libraries(
             improved.append((inc_path, best_match))
         else:
             _dlog("DEBUG: Existing is higher quality", log_callback)
-            existing.append((inc_path, best_match))
+            existing_matches.append((inc_path, best_match))
 
     _dlog(
-        f"DEBUG: Compare complete new={len(new)} existing={len(existing)} improved={len(improved)}",
+        "DEBUG: Compare complete "
+        f"library_existing={len(existing_tracks)} "
+        f"incoming_tracks={len(new_tracks)} "
+        f"new={len(new)} existing_matches={len(existing_matches)} improved={len(improved)}",
         log_callback,
     )
-    result = {"new": new, "existing": existing, "improved": improved}
+    result = {
+        "existing": existing_tracks,
+        "new_tracks": new_tracks,
+        "new": new,
+        "existing_matches": existing_matches,
+        "improved": improved,
+    }
     record_event(
-        f"library_sync: comparison complete new={len(new)} existing={len(existing)} improved={len(improved)}"
+        "library_sync: comparison complete "
+        f"library_existing={len(existing_tracks)} incoming_tracks={len(new_tracks)} "
+        f"new={len(new)} existing_matches={len(existing_matches)} improved={len(improved)}"
     )
     return result
 
