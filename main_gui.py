@@ -54,6 +54,7 @@ from tag_fixer import MIN_INTERACTIVE_SCORE, FileRecord
 from typing import Any, Callable, List
 from indexer_control import cancel_event, IndexCancelled
 import library_sync
+import library_sync_review
 import playlist_generator
 import crash_watcher
 
@@ -1552,6 +1553,10 @@ class SoundVaultImporterApp(tk.Tk):
         self.sync_improved = []
         self.sync_existing_matches = []
         self.sync_unmatched_new = []
+        self.use_review_sync_var = tk.BooleanVar(
+            value=cfg.get("use_library_sync_review", False)
+        )
+        self.sync_review_window: library_sync_review.LibrarySyncReviewWindow | None = None
 
         # ── Tag Fixer state ──
         self.tagfix_folder_var = tk.StringVar(value="")
@@ -1660,6 +1665,15 @@ class SoundVaultImporterApp(tk.Tk):
         menubar.add_cascade(label="Settings", menu=settings_menu)
 
         tools_menu = tk.Menu(menubar, tearoff=False)
+        tools_menu.add_command(
+            label="Library Sync…", command=self._open_library_sync_tool
+        )
+        tools_menu.add_checkbutton(
+            label="Use Library Sync (Review)",
+            variable=self.use_review_sync_var,
+            command=self._toggle_library_sync_mode,
+        )
+        tools_menu.add_separator()
         tools_menu.add_command(label="Fix Tags via AcoustID", command=self.fix_tags_gui)
         tools_menu.add_command(
             label="Generate Library Index…",
@@ -3566,6 +3580,34 @@ class SoundVaultImporterApp(tk.Tk):
         self._log(f"Reset tag-fix log for {folder}")
 
     # ── Library Sync Helpers ───────────────────────────────────────────
+    def _toggle_library_sync_mode(self) -> None:
+        cfg = load_config()
+        cfg["use_library_sync_review"] = bool(self.use_review_sync_var.get())
+        save_config(cfg)
+
+    def _open_library_sync_tool(self) -> None:
+        if self.use_review_sync_var.get():
+            if self.sync_review_window and self.sync_review_window.winfo_exists():
+                self.sync_review_window.lift()
+                self.sync_review_window.focus_set()
+                return
+            try:
+                self.sync_review_window = library_sync_review.LibrarySyncReviewWindow(
+                    self
+                )
+                self.sync_review_window.bind(
+                    "<Destroy>", lambda _e: setattr(self, "sync_review_window", None)
+                )
+            except Exception as exc:
+                messagebox.showerror("Library Sync (Review)", str(exc))
+        else:
+            try:
+                self.notebook.select(self.sync_tab)
+            except Exception:
+                messagebox.showinfo(
+                    "Library Sync", "The classic Library Sync tab is not available."
+                )
+
     def _browse_sync_library(self):
         initial = self.sync_library_var.get() or load_last_path()
         folder = filedialog.askdirectory(
