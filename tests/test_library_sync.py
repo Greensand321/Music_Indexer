@@ -63,10 +63,20 @@ def test_compare_libraries(tmp_path):
     db = tmp_path / 'fp.db'
     res = compare_libraries(str(lib), str(inc), str(db))
 
-    new_set = set(res['new'])
-    assert str(inc / 'new.mp3') in new_set
+    existing_paths = set(res['existing'])
+    assert existing_paths == {str(lib / 'a.flac'), str(lib / 'b.mp3')}
 
-    ex_pairs = set(res['existing'])
+    incoming_paths = set(res['new_tracks'])
+    assert incoming_paths == {
+        str(inc / 'a.flac'),
+        str(inc / 'b.flac'),
+        str(inc / 'new.mp3'),
+    }
+
+    unmatched_new = set(res['new'])
+    assert str(inc / 'new.mp3') in unmatched_new
+
+    ex_pairs = set(res['existing_matches'])
     assert (str(inc / 'a.flac'), str(lib / 'a.flac')) in ex_pairs
 
     imp_pairs = set(res['improved'])
