@@ -27,6 +27,7 @@ def _ensure_db(db_path: str) -> sqlite3.Connection:
         CREATE TABLE IF NOT EXISTS fingerprints (
             path TEXT PRIMARY KEY,
             mtime REAL,
+            size INTEGER,
             duration INT,
             fingerprint TEXT
         );
@@ -39,6 +40,8 @@ def _ensure_db(db_path: str) -> sqlite3.Connection:
     }
     if "mtime" not in cols:
         conn.execute("ALTER TABLE fingerprints ADD COLUMN mtime REAL")
+    if "size" not in cols:
+        conn.execute("ALTER TABLE fingerprints ADD COLUMN size INTEGER")
     if "duration" not in cols:
         conn.execute("ALTER TABLE fingerprints ADD COLUMN duration INT")
     if "fingerprint" not in cols:
@@ -64,16 +67,19 @@ def get_fingerprint(
     conn = _ensure_db(db_path)
     try:
         mtime = os.path.getmtime(path)
+        size = os.path.getsize(path)
     except OSError as e:
         log_callback(f"! Could not stat {path}: {e}")
         conn.close()
         return None
     row = conn.execute(
-        "SELECT mtime, fingerprint FROM fingerprints WHERE path=?",
+        "SELECT mtime, size, fingerprint FROM fingerprints WHERE path=?",
         (path,),
     ).fetchone()
-    if row and abs(row[0] - mtime) < 1e-6:
-        fp = row[1]
+    cached_mtime = row[0] if row else None
+    cached_size = row[1] if row else None
+    if row and abs(cached_mtime - mtime) < 1e-6 and int(cached_size or 0) == int(size):
+        fp = row[2]
         _dlog("FP", f"cache hit {path}", log_callback)
         conn.close()
         if isinstance(fp, (bytes, bytearray)):
@@ -83,14 +89,20 @@ def get_fingerprint(
                 fp = fp.decode("latin1", errors="ignore")
         _dlog("FP", f"fingerprint={fp} prefix={fp[:16]}", log_callback)
         return fp
+    if row:
+        _dlog(
+            "FP",
+            f"cache invalidated {path} stored_mtime={cached_mtime} stored_size={cached_size} new_mtime={mtime} new_size={size}",
+            log_callback,
+        )
 
     _dlog("FP", f"cache miss {path}", log_callback)
     duration, fp_hash = compute_func(path)
     if fp_hash is not None:
         _dlog("FP", f"computed fingerprint {fp_hash} prefix={fp_hash[:16]}", log_callback)
         conn.execute(
-            "INSERT OR REPLACE INTO fingerprints (path, mtime, duration, fingerprint) VALUES (?, ?, ?, ?)",
-            (path, mtime, duration, fp_hash),
+            "INSERT OR REPLACE INTO fingerprints (path, mtime, size, duration, fingerprint) VALUES (?, ?, ?, ?, ?)",
+            (path, mtime, size, duration, fp_hash),
         )
         conn.commit()
     conn.close()
@@ -108,4 +120,3 @@ def flush_cache(db_path: str) -> None:
         conn.execute("DROP TABLE IF EXISTS fingerprints")
         conn.commit()
         conn.close()
-
