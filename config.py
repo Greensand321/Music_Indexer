@@ -60,6 +60,8 @@ def load_config():
         cfg.setdefault("fingerprint_duration_ms", FP_DURATION_MS)
         cfg.setdefault("allow_mismatched_edits", ALLOW_MISMATCHED_EDITS)
         cfg.setdefault("library_root", "")
+        cfg.setdefault("use_library_sync_review", False)
+        cfg.setdefault("library_sync_review", {})
         return cfg
     except Exception:
         return {
@@ -69,6 +71,8 @@ def load_config():
             "library_root": "",
             "duplicate_threshold": DEFAULT_DUP_THRESHOLD,
             "duplicate_prefix_len": DEFAULT_DUP_PREFIX_LEN,
+            "use_library_sync_review": False,
+            "library_sync_review": {},
         }
 
 
