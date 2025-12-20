@@ -33,7 +33,7 @@ sys.modules.setdefault("mutagen.id3", id3_stub)
 acoustid_stub = types.SimpleNamespace(fingerprint_file=lambda *_a, **_k: (None, None))
 sys.modules.setdefault("acoustid", acoustid_stub)
 
-from library_sync import compute_library_sync_plan, execute_library_sync_plan
+from library_sync import LibrarySyncPlan, _compute_plan_items, compute_library_sync_plan, execute_library_sync_plan
 
 
 def test_library_sync_plan_preview_reuses_plan(tmp_path):
@@ -102,3 +102,31 @@ def test_execute_library_sync_plan_honors_cancellation(tmp_path):
 
     assert summary["cancelled"]
     assert incoming_song.exists()
+
+
+def test_preview_marks_duplicate_items(tmp_path):
+    library_root = tmp_path / "library"
+    incoming_root = tmp_path / "incoming"
+    dest_root = library_root / "Music"
+    dest_root.mkdir(parents=True)
+    incoming_root.mkdir()
+
+    src = incoming_root / "dup.mp3"
+    dst = dest_root / "dup.mp3"
+    src.write_text("audio")
+    dst.write_text("audio")
+
+    plan = LibrarySyncPlan(
+        library_root=str(library_root),
+        incoming_root=str(incoming_root),
+        destination_root=str(dest_root),
+        moves={str(src): str(dst)},
+        tag_index={str(dst): {"leftover_tags": []}},
+        decision_log=[],
+    )
+    plan.items = _compute_plan_items(plan.moves, destination_root=str(dest_root))
+    html_path = tmp_path / "preview.html"
+    plan.render_preview(str(html_path))
+    content = html_path.read_text()
+
+    assert "(duplicate)" in content
