@@ -999,10 +999,6 @@ class LibrarySyncReviewPanel(ttk.Frame):
         if not sel:
             return
         incoming_id = sel[0]
-        match = self.match_by_incoming.get(incoming_id)
-        if match and match.existing:
-            self.existing_tree.selection_set(match.existing.track_id)
-            self.existing_tree.see(match.existing.track_id)
         self._update_inspector(incoming_id=incoming_id)
 
     def _on_existing_select(self, _event=None) -> None:
@@ -1013,8 +1009,6 @@ class LibrarySyncReviewPanel(ttk.Frame):
         linked = self.match_by_existing.get(existing_id, [])
         if linked:
             target = linked[0].incoming.track_id
-            self.incoming_tree.selection_set(target)
-            self.incoming_tree.see(target)
             self._update_inspector(incoming_id=target)
         else:
             self._update_inspector(existing_id=existing_id)
