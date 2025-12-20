@@ -9,10 +9,10 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 from config import DEFAULT_FP_THRESHOLDS, load_config, save_config
+from library_sync_review_report import DEFAULT_REPORT_VERSION
 
 REVIEW_CONFIG_KEY = "library_sync_review"
 REVIEW_FLAG_KEY = "use_library_sync_review"
-DEFAULT_REPORT_VERSION = 1
 
 
 class ScanState(str, Enum):
@@ -115,6 +115,62 @@ def set_review_enabled(enabled: bool) -> None:
     cfg = load_config()
     cfg[REVIEW_FLAG_KEY] = bool(enabled)
     save_config(cfg)
+
+
+class ReportPreviewDialog(tk.Toplevel):
+    """Simple dialog that summarizes report counts before export."""
+
+    LABELS = {
+        "new": "New",
+        "collisions": "Collisions / Exact Matches",
+        "low_confidence": "Low Confidence",
+        "flagged_copy": "Flagged Copy",
+        "flagged_replace": "Flagged Replace",
+    }
+
+    def __init__(self, master: tk.Misc | None, summary: dict[str, int]):
+        super().__init__(master)
+        self.title("Report Preview")
+        self.resizable(False, False)
+        self.result = False
+        self.transient(master)
+        self.grab_set()
+
+        ttk.Label(self, text="Review counts before saving the export report:").pack(
+            anchor="w", padx=10, pady=(10, 5)
+        )
+
+        for key, label in self.LABELS.items():
+            row = ttk.Frame(self)
+            row.pack(fill="x", padx=10, pady=2)
+            ttk.Label(row, text=f"{label}:").pack(side="left")
+            ttk.Label(row, text=str(summary.get(key, 0)), font=("TkDefaultFont", 10, "bold")).pack(
+                side="right"
+            )
+
+        btn_row = ttk.Frame(self)
+        btn_row.pack(fill="x", padx=10, pady=(10, 10))
+        ttk.Button(btn_row, text="Save Report", command=self._confirm).pack(side="left")
+        ttk.Button(btn_row, text="Cancel", command=self._cancel).pack(side="right")
+
+        self.protocol("WM_DELETE_WINDOW", self._cancel)
+
+    @classmethod
+    def prompt(cls, master: tk.Misc | None, summary: dict[str, int]) -> bool:
+        dialog = cls(master, summary)
+        if master is not None:
+            master.wait_window(dialog)
+        else:
+            dialog.wait_window()
+        return bool(getattr(dialog, "result", False))
+
+    def _confirm(self) -> None:
+        self.result = True
+        self.destroy()
+
+    def _cancel(self) -> None:
+        self.result = False
+        self.destroy()
 
 
 class LibrarySyncReviewWindow(tk.Toplevel):
@@ -275,6 +331,10 @@ class LibrarySyncReviewWindow(tk.Toplevel):
 
     def _describe_state(self, state: ScanState) -> str:
         return state.value.replace("_", " ").title()
+
+    def preview_report(self, summary: dict[str, int]) -> bool:
+        """Open a modal preview dialog to confirm report export counts."""
+        return ReportPreviewDialog.prompt(self, summary)
 
     def _on_close(self) -> None:
         if self._persist_session():

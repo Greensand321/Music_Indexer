@@ -13,6 +13,7 @@ class ReviewFlags:
 
     copy: set[str] = field(default_factory=set)
     replace: Dict[str, str] = field(default_factory=dict)
+    notes: Dict[str, str] = field(default_factory=dict)
 
 
 class ReviewStateStore:
@@ -39,6 +40,17 @@ class ReviewStateStore:
             raise ValueError("Cannot flag for replace without a best match.")
         self.flags.replace[match.incoming.track_id] = match.existing.track_id
 
+    def set_note(self, incoming_track_id: str, note: str | None) -> None:
+        """Attach or clear a freeform note for an incoming row."""
+        if note is None or not str(note).strip():
+            self.flags.notes.pop(incoming_track_id, None)
+            return
+        self.flags.notes[incoming_track_id] = str(note)
+
+    def note_for(self, incoming_track_id: str) -> str | None:
+        """Return a stored note for the incoming row, if present."""
+        return self.flags.notes.get(incoming_track_id)
+
     def replace_target(self, incoming_track_id: str) -> str | None:
         """Return the flagged replacement target, if any."""
         return self.flags.replace.get(incoming_track_id)
@@ -47,6 +59,7 @@ class ReviewStateStore:
         """Remove all flags across the review session."""
         self.flags.copy.clear()
         self.flags.replace.clear()
+        self.flags.notes.clear()
 
     def reconcile_best_matches(self, results: Iterable[MatchResult]) -> List[str]:
         """Rebind replacement flags when the best match changes.
