@@ -7,7 +7,7 @@ import threading
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import Any, Dict, Iterable, List, Sequence
+from typing import Any, Callable, Dict, Iterable, List, Sequence
 
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
@@ -180,14 +180,23 @@ class ReportPreviewDialog(tk.Toplevel):
         self.destroy()
 
 
-class LibrarySyncReviewWindow(tk.Toplevel):
-    """Lightweight entry point for the redesign with persisted settings."""
+class LibrarySyncReviewPanel(ttk.Frame):
+    """Embeddable preview-first Library Sync UI."""
 
-    def __init__(self, master: tk.Widget | None = None):
+    def __init__(
+        self,
+        master: tk.Widget | None = None,
+        *,
+        library_root: str | None = None,
+        incoming_root: str | None = None,
+        on_close: Callable[[], None] | None = None,
+    ):
         super().__init__(master)
-        self.title("Library Sync (Review)")
-        self.resizable(True, True)
         self.session = load_scan_session()
+        if library_root:
+            self.session.library_root = library_root
+        if incoming_root:
+            self.session.incoming_root = incoming_root
 
         self.library_var = tk.StringVar(value=self.session.library_root)
         self.incoming_var = tk.StringVar(value=self.session.incoming_root)
@@ -195,6 +204,7 @@ class LibrarySyncReviewWindow(tk.Toplevel):
         self.preset_var = tk.StringVar(value=self.session.scan_config.preset_name or "")
         self.report_version_var = tk.StringVar(value=str(self.session.exported_report_version))
         self.scan_state_var = tk.StringVar(value=self._describe_state(self.session.scan_state))
+        self._on_close_callback = on_close
 
         # Scan + progress state
         self.library_cancel = threading.Event()
@@ -233,7 +243,6 @@ class LibrarySyncReviewWindow(tk.Toplevel):
         self.LOG_LIMIT = 400
 
         self._build_ui()
-        self.protocol("WM_DELETE_WINDOW", self._on_close)
 
     def _build_ui(self) -> None:
         padding = {"padx": 10, "pady": 5}
@@ -485,8 +494,22 @@ class LibrarySyncReviewWindow(tk.Toplevel):
         return ReportPreviewDialog.prompt(self, summary)
 
     def _on_close(self) -> None:
-        if self._persist_session():
-            self.destroy()
+        if self._persist_session() and self._on_close_callback:
+            self._on_close_callback()
+
+    def set_folders(self, library_root: str | None = None, incoming_root: str | None = None) -> None:
+        """Update the selected folders, persisting them to the scan session."""
+        changed = False
+        if library_root:
+            self.library_var.set(library_root)
+            self.session.library_root = library_root
+            changed = True
+        if incoming_root:
+            self.incoming_var.set(incoming_root)
+            self.session.incoming_root = incoming_root
+            changed = True
+        if changed:
+            save_scan_session(self.session)
 
     # ── Scan + Progress -------------------------------------------------
     def _cancel_event_for(self, kind: str) -> threading.Event:
@@ -799,3 +822,19 @@ class LibrarySyncReviewWindow(tk.Toplevel):
             self._log_event(f"{kind}_scan", msg.get("event", "scan"), msg)
         else:
             self._log_event(f"{kind}_scan", str(msg))
+
+
+class LibrarySyncReviewWindow(tk.Toplevel):
+    """Toplevel wrapper that hosts the embeddable review panel."""
+
+    def __init__(self, master: tk.Widget | None = None):
+        super().__init__(master)
+        self.title("Library Sync (Review)")
+        self.resizable(True, True)
+        self.panel = LibrarySyncReviewPanel(self, on_close=self._on_close)
+        self.panel.pack(fill="both", expand=True)
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
+
+    def _on_close(self) -> None:
+        if self.panel._persist_session():
+            self.destroy()

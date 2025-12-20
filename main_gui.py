@@ -53,7 +53,6 @@ from mutagen import File as MutagenFile
 from tag_fixer import MIN_INTERACTIVE_SCORE, FileRecord
 from typing import Any, Callable, List
 from indexer_control import cancel_event, IndexCancelled
-import library_sync
 import library_sync_review
 import playlist_generator
 import crash_watcher
@@ -1543,19 +1542,11 @@ class SoundVaultImporterApp(tk.Tk):
         self.plugin_views: dict[str, ttk.Frame] = {}
         self.active_plugin: str | None = None
 
-        # Library Sync state
-        self.sync_debug_var = tk.BooleanVar(value=False)
-        self.sync_library_var = tk.StringVar(value="")
-        self.sync_incoming_var = tk.StringVar(value="")
-        self.sync_new = []
-        self.sync_existing = []
-        self.sync_improved = []
-        self.sync_existing_matches = []
-        self.sync_unmatched_new = []
         self.use_review_sync_var = tk.BooleanVar(
             value=cfg.get("use_library_sync_review", False)
         )
         self.sync_review_window: library_sync_review.LibrarySyncReviewWindow | None = None
+        self.sync_review_panel: library_sync_review.LibrarySyncReviewPanel | None = None
 
         # ── Tag Fixer state ──
         self.tagfix_folder_var = tk.StringVar(value="")
@@ -2129,61 +2120,11 @@ class SoundVaultImporterApp(tk.Tk):
         # ─── Library Sync Tab ─────────────────────────────────────────────
         self.sync_tab = ttk.Frame(self.notebook)
         self.notebook.add(self.sync_tab, text="Library Sync")
-
-        path_row = ttk.Frame(self.sync_tab)
-        path_row.pack(fill="x", padx=10, pady=(10, 5))
-        ttk.Label(path_row, text="Library Folder:").grid(row=0, column=0, sticky="w")
-        ttk.Entry(path_row, textvariable=self.sync_library_var, state="readonly").grid(
-            row=0, column=1, sticky="ew"
+        self.sync_review_panel = library_sync_review.LibrarySyncReviewPanel(
+            self.sync_tab,
+            library_root=self.library_path or "",
         )
-        ttk.Button(path_row, text="Browse…", command=self._browse_sync_library).grid(
-            row=0, column=2, padx=(5, 0)
-        )
-        path_row.columnconfigure(1, weight=1)
-
-        inc_row = ttk.Frame(self.sync_tab)
-        inc_row.pack(fill="x", padx=10, pady=(0, 5))
-        ttk.Label(inc_row, text="Incoming Folder:").grid(row=0, column=0, sticky="w")
-        ttk.Entry(inc_row, textvariable=self.sync_incoming_var).grid(
-            row=0, column=1, sticky="ew"
-        )
-        ttk.Button(inc_row, text="Browse…", command=self._browse_sync_incoming).grid(
-            row=0, column=2, padx=(5, 0)
-        )
-        inc_row.columnconfigure(1, weight=1)
-
-        ttk.Button(self.sync_tab, text="Scan", command=self._scan_library_sync).pack(
-            pady=5
-        )
-
-        lists = ttk.Frame(self.sync_tab)
-        lists.pack(fill="both", expand=True, padx=10, pady=5)
-        lists.columnconfigure((0, 1, 2), weight=1)
-
-        ttk.Label(lists, text="New Tracks").grid(row=0, column=0)
-        ttk.Label(lists, text="Existing").grid(row=0, column=1)
-        ttk.Label(lists, text="Improvement Candidates").grid(row=0, column=2)
-
-        self.sync_new_list = tk.Listbox(lists, selectmode="extended")
-        self.sync_new_list.grid(row=1, column=0, sticky="nsew")
-        self.sync_existing_list = tk.Listbox(lists, selectmode="extended")
-        self.sync_existing_list.grid(row=1, column=1, sticky="nsew")
-        self.sync_improved_list = tk.Listbox(lists, selectmode="extended")
-        self.sync_improved_list.grid(row=1, column=2, sticky="nsew")
-
-        actions = ttk.Frame(self.sync_tab)
-        actions.pack(fill="x", padx=10, pady=(0, 10))
-        ttk.Label(
-            actions,
-            text="Library Sync actions are review-only; exporting plans is non-destructive.",
-            wraplength=360,
-        ).pack(side="left", fill="x", expand=True)
-        ttk.Button(actions, text="Copy New", command=self._show_sync_review_notice).pack(
-            side="left", padx=(5, 0)
-        )
-        ttk.Button(
-            actions, text="Replace Selected", command=self._show_sync_review_notice
-        ).pack(side="left", padx=(5, 0))
+        self.sync_review_panel.pack(fill="both", expand=True)
 
         # after your other tabs
         help_frame = ttk.Frame(self.notebook)
@@ -2296,6 +2237,8 @@ class SoundVaultImporterApp(tk.Tk):
         if hasattr(self, "player_reload_btn"):
             self.player_reload_btn.config(state="normal")
         self._load_player_library_async()
+        if self.sync_review_panel:
+            self.sync_review_panel.set_folders(library_root=self.library_path)
 
     def update_library_info(self):
         if not self.library_path:
@@ -3606,80 +3549,8 @@ class SoundVaultImporterApp(tk.Tk):
                 self.notebook.select(self.sync_tab)
             except Exception:
                 messagebox.showinfo(
-                    "Library Sync", "The classic Library Sync tab is not available."
+                    "Library Sync", "The Library Sync tab is not available."
                 )
-
-    def _browse_sync_library(self):
-        initial = self.sync_library_var.get() or load_last_path()
-        folder = filedialog.askdirectory(
-            title="Select Library Folder", initialdir=initial
-        )
-        if folder:
-            self.sync_library_var.set(folder)
-
-    def _browse_sync_incoming(self):
-        initial = self.sync_incoming_var.get() or load_last_path()
-        folder = filedialog.askdirectory(
-            title="Select Incoming Folder", initialdir=initial
-        )
-        if folder:
-            self.sync_incoming_var.set(folder)
-
-    def _scan_library_sync(self):
-        lib = self.sync_library_var.get()
-        inc = self.sync_incoming_var.get()
-        if not lib or not inc:
-            messagebox.showwarning(
-                "Scan", "Please choose library and incoming folders."
-            )
-            return
-        db = os.path.join(lib, "Docs", ".soundvault.db")
-        cfg = load_config()
-        thresholds = cfg.get("format_fp_thresholds", DEFAULT_FP_THRESHOLDS)
-
-        library_sync.set_debug(self.sync_debug_var.get())
-
-        def task():
-            try:
-                res = library_sync.compare_libraries(
-                    lib, inc, db, thresholds=thresholds
-                )
-                self.sync_new = res["new_tracks"]
-                self.sync_existing = res["existing"]
-                self.sync_improved = res["improved"]
-                self.sync_existing_matches = res.get("existing_matches", [])
-                self.sync_unmatched_new = res.get("new", [])
-                self.after(0, self._render_sync_results)
-            except Exception as e:
-                self.after(0, lambda: messagebox.showerror("Scan Failed", str(e)))
-
-        threading.Thread(target=task, daemon=True).start()
-
-    def _render_sync_results(self):
-        self.sync_new_list.delete(0, "end")
-        self.sync_existing_list.delete(0, "end")
-        self.sync_improved_list.delete(0, "end")
-        for p in self.sync_new:
-            self.sync_new_list.insert("end", os.path.basename(p))
-        for lib in self.sync_existing:
-            self.sync_existing_list.insert("end", os.path.basename(lib))
-        for inc, _lib in self.sync_improved:
-            self.sync_improved_list.insert("end", os.path.basename(inc))
-
-    def _copy_new_tracks(self):
-        self._show_sync_review_notice()
-
-    def _replace_selected(self):
-        self._show_sync_review_notice()
-
-    def _show_sync_review_notice(self) -> None:
-        messagebox.showinfo(
-            "Review Only",
-            (
-                "Library Sync no longer performs copy or replace operations. "
-                "Export the review plan instead and apply changes manually."
-            ),
-        )
 
     # ── Quality Checker Helpers ─────────────────────────────────────────
     def clear_quality_view(self) -> None:
