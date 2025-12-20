@@ -11,11 +11,20 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Callable, Dict, Iterable, List, Optional, Tuple
 
-import music_indexer_api as idx
-import fingerprint_generator
-from fingerprint_cache import _ensure_db
-from near_duplicate_detector import fingerprint_distance
-from config import FORMAT_PRIORITY, DEFAULT_FP_THRESHOLDS
+from library_sync_indexer_engine import (
+    config as idx_config,
+    fingerprint_cache as idx_fingerprint_cache,
+    fingerprint_generator as idx_fingerprint_generator,
+    music_indexer_api as idx,
+    near_duplicate_detector as idx_near_duplicate_detector,
+)
+
+fingerprint_generator = idx_fingerprint_generator
+fingerprint_distance = idx_near_duplicate_detector.fingerprint_distance
+_ensure_db = idx_fingerprint_cache._ensure_db
+FORMAT_PRIORITY = idx_config.FORMAT_PRIORITY
+DEFAULT_FP_THRESHOLDS = idx_config.DEFAULT_FP_THRESHOLDS
+
 from crash_watcher import record_event
 from crash_logger import watcher
 
