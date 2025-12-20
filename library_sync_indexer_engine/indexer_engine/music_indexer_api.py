@@ -770,17 +770,19 @@ def render_dry_run_html_from_plan(
     """Render a dry-run preview from an already computed move plan."""
     coord = DryRunCoordinator()
 
-    def _decision_annotation(decision: str):
+    def _decision_annotation(decision: str, action: str | None = None):
+        normalized_action = (action or "").lower()
+        action_label = "(copy)" if normalized_action == "copy" else "(move)"
         mapping = {
             "SKIP_DUPLICATE": ("(duplicate)", "decision-skip"),
             "SKIP_KEEP_EXISTING": ("(kept existing)", "decision-skip"),
             "REVIEW_REQUIRED": ("(review required)", "decision-review"),
             "REPLACE": ("(replace)", "decision-replace"),
-            "COPY": ("(move)", "decision-copy"),
+            "COPY": (action_label, "decision-copy" if normalized_action == "copy" else "decision-move"),
         }
         return mapping.get(decision.upper())
 
-    def _render_legend(decisions):
+    def _render_legend(decisions, action_map=None):
         if not decisions:
             return ""
         legend_lines = ["<div class=\"legend\"><strong>Legend:</strong>"]
@@ -789,12 +791,15 @@ def render_dry_run_html_from_plan(
             "SKIP_KEEP_EXISTING": "A different file is already present; keeping existing.",
             "REVIEW_REQUIRED": "Needs manual approval before moving.",
             "REPLACE": "Existing file will be replaced.",
-            "COPY": "Incoming file will be moved.",
+            "COPY": "Incoming file will be transferred.",
         }
         for key in ["SKIP_DUPLICATE", "SKIP_KEEP_EXISTING", "REVIEW_REQUIRED", "REPLACE", "COPY"]:
             if key not in decisions:
                 continue
-            annotation = _decision_annotation(key)
+            action = None
+            if action_map and key in action_map and action_map[key]:
+                action = sorted(action_map[key])[0]
+            annotation = _decision_annotation(key, action or "move")
             if not annotation:
                 continue
             label, css = annotation
@@ -810,16 +815,20 @@ def render_dry_run_html_from_plan(
         lines = [f"<h2>{heading_text}</h2>"]
         decision_map = {}
         decision_keys = set()
+        decision_actions = {}
         if plan_items:
             for item in plan_items:
                 dst = item.get("destination")
                 decision = (item.get("decision") or "").upper()
-                annotation = _decision_annotation(decision)
+                annotation = _decision_annotation(decision, item.get("action"))
                 if dst and annotation:
                     decision_map[dst] = annotation
                     decision_keys.add(decision)
+                    action_val = (item.get("action") or "").lower()
+                    if action_val:
+                        decision_actions.setdefault(decision, set()).add(action_val)
 
-        legend_html = _render_legend(decision_keys)
+        legend_html = _render_legend(decision_keys, decision_actions if decision_actions else None)
         if legend_html:
             lines.append(legend_html)
         lines.append("<pre>")
@@ -865,7 +874,7 @@ def render_dry_run_html_from_plan(
         out.write(
             "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n  <meta charset=\"UTF-8\">\n  "
             f"<title>{title_prefix} – {sanitize(os.path.basename(root_path))}</title>\n  "
-            "<style>\n    body { background:#2e3440; color:#d8dee9; font-family:'Courier New', monospace; }\n    pre  { font-size:14px; }\n    .folder { color:#81a1c1; }\n    .song   { color:#a3be8c; }\n    .tags   { color:#88c0d0; font-size:12px; margin-left:1em; }\n    .legend { margin:0 0 8px 0; font-size:13px; color:#e5e9f0; }\n    .legend-note { color:#cfd6e3; font-size:12px; }\n    .decision-label { color:#b5bcc9; font-size:12px; margin-left:0.5em; }\n    .decision-skip { color:#c0c8d8; opacity:0.7; }\n    .decision-review { color:#ebcb8b; }\n    .decision-replace { color:#bf616a; }\n    .decision-copy { color:#8fbcbb; }\n  </style>\n</head>\n<body>\n"
+            "<style>\n    body { background:#2e3440; color:#d8dee9; font-family:'Courier New', monospace; }\n    pre  { font-size:14px; }\n    .folder { color:#81a1c1; }\n    .song   { color:#a3be8c; }\n    .tags   { color:#88c0d0; font-size:12px; margin-left:1em; }\n    .legend { margin:0 0 8px 0; font-size:13px; color:#e5e9f0; }\n    .legend-note { color:#cfd6e3; font-size:12px; }\n    .decision-label { color:#b5bcc9; font-size:12px; margin-left:0.5em; }\n    .decision-skip { color:#c0c8d8; opacity:0.7; }\n    .decision-review { color:#ebcb8b; }\n    .decision-replace { color:#bf616a; }\n    .decision-copy { color:#8fbcbb; }\n    .decision-move { color:#88c0d0; }\n  </style>\n</head>\n<body>\n"
         )
         out.write(html_body)
         if html_body and not html_body.endswith("\n"):
