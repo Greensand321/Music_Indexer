@@ -70,6 +70,8 @@ class ScanSession:
     scan_config: ScanConfig = field(default_factory=ScanConfig)
     scan_state: ScanState = ScanState.IDLE
     exported_report_version: int = DEFAULT_REPORT_VERSION
+    transfer_mode: str = "copy"
+    output_playlist: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -78,6 +80,8 @@ class ScanSession:
             "scan_config": self.scan_config.to_dict(),
             "scan_state": self.scan_state.value,
             "exported_report_version": int(self.exported_report_version),
+            "transfer_mode": self.transfer_mode,
+            "output_playlist": bool(self.output_playlist),
         }
 
     @classmethod
@@ -94,6 +98,8 @@ class ScanSession:
             scan_config=ScanConfig.from_dict(data.get("scan_config")),
             scan_state=scan_state,
             exported_report_version=int(data.get("exported_report_version", DEFAULT_REPORT_VERSION)),
+            transfer_mode=str(data.get("transfer_mode", "copy") or "copy").lower(),
+            output_playlist=bool(data.get("output_playlist", False)),
         )
 
 
@@ -206,6 +212,9 @@ class LibrarySyncReviewPanel(ttk.Frame):
         self.preset_var = tk.StringVar(value=self.session.scan_config.preset_name or "")
         self.report_version_var = tk.StringVar(value=str(self.session.exported_report_version))
         self.scan_state_var = tk.StringVar(value=self._describe_state(self.session.scan_state))
+        transfer_mode = (self.session.transfer_mode or "copy").lower()
+        self.transfer_mode_var = tk.StringVar(value="copy" if transfer_mode == "copy" else "move")
+        self.output_playlist_var = tk.BooleanVar(value=bool(getattr(self.session, "output_playlist", False)))
         self._on_close_callback = on_close
         self.library_var.trace_add("write", lambda *_: self._invalidate_plan("Library folder changed"))
         self.incoming_var.trace_add("write", lambda *_: self._invalidate_plan("Incoming folder changed"))
@@ -419,14 +428,24 @@ class LibrarySyncReviewPanel(ttk.Frame):
         self.build_plan_btn.pack(side="left")
         self.preview_plan_btn = ttk.Button(btns, text="Preview", command=self._preview_plan)
         self.preview_plan_btn.pack(side="left", padx=(5, 0))
+        self.transfer_mode_btn = ttk.Button(btns, command=self._toggle_transfer_mode)
+        self.transfer_mode_btn.pack(side="left", padx=(5, 0))
         self.execute_plan_btn = ttk.Button(btns, text="Execute", command=self._execute_plan)
         self.execute_plan_btn.pack(side="left", padx=(5, 0))
+        self.playlist_check = ttk.Checkbutton(
+            btns,
+            text="Output playlist",
+            variable=self.output_playlist_var,
+            command=self._on_output_playlist_toggle,
+        )
+        self.playlist_check.pack(side="left", padx=(10, 0))
         self.open_preview_btn = ttk.Button(
             btns, text="Open Preview", command=self._open_preview_file, state="disabled"
         )
         self.open_preview_btn.pack(side="right")
         self.cancel_plan_btn = ttk.Button(btns, text="Cancel", command=self._cancel_plan_task, state="disabled")
         self.cancel_plan_btn.pack(side="right", padx=(5, 0))
+        self._update_transfer_mode_label()
         self._refresh_plan_actions()
 
     def _build_incoming_tree(self, parent: ttk.Frame) -> None:
@@ -513,6 +532,8 @@ class LibrarySyncReviewPanel(ttk.Frame):
             ),
             scan_state=self.session.scan_state,
             exported_report_version=report_ver,
+            transfer_mode=self._current_transfer_mode(),
+            output_playlist=bool(self.output_playlist_var.get()),
         )
         save_scan_session(self.session)
         self.scan_state_var.set(self._describe_state(self.session.scan_state))
@@ -524,6 +545,8 @@ class LibrarySyncReviewPanel(ttk.Frame):
                 "overrides": overrides,
                 "preset": self.preset_var.get().strip() or None,
                 "report_version": report_ver,
+                "transfer_mode": self._current_transfer_mode(),
+                "output_playlist": bool(self.output_playlist_var.get()),
             },
         )
         return True
@@ -541,6 +564,23 @@ class LibrarySyncReviewPanel(ttk.Frame):
             self.plan_status_var.set(reason)
         self._refresh_plan_actions()
 
+    def _current_transfer_mode(self) -> str:
+        return "copy" if self.transfer_mode_var.get().lower() == "copy" else "move"
+
+    def _update_transfer_mode_label(self) -> None:
+        label = "Copy Originals" if self._current_transfer_mode() == "copy" else "Move Originals"
+        self.transfer_mode_btn.config(text=label)
+
+    def _toggle_transfer_mode(self) -> None:
+        new_mode = "move" if self._current_transfer_mode() == "copy" else "copy"
+        self.transfer_mode_var.set(new_mode)
+        self._update_transfer_mode_label()
+        self._invalidate_plan("Transfer mode changed")
+        self._persist_session()
+
+    def _on_output_playlist_toggle(self) -> None:
+        self._persist_session()
+
     def _refresh_plan_actions(self) -> None:
         """Enable/disable plan controls based on current state."""
         running = self.plan_running
@@ -554,9 +594,13 @@ class LibrarySyncReviewPanel(ttk.Frame):
             and sources_match
         )
 
+        self._update_transfer_mode_label()
         for btn in (self.build_plan_btn, self.preview_plan_btn):
             btn_state = "disabled" if running else "normal"
             btn.config(state=btn_state)
+        mode_state = "disabled" if running else "normal"
+        self.transfer_mode_btn.config(state=mode_state)
+        self.playlist_check.config(state="disabled" if running else "normal")
         self.cancel_plan_btn.config(state="normal" if running else "disabled")
         self.execute_plan_btn.config(state="normal" if execute_ready else "disabled")
         self.open_preview_btn.config(state="normal" if self.plan_preview_path else "disabled")
@@ -587,10 +631,15 @@ class LibrarySyncReviewPanel(ttk.Frame):
         self.plan_progress_label.set("Starting…")
         self.plan_status_var.set("Building preview…" if render_preview else "Building plan…")
         self._refresh_plan_actions()
-        thread = threading.Thread(target=self._plan_worker, args=(library_root, incoming_root, render_preview), daemon=True)
+        transfer_mode = self._current_transfer_mode()
+        thread = threading.Thread(
+            target=self._plan_worker,
+            args=(library_root, incoming_root, transfer_mode, render_preview),
+            daemon=True,
+        )
         thread.start()
 
-    def _plan_worker(self, library_root: str, incoming_root: str, render_preview: bool) -> None:
+    def _plan_worker(self, library_root: str, incoming_root: str, transfer_mode: str, render_preview: bool) -> None:
         docs_dir = os.path.join(library_root, "Docs")
         os.makedirs(docs_dir, exist_ok=True)
         output_html = os.path.join(docs_dir, "LibrarySyncPreview.html")
@@ -610,6 +659,7 @@ class LibrarySyncReviewPanel(ttk.Frame):
                     log_callback=log,
                     progress_callback=progress,
                     cancel_event=self.plan_cancel,
+                    transfer_mode=transfer_mode,
                 )
                 preview_path = output_html
             else:
@@ -619,6 +669,7 @@ class LibrarySyncReviewPanel(ttk.Frame):
                     log_callback=log,
                     progress_callback=progress,
                     cancel_event=self.plan_cancel,
+                    transfer_mode=transfer_mode,
                 )
                 preview_path = None
         except IndexCancelled:
@@ -651,7 +702,11 @@ class LibrarySyncReviewPanel(ttk.Frame):
             self._preview_version = self._plan_version
             self.plan_preview_path = preview_path
             self.plan_status_var.set(f"Preview ready: {preview_path}")
-            self._log_event("plan_preview", "Preview ready", {"path": preview_path, "moves": len(plan.moves)})
+            self._log_event(
+                "plan_preview",
+                "Preview ready",
+                {"path": preview_path, "moves": len(plan.moves), "transfer_mode": plan.transfer_mode},
+            )
             if preview_path:
                 try:
                     webbrowser.open(preview_path)
@@ -661,7 +716,11 @@ class LibrarySyncReviewPanel(ttk.Frame):
             self.plan_preview_path = None
             self._preview_version = -1
             self.plan_status_var.set("Plan built. Run Preview to inspect before execution.")
-            self._log_event("plan_built", "Plan ready", {"moves": len(plan.moves)})
+            self._log_event(
+                "plan_built",
+                "Plan ready",
+                {"moves": len(plan.moves), "transfer_mode": plan.transfer_mode},
+            )
 
         self.plan_progress_var.set(1)
         self.plan_progress_label.set("Complete")
@@ -737,10 +796,15 @@ class LibrarySyncReviewPanel(ttk.Frame):
         self.plan_progress_label.set("Executing…")
         self.plan_status_var.set("Executing plan…")
         self._refresh_plan_actions()
-        thread = threading.Thread(target=self._execute_plan_worker, args=(self.active_plan,), daemon=True)
+        create_playlist = bool(self.output_playlist_var.get())
+        thread = threading.Thread(
+            target=self._execute_plan_worker,
+            args=(self.active_plan, create_playlist),
+            daemon=True,
+        )
         thread.start()
 
-    def _execute_plan_worker(self, plan: library_sync.LibrarySyncPlan) -> None:
+    def _execute_plan_worker(self, plan: library_sync.LibrarySyncPlan, create_playlist: bool) -> None:
         def log(msg: str) -> None:
             self._log_event("execute_log", msg)
 
@@ -753,6 +817,7 @@ class LibrarySyncReviewPanel(ttk.Frame):
                 log_callback=log,
                 progress_callback=progress,
                 cancel_event=self.plan_cancel,
+                create_playlist=create_playlist,
             )
         except Exception as exc:  # pragma: no cover - UI behavior
             self.after(0, lambda e=exc: self._handle_plan_error(e))
@@ -765,7 +830,10 @@ class LibrarySyncReviewPanel(ttk.Frame):
         self.plan_cancel.clear()
         cancelled = bool(summary.get("cancelled"))
         moved = int(summary.get("moved", 0))
+        copied = int(summary.get("copied", 0))
+        transferred = int(summary.get("transferred", moved + copied))
         errors = summary.get("errors", []) or []
+        playlist_path = summary.get("playlist_path")
 
         if cancelled:
             status = "Execution cancelled."
@@ -773,17 +841,52 @@ class LibrarySyncReviewPanel(ttk.Frame):
             self.plan_progress_label.set("Cancelled")
             self._log_event("execute_cancelled", status)
         else:
-            status = f"Execution complete. Moved {moved} files."
+            parts = []
+            if copied:
+                parts.append(f"Copied {copied}")
+            if moved:
+                parts.append(f"Moved {moved}")
+            if not parts:
+                parts.append("No files transferred")
+            status = "Execution complete. " + " and ".join(parts) + "."
             self.plan_progress_var.set(1)
             self.plan_progress_label.set("Complete")
-            self._log_event("execute_complete", status, {"moved": moved})
+            self._log_event(
+                "execute_complete",
+                status,
+                {"moved": moved, "copied": copied, "transferred": transferred},
+            )
 
         self.plan_status_var.set(status)
         if errors:
             messagebox.showerror("Execution Errors", "\n".join(errors))
         elif not cancelled:
             messagebox.showinfo("Execution Complete", status)
+            if playlist_path:
+                self._show_playlist_popup(str(playlist_path))
         self._refresh_plan_actions()
+
+    def _show_playlist_popup(self, path: str) -> None:
+        popup = tk.Toplevel(self)
+        popup.title("Playlist Created")
+        popup.transient(self.winfo_toplevel())
+        ttk.Label(popup, text=f"Playlist saved:\n{path}", wraplength=420, justify="left").pack(
+            padx=12, pady=(12, 8), anchor="w"
+        )
+        btns = ttk.Frame(popup)
+        btns.pack(padx=12, pady=(0, 12), anchor="e")
+
+        def copy_path() -> None:
+            try:
+                popup.clipboard_clear()
+                popup.clipboard_append(path)
+            except Exception:
+                pass
+
+        ttk.Button(btns, text="Copy Path", command=copy_path).pack(side="left")
+        ttk.Button(btns, text="Close", command=popup.destroy).pack(side="left", padx=(6, 0))
+        popup.grab_set()
+        popup.lift()
 
     def _describe_state(self, state: ScanState) -> str:
         return state.value.replace("_", " ").title()

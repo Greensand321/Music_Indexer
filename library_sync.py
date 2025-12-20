@@ -705,6 +705,7 @@ class LibrarySyncPlan:
     copy_only: set[str] = field(default_factory=set)
     allowed_replacements: set[str] = field(default_factory=set)
     items: List[PlannedItem] = field(default_factory=list)
+    transfer_mode: str = "move"
 
     def planned_moves(self) -> Dict[str, str]:
         """Return a copy of the planned move mapping for execution."""
@@ -742,15 +743,17 @@ def _compute_plan_items(
     copy_only: Iterable[str] | None = None,
     allow_all_replacements: bool = False,
     allowed_replacements: Iterable[str] | None = None,
+    transfer_mode: str = "move",
 ) -> List[PlannedItem]:
     """Attach deterministic execution decisions to each planned move."""
 
     copy_only_set = set(copy_only or [])
     allowed_replacements_set = set(allowed_replacements or [])
+    normalized_transfer_mode = "copy" if str(transfer_mode).lower() == "copy" else "move"
     items: List[PlannedItem] = []
 
     for src, dst in sorted(moves.items(), key=lambda item: item[1]):
-        action = "copy" if src in copy_only_set else "move"
+        action = "copy" if src in copy_only_set else normalized_transfer_mode
         dest_exists = os.path.exists(dst)
         replacement_allowed = allow_all_replacements or dst in allowed_replacements_set
 
@@ -790,6 +793,7 @@ def compute_library_sync_plan(
     flush_cache: bool = False,
     max_workers: int | None = None,
     cancel_event: threading.Event | None = None,
+    transfer_mode: str = "move",
 ) -> LibrarySyncPlan:
     """Compute a deterministic move/route plan for Library Sync."""
     cancel_event = cancel_event or threading.Event()
@@ -841,6 +845,7 @@ def compute_library_sync_plan(
         copy_only=None,
         allow_all_replacements=False,
         allowed_replacements=None,
+        transfer_mode=transfer_mode,
     )
 
     return LibrarySyncPlan(
@@ -851,6 +856,7 @@ def compute_library_sync_plan(
         tag_index=remapped_tag_index,
         decision_log=decision_log,
         items=plan_items,
+        transfer_mode="copy" if str(transfer_mode).lower() == "copy" else "move",
     )
 
 
@@ -864,6 +870,7 @@ def build_library_sync_preview(
     flush_cache: bool = False,
     max_workers: int | None = None,
     cancel_event: threading.Event | None = None,
+    transfer_mode: str = "move",
 ) -> LibrarySyncPlan:
     """Compute a Library Sync plan and write the dry-run preview."""
     plan = compute_library_sync_plan(
@@ -874,6 +881,7 @@ def build_library_sync_preview(
         flush_cache=flush_cache,
         max_workers=max_workers,
         cancel_event=cancel_event,
+        transfer_mode=transfer_mode,
     )
     plan.render_preview(output_html_path)
     return plan
@@ -976,7 +984,11 @@ def execute_plan(
     docs_dir = _ensure_docs_dir(plan.library_root)
     audit_path = audit_path or os.path.join(docs_dir, "LibrarySyncAudit.json")
     executed_report_path = executed_report_path or os.path.join(docs_dir, "LibrarySyncExecuted.html")
-    playlist_path = playlist_path or os.path.join(plan.library_root, "Playlists", "LibrarySyncExecuted.m3u")
+    playlist_root = os.path.join(plan.library_root, "Playlists")
+    os.makedirs(playlist_root, exist_ok=True)
+    if playlist_path is None:
+        playlist_stamp = datetime.now().strftime("%Y-%m-%d_%H%M")
+        playlist_path = os.path.join(playlist_root, f"LibrarySync_Added_{playlist_stamp}.m3u8")
     backup_root = os.path.join(docs_dir, "Backups", "LibrarySync")
     os.makedirs(backup_root, exist_ok=True)
 
@@ -993,6 +1005,7 @@ def execute_plan(
         copy_only=copy_only,
         allow_all_replacements=allow_all_replacements,
         allowed_replacements=allowed_replacements,
+        transfer_mode=getattr(plan, "transfer_mode", "move"),
     )
     plan.items = plan_items
 
@@ -1002,6 +1015,7 @@ def execute_plan(
     summary: Dict[str, object] = {
         "moved": 0,
         "copied": 0,
+        "transferred": 0,
         "errors": [],
         "skipped": [],
         "review_required": [],
@@ -1108,6 +1122,7 @@ def execute_plan(
             else:
                 shutil.move(src, dst)
                 summary["moved"] = int(summary["moved"]) + 1
+            summary["transferred"] = int(summary["transferred"]) + 1
             executed_moves[src] = dst
             outcome["status"] = "success"
             if backup_path:
@@ -1120,6 +1135,8 @@ def execute_plan(
             log_callback(msg)
 
         audit_items.append(outcome)
+
+    summary["transferred"] = int(summary.get("moved", 0)) + int(summary.get("copied", 0))
 
     report_heading = "Library Sync (Executed)" if not dry_run else "Library Sync (Dry Run Execution)"
 
@@ -1178,6 +1195,7 @@ def execute_library_sync_plan(
     progress_callback: Callable[[int, int, str, str], None] | None = None,
     cancel_event: threading.Event | None = None,
     dry_run: bool = False,
+    create_playlist: bool = True,
 ) -> Dict[str, object]:
     """Compatibility wrapper around :func:`execute_plan`."""
 
@@ -1185,7 +1203,7 @@ def execute_library_sync_plan(
         plan,
         dry_run=dry_run,
         allow_replacements=False,
-        create_playlist=True,
+        create_playlist=create_playlist,
         log_callback=log_callback,
         progress_callback=progress_callback,
         cancel_event=cancel_event,
