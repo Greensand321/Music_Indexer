@@ -207,6 +207,7 @@ class LibrarySyncReviewPanel(ttk.Frame):
         self.report_version_var = tk.StringVar(value=str(self.session.exported_report_version))
         self.scan_state_var = tk.StringVar(value=self._describe_state(self.session.scan_state))
         self._on_close_callback = on_close
+        self._selection_syncing = False
         self.library_var.trace_add("write", lambda *_: self._invalidate_plan("Library folder changed"))
         self.incoming_var.trace_add("write", lambda *_: self._invalidate_plan("Incoming folder changed"))
 
@@ -998,17 +999,24 @@ class LibrarySyncReviewPanel(ttk.Frame):
         sel = self.incoming_tree.selection()
         if not sel:
             return
+        if self._selection_syncing:
+            return
+        self._selection_syncing = True
         incoming_id = sel[0]
         match = self.match_by_incoming.get(incoming_id)
         if match and match.existing:
             self.existing_tree.selection_set(match.existing.track_id)
             self.existing_tree.see(match.existing.track_id)
+        self._selection_syncing = False
         self._update_inspector(incoming_id=incoming_id)
 
     def _on_existing_select(self, _event=None) -> None:
         sel = self.existing_tree.selection()
         if not sel:
             return
+        if self._selection_syncing:
+            return
+        self._selection_syncing = True
         existing_id = sel[0]
         linked = self.match_by_existing.get(existing_id, [])
         if linked:
@@ -1018,6 +1026,7 @@ class LibrarySyncReviewPanel(ttk.Frame):
             self._update_inspector(incoming_id=target)
         else:
             self._update_inspector(existing_id=existing_id)
+        self._selection_syncing = False
 
     def _update_inspector(self, incoming_id: str | None = None, existing_id: str | None = None) -> None:
         res: MatchResult | None = None
