@@ -776,7 +776,7 @@ def render_dry_run_html_from_plan(
             "SKIP_KEEP_EXISTING": ("(kept existing)", "decision-skip"),
             "REVIEW_REQUIRED": ("(review required)", "decision-review"),
             "REPLACE": ("(replace)", "decision-replace"),
-            "COPY": ("(copy)", "decision-copy"),
+            "COPY": ("(move)", "decision-copy"),
         }
         return mapping.get(decision.upper())
 
@@ -789,7 +789,7 @@ def render_dry_run_html_from_plan(
             "SKIP_KEEP_EXISTING": "A different file is already present; keeping existing.",
             "REVIEW_REQUIRED": "Needs manual approval before moving.",
             "REPLACE": "Existing file will be replaced.",
-            "COPY": "Incoming file will be copied/moved.",
+            "COPY": "Incoming file will be moved.",
         }
         for key in ["SKIP_DUPLICATE", "SKIP_KEEP_EXISTING", "REVIEW_REQUIRED", "REPLACE", "COPY"]:
             if key not in decisions:
