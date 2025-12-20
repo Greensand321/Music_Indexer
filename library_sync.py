@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import threading
+import time
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Callable, Dict, Iterable, List, Optional, Tuple
@@ -158,6 +159,45 @@ class MatchResult:
         }
 
 
+@dataclass
+class PerformanceProfile:
+    """Capture lightweight performance metrics for profiling runs."""
+
+    cache_hits: int = 0
+    fingerprints_computed: int = 0
+    shortlist_sizes: List[int] = field(default_factory=list)
+    signature_shortlists: int = 0
+    extension_shortlists: int = 0
+    fallback_shortlists: int = 0
+    progress_updates: int = 0
+    library_scan_duration: float = 0.0
+    incoming_scan_duration: float = 0.0
+    match_duration: float = 0.0
+
+    def record_shortlist(self, size: int, source: str) -> None:
+        self.shortlist_sizes.append(size)
+        if source == "signature":
+            self.signature_shortlists += 1
+        elif source == "extension":
+            self.extension_shortlists += 1
+        else:
+            self.fallback_shortlists += 1
+
+    def to_dict(self) -> Dict[str, object]:
+        return {
+            "cache_hits": self.cache_hits,
+            "fingerprints_computed": self.fingerprints_computed,
+            "shortlist_sizes": list(self.shortlist_sizes),
+            "signature_shortlists": self.signature_shortlists,
+            "extension_shortlists": self.extension_shortlists,
+            "fallback_shortlists": self.fallback_shortlists,
+            "progress_updates": self.progress_updates,
+            "library_scan_duration": self.library_scan_duration,
+            "incoming_scan_duration": self.incoming_scan_duration,
+            "match_duration": self.match_duration,
+        }
+
+
 def _fingerprint_signature(fp: str | None) -> str | None:
     if not fp:
         return None
@@ -202,6 +242,7 @@ def _scan_folder(
     log_callback: Callable[[str], None] | None = None,
     progress_callback: Callable[[int, int, str, str], None] | None = None,
     cancel_event: threading.Event | None = None,
+    profiler: PerformanceProfile | None = None,
 ) -> List[TrackRecord]:
     """Enumerate audio files, normalize paths, and attach cached fingerprints."""
     cancel_event = cancel_event or threading.Event()
@@ -251,6 +292,8 @@ def _scan_folder(
             total_files += 1
             if progress_callback:
                 progress_callback(total_files, 0, path, "scan")
+            if profiler:
+                profiler.progress_updates += 1
 
     if not entries:
         return []
@@ -272,6 +315,8 @@ def _scan_folder(
             _dlog(f"DEBUG: cache hit {entry['path']}", log_callback)
             if log_callback:
                 log_callback(json.dumps({"event": "cache_hit", "path": entry["path"]}))
+            if profiler:
+                profiler.cache_hits += 1
         else:
             if row:
                 msg = (
@@ -310,6 +355,8 @@ def _scan_folder(
             path = result[0]
             duration = result[1] if len(result) > 2 else None
             fp = result[-1]
+            if profiler:
+                profiler.fingerprints_computed += 1
             entry = entry_map.get(path)
             if entry is None:
                 continue
@@ -364,15 +411,22 @@ def _shortlist_candidates(
     ext_index: Dict[str, List[TrackRecord]],
     fallback_pool: List[TrackRecord],
     log_callback: Callable[[str], None] | None = None,
+    profiler: PerformanceProfile | None = None,
 ) -> List[TrackRecord]:
     sig = incoming.signature()
     candidates: List[TrackRecord] = []
+    shortlist_source = "fallback"
     if sig and sig in sig_index:
         candidates.extend(sig_index[sig])
+        shortlist_source = "signature"
     if not candidates:
-        candidates.extend(ext_index.get(incoming.ext, [])[:SHORTLIST_FALLBACK])
+        ext_candidates = ext_index.get(incoming.ext, [])[:SHORTLIST_FALLBACK]
+        candidates.extend(ext_candidates)
+        shortlist_source = "extension" if ext_candidates else shortlist_source
     if not candidates and fallback_pool:
         candidates.extend(fallback_pool[:SHORTLIST_FALLBACK])
+    if profiler:
+        profiler.record_shortlist(len(candidates), shortlist_source)
     _dlog(
         f"DEBUG: shortlist for {incoming.path} -> {len(candidates)} candidates",
         log_callback,
@@ -386,14 +440,18 @@ def _match_tracks(
     thresholds: Dict[str, float],
     fmt_priority: Dict[str, int],
     log_callback: Callable[[str], None] | None = None,
+    profiler: PerformanceProfile | None = None,
 ) -> List[MatchResult]:
     sig_index, ext_index = _build_candidate_index(library)
     fallback_pool = sorted([r for r in library if r.fingerprint], key=lambda r: r.normalized_path)
     results: List[MatchResult] = []
+    start_time = time.perf_counter()
     for inc in incoming:
         threshold_used = _select_threshold(inc.ext, thresholds)
         near_miss_margin = max(NEAR_MISS_MARGIN_FLOOR, threshold_used * NEAR_MISS_MARGIN_RATIO)
-        candidates = _shortlist_candidates(inc, sig_index, ext_index, fallback_pool, log_callback=log_callback)
+        candidates = _shortlist_candidates(
+            inc, sig_index, ext_index, fallback_pool, log_callback=log_callback, profiler=profiler
+        )
         cand_dist: List[CandidateDistance] = []
         for cand in candidates:
             dist = fingerprint_distance(inc.fingerprint, cand.fingerprint)
@@ -444,6 +502,8 @@ def _match_tracks(
                 existing_score=existing_score,
             )
         )
+    if profiler:
+        profiler.match_duration = time.perf_counter() - start_time
     return results
 
 
@@ -458,6 +518,8 @@ def compare_libraries(
     log_callback: Callable[[str], None] | None = None,
     progress_callback: Callable[[int, int, str, str], None] | None = None,
     cancel_event: threading.Event | None = None,
+    profiler: PerformanceProfile | None = None,
+    include_profile: bool = False,
 ) -> Dict[str, object]:
     """Return classification of incoming files vs. an existing library.
 
@@ -474,6 +536,8 @@ def compare_libraries(
         f"library_sync: comparing {library_folder} to {incoming_folder}"
     )
     cancel_event = cancel_event or threading.Event()
+    if profiler is None and include_profile:
+        profiler = PerformanceProfile()
     if thresholds is None:
         if threshold is not None:
             thresholds = {"default": threshold}
@@ -481,22 +545,32 @@ def compare_libraries(
             thresholds = DEFAULT_FP_THRESHOLDS
     fmt_priority = fmt_priority or FORMAT_PRIORITY
 
+    start = time.perf_counter()
     lib_records = _scan_folder(
         library_folder,
         db_path,
         log_callback=log_callback,
         progress_callback=progress_callback,
         cancel_event=cancel_event,
+        profiler=profiler,
     )
+    if profiler:
+        profiler.library_scan_duration = time.perf_counter() - start
+    start = time.perf_counter()
     inc_records = _scan_folder(
         incoming_folder,
         db_path,
         log_callback=log_callback,
         progress_callback=progress_callback,
         cancel_event=cancel_event,
+        profiler=profiler,
     )
+    if profiler:
+        profiler.incoming_scan_duration = time.perf_counter() - start
 
-    match_results = _match_tracks(inc_records, lib_records, thresholds, fmt_priority, log_callback=log_callback)
+    match_results = _match_tracks(
+        inc_records, lib_records, thresholds, fmt_priority, log_callback=log_callback, profiler=profiler
+    )
 
     new_paths: List[str] = []
     existing_matches: List[Tuple[str, str]] = []
@@ -525,6 +599,8 @@ def compare_libraries(
         "matches": [m.to_dict() for m in match_results],
         "partial": cancel_event.is_set(),
     }
+    if include_profile and profiler:
+        result["profile"] = profiler.to_dict()
     record_event(
         "library_sync: comparison complete "
         f"library_existing={len(lib_records)} incoming_tracks={len(inc_records)} "
@@ -532,59 +608,41 @@ def compare_libraries(
     )
     return result
 
-def copy_new_tracks(
-    new_paths: List[str],
-    incoming_root: str,
-    library_root: str,
+
+def profile_compare_libraries(
+    library_folder: str,
+    incoming_folder: str,
+    db_path: str,
+    threshold: float | None = None,
+    fmt_priority: Dict[str, int] | None = None,
+    thresholds: Dict[str, float] | None = None,
     log_callback: Callable[[str], None] | None = None,
-) -> List[str]:
-    """Copy each path in ``new_paths`` from ``incoming_root`` into ``library_root``.
-
-    Returns the list of destination paths created.
-    """
-    import shutil
-
-    _dlog("DEBUG: Copying new tracks", log_callback)
-    dest_paths = []
-    for src in new_paths:
-        rel = os.path.relpath(src, incoming_root)
-        dest = os.path.join(library_root, rel)
-        base, ext = os.path.splitext(dest)
-        idx = 1
-        final = dest
-        while os.path.exists(final):
-            final = f"{base} ({idx}){ext}"
-            idx += 1
-        os.makedirs(os.path.dirname(final), exist_ok=True)
-        _dlog(f"DEBUG: Copy {src} -> {final}", log_callback)
-        shutil.copy2(src, final)
-        dest_paths.append(final)
-    return dest_paths
+    progress_callback: Callable[[int, int, str, str], None] | None = None,
+    cancel_event: threading.Event | None = None,
+) -> Tuple[Dict[str, object], PerformanceProfile]:
+    """Run a profiled comparison and return both results and metrics."""
+    profile = PerformanceProfile()
+    result = compare_libraries(
+        library_folder,
+        incoming_folder,
+        db_path,
+        threshold=threshold,
+        fmt_priority=fmt_priority,
+        thresholds=thresholds,
+        log_callback=log_callback,
+        progress_callback=progress_callback,
+        cancel_event=cancel_event,
+        profiler=profile,
+        include_profile=True,
+    )
+    return result, profile
 
 
-def replace_tracks(
-    pairs: List[Tuple[str, str]],
-    backup_dirname: str = "__backup__",
-    log_callback: Callable[[str], None] | None = None,
-) -> List[str]:
-    """Replace library files with higher quality versions.
+def copy_new_tracks(*_args, **_kwargs):
+    """Deprecated: blocked per review-first redesign."""
+    raise RuntimeError("File operations are disabled in the Library Sync review tool.")
 
-    Each pair is ``(incoming, existing)``. The original file is moved into a
-    ``backup_dirname`` folder alongside the existing file before the incoming
-    file is moved into place.
 
-    Returns the list of replaced library paths.
-    """
-    import shutil
-
-    _dlog("DEBUG: Replacing tracks", log_callback)
-    replaced = []
-    for inc, lib in pairs:
-        backup = os.path.join(os.path.dirname(lib), backup_dirname, os.path.basename(lib))
-        os.makedirs(os.path.dirname(backup), exist_ok=True)
-        _dlog(f"DEBUG: Backup {lib} -> {backup}", log_callback)
-        shutil.move(lib, backup)
-        _dlog(f"DEBUG: Move {inc} -> {lib}", log_callback)
-        shutil.move(inc, lib)
-        replaced.append(lib)
-    return replaced
+def replace_tracks(*_args, **_kwargs):
+    """Deprecated: blocked per review-first redesign."""
+    raise RuntimeError("File operations are disabled in the Library Sync review tool.")
