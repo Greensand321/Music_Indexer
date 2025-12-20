@@ -1547,7 +1547,6 @@ class SoundVaultImporterApp(tk.Tk):
         self.sync_debug_var = tk.BooleanVar(value=False)
         self.sync_library_var = tk.StringVar(value="")
         self.sync_incoming_var = tk.StringVar(value="")
-        self.sync_auto_var = tk.BooleanVar(value=True)
         self.sync_new = []
         self.sync_existing = []
         self.sync_improved = []
@@ -2174,14 +2173,16 @@ class SoundVaultImporterApp(tk.Tk):
 
         actions = ttk.Frame(self.sync_tab)
         actions.pack(fill="x", padx=10, pady=(0, 10))
-        ttk.Checkbutton(
-            actions, text="Auto-Update Playlists", variable=self.sync_auto_var
-        ).pack(side="left")
-        ttk.Button(actions, text="Copy New", command=self._copy_new_tracks).pack(
+        ttk.Label(
+            actions,
+            text="Library Sync actions are review-only; exporting plans is non-destructive.",
+            wraplength=360,
+        ).pack(side="left", fill="x", expand=True)
+        ttk.Button(actions, text="Copy New", command=self._show_sync_review_notice).pack(
             side="left", padx=(5, 0)
         )
         ttk.Button(
-            actions, text="Replace Selected", command=self._replace_selected
+            actions, text="Replace Selected", command=self._show_sync_review_notice
         ).pack(side="left", padx=(5, 0))
 
         # after your other tabs
@@ -3666,28 +3667,19 @@ class SoundVaultImporterApp(tk.Tk):
             self.sync_improved_list.insert("end", os.path.basename(inc))
 
     def _copy_new_tracks(self):
-        idxs = self.sync_new_list.curselection()
-        if not idxs:
-            return
-        sels = [self.sync_new[int(i)] for i in idxs]
-        dests = library_sync.copy_new_tracks(
-            sels,
-            self.sync_incoming_var.get(),
-            self.sync_library_var.get(),
-        )
-        if self.sync_auto_var.get():
-            playlist_generator.update_playlists(dests)
-        messagebox.showinfo("Copy New", f"Copied {len(dests)} files")
+        self._show_sync_review_notice()
 
     def _replace_selected(self):
-        idxs = self.sync_improved_list.curselection()
-        if not idxs:
-            return
-        sels = [self.sync_improved[int(i)] for i in idxs]
-        dests = library_sync.replace_tracks(sels)
-        if self.sync_auto_var.get():
-            playlist_generator.update_playlists(dests)
-        messagebox.showinfo("Replace", f"Replaced {len(dests)} files")
+        self._show_sync_review_notice()
+
+    def _show_sync_review_notice(self) -> None:
+        messagebox.showinfo(
+            "Review Only",
+            (
+                "Library Sync no longer performs copy or replace operations. "
+                "Export the review plan instead and apply changes manually."
+            ),
+        )
 
     # ── Quality Checker Helpers ─────────────────────────────────────────
     def clear_quality_view(self) -> None:
