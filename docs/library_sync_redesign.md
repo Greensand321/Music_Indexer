@@ -3,6 +3,8 @@
 ## Overview
 This redesign reframes the Library Sync tool as a review-first comparison interface between an existing music library and an incoming folder. The UI prioritizes clarity, safety, and trust by clearly distinguishing incoming content from existing content, surfacing duplicates and collisions, and enabling informed decisions through non-destructive review actions. All automated file operations and playlist updates are intentionally excluded from this tool.
 
+**Backend alignment (current state):** The shipping backend in `library_sync.py` already follows this review-first contract. It performs independent scans of the *Existing Library* and *Incoming Folder*, reuses cached fingerprints where size/mtime match, computes new fingerprints in parallel when needed, and matches via indexed shortlists (fingerprint signature ➜ extension ➜ fallback pool). Matches are classified as *New*, *Collision*, *Exact Match*, or *Low Confidence* with a quality label (*Potential Upgrade* / *Keep Existing*) derived from format priority and bitrate. Execution helpers remain opt-in and write dry-run previews plus JSON/HTML audit logs; file operations are blocked unless a plan is explicitly executed.
+
 ## User Flow (Start ➜ Finish)
 1. **Pick folders:** The user independently selects an *Existing Library* folder and an *Incoming Folder*.
 2. **Configure scan:** The user adjusts fingerprint distance thresholds (global or per-format) and optional quality tie-breaker settings, then starts scans for each folder independently.
@@ -31,6 +33,8 @@ This redesign reframes the Library Sync tool as a review-first comparison interf
 - Shows detailed information for the selected item, including tags, duration, bitrate (when available), format-based quality score, fingerprint distance, threshold used, and the single best-matched counterpart (lowest distance). If multiple potential matches exist, only the best candidate is actionable; others are informational.
 - Optional shortcuts such as “open containing folder” and “play preview” are shown only when supported by the runtime environment.
 
+**Implementation snapshot:** Each scan produces normalized `TrackRecord` entries (path, ext, bitrate, size, mtime, duration, fingerprint, tags). The inspector can display `MatchResult` payloads that already include the best match, candidate shortlist (with distances), threshold applied, near-miss margin, confidence score, and quality comparison labels. These payloads also flag when a result is partial due to cancellation, allowing the UI to show “Partial scan” states without blocking retries.
+
 ### Status Chips
 - Each row may display one or more chips, including *New*, *Collision*, *Exact Match*, *Low Confidence*, *Potential Upgrade*, *Keep Existing*, or *Missing Metadata*. Chips are used consistently throughout the UI to avoid ambiguity.
 
@@ -42,6 +46,10 @@ This redesign reframes the Library Sync tool as a review-first comparison interf
 - **Export Plan / Report:** Generates a CSV or JSON summary of the current review state.
 - **Clear Flags:** Removes all review flags without affecting scan results.
 - No UI control, context menu, shortcut, or background task performs file moves, replacements, or playlist updates.
+
+**Execution pipeline (opt-in):**
+- **Plan generation:** `compute_library_sync_plan()` builds a deterministic move/route plan by reusing the indexer engine’s routing rules, remapping destinations under the selected library root, and attaching per-file decisions (*COPY*, *REPLACE*, or *SKIP* with reasons). Dry-run previews reuse the indexer HTML renderer for consistency.
+- **Execution:** `execute_plan()` consumes the plan, writes JSON audit logs plus executed HTML reports, creates a “LibrarySync_Added_YYYY-mm-dd_hhmm.m3u8” playlist of transferred files (when enabled), and writes backups before replacements. Cancellations are honored between steps; skipped or review-required items are summarized in the report.
 
 ### Progress and Status
 - Separate progress indicators are shown for library and incoming scans. Each scan can be cancelled independently. A log panel displays scan configuration, counts, skipped files, and warnings.
@@ -68,6 +76,8 @@ This redesign reframes the Library Sync tool as a review-first comparison interf
 - Cancelled scans preserve partial results and are clearly labeled as *Partial*.
 - Path and permission errors surface as inline banners and log entries without disabling retry.
 - Threshold inputs are validated; invalid values are rejected with inline feedback and reverted to the last known good configuration.
+
+**Performance profiling hooks:** An optional `PerformanceProfile` collector records cache hits, fingerprint computations, shortlist sizes, and scan/match durations. UI surfaces can render these metrics for troubleshooting slow comparisons without affecting the main workflow.
 
 ## Export Plan Schema (Minimum)
 - Exported reports must include incoming path, existing path (nullable), match status, fingerprint distance, threshold used, quality scores, user flags, notes, timestamp, and a scan configuration hash.

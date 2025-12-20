@@ -35,6 +35,8 @@
   <li>Scans folders recursively for audio files.</li>
   <li>Reads metadata: artist, title, album, year, track number, embedded cover art.</li>
   <li>Deduplicates tracks by fingerprint, preferring FLAC &gt; M4A &gt; MP3.</li>
+  <li>Separates workflow into deterministic phases: vault pre-scan (artist counts), fingerprint-based dedupe, metadata aggregation, destination routing, and preview generation.</li>
+  <li>Surfaces every routing decision in <code>decision_log</code> and a tag index to drive consistent HTML previews and downstream plan rendering.</li>
   <li><strong>Phase 0</strong>: Pre-scan the vault under MUSIC_ROOT to build a global artist-count map via <code>build_primary_counts()</code>.</li>
   <li>Implements grouping rules:
     <ul>
@@ -117,6 +119,19 @@ def run_full_indexer(root_path, output_html_path, dry_run_only=False, log_callba
     #   4. If not dry_run_only, call apply_indexer_moves(...)
     pass
 </code></pre>
+
+<hr>
+
+<h3>2.5 Library Sync Review Tool (<code>library_sync.py</code>)</h3>
+<p>Comparison-first workflow that aligns to the redesign in <code>docs/library_sync_redesign.md</code>:</p>
+<ul>
+  <li>Runs independent scans for Library and Incoming folders, reusing cached fingerprints when size/mtime match and computing new prints in parallel when needed.</li>
+  <li>Builds normalized <code>TrackRecord</code> entries (path, ext, bitrate, size, mtime, duration, fingerprint, tags) and matches via indexed shortlists: fingerprint signature → extension cohort → fallback pool.</li>
+  <li>Classifies each incoming track as <em>New</em>, <em>Collision</em>, <em>Exact Match</em>, or <em>Low Confidence</em>, and attaches quality labels (<em>Potential Upgrade</em> / <em>Keep Existing</em>) using format priority and bitrate.</li>
+  <li>Exposes full <code>MatchResult</code> payloads with shortlist distances, thresholds used, near-miss margins, and confidence scores so the UI can render detailed inspectors without extra computation.</li>
+  <li>Optional profiling (<code>PerformanceProfile</code>) tracks cache hits, fingerprints computed, shortlist sizes, and scan/match timings for troubleshooting.</li>
+  <li>Opt-in execution path: <code>compute_library_sync_plan()</code> remaps indexer-derived destinations under the chosen library root and emits deterministic plan items (<em>COPY</em> / <em>REPLACE</em> / <em>SKIP</em> with reasons). <code>execute_plan()</code> writes JSON audits + executed HTML reports, creates a playlist of transferred files, and backs up any replaced destination before writing.</li>
+</ul>
 
 <hr>
 
