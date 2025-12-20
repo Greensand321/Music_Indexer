@@ -9,6 +9,7 @@ import shutil
 import threading
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Callable, Dict, Iterable, List, Optional, Tuple
 
@@ -19,6 +20,7 @@ from library_sync_indexer_engine import (
     music_indexer_api as idx,
     near_duplicate_detector as idx_near_duplicate_detector,
 )
+from playlist_generator import write_playlist
 
 fingerprint_generator = idx_fingerprint_generator
 fingerprint_distance = idx_near_duplicate_detector.fingerprint_distance
@@ -669,6 +671,8 @@ class LibrarySyncPlan:
     moves: Dict[str, str]
     tag_index: Dict[str, object]
     decision_log: List[str]
+    copy_only: set[str] = field(default_factory=set)
+    allowed_replacements: set[str] = field(default_factory=set)
 
     def planned_moves(self) -> Dict[str, str]:
         """Return a copy of the planned move mapping for execution."""
@@ -777,55 +781,285 @@ def build_library_sync_preview(
     return plan
 
 
+def _ensure_docs_dir(root: str) -> str:
+    docs_dir = os.path.join(root, "Docs")
+    os.makedirs(docs_dir, exist_ok=True)
+    return docs_dir
+
+
+def _render_execution_report(
+    plan: LibrarySyncPlan,
+    executed_moves: Dict[str, str],
+    skipped: List[Dict[str, str]],
+    failed: List[Dict[str, str]],
+    review_required: List[Dict[str, str]],
+    output_html_path: str,
+    heading: str,
+    dry_run: bool,
+) -> str:
+    """Write an executed-plan HTML using the indexer preview style."""
+    idx.render_dry_run_html_from_plan(
+        plan.destination_root,
+        output_html_path,
+        executed_moves,
+        plan.tag_index,
+        heading_text=heading,
+        title_prefix=heading,
+    )
+
+    sections: List[str] = []
+    if dry_run:
+        sections.append("<p><strong>Dry run:</strong> no files were modified.</p>")
+
+    def _format_section(title: str, items: List[Dict[str, str]]) -> None:
+        if not items:
+            return
+        sections.append(f"<h3>{idx.sanitize(title)}</h3>")
+        sections.append("<ul>")
+        for item in items:
+            src = idx.sanitize(os.path.basename(item.get("source", "")))
+            dst = idx.sanitize(os.path.basename(item.get("destination", "")))
+            reason = idx.sanitize(item.get("reason", ""))
+            line = f"<li><code>{src}</code> → <code>{dst}</code>"
+            if reason:
+                line += f" — {reason}"
+            line += "</li>"
+            sections.append(line)
+        sections.append("</ul>")
+
+    _format_section("Review Required", review_required)
+    _format_section("Skipped", skipped)
+    _format_section("Failed", failed)
+
+    if sections:
+        extras = "\n".join(sections)
+        try:
+            with open(output_html_path, "r+", encoding="utf-8") as f:
+                content = f.read()
+                marker = "</body>"
+                if marker in content:
+                    content = content.replace(marker, extras + "\n" + marker, 1)
+                else:
+                    content += extras
+                f.seek(0)
+                f.write(content)
+                f.truncate()
+        except Exception:
+            pass
+    return output_html_path
+
+
+def execute_plan(
+    plan: LibrarySyncPlan,
+    dry_run: bool = False,
+    *,
+    allow_replacements: bool | Iterable[str] | None = None,
+    audit_path: str | None = None,
+    executed_report_path: str | None = None,
+    playlist_path: str | None = None,
+    create_playlist: bool = True,
+    log_callback: Callable[[str], None] | None = None,
+    progress_callback: Callable[[int, int, str, str], None] | None = None,
+    cancel_event: threading.Event | None = None,
+) -> Dict[str, object]:
+    """Execute a Library Sync plan with auditing and HTML reporting.
+
+    The execution routine performs only the operations expressed by the plan,
+    capturing a JSON audit trail and an executed HTML report. Existing files
+    are only replaced when explicitly allowed (via ``allow_replacements`` or
+    ``plan.allowed_replacements``). Backups are written for any destructive
+    action before the destination is overwritten.
+    """
+
+    log_callback = log_callback or (lambda _msg: None)
+    progress_callback = progress_callback or (lambda _c, _t, _p, _ph: None)
+    cancel_event = cancel_event or threading.Event()
+
+    docs_dir = _ensure_docs_dir(plan.library_root)
+    audit_path = audit_path or os.path.join(docs_dir, "LibrarySyncAudit.json")
+    executed_report_path = executed_report_path or os.path.join(docs_dir, "LibrarySyncExecuted.html")
+    playlist_path = playlist_path or os.path.join(plan.library_root, "Playlists", "LibrarySyncExecuted.m3u")
+    backup_root = os.path.join(docs_dir, "Backups", "LibrarySync")
+    os.makedirs(backup_root, exist_ok=True)
+
+    allow_all_replacements = allow_replacements is True
+    allowed_replacements = set(getattr(plan, "allowed_replacements", set()) or [])
+    if allow_replacements not in (None, False, True):
+        allowed_replacements.update(allow_replacements)  # type: ignore[arg-type]
+
+    copy_only = set(getattr(plan, "copy_only", set()) or [])
+
+    moves = sorted(plan.moves.items())
+    total = len(moves)
+    timestamp = datetime.now(timezone.utc).isoformat()
+
+    summary: Dict[str, object] = {
+        "moved": 0,
+        "copied": 0,
+        "errors": [],
+        "skipped": [],
+        "review_required": [],
+        "backups": [],
+        "cancelled": False,
+        "dry_run": dry_run,
+    }
+    audit_items: List[Dict[str, object]] = []
+    executed_moves: Dict[str, str] = {}
+
+    if cancel_event.is_set():
+        log_callback("✘ Execution cancelled before start.")
+        summary["cancelled"] = True
+    else:
+        log_callback(f"Executing plan with {total} operations…")
+
+    for idx, (src, dst) in enumerate(moves, start=1):
+        if cancel_event.is_set():
+            summary["cancelled"] = True
+            log_callback("✘ Execution cancelled.")
+            break
+
+        progress_callback(idx, total, src, "execute")
+        action = "copy" if src in copy_only else "move"
+        outcome: Dict[str, object] = {
+            "source": src,
+            "destination": dst,
+            "action": action,
+            "timestamp": timestamp,
+        }
+
+        if not os.path.exists(src):
+            reason = "Source missing"
+            summary["errors"].append(f"{reason}: {src}")  # type: ignore[arg-type]
+            outcome["status"] = "failed"
+            outcome["reason"] = reason
+            audit_items.append(outcome)
+            continue
+
+        dest_exists = os.path.exists(dst)
+        replacement_allowed = allow_all_replacements or dst in allowed_replacements
+
+        if dest_exists and not replacement_allowed:
+            reason = "Destination exists; replacement not allowed"
+            skip_entry = {"source": src, "destination": dst, "reason": reason}
+            summary["review_required"].append(skip_entry)
+            summary["skipped"].append(skip_entry)
+            outcome["status"] = "skipped"
+            outcome["reason"] = reason
+            audit_items.append(outcome)
+            continue
+
+        backup_path = None
+        if dest_exists and replacement_allowed:
+            rel = os.path.relpath(dst, plan.destination_root if os.path.isdir(plan.destination_root) else plan.library_root)
+            backup_path = os.path.join(backup_root, rel)
+            if not dry_run:
+                try:
+                    os.makedirs(os.path.dirname(backup_path), exist_ok=True)
+                    shutil.copy2(dst, backup_path)
+                    summary["backups"].append(backup_path)
+                except Exception as exc:  # pragma: no cover - OS interaction
+                    summary["errors"].append(f"Backup failed for {dst}: {exc}")  # type: ignore[arg-type]
+            outcome["backup_path"] = backup_path
+
+        if dry_run:
+            outcome["status"] = "dry_run"
+            outcome["reason"] = outcome.get("reason", "No changes written (dry run)")
+            executed_moves[src] = dst
+            audit_items.append(outcome)
+            continue
+
+        try:
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            if dest_exists and replacement_allowed:
+                try:
+                    os.remove(dst)
+                except FileNotFoundError:
+                    pass
+            if action == "copy":
+                shutil.copy2(src, dst)
+                summary["copied"] = int(summary["copied"]) + 1
+            else:
+                shutil.move(src, dst)
+                summary["moved"] = int(summary["moved"]) + 1
+            executed_moves[src] = dst
+            outcome["status"] = "success"
+            if backup_path:
+                outcome["backup_path"] = backup_path
+        except Exception as exc:  # pragma: no cover - OS interaction
+            msg = f"Failed to {action} {src} → {dst}: {exc}"
+            summary["errors"].append(msg)  # type: ignore[arg-type]
+            outcome["status"] = "failed"
+            outcome["reason"] = str(exc)
+            log_callback(msg)
+
+        audit_items.append(outcome)
+
+    report_heading = "Library Sync (Executed)" if not dry_run else "Library Sync (Dry Run Execution)"
+
+    report_skipped = [item for item in audit_items if item.get("status") == "skipped"]
+    report_failed = [item for item in audit_items if item.get("status") == "failed"]
+    report_review = [dict(rr) for rr in summary["review_required"]]  # type: ignore[arg-type]
+    _render_execution_report(
+        plan,
+        executed_moves,
+        report_skipped,  # type: ignore[arg-type]
+        report_failed,  # type: ignore[arg-type]
+        report_review,
+        executed_report_path,
+        report_heading,
+        dry_run,
+    )
+    summary["report_path"] = executed_report_path
+
+    audit_payload = {
+        "executed_at": timestamp,
+        "dry_run": dry_run,
+        "plan": {
+            "library_root": plan.library_root,
+            "incoming_root": plan.incoming_root,
+            "destination_root": plan.destination_root,
+            "total_operations": total,
+        },
+        "summary": summary,
+        "items": audit_items,
+    }
+    try:
+        with open(audit_path, "w", encoding="utf-8") as f:
+            json.dump(audit_payload, f, indent=2)
+    except Exception as exc:  # pragma: no cover - OS interaction
+        log_callback(f"✘ Failed to write audit log: {exc}")
+    summary["audit_path"] = audit_path
+
+    playlist_created = None
+    if create_playlist and executed_moves and not dry_run:
+        try:
+            write_playlist(sorted(executed_moves.values()), playlist_path)
+            playlist_created = playlist_path
+        except Exception as exc:  # pragma: no cover - OS interaction
+            log_callback(f"✘ Failed to write playlist: {exc}")
+    summary["playlist_path"] = playlist_created
+
+    if not summary.get("cancelled"):
+        log_callback("✓ Execution complete.")
+    return summary
+
+
 def execute_library_sync_plan(
     plan: LibrarySyncPlan,
     *,
     log_callback: Callable[[str], None] | None = None,
     progress_callback: Callable[[int, int, str, str], None] | None = None,
     cancel_event: threading.Event | None = None,
+    dry_run: bool = False,
 ) -> Dict[str, object]:
-    """Apply a previously computed Library Sync plan.
+    """Compatibility wrapper around :func:`execute_plan`."""
 
-    The execution routine only trusts the provided plan. No recomputation or
-    reinterpretation of moves occurs here, ensuring the same routing used for
-    preview is applied during execution.
-    """
-
-    cancel_event = cancel_event or threading.Event()
-
-    def _log(message: str) -> None:
-        if log_callback:
-            log_callback(message)
-
-    def _progress(current: int, total: int, path: str, phase: str) -> None:
-        if progress_callback:
-            progress_callback(current, total, path, phase)
-
-    if cancel_event.is_set():
-        _log("✘ Execution cancelled before start.")
-        return {"moved": 0, "errors": [], "cancelled": True}
-
-    moves = sorted(plan.moves.items())
-    total = len(moves)
-    summary: Dict[str, object] = {"moved": 0, "errors": [], "cancelled": False}
-    _log(f"Executing plan with {total} moves…")
-
-    for idx, (src, dst) in enumerate(moves, start=1):
-        if cancel_event.is_set():
-            summary["cancelled"] = True
-            _log("✘ Execution cancelled.")
-            break
-
-        _progress(idx, total, src, "execute")
-        try:
-            os.makedirs(os.path.dirname(dst), exist_ok=True)
-            shutil.move(src, dst)
-            summary["moved"] = int(summary["moved"]) + 1
-        except Exception as exc:  # pragma: no cover - OS interaction
-            msg = f"Failed to move {src} → {dst}: {exc}"
-            summary.setdefault("errors", []).append(msg)
-            _log(msg)
-
-    if not summary.get("cancelled"):
-        _log("✓ Execution complete.")
-    return summary
+    return execute_plan(
+        plan,
+        dry_run=dry_run,
+        allow_replacements=False,
+        create_playlist=True,
+        log_callback=log_callback,
+        progress_callback=progress_callback,
+        cancel_event=cancel_event,
+    )
