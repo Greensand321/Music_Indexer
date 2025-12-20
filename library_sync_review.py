@@ -238,8 +238,26 @@ class LibrarySyncReviewWindow(tk.Toplevel):
     def _build_ui(self) -> None:
         padding = {"padx": 10, "pady": 5}
 
-        root = ttk.Frame(self)
-        root.pack(fill="both", expand=True)
+        outer = ttk.Frame(self)
+        outer.pack(fill="both", expand=True)
+
+        canvas = tk.Canvas(outer, borderwidth=0, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(outer, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+
+        root = ttk.Frame(canvas)
+        root_id = canvas.create_window((0, 0), window=root, anchor="nw")
+
+        def _on_frame_config(_event=None):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+
+        def _on_canvas_config(event):
+            canvas.itemconfigure(root_id, width=event.width)
+
+        root.bind("<Configure>", _on_frame_config)
+        canvas.bind("<Configure>", _on_canvas_config)
 
         folder_frame = ttk.LabelFrame(root, text="Folders")
         folder_frame.pack(fill="x", **padding)
