@@ -5,6 +5,7 @@ import hashlib
 import json
 import logging
 import os
+import shutil
 import threading
 import time
 from dataclasses import dataclass, field
@@ -27,6 +28,7 @@ DEFAULT_FP_THRESHOLDS = idx_config.DEFAULT_FP_THRESHOLDS
 
 from crash_watcher import record_event
 from crash_logger import watcher
+from indexer_control import IndexCancelled
 
 debug: bool = False
 _logger = logging.getLogger(__name__)
@@ -694,8 +696,10 @@ def compute_library_sync_plan(
     progress_callback: Callable[[int, int, str, str], None] | None = None,
     flush_cache: bool = False,
     max_workers: int | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> LibrarySyncPlan:
     """Compute a deterministic move/route plan for Library Sync."""
+    cancel_event = cancel_event or threading.Event()
     if log_callback is None:
         def log_callback(msg: str) -> None:
             _dlog(msg)
@@ -703,10 +707,23 @@ def compute_library_sync_plan(
         def progress_callback(_c: int, _t: int, _m: str, _p: str) -> None:
             pass
 
+    def _cancellable_progress(current: int, total: int, message: str, phase: str) -> None:
+        if cancel_event.is_set():
+            raise IndexCancelled()
+        progress_callback(current, total, message, phase)
+
+    def _cancellable_log(message: str) -> None:
+        if cancel_event.is_set():
+            raise IndexCancelled()
+        log_callback(message)
+
+    if cancel_event.is_set():
+        raise IndexCancelled()
+
     moves, tag_index, decision_log = idx.compute_moves_and_tag_index(
         incoming_folder,
-        log_callback,
-        progress_callback,
+        _cancellable_log,
+        _cancellable_progress,
         dry_run=True,
         enable_phase_c=False,
         flush_cache=flush_cache,
@@ -744,6 +761,7 @@ def build_library_sync_preview(
     progress_callback: Callable[[int, int, str, str], None] | None = None,
     flush_cache: bool = False,
     max_workers: int | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> LibrarySyncPlan:
     """Compute a Library Sync plan and write the dry-run preview."""
     plan = compute_library_sync_plan(
@@ -753,6 +771,61 @@ def build_library_sync_preview(
         progress_callback=progress_callback,
         flush_cache=flush_cache,
         max_workers=max_workers,
+        cancel_event=cancel_event,
     )
     plan.render_preview(output_html_path)
     return plan
+
+
+def execute_library_sync_plan(
+    plan: LibrarySyncPlan,
+    *,
+    log_callback: Callable[[str], None] | None = None,
+    progress_callback: Callable[[int, int, str, str], None] | None = None,
+    cancel_event: threading.Event | None = None,
+) -> Dict[str, object]:
+    """Apply a previously computed Library Sync plan.
+
+    The execution routine only trusts the provided plan. No recomputation or
+    reinterpretation of moves occurs here, ensuring the same routing used for
+    preview is applied during execution.
+    """
+
+    cancel_event = cancel_event or threading.Event()
+
+    def _log(message: str) -> None:
+        if log_callback:
+            log_callback(message)
+
+    def _progress(current: int, total: int, path: str, phase: str) -> None:
+        if progress_callback:
+            progress_callback(current, total, path, phase)
+
+    if cancel_event.is_set():
+        _log("✘ Execution cancelled before start.")
+        return {"moved": 0, "errors": [], "cancelled": True}
+
+    moves = sorted(plan.moves.items())
+    total = len(moves)
+    summary: Dict[str, object] = {"moved": 0, "errors": [], "cancelled": False}
+    _log(f"Executing plan with {total} moves…")
+
+    for idx, (src, dst) in enumerate(moves, start=1):
+        if cancel_event.is_set():
+            summary["cancelled"] = True
+            _log("✘ Execution cancelled.")
+            break
+
+        _progress(idx, total, src, "execute")
+        try:
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            shutil.move(src, dst)
+            summary["moved"] = int(summary["moved"]) + 1
+        except Exception as exc:  # pragma: no cover - OS interaction
+            msg = f"Failed to move {src} → {dst}: {exc}"
+            summary.setdefault("errors", []).append(msg)
+            _log(msg)
+
+    if not summary.get("cancelled"):
+        _log("✓ Execution complete.")
+    return summary

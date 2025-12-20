@@ -4,16 +4,18 @@ from __future__ import annotations
 import json
 import os
 import threading
+import webbrowser
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import Any, Callable, Dict, Iterable, List, Sequence
+from typing import Any, Callable, Dict, Iterable, List, Sequence, Tuple
 
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 from config import DEFAULT_FP_THRESHOLDS, FORMAT_PRIORITY, load_config, save_config
 import library_sync
+from indexer_control import IndexCancelled
 from library_sync import MatchResult, MatchStatus, TrackRecord
 from library_sync_review_report import DEFAULT_REPORT_VERSION
 from library_sync_review_state import ReviewStateStore
@@ -205,6 +207,8 @@ class LibrarySyncReviewPanel(ttk.Frame):
         self.report_version_var = tk.StringVar(value=str(self.session.exported_report_version))
         self.scan_state_var = tk.StringVar(value=self._describe_state(self.session.scan_state))
         self._on_close_callback = on_close
+        self.library_var.trace_add("write", lambda *_: self._invalidate_plan("Library folder changed"))
+        self.incoming_var.trace_add("write", lambda *_: self._invalidate_plan("Incoming folder changed"))
 
         # Scan + progress state
         self.library_cancel = threading.Event()
@@ -241,6 +245,18 @@ class LibrarySyncReviewPanel(ttk.Frame):
         # Logs
         self.log_entries: list[dict[str, object]] = []
         self.LOG_LIMIT = 400
+
+        # Plan + execution state
+        self.plan_progress_var = tk.DoubleVar(value=0)
+        self.plan_progress_label = tk.StringVar(value="Idle")
+        self.plan_status_var = tk.StringVar(value="No plan built.")
+        self.plan_cancel = threading.Event()
+        self.plan_running = False
+        self.plan_preview_path: str | None = None
+        self.active_plan: library_sync.LibrarySyncPlan | None = None
+        self._plan_sources: Tuple[str, str] | None = None
+        self._plan_version = 0
+        self._preview_version = -1
 
         self._build_ui()
 
@@ -317,6 +333,10 @@ class LibrarySyncReviewPanel(ttk.Frame):
         self._build_scan_column(controls, "Existing Library", "library", 0)
         self._build_scan_column(controls, "Incoming Folder", "incoming", 1)
 
+        plan_frame = ttk.LabelFrame(root, text="Plan & Execution")
+        plan_frame.pack(fill="x", **padding)
+        self._build_plan_controls(plan_frame)
+
         body = ttk.Frame(root)
         body.pack(fill="both", expand=True, **padding)
         body.columnconfigure(0, weight=1)
@@ -386,6 +406,28 @@ class LibrarySyncReviewPanel(ttk.Frame):
             text="Cancel",
             command=lambda k=kind: self._cancel_scan(k),
         ).pack(side="left", padx=(5, 0))
+
+    def _build_plan_controls(self, parent: ttk.Frame) -> None:
+        ttk.Label(parent, textvariable=self.plan_status_var).pack(anchor="w", padx=5, pady=(5, 2))
+        ttk.Progressbar(parent, variable=self.plan_progress_var, maximum=1).pack(fill="x", padx=5)
+        ttk.Label(parent, textvariable=self.plan_progress_label, foreground="#555").pack(
+            anchor="w", padx=5, pady=(0, 5)
+        )
+        btns = ttk.Frame(parent)
+        btns.pack(fill="x", padx=5, pady=(0, 6))
+        self.build_plan_btn = ttk.Button(btns, text="Build Plan", command=self._build_plan)
+        self.build_plan_btn.pack(side="left")
+        self.preview_plan_btn = ttk.Button(btns, text="Preview", command=self._preview_plan)
+        self.preview_plan_btn.pack(side="left", padx=(5, 0))
+        self.execute_plan_btn = ttk.Button(btns, text="Execute", command=self._execute_plan)
+        self.execute_plan_btn.pack(side="left", padx=(5, 0))
+        self.open_preview_btn = ttk.Button(
+            btns, text="Open Preview", command=self._open_preview_file, state="disabled"
+        )
+        self.open_preview_btn.pack(side="right")
+        self.cancel_plan_btn = ttk.Button(btns, text="Cancel", command=self._cancel_plan_task, state="disabled")
+        self.cancel_plan_btn.pack(side="right", padx=(5, 0))
+        self._refresh_plan_actions()
 
     def _build_incoming_tree(self, parent: ttk.Frame) -> None:
         columns = ("name", "chips", "distance")
@@ -485,6 +527,263 @@ class LibrarySyncReviewPanel(ttk.Frame):
             },
         )
         return True
+
+    def _invalidate_plan(self, reason: str | None = None) -> None:
+        """Clear any cached plan/preview when inputs change."""
+        self.active_plan = None
+        self._plan_sources = None
+        self.plan_preview_path = None
+        self._plan_version = 0
+        self._preview_version = -1
+        self.plan_progress_var.set(0)
+        self.plan_progress_label.set("Idle")
+        if reason:
+            self.plan_status_var.set(reason)
+        self._refresh_plan_actions()
+
+    def _refresh_plan_actions(self) -> None:
+        """Enable/disable plan controls based on current state."""
+        running = self.plan_running
+        library_root = self.library_var.get().strip()
+        incoming_root = self.incoming_var.get().strip()
+        sources_match = self._plan_sources == (library_root, incoming_root)
+        execute_ready = (
+            not running
+            and self.active_plan is not None
+            and self._preview_version == self._plan_version
+            and sources_match
+        )
+
+        for btn in (self.build_plan_btn, self.preview_plan_btn):
+            btn_state = "disabled" if running else "normal"
+            btn.config(state=btn_state)
+        self.cancel_plan_btn.config(state="normal" if running else "disabled")
+        self.execute_plan_btn.config(state="normal" if execute_ready else "disabled")
+        self.open_preview_btn.config(state="normal" if self.plan_preview_path else "disabled")
+
+    def _plan_inputs(self) -> Tuple[str, str] | None:
+        """Validate folder selections for planning/execution."""
+        library_root = self.library_var.get().strip()
+        incoming_root = self.incoming_var.get().strip()
+        if not library_root or not incoming_root:
+            messagebox.showerror("Missing Folder", "Select both the Existing Library and Incoming Folder first.")
+            return None
+        return library_root, incoming_root
+
+    def _update_plan_progress(self, current: int, total: int, path: str, phase: str) -> None:
+        if total:
+            self.plan_progress_var.set(current / total)
+        label = f"{phase.title()}: {os.path.basename(path) if path else ''}".strip()
+        self.plan_progress_label.set(label or "Working…")
+
+    def _start_plan_task(self, render_preview: bool) -> None:
+        inputs = self._plan_inputs()
+        if not inputs or self.plan_running:
+            return
+        library_root, incoming_root = inputs
+        self.plan_cancel.clear()
+        self.plan_running = True
+        self.plan_progress_var.set(0)
+        self.plan_progress_label.set("Starting…")
+        self.plan_status_var.set("Building preview…" if render_preview else "Building plan…")
+        self._refresh_plan_actions()
+        thread = threading.Thread(target=self._plan_worker, args=(library_root, incoming_root, render_preview), daemon=True)
+        thread.start()
+
+    def _plan_worker(self, library_root: str, incoming_root: str, render_preview: bool) -> None:
+        docs_dir = os.path.join(library_root, "Docs")
+        os.makedirs(docs_dir, exist_ok=True)
+        output_html = os.path.join(docs_dir, "LibrarySyncPreview.html")
+
+        def log(msg: str) -> None:
+            self._log_event("plan_log", msg)
+
+        def progress(current: int, total: int, path: str, phase: str) -> None:
+            self.after(0, lambda c=current, t=total, p=path, ph=phase: self._update_plan_progress(c, t, p, ph))
+
+        try:
+            if render_preview:
+                plan = library_sync.build_library_sync_preview(
+                    library_root,
+                    incoming_root,
+                    output_html,
+                    log_callback=log,
+                    progress_callback=progress,
+                    cancel_event=self.plan_cancel,
+                )
+                preview_path = output_html
+            else:
+                plan = library_sync.compute_library_sync_plan(
+                    library_root,
+                    incoming_root,
+                    log_callback=log,
+                    progress_callback=progress,
+                    cancel_event=self.plan_cancel,
+                )
+                preview_path = None
+        except IndexCancelled:
+            self.after(0, self._on_plan_cancelled)
+            return
+        except Exception as exc:  # pragma: no cover - UI behavior
+            self.after(0, lambda e=exc: self._handle_plan_error(e))
+            return
+
+        self.after(
+            0,
+            lambda p=plan, preview=preview_path, sources=(library_root, incoming_root), render=render_preview: self._on_plan_ready(
+                p, preview, sources, render
+            ),
+        )
+
+    def _on_plan_ready(
+        self,
+        plan: library_sync.LibrarySyncPlan,
+        preview_path: str | None,
+        sources: Tuple[str, str],
+        render_preview: bool,
+    ) -> None:
+        self.plan_running = False
+        self.plan_cancel.clear()
+        self.active_plan = plan
+        self._plan_sources = sources
+        self._plan_version += 1
+        if render_preview:
+            self._preview_version = self._plan_version
+            self.plan_preview_path = preview_path
+            self.plan_status_var.set(f"Preview ready: {preview_path}")
+            self._log_event("plan_preview", "Preview ready", {"path": preview_path, "moves": len(plan.moves)})
+            if preview_path:
+                try:
+                    webbrowser.open(preview_path)
+                except Exception:
+                    pass
+        else:
+            self.plan_preview_path = None
+            self._preview_version = -1
+            self.plan_status_var.set("Plan built. Run Preview to inspect before execution.")
+            self._log_event("plan_built", "Plan ready", {"moves": len(plan.moves)})
+
+        self.plan_progress_var.set(1)
+        self.plan_progress_label.set("Complete")
+        self.session.library_root, self.session.incoming_root = sources
+        save_scan_session(self.session)
+        self._refresh_plan_actions()
+
+    def _handle_plan_error(self, exc: Exception) -> None:
+        self.plan_running = False
+        self.plan_cancel.clear()
+        self.plan_progress_var.set(0)
+        self.plan_progress_label.set("Error")
+        self.plan_status_var.set(f"Plan failed: {exc}")
+        self._log_event("plan_error", str(exc))
+        messagebox.showerror("Library Sync", str(exc))
+        self._refresh_plan_actions()
+
+    def _on_plan_cancelled(self) -> None:
+        self.plan_running = False
+        self.plan_cancel.clear()
+        self.plan_progress_var.set(0)
+        self.plan_progress_label.set("Cancelled")
+        self.plan_status_var.set("Plan cancelled.")
+        self._log_event("plan_cancelled", "Plan or preview cancelled")
+        self._refresh_plan_actions()
+
+    def _cancel_plan_task(self) -> None:
+        if self.plan_running:
+            self.plan_cancel.set()
+            self.plan_progress_label.set("Cancelling…")
+            self.plan_status_var.set("Cancellation requested…")
+            self._log_event("plan_cancel_requested", "Cancellation requested")
+        else:
+            self.plan_cancel.clear()
+
+    def _build_plan(self) -> None:
+        self._start_plan_task(render_preview=False)
+
+    def _preview_plan(self) -> None:
+        self._start_plan_task(render_preview=True)
+
+    def _open_preview_file(self) -> None:
+        if not self.plan_preview_path:
+            messagebox.showinfo("Preview", "No preview has been generated yet.")
+            return
+        if not os.path.exists(self.plan_preview_path):
+            messagebox.showerror("Preview Missing", "The preview file could not be found. Build a new preview.")
+            return
+        try:
+            webbrowser.open(self.plan_preview_path)
+        except Exception as exc:  # pragma: no cover - OS interaction
+            messagebox.showerror("Preview", str(exc))
+
+    def _execute_plan(self) -> None:
+        if self.plan_running:
+            return
+        inputs = self._plan_inputs()
+        if not inputs:
+            return
+        if not self.active_plan:
+            messagebox.showerror("Library Sync", "Build and preview a plan before executing.")
+            return
+        if self._plan_sources != inputs:
+            messagebox.showerror("Library Sync", "Plan inputs changed. Rebuild and preview the plan before executing.")
+            return
+        if self._preview_version != self._plan_version:
+            messagebox.showerror("Library Sync", "Generate a preview to lock the current plan before execution.")
+            return
+
+        self.plan_cancel.clear()
+        self.plan_running = True
+        self.plan_progress_var.set(0)
+        self.plan_progress_label.set("Executing…")
+        self.plan_status_var.set("Executing plan…")
+        self._refresh_plan_actions()
+        thread = threading.Thread(target=self._execute_plan_worker, args=(self.active_plan,), daemon=True)
+        thread.start()
+
+    def _execute_plan_worker(self, plan: library_sync.LibrarySyncPlan) -> None:
+        def log(msg: str) -> None:
+            self._log_event("execute_log", msg)
+
+        def progress(current: int, total: int, path: str, phase: str) -> None:
+            self.after(0, lambda c=current, t=total, p=path, ph=phase: self._update_plan_progress(c, t, p, ph))
+
+        try:
+            summary = library_sync.execute_library_sync_plan(
+                plan,
+                log_callback=log,
+                progress_callback=progress,
+                cancel_event=self.plan_cancel,
+            )
+        except Exception as exc:  # pragma: no cover - UI behavior
+            self.after(0, lambda e=exc: self._handle_plan_error(e))
+            return
+
+        self.after(0, lambda s=summary: self._on_execute_complete(s))
+
+    def _on_execute_complete(self, summary: Dict[str, object]) -> None:
+        self.plan_running = False
+        self.plan_cancel.clear()
+        cancelled = bool(summary.get("cancelled"))
+        moved = int(summary.get("moved", 0))
+        errors = summary.get("errors", []) or []
+
+        if cancelled:
+            status = "Execution cancelled."
+            self.plan_progress_var.set(0)
+            self.plan_progress_label.set("Cancelled")
+            self._log_event("execute_cancelled", status)
+        else:
+            status = f"Execution complete. Moved {moved} files."
+            self.plan_progress_var.set(1)
+            self.plan_progress_label.set("Complete")
+            self._log_event("execute_complete", status, {"moved": moved})
+
+        self.plan_status_var.set(status)
+        if errors:
+            messagebox.showerror("Execution Errors", "\n".join(errors))
+        elif not cancelled:
+            messagebox.showinfo("Execution Complete", status)
+        self._refresh_plan_actions()
 
     def _describe_state(self, state: ScanState) -> str:
         return state.value.replace("_", " ").title()

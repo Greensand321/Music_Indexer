@@ -1,5 +1,6 @@
 import os
 import sys
+import threading
 import types
 
 # Provide simple stubs for mutagen so the module imports
@@ -32,7 +33,7 @@ sys.modules.setdefault("mutagen.id3", id3_stub)
 acoustid_stub = types.SimpleNamespace(fingerprint_file=lambda *_a, **_k: (None, None))
 sys.modules.setdefault("acoustid", acoustid_stub)
 
-from library_sync import compute_library_sync_plan
+from library_sync import compute_library_sync_plan, execute_library_sync_plan
 
 
 def test_library_sync_plan_preview_reuses_plan(tmp_path):
@@ -60,3 +61,44 @@ def test_library_sync_plan_preview_reuses_plan(tmp_path):
     assert "Library Sync (Dry Run Preview)" in content
     assert incoming_song.name in content
     assert f"{music_root.name}/" in content
+
+
+def test_execute_library_sync_plan_moves_files(tmp_path):
+    library_root = tmp_path / "library"
+    incoming_root = tmp_path / "incoming"
+    library_root.mkdir()
+    incoming_root.mkdir()
+    (library_root / "Music").mkdir()
+
+    incoming_song = incoming_root / "artist - track.mp3"
+    incoming_song.write_text("audio")
+
+    plan = compute_library_sync_plan(str(library_root), str(incoming_root))
+    dest_path = plan.moves[str(incoming_song)]
+
+    summary = execute_library_sync_plan(plan)
+
+    assert summary["moved"] == 1
+    assert not summary.get("cancelled")
+    assert dest_path and os.path.exists(dest_path)
+    assert not incoming_song.exists()
+
+
+def test_execute_library_sync_plan_honors_cancellation(tmp_path):
+    library_root = tmp_path / "library"
+    incoming_root = tmp_path / "incoming"
+    library_root.mkdir()
+    incoming_root.mkdir()
+    (library_root / "Music").mkdir()
+
+    incoming_song = incoming_root / "artist - track.mp3"
+    incoming_song.write_text("audio")
+
+    plan = compute_library_sync_plan(str(library_root), str(incoming_root))
+    cancel_event = threading.Event()
+    cancel_event.set()
+
+    summary = execute_library_sync_plan(plan, cancel_event=cancel_event)
+
+    assert summary["cancelled"]
+    assert incoming_song.exists()
