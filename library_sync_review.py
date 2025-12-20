@@ -19,7 +19,6 @@ from library_sync_review_report import DEFAULT_REPORT_VERSION
 from library_sync_review_state import ReviewStateStore
 
 REVIEW_CONFIG_KEY = "library_sync_review"
-REVIEW_FLAG_KEY = "use_library_sync_review"
 
 
 class ScanState(str, Enum):
@@ -108,19 +107,6 @@ def save_scan_session(session: ScanSession) -> None:
     """Persist the review scan session to config."""
     cfg = load_config()
     cfg[REVIEW_CONFIG_KEY] = session.to_dict()
-    save_config(cfg)
-
-
-def is_review_enabled() -> bool:
-    """Return whether the review-first entry point is enabled."""
-    cfg = load_config()
-    return bool(cfg.get(REVIEW_FLAG_KEY, False))
-
-
-def set_review_enabled(enabled: bool) -> None:
-    """Toggle the review-first entry point flag."""
-    cfg = load_config()
-    cfg[REVIEW_FLAG_KEY] = bool(enabled)
     save_config(cfg)
 
 

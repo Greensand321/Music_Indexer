@@ -1542,11 +1542,7 @@ class SoundVaultImporterApp(tk.Tk):
         self.plugin_views: dict[str, ttk.Frame] = {}
         self.active_plugin: str | None = None
 
-        self.use_review_sync_var = tk.BooleanVar(
-            value=cfg.get("use_library_sync_review", False)
-        )
         self.sync_review_window: library_sync_review.LibrarySyncReviewWindow | None = None
-        self.sync_review_panel: library_sync_review.LibrarySyncReviewPanel | None = None
 
         # ── Tag Fixer state ──
         self.tagfix_folder_var = tk.StringVar(value="")
@@ -1656,12 +1652,7 @@ class SoundVaultImporterApp(tk.Tk):
 
         tools_menu = tk.Menu(menubar, tearoff=False)
         tools_menu.add_command(
-            label="Library Sync…", command=self._open_library_sync_tool
-        )
-        tools_menu.add_checkbutton(
-            label="Use Library Sync (Review)",
-            variable=self.use_review_sync_var,
-            command=self._toggle_library_sync_mode,
+            label="Library Sync (Preview)…", command=self._open_library_sync_tool
         )
         tools_menu.add_separator()
         tools_menu.add_command(label="Fix Tags via AcoustID", command=self.fix_tags_gui)
@@ -2117,15 +2108,6 @@ class SoundVaultImporterApp(tk.Tk):
         ).pack(side="left", expand=True, fill="x", padx=(5, 0))
         self._sync_player_playlist()
 
-        # ─── Library Sync Tab ─────────────────────────────────────────────
-        self.sync_tab = ttk.Frame(self.notebook)
-        self.notebook.add(self.sync_tab, text="Library Sync")
-        self.sync_review_panel = library_sync_review.LibrarySyncReviewPanel(
-            self.sync_tab,
-            library_root=self.library_path or "",
-        )
-        self.sync_review_panel.pack(fill="both", expand=True)
-
         # after your other tabs
         help_frame = ttk.Frame(self.notebook)
         self.notebook.add(help_frame, text="Help")
@@ -2237,8 +2219,8 @@ class SoundVaultImporterApp(tk.Tk):
         if hasattr(self, "player_reload_btn"):
             self.player_reload_btn.config(state="normal")
         self._load_player_library_async()
-        if self.sync_review_panel:
-            self.sync_review_panel.set_folders(library_root=self.library_path)
+        if self.sync_review_window and self.sync_review_window.winfo_exists():
+            self.sync_review_window.panel.set_folders(library_root=self.library_path)
 
     def update_library_info(self):
         if not self.library_path:
@@ -3524,33 +3506,26 @@ class SoundVaultImporterApp(tk.Tk):
         self._log(f"Reset tag-fix log for {folder}")
 
     # ── Library Sync Helpers ───────────────────────────────────────────
-    def _toggle_library_sync_mode(self) -> None:
-        cfg = load_config()
-        cfg["use_library_sync_review"] = bool(self.use_review_sync_var.get())
-        save_config(cfg)
-
     def _open_library_sync_tool(self) -> None:
-        if self.use_review_sync_var.get():
-            if self.sync_review_window and self.sync_review_window.winfo_exists():
-                self.sync_review_window.lift()
-                self.sync_review_window.focus_set()
-                return
-            try:
-                self.sync_review_window = library_sync_review.LibrarySyncReviewWindow(
-                    self
+        if self.sync_review_window and self.sync_review_window.winfo_exists():
+            if self.library_path:
+                self.sync_review_window.panel.set_folders(
+                    library_root=self.library_path
                 )
-                self.sync_review_window.bind(
-                    "<Destroy>", lambda _e: setattr(self, "sync_review_window", None)
+            self.sync_review_window.lift()
+            self.sync_review_window.focus_set()
+            return
+        try:
+            self.sync_review_window = library_sync_review.LibrarySyncReviewWindow(self)
+            if self.library_path:
+                self.sync_review_window.panel.set_folders(
+                    library_root=self.library_path
                 )
-            except Exception as exc:
-                messagebox.showerror("Library Sync (Review)", str(exc))
-        else:
-            try:
-                self.notebook.select(self.sync_tab)
-            except Exception:
-                messagebox.showinfo(
-                    "Library Sync", "The Library Sync tab is not available."
-                )
+            self.sync_review_window.bind(
+                "<Destroy>", lambda _e: setattr(self, "sync_review_window", None)
+            )
+        except Exception as exc:
+            messagebox.showerror("Library Sync (Review)", str(exc))
 
     # ── Quality Checker Helpers ─────────────────────────────────────────
     def clear_quality_view(self) -> None:
