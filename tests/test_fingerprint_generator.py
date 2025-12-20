@@ -81,6 +81,28 @@ class DummyExecutor:
     def map(self, fn, iterable):
         return map(fn, iterable)
 
+    def submit(self, fn, arg):
+        class _Future:
+            def __init__(self, fn, arg):
+                self._fn = fn
+                self._arg = arg
+                self._result = None
+                self._executed = False
+
+            def result(self):
+                if not self._executed:
+                    self._result = self._fn(self._arg)
+                    self._executed = True
+                return self._result
+
+            def done(self):
+                return self._executed
+
+            def cancel(self):
+                return False
+
+        return _Future(fn, arg)
+
 
 def test_mtime_change_triggers_recompute(monkeypatch, tmp_path):
     audio = tmp_path / "song.mp3"

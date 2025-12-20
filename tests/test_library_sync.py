@@ -27,7 +27,7 @@ fp_map = {
 
 fingerprint_stub = types.ModuleType('fingerprint_generator')
 
-def fake_compute(paths, db_path, log_callback=None, progress_callback=None):
+def fake_compute(paths, db_path, log_callback=None, progress_callback=None, cancel_event=None):
     for p in paths:
         yield p, 0, fp_map.get(os.path.basename(p), 'x')
 
@@ -106,7 +106,7 @@ def test_compare_libraries_thresholds(tmp_path, monkeypatch):
             return "1 1 1 1 1 1 1 2"
         return "1 1 1 1 1 1 1 1"
 
-    def fake_compute(paths, db_path, log_callback=None, progress_callback=None):
+    def fake_compute(paths, db_path, log_callback=None, progress_callback=None, cancel_event=None):
         for p in paths:
             fp = fake_fp(p)
             yield p, 0, fp
@@ -177,7 +177,7 @@ def test_format_threshold_match(tmp_path, monkeypatch):
             return "1 2 3 4"
         return "1 2 3 5"
 
-    def fake_compute(paths, db_path, log_callback=None, progress_callback=None):
+    def fake_compute(paths, db_path, log_callback=None, progress_callback=None, cancel_event=None):
         for p in paths:
             fp = fake_fp(p)
             yield p, 0, fp
@@ -225,7 +225,7 @@ def test_compare_libraries_relaxed_threshold(tmp_path, monkeypatch):
             return "10 20 30 40 50"
         return "10 20 30 40 51"
 
-    def fake_compute(paths, db_path, log_callback=None, progress_callback=None):
+    def fake_compute(paths, db_path, log_callback=None, progress_callback=None, cancel_event=None):
         for p in paths:
             fp = fake_fp(p)
             yield p, 0, fp

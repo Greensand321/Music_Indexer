@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import os
+import threading
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Callable, Dict, Iterable, List, Optional, Tuple
@@ -199,13 +201,19 @@ def _scan_folder(
     on_record: Callable[[TrackRecord], None] | None = None,
     log_callback: Callable[[str], None] | None = None,
     progress_callback: Callable[[int, int, str, str], None] | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> List[TrackRecord]:
     """Enumerate audio files, normalize paths, and attach cached fingerprints."""
+    cancel_event = cancel_event or threading.Event()
     record_event(f"library_sync: scanning folder {folder}")
     _dlog(f"DEBUG: Scanning folder {folder}", log_callback)
     entries: List[Dict[str, object]] = []
     total_files = 0
     for dirpath, _dirs, files in os.walk(folder):
+        if cancel_event.is_set():
+            if log_callback:
+                log_callback(json.dumps({"event": "scan_cancelled", "folder": folder, "stage": "walk"}))
+            break
         for fname in files:
             ext = os.path.splitext(fname)[1].lower()
             if ext not in idx.SUPPORTED_EXTS:
@@ -218,6 +226,8 @@ def _scan_folder(
                 size = stat.st_size
             except OSError as e:
                 _dlog(f"DEBUG: Skipping unreadable file {path}: {e}", log_callback)
+                if log_callback:
+                    log_callback(json.dumps({"event": "skip", "path": path, "reason": str(e)}))
                 continue
             tags = idx.get_tags(path)
             bitrate = 0
@@ -260,6 +270,8 @@ def _scan_folder(
             entry["duration"] = row[2]
             entry["fingerprint"] = row[3]
             _dlog(f"DEBUG: cache hit {entry['path']}", log_callback)
+            if log_callback:
+                log_callback(json.dumps({"event": "cache_hit", "path": entry["path"]}))
         else:
             if row:
                 msg = (
@@ -269,16 +281,31 @@ def _scan_folder(
                 )
                 if log_callback:
                     log_callback(msg)
+                    log_callback(json.dumps({"event": "cache_miss", "path": entry["path"], "reason": "stale"}))
                 _dlog(msg, log_callback)
             to_compute.append(entry["path"])
 
     def fp_progress(current: int, total: int, path: str, phase: str) -> None:
         if progress_callback:
             progress_callback(current, total, path, phase)
+        if log_callback and phase.startswith("fp") and current and total:
+            log_callback(
+                json.dumps(
+                    {
+                        "event": "fingerprint_progress",
+                        "path": path,
+                        "current": current,
+                        "total": total,
+                        "phase": phase,
+                    }
+                )
+            )
 
     if to_compute:
+        if log_callback:
+            log_callback(json.dumps({"event": "fingerprint_start", "pending": len(to_compute), "folder": folder}))
         for result in fingerprint_generator.compute_fingerprints_parallel(
-            to_compute, db_path, log_callback, fp_progress
+            to_compute, db_path, log_callback, fp_progress, cancel_event=cancel_event
         ):
             path = result[0]
             duration = result[1] if len(result) > 2 else None
@@ -292,6 +319,9 @@ def _scan_folder(
                 "INSERT OR REPLACE INTO fingerprints (path, mtime, size, duration, fingerprint) VALUES (?, ?, ?, ?, ?)",
                 (path, entry["mtime"], entry["size"], duration, fp),
             )
+            if cancel_event.is_set():
+                _dlog(f"DEBUG: cancellation after fingerprinting {path}", log_callback)
+                break
         conn.commit()
     conn.close()
 
@@ -427,6 +457,7 @@ def compare_libraries(
     thresholds: Dict[str, float] | None = None,
     log_callback: Callable[[str], None] | None = None,
     progress_callback: Callable[[int, int, str, str], None] | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> Dict[str, object]:
     """Return classification of incoming files vs. an existing library.
 
@@ -442,6 +473,7 @@ def compare_libraries(
     record_event(
         f"library_sync: comparing {library_folder} to {incoming_folder}"
     )
+    cancel_event = cancel_event or threading.Event()
     if thresholds is None:
         if threshold is not None:
             thresholds = {"default": threshold}
@@ -449,8 +481,20 @@ def compare_libraries(
             thresholds = DEFAULT_FP_THRESHOLDS
     fmt_priority = fmt_priority or FORMAT_PRIORITY
 
-    lib_records = _scan_folder(library_folder, db_path, log_callback=log_callback, progress_callback=progress_callback)
-    inc_records = _scan_folder(incoming_folder, db_path, log_callback=log_callback, progress_callback=progress_callback)
+    lib_records = _scan_folder(
+        library_folder,
+        db_path,
+        log_callback=log_callback,
+        progress_callback=progress_callback,
+        cancel_event=cancel_event,
+    )
+    inc_records = _scan_folder(
+        incoming_folder,
+        db_path,
+        log_callback=log_callback,
+        progress_callback=progress_callback,
+        cancel_event=cancel_event,
+    )
 
     match_results = _match_tracks(inc_records, lib_records, thresholds, fmt_priority, log_callback=log_callback)
 
@@ -479,6 +523,7 @@ def compare_libraries(
         "library_records": [r.to_dict() for r in lib_records],
         "incoming_records": [r.to_dict() for r in inc_records],
         "matches": [m.to_dict() for m in match_results],
+        "partial": cancel_event.is_set(),
     }
     record_event(
         "library_sync: comparison complete "
