@@ -1,6 +1,7 @@
 """Helpers for comparing an existing library to an incoming folder."""
 from __future__ import annotations
 
+import filecmp
 import hashlib
 import json
 import logging
@@ -94,6 +95,16 @@ class MatchStatus(str, Enum):
     COLLISION = "collision"
     EXACT_MATCH = "exact_match"
     LOW_CONFIDENCE = "low_confidence"
+
+
+class ExecutionDecision(str, Enum):
+    """Execution outcome for a planned incoming track."""
+
+    COPY = "COPY"
+    REPLACE = "REPLACE"
+    SKIP_DUPLICATE = "SKIP_DUPLICATE"
+    SKIP_KEEP_EXISTING = "SKIP_KEEP_EXISTING"
+    REVIEW_REQUIRED = "REVIEW_REQUIRED"
 
 
 @dataclass
@@ -208,6 +219,26 @@ class PerformanceProfile:
             "library_scan_duration": self.library_scan_duration,
             "incoming_scan_duration": self.incoming_scan_duration,
             "match_duration": self.match_duration,
+        }
+
+
+@dataclass
+class PlannedItem:
+    """Planned movement decision for a single incoming track."""
+
+    source: str
+    destination: str
+    decision: ExecutionDecision
+    reason: str | None = None
+    action: str = "move"
+
+    def to_dict(self) -> Dict[str, str]:
+        return {
+            "source": self.source,
+            "destination": self.destination,
+            "decision": self.decision.value,
+            "reason": self.reason or "",
+            "action": self.action,
         }
 
 
@@ -673,23 +704,81 @@ class LibrarySyncPlan:
     decision_log: List[str]
     copy_only: set[str] = field(default_factory=set)
     allowed_replacements: set[str] = field(default_factory=set)
+    items: List[PlannedItem] = field(default_factory=list)
 
     def planned_moves(self) -> Dict[str, str]:
         """Return a copy of the planned move mapping for execution."""
+        if self.items:
+            return {item.source: item.destination for item in self.items}
         return dict(self.moves)
 
     def render_preview(self, output_html_path: str) -> str:
         """Generate a dry-run HTML preview from this plan."""
         heading = "Library Sync (Dry Run Preview)"
+        preview_items = [item.to_dict() for item in self.items] if self.items else None
         idx.render_dry_run_html_from_plan(
             self.destination_root,
             output_html_path,
             self.moves,
             self.tag_index,
+            plan_items=preview_items,
             heading_text=heading,
             title_prefix=heading,
         )
         return output_html_path
+
+
+def _files_match(path_a: str, path_b: str) -> bool:
+    try:
+        return filecmp.cmp(path_a, path_b, shallow=False)
+    except Exception:
+        return False
+
+
+def _compute_plan_items(
+    moves: Dict[str, str],
+    *,
+    destination_root: str,
+    copy_only: Iterable[str] | None = None,
+    allow_all_replacements: bool = False,
+    allowed_replacements: Iterable[str] | None = None,
+) -> List[PlannedItem]:
+    """Attach deterministic execution decisions to each planned move."""
+
+    copy_only_set = set(copy_only or [])
+    allowed_replacements_set = set(allowed_replacements or [])
+    items: List[PlannedItem] = []
+
+    for src, dst in sorted(moves.items(), key=lambda item: item[1]):
+        action = "copy" if src in copy_only_set else "move"
+        dest_exists = os.path.exists(dst)
+        replacement_allowed = allow_all_replacements or dst in allowed_replacements_set
+
+        if dest_exists and not replacement_allowed:
+            if _files_match(src, dst):
+                decision = ExecutionDecision.SKIP_DUPLICATE
+                reason = "Exact duplicate already in library"
+            else:
+                decision = ExecutionDecision.SKIP_KEEP_EXISTING
+                reason = "Destination exists; keeping library copy"
+        elif dest_exists and replacement_allowed:
+            decision = ExecutionDecision.REPLACE
+            reason = "Replacing existing file"
+        else:
+            decision = ExecutionDecision.COPY
+            reason = "Plan will transfer file"
+
+        items.append(
+            PlannedItem(
+                source=src,
+                destination=dst,
+                decision=decision,
+                reason=reason,
+                action=action,
+            )
+        )
+
+    return items
 
 
 def compute_library_sync_plan(
@@ -746,6 +835,14 @@ def compute_library_sync_plan(
     remapped_moves = {_normalize_path(src): _remap_path(dst) for src, dst in moves.items()}
     remapped_tag_index = {_remap_path(dst): data for dst, data in tag_index.items()}
 
+    plan_items = _compute_plan_items(
+        remapped_moves,
+        destination_root=_normalize_path(destination_root),
+        copy_only=None,
+        allow_all_replacements=False,
+        allowed_replacements=None,
+    )
+
     return LibrarySyncPlan(
         library_root=_normalize_path(library_root),
         incoming_root=_normalize_path(incoming_folder),
@@ -753,6 +850,7 @@ def compute_library_sync_plan(
         moves=remapped_moves,
         tag_index=remapped_tag_index,
         decision_log=decision_log,
+        items=plan_items,
     )
 
 
@@ -889,8 +987,16 @@ def execute_plan(
 
     copy_only = set(getattr(plan, "copy_only", set()) or [])
 
-    moves = sorted(plan.moves.items())
-    total = len(moves)
+    plan_items = _compute_plan_items(
+        plan.planned_moves(),
+        destination_root=plan.destination_root,
+        copy_only=copy_only,
+        allow_all_replacements=allow_all_replacements,
+        allowed_replacements=allowed_replacements,
+    )
+    plan.items = plan_items
+
+    total = len(plan_items)
     timestamp = datetime.now(timezone.utc).isoformat()
 
     summary: Dict[str, object] = {
@@ -912,20 +1018,41 @@ def execute_plan(
     else:
         log_callback(f"Executing plan with {total} operations…")
 
-    for idx, (src, dst) in enumerate(moves, start=1):
+    for idx, item in enumerate(plan_items, start=1):
         if cancel_event.is_set():
             summary["cancelled"] = True
             log_callback("✘ Execution cancelled.")
             break
 
+        src = item.source
+        dst = item.destination
         progress_callback(idx, total, src, "execute")
-        action = "copy" if src in copy_only else "move"
+        action = item.action or ("copy" if src in copy_only else "move")
         outcome: Dict[str, object] = {
             "source": src,
             "destination": dst,
             "action": action,
             "timestamp": timestamp,
         }
+
+        if item.decision in (
+            ExecutionDecision.SKIP_DUPLICATE,
+            ExecutionDecision.SKIP_KEEP_EXISTING,
+            ExecutionDecision.REVIEW_REQUIRED,
+        ):
+            reason = item.reason or "Skipped by plan decision"
+            skip_entry = {"source": src, "destination": dst, "reason": reason}
+            summary["skipped"].append(skip_entry)
+            if item.decision in (
+                ExecutionDecision.SKIP_DUPLICATE,
+                ExecutionDecision.SKIP_KEEP_EXISTING,
+                ExecutionDecision.REVIEW_REQUIRED,
+            ):
+                summary["review_required"].append(skip_entry)
+            outcome["status"] = "skipped"
+            outcome["reason"] = reason
+            audit_items.append(outcome)
+            continue
 
         if not os.path.exists(src):
             reason = "Source missing"
@@ -936,7 +1063,7 @@ def execute_plan(
             continue
 
         dest_exists = os.path.exists(dst)
-        replacement_allowed = allow_all_replacements or dst in allowed_replacements
+        replacement_allowed = item.decision == ExecutionDecision.REPLACE
 
         if dest_exists and not replacement_allowed:
             reason = "Destination exists; replacement not allowed"

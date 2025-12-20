@@ -762,6 +762,7 @@ def render_dry_run_html_from_plan(
     output_html_path,
     moves,
     tag_index,
+    plan_items=None,
     *,
     heading_text="Phase A – Exact Metadata",
     title_prefix="Music Index (Dry Run)",
@@ -769,11 +770,63 @@ def render_dry_run_html_from_plan(
     """Render a dry-run preview from an already computed move plan."""
     coord = DryRunCoordinator()
 
+    def _decision_annotation(decision: str):
+        mapping = {
+            "SKIP_DUPLICATE": ("(duplicate)", "decision-skip"),
+            "SKIP_KEEP_EXISTING": ("(kept existing)", "decision-skip"),
+            "REVIEW_REQUIRED": ("(review required)", "decision-review"),
+            "REPLACE": ("(replace)", "decision-replace"),
+            "COPY": ("(copy)", "decision-copy"),
+        }
+        return mapping.get(decision.upper())
+
+    def _render_legend(decisions):
+        if not decisions:
+            return ""
+        legend_lines = ["<div class=\"legend\"><strong>Legend:</strong>"]
+        descriptions = {
+            "SKIP_DUPLICATE": "Identical file already exists; will be skipped.",
+            "SKIP_KEEP_EXISTING": "A different file is already present; keeping existing.",
+            "REVIEW_REQUIRED": "Needs manual approval before moving.",
+            "REPLACE": "Existing file will be replaced.",
+            "COPY": "Incoming file will be copied/moved.",
+        }
+        for key in ["SKIP_DUPLICATE", "SKIP_KEEP_EXISTING", "REVIEW_REQUIRED", "REPLACE", "COPY"]:
+            if key not in decisions:
+                continue
+            annotation = _decision_annotation(key)
+            if not annotation:
+                continue
+            label, css = annotation
+            desc = descriptions.get(key, "")
+            legend_lines.append(
+                f"<div><span class=\"decision-label {css}\">{sanitize(label)}</span> "
+                f"<span class=\"legend-note\">{sanitize(desc)}</span></div>"
+            )
+        legend_lines.append("</div>")
+        return "\n".join(legend_lines)
+
     def build_exact_metadata_section() -> str:
-        lines = [f"<h2>{heading_text}</h2>", "<pre>"]
+        lines = [f"<h2>{heading_text}</h2>"]
+        decision_map = {}
+        decision_keys = set()
+        if plan_items:
+            for item in plan_items:
+                dst = item.get("destination")
+                decision = (item.get("decision") or "").upper()
+                annotation = _decision_annotation(decision)
+                if dst and annotation:
+                    decision_map[dst] = annotation
+                    decision_keys.add(decision)
+
+        legend_html = _render_legend(decision_keys)
+        if legend_html:
+            lines.append(legend_html)
+        lines.append("<pre>")
         lines.append(f"<span class=\"folder\">{sanitize(os.path.basename(root_path))}/</span>")
         tree_nodes = set()
-        for new_path in moves.values():
+        target_paths = [item.get("destination") for item in plan_items if item.get("destination")] if plan_items else list(moves.values())
+        for new_path in target_paths:
             parts = os.path.relpath(new_path, root_path).split(os.sep)
             for i in range(1, len(parts) + 1):
                 subtree = os.path.join(root_path, *parts[:i])
@@ -789,7 +842,14 @@ def render_dry_run_html_from_plan(
                 fname = os.path.basename(node)
                 leftover = tag_index.get(node, {}).get("leftover_tags", [])
                 tags_str = ", ".join(leftover) if leftover else ""
-                line = f"{indent}<span class=\"song\">- {sanitize(fname)}</span>"
+                annotation = decision_map.get(node)
+                classes = ["song"]
+                label = ""
+                if annotation:
+                    label_text, css_class = annotation
+                    classes.append(css_class)
+                    label = f" <span class=\"decision-label {css_class}\">{sanitize(label_text)}</span>"
+                line = f"{indent}<span class=\"{' '.join(classes)}\">- {sanitize(fname)}{label}</span>"
                 if tags_str:
                     line += f"  <span class=\"tags\">[{sanitize(tags_str)}]</span>"
                 lines.append(line)
@@ -805,7 +865,7 @@ def render_dry_run_html_from_plan(
         out.write(
             "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n  <meta charset=\"UTF-8\">\n  "
             f"<title>{title_prefix} – {sanitize(os.path.basename(root_path))}</title>\n  "
-            "<style>\n    body { background:#2e3440; color:#d8dee9; font-family:'Courier New', monospace; }\n    pre  { font-size:14px; }\n    .folder { color:#81a1c1; }\n    .song   { color:#a3be8c; }\n    .tags   { color:#88c0d0; font-size:12px; margin-left:1em; }\n  </style>\n</head>\n<body>\n"
+            "<style>\n    body { background:#2e3440; color:#d8dee9; font-family:'Courier New', monospace; }\n    pre  { font-size:14px; }\n    .folder { color:#81a1c1; }\n    .song   { color:#a3be8c; }\n    .tags   { color:#88c0d0; font-size:12px; margin-left:1em; }\n    .legend { margin:0 0 8px 0; font-size:13px; color:#e5e9f0; }\n    .legend-note { color:#cfd6e3; font-size:12px; }\n    .decision-label { color:#b5bcc9; font-size:12px; margin-left:0.5em; }\n    .decision-skip { color:#c0c8d8; opacity:0.7; }\n    .decision-review { color:#ebcb8b; }\n    .decision-replace { color:#bf616a; }\n    .decision-copy { color:#8fbcbb; }\n  </style>\n</head>\n<body>\n"
         )
         out.write(html_body)
         if html_body and not html_body.endswith("\n"):
