@@ -757,38 +757,20 @@ def compute_moves_and_tag_index(
 
 # ─── B. BUILD DRY-RUN HTML ─────────────────────────────────────────────
 
-def build_dry_run_html(
+def render_dry_run_html_from_plan(
     root_path,
     output_html_path,
-    log_callback=None,
-    enable_phase_c=False,
-    flush_cache=False,
-    max_workers=None,
-): 
-    """
-    1) Call compute_moves_and_tag_index() to get (moves, tag_index, decision_log).
-    2) Write a dry-run HTML to output_html_path showing the proposed tree.
-    Does NOT move any files.
-    """
-    if log_callback is None:
-        def log_callback(msg): pass
-
+    moves,
+    tag_index,
+    *,
+    heading_text="Phase A – Exact Metadata",
+    title_prefix="Music Index (Dry Run)",
+):
+    """Render a dry-run preview from an already computed move plan."""
     coord = DryRunCoordinator()
-    moves, tag_index, _ = compute_moves_and_tag_index(
-        root_path,
-        log_callback,
-        None,
-        dry_run=True,
-        enable_phase_c=enable_phase_c,
-        flush_cache=flush_cache,
-        max_workers=max_workers,
-        coord=coord,
-    )
-
-    log_callback("5/6: Writing dry-run HTML…")
 
     def build_exact_metadata_section() -> str:
-        lines = ["<h2>Phase A – Exact Metadata</h2>", "<pre>"]
+        lines = [f"<h2>{heading_text}</h2>", "<pre>"]
         lines.append(f"<span class=\"folder\">{sanitize(os.path.basename(root_path))}/</span>")
         tree_nodes = set()
         for new_path in moves.values():
@@ -822,14 +804,47 @@ def build_dry_run_html(
     with open(output_html_path, "w", encoding="utf-8") as out:
         out.write(
             "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n  <meta charset=\"UTF-8\">\n  "
-            f"<title>Music Index (Dry Run) – {sanitize(os.path.basename(root_path))}</title>\n  "
+            f"<title>{title_prefix} – {sanitize(os.path.basename(root_path))}</title>\n  "
             "<style>\n    body { background:#2e3440; color:#d8dee9; font-family:'Courier New', monospace; }\n    pre  { font-size:14px; }\n    .folder { color:#81a1c1; }\n    .song   { color:#a3be8c; }\n    .tags   { color:#88c0d0; font-size:12px; margin-left:1em; }\n  </style>\n</head>\n<body>\n"
         )
         out.write(html_body)
         if html_body and not html_body.endswith("\n"):
             out.write("\n")
         out.write("</body>\n</html>\n")
+    return output_html_path
 
+
+def build_dry_run_html(
+    root_path,
+    output_html_path,
+    log_callback=None,
+    enable_phase_c=False,
+    flush_cache=False,
+    max_workers=None,
+): 
+    """
+    1) Call compute_moves_and_tag_index() to get (moves, tag_index, decision_log).
+    2) Write a dry-run HTML to output_html_path showing the proposed tree.
+    Does NOT move any files.
+    """
+    if log_callback is None:
+        def log_callback(msg): pass
+
+    coord = DryRunCoordinator()
+    moves, tag_index, _ = compute_moves_and_tag_index(
+        root_path,
+        log_callback,
+        None,
+        dry_run=True,
+        enable_phase_c=enable_phase_c,
+        flush_cache=flush_cache,
+        max_workers=max_workers,
+        coord=coord,
+    )
+
+    log_callback("5/6: Writing dry-run HTML…")
+
+    render_dry_run_html_from_plan(root_path, output_html_path, moves, tag_index)
     log_callback(f"✓ Dry-run HTML written to: {output_html_path}")
     return {"moved": 0, "html": output_html_path, "dry_run": True}
 

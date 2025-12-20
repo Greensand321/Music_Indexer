@@ -655,3 +655,104 @@ def copy_new_tracks(*_args, **_kwargs):
 def replace_tracks(*_args, **_kwargs):
     """Deprecated: blocked per review-first redesign."""
     raise RuntimeError("File operations are disabled in the Library Sync review tool.")
+
+
+@dataclass
+class LibrarySyncPlan:
+    """Move/route plan computed by the indexer engine for Library Sync."""
+
+    library_root: str
+    incoming_root: str
+    destination_root: str
+    moves: Dict[str, str]
+    tag_index: Dict[str, object]
+    decision_log: List[str]
+
+    def planned_moves(self) -> Dict[str, str]:
+        """Return a copy of the planned move mapping for execution."""
+        return dict(self.moves)
+
+    def render_preview(self, output_html_path: str) -> str:
+        """Generate a dry-run HTML preview from this plan."""
+        heading = "Library Sync (Dry Run Preview)"
+        idx.render_dry_run_html_from_plan(
+            self.destination_root,
+            output_html_path,
+            self.moves,
+            self.tag_index,
+            heading_text=heading,
+            title_prefix=heading,
+        )
+        return output_html_path
+
+
+def compute_library_sync_plan(
+    library_root: str,
+    incoming_folder: str,
+    *,
+    log_callback: Callable[[str], None] | None = None,
+    progress_callback: Callable[[int, int, str, str], None] | None = None,
+    flush_cache: bool = False,
+    max_workers: int | None = None,
+) -> LibrarySyncPlan:
+    """Compute a deterministic move/route plan for Library Sync."""
+    if log_callback is None:
+        def log_callback(msg: str) -> None:
+            _dlog(msg)
+    if progress_callback is None:
+        def progress_callback(_c: int, _t: int, _m: str, _p: str) -> None:
+            pass
+
+    moves, tag_index, decision_log = idx.compute_moves_and_tag_index(
+        incoming_folder,
+        log_callback,
+        progress_callback,
+        dry_run=True,
+        enable_phase_c=False,
+        flush_cache=flush_cache,
+        max_workers=max_workers,
+        coord=None,
+    )
+
+    destination_root = os.path.join(library_root, "Music")
+    if not os.path.isdir(destination_root):
+        destination_root = library_root
+
+    def _remap_path(path: str) -> str:
+        rel = os.path.relpath(path, incoming_folder)
+        return _normalize_path(os.path.join(destination_root, rel))
+
+    remapped_moves = {_normalize_path(src): _remap_path(dst) for src, dst in moves.items()}
+    remapped_tag_index = {_remap_path(dst): data for dst, data in tag_index.items()}
+
+    return LibrarySyncPlan(
+        library_root=_normalize_path(library_root),
+        incoming_root=_normalize_path(incoming_folder),
+        destination_root=_normalize_path(destination_root),
+        moves=remapped_moves,
+        tag_index=remapped_tag_index,
+        decision_log=decision_log,
+    )
+
+
+def build_library_sync_preview(
+    library_root: str,
+    incoming_folder: str,
+    output_html_path: str,
+    *,
+    log_callback: Callable[[str], None] | None = None,
+    progress_callback: Callable[[int, int, str, str], None] | None = None,
+    flush_cache: bool = False,
+    max_workers: int | None = None,
+) -> LibrarySyncPlan:
+    """Compute a Library Sync plan and write the dry-run preview."""
+    plan = compute_library_sync_plan(
+        library_root,
+        incoming_folder,
+        log_callback=log_callback,
+        progress_callback=progress_callback,
+        flush_cache=flush_cache,
+        max_workers=max_workers,
+    )
+    plan.render_preview(output_html_path)
+    return plan
