@@ -1,7 +1,8 @@
 import os
 import sqlite3
-from typing import Callable, Iterable, List, Tuple
 import tempfile
+import threading
+from typing import Callable, Iterable, List, Tuple
 from pydub import AudioSegment, silence
 
 
@@ -97,6 +98,7 @@ def compute_fingerprints_parallel(
     max_workers: int | None = None,
     trim_silence: bool = False,
     phase: str = "A",
+    cancel_event: threading.Event | None = None,
 ) -> list[tuple[str, int | None, str | None]]:
     """Compute fingerprints and return ``(path, duration, fingerprint)`` results.
 
@@ -110,6 +112,9 @@ def compute_fingerprints_parallel(
     if progress_callback is None:
         def progress_callback(current: int, total: int, msg: str, _phase: str) -> None:
             pass
+
+    if cancel_event is None:
+        cancel_event = threading.Event()
 
     if max_workers is None:
         max_workers = os.cpu_count() or 1
@@ -139,6 +144,9 @@ def compute_fingerprints_parallel(
     completed = 0
 
     for path in audio_files:
+        if cancel_event.is_set():
+            log_callback("Cancellation requested before fingerprint scheduling")
+            break
         mtime = os.path.getmtime(ensure_long_path(path))
         cache_entry = cached.get(path)
         if cache_entry and cache_entry[2] is not None and cache_entry[0] == mtime:
@@ -153,13 +161,23 @@ def compute_fingerprints_parallel(
 
     if pending:
         with ProcessPoolExecutor(max_workers=max_workers) as exe:
-            for path, duration, fp_hash, err in exe.map(
-                compute_fingerprint_for_file, work_items
-            ):
+            futures = [exe.submit(compute_fingerprint_for_file, item) for item in work_items]
+            for fut in futures:
+                if cancel_event.is_set():
+                    cancelled = 0
+                    for remaining in futures:
+                        if not remaining.done() and remaining.cancel():
+                            cancelled += 1
+                    log_callback(f"Cancellation requested; attempting to stop after current file ({cancelled} cancelled)")
+                    break
+
+                path, duration, fp_hash, err = fut.result()
                 completed += 1
                 if err:
                     log_callback(f"   ! Failed fingerprint {path}: {err}")
                     progress_callback(completed, total, path, phase)
+                    if cancel_event.is_set():
+                        break
                     continue
                 mtime = os.path.getmtime(ensure_long_path(path))
                 conn.execute(
@@ -171,6 +189,9 @@ def compute_fingerprints_parallel(
                 progress_callback(completed, total, path, phase)
                 if completed % 50 == 0 or completed == total:
                     log_callback(f"   • Fingerprinting {completed}/{total}")
+                if cancel_event.is_set():
+                    log_callback("Cancellation requested; stopping after current fingerprint")
+                    break
     else:
         log_callback("All fingerprints loaded from cache")
 
@@ -188,6 +209,7 @@ def compute_fingerprints(
     max_workers: int | None = None,
     trim_silence: bool = False,
     phase: str = "A",
+    cancel_event: threading.Event | None = None,
 ) -> None:
     """Backward-compatible wrapper around :func:`compute_fingerprints_parallel`."""
     return compute_fingerprints_parallel(
@@ -198,5 +220,5 @@ def compute_fingerprints(
         max_workers,
         trim_silence,
         phase,
+        cancel_event,
     )
-
