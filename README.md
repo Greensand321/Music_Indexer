@@ -25,10 +25,9 @@ pip install -r requirements.txt
 The indexer will exit with an error if the real `mutagen` package is missing,
 so ensure all dependencies are installed before running.
 
-The **Quality Checker** now imports the indexer's `fingerprint_generator`
-module. Make sure the Music Indexer package itself is installed (e.g.
-`pip install .`) so this dependency is available when running the Quality
-Checker.
+The **Duplicate Finder** tab now opens the redesigned shell for spotting
+duplicates. Keep the Music Indexer package installed (e.g. `pip install .`) so
+the duplicate detection backend remains available as the new UI rolls out.
 
 ### Optional: Essentia audio engine
 
@@ -67,7 +66,7 @@ python main_gui.py
 9. **Library Duplicate Scan** finds duplicate tracks after you drop new songs directly into your library
 10. **Cross-Album Scan** optionally finds duplicates appearing on multiple albums
 11. Use the **Theme** dropdown and **Help** tab for assistance
-12. Adjust the **Distance Threshold** in the Quality Checker tab to fine‑tune duplicate detection and view detailed fingerprint distance logs
+12. Launch the **Duplicate Finder** tab to open the updated shell for spotting duplicates
 
 ### Playlist generator feedback
 

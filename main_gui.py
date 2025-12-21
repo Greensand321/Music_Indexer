@@ -41,11 +41,7 @@ from music_indexer_api import (
     find_duplicates as api_find_duplicates,
     get_tags,
 )
-import simple_duplicate_finder as sdf_mod
-import fingerprint_cache
-import chromaprint_utils
 from controllers.library_index_controller import generate_index
-from controllers.scan_progress_controller import ScanProgressController
 from gui.audio_preview import PlaybackError, VlcPreviewPlayer
 from io import BytesIO
 from PIL import Image, ImageTk
@@ -79,7 +75,7 @@ from plugins.assistant_plugin import AssistantPlugin
 from plugins.acoustid_plugin import AcoustIDService, MusicBrainzService
 from controllers.cluster_controller import cluster_library
 from controllers.cluster_view_controller import ClusterComputationManager
-from config import load_config, save_config, DEFAULT_FP_THRESHOLDS
+from config import load_config, save_config
 import playlist_engine
 from playlist_engine import bucket_by_tempo_energy, autodj_playlist
 from controllers.cluster_controller import gather_tracks
@@ -1447,62 +1443,46 @@ class ProgressDialog(tk.Toplevel):
         self.update_idletasks()
 
 
-class ScanProgressWindow(tk.Toplevel):
-    """Non-modal window showing scan progress and logs."""
+class DuplicateFinderShell(tk.Toplevel):
+    """Placeholder shell for the updated Duplicate Finder UI."""
 
-    def __init__(self, parent: tk.Widget, cancel_event: threading.Event):
+    def __init__(self, parent: tk.Widget, library_path: str):
         super().__init__(parent)
-        self.title("Scanning…")
-        self.cancel_event = cancel_event
-        self.resizable(True, True)
+        self.title("Duplicate Finder")
         self.transient(parent)
+        self.resizable(True, False)
 
-        self.progress = ttk.Progressbar(self, mode="indeterminate")
-        self.progress.pack(fill="x", padx=10, pady=(10, 0))
-        self.progress.start()
+        ttk.Label(
+            self,
+            text="Duplicate Finder",
+            font=("TkDefaultFont", 11, "bold"),
+        ).pack(anchor="w", padx=10, pady=(10, 4))
+        ttk.Label(
+            self,
+            text=(
+                "The Duplicate Finder is being redesigned. "
+                "This stub window replaces the previous tool while the new experience is built."
+            ),
+            wraplength=460,
+            justify="left",
+        ).pack(anchor="w", padx=10, pady=(0, 8))
 
-        self.log_widget = ScrolledText(self, width=60, height=15, state="disabled")
-        self.log_widget.pack(padx=10, pady=10, fill="both", expand=True)
+        ttk.Label(
+            self,
+            text=f"Library: {library_path or 'No library selected'}",
+            wraplength=460,
+            justify="left",
+        ).pack(anchor="w", padx=10, pady=(0, 8))
 
-        btn = ttk.Button(self, text="Cancel", command=self._on_cancel)
-        btn.pack(pady=(0, 10))
-        self.protocol("WM_DELETE_WINDOW", self._on_cancel)
+        ttk.Label(
+            self,
+            text="No duplicate scans are performed from this stub.",
+            foreground="#666",
+            wraplength=460,
+            justify="left",
+        ).pack(anchor="w", padx=10)
 
-    def _on_cancel(self) -> None:
-        if messagebox.askyesno("Cancel Scan", "Stop scanning?"):
-            self.cancel_event.set()
-
-    # Public method used by background threads
-    def update_progress(self, kind: str, current: int, total: int, msg: str) -> None:
-        self.after(0, lambda: self._do_update(kind, current, total, msg))
-
-    # Actual UI updates executed on main thread
-    def _do_update(self, kind: str, current: int, total: int, msg: str) -> None:
-        if kind == "walk":
-            if self.progress["mode"] != "indeterminate":
-                self.progress.config(mode="indeterminate")
-                self.progress.start()
-            if msg:
-                self._append(f"Scanning: {msg}")
-        elif kind == "fp_start":
-            if self.progress["mode"] != "determinate":
-                self.progress.stop()
-                self.progress.config(mode="determinate", maximum=total, value=current - 1)
-            self._append(f"Fingerprinting file {current} of {total}\n{msg}")
-        elif kind == "fp_end":
-            if self.progress["mode"] == "determinate":
-                self.progress["value"] = current
-        elif kind == "log":
-            self._append(msg)
-        elif kind == "complete":
-            self.progress.stop()
-            self._append(f"Completed: {current} duplicate pairs found")
-
-    def _append(self, text: str) -> None:
-        self.log_widget.configure(state="normal")
-        self.log_widget.insert("end", text + "\n")
-        self.log_widget.see("end")
-        self.log_widget.configure(state="disabled")
+        ttk.Button(self, text="Close", command=self.destroy).pack(pady=(0, 10))
 
 class SoundVaultImporterApp(tk.Tk):
     def __init__(self):
@@ -1521,7 +1501,7 @@ class SoundVaultImporterApp(tk.Tk):
         self.library_path = ""
         self.library_name_var = tk.StringVar(value="No library selected")
         self.library_path_var = tk.StringVar(value="")
-        # Folder to run Quality Checker - now always uses library_path
+        # Folder to run Duplicate Finder - now always uses library_path
         self.dup_folder_var = tk.StringVar(value="")  # retained for compatibility
         self.library_stats_var = tk.StringVar(value="")
         self.show_all = False
@@ -1561,16 +1541,10 @@ class SoundVaultImporterApp(tk.Tk):
         self.tagfix_debug_var = tk.BooleanVar(value=False)
         self.tagfix_api_status = tk.StringVar(value="")
 
-        self.dup_debug_var = tk.BooleanVar(value=False)
+        # Duplicate Finder state
+        self.duplicate_finder_window: DuplicateFinderShell | None = None
 
-        # Distance threshold for duplicate scanning
-        dup_thr = cfg.get("duplicate_threshold", 0.03)
-        self.fp_threshold_var = tk.DoubleVar(value=dup_thr)
-        dup_pref = cfg.get("duplicate_prefix_len", sdf_mod.FP_PREFIX_LEN)
-        self.fp_prefix_var = tk.IntVar(value=dup_pref)
-
-        # Quality Checker state
-        self._dup_logging = False
+        # Shared preview/playback state
         self._preview_thread = None
         self.player_status_var = tk.StringVar(
             value="Select a library to load tracks."
@@ -1586,7 +1560,6 @@ class SoundVaultImporterApp(tk.Tk):
             self.player_status_var.set(f"Preview disabled: {reason}")
         else:
             logging.info("VLC preview backend initialized")
-        self._quality_play_buttons: list[ttk.Button] = []
         self._preview_in_progress = False
         self._player_busy_item: str | None = None
         self._ignore_next_preview_finish = False
@@ -1973,50 +1946,33 @@ class SoundVaultImporterApp(tk.Tk):
             apply_frame, text="Apply Selected", command=self._apply_selected_tags
         ).pack(side="right")
 
-        # ─── Quality Checker Tab ─────────────────────────────────────────
+        # ─── Duplicate Finder Tab ─────────────────────────────────────────
         self.dup_tab = ttk.Frame(self.notebook)
-        self.notebook.add(self.dup_tab, text="Quality Checker")
+        self.notebook.add(self.dup_tab, text="Duplicate Finder")
 
-        df_controls = ttk.Frame(self.dup_tab)
-        df_controls.pack(fill="x", padx=10, pady=(10, 5))
-        ttk.Label(df_controls, textvariable=self.library_path_var).pack(side="left")
+        df_container = ttk.LabelFrame(self.dup_tab, text="Duplicate Finder")
+        df_container.pack(fill="both", expand=True, padx=10, pady=10)
+        ttk.Label(
+            df_container,
+            textvariable=self.library_path_var,
+            justify="left",
+        ).pack(anchor="w", padx=10, pady=(8, 4))
+        ttk.Label(
+            df_container,
+            text=(
+                "The Duplicate Finder is being refreshed. Launch the new shell to try "
+                "the updated experience when it becomes available."
+            ),
+            wraplength=520,
+            justify="left",
+        ).pack(anchor="w", padx=10, pady=(0, 6))
         self.scan_btn = ttk.Button(
-            df_controls,
-            text="Scan",
+            df_container,
+            text="Open Duplicate Finder",
             command=self.scan_duplicates,
             state="disabled",
         )
-        self.scan_btn.pack(side="left", padx=(5, 0))
-        ttk.Label(df_controls, text="Distance Threshold:").pack(side="left", padx=(10, 0))
-        thr_entry = ttk.Entry(df_controls, textvariable=self.fp_threshold_var, width=5)
-        thr_entry.pack(side="left")
-        ttk.Label(df_controls, text="Prefix Length:").pack(side="left", padx=(10, 0))
-        pref_entry = ttk.Entry(df_controls, textvariable=self.fp_prefix_var, width=4)
-        pref_entry.pack(side="left")
-        self.fp_threshold_var.trace_add("write", lambda *a: self._validate_threshold())
-        self.fp_prefix_var.trace_add("write", lambda *a: self._validate_threshold())
-        ttk.Checkbutton(
-            df_controls,
-            text="Verbose Debug",
-            variable=self.dup_debug_var,
-        ).pack(side="left", padx=(5, 0))
-
-        self.qc_canvas = tk.Canvas(self.dup_tab)
-        self.qc_scroll = ttk.Scrollbar(
-            self.dup_tab, orient="vertical", command=self.qc_canvas.yview
-        )
-        self.qc_canvas.configure(yscrollcommand=self.qc_scroll.set)
-        self.qc_canvas.pack(side="left", fill="both", expand=True, padx=(10, 0), pady=(0, 10))
-        self.qc_scroll.pack(side="right", fill="y", pady=(0, 10))
-        self.qc_inner = ttk.Frame(self.qc_canvas)
-        self.qc_canvas.create_window((0, 0), window=self.qc_inner, anchor="nw")
-        self.qc_inner.bind(
-            "<Configure>",
-            lambda e: self.qc_canvas.configure(scrollregion=self.qc_canvas.bbox("all")),
-        )
-        if self.library_path_var.get():
-            self.scan_btn.config(state="normal")
-        self._validate_threshold()
+        self.scan_btn.pack(anchor="w", padx=10, pady=(4, 10))
         self._check_tagfix_api_status()
 
         # ─── Player Tab ────────────────────────────────────────────────
@@ -2232,7 +2188,6 @@ class SoundVaultImporterApp(tk.Tk):
         self.active_plugin = None
         if hasattr(self, "scan_btn"):
             self.scan_btn.config(state="normal")
-            self._validate_threshold()
         self.update_library_info()
         if hasattr(self, "player_reload_btn"):
             self.player_reload_btn.config(state="normal")
@@ -2245,6 +2200,8 @@ class SoundVaultImporterApp(tk.Tk):
             self.library_stats_var.set("")
             if hasattr(self, "player_reload_btn"):
                 self.player_reload_btn.config(state="disabled")
+            if hasattr(self, "scan_btn"):
+                self.scan_btn.config(state="disabled")
             self.player_status_var.set("Select a library to load tracks.")
             return
         num = count_audio_files(self.library_path)
@@ -2319,70 +2276,27 @@ class SoundVaultImporterApp(tk.Tk):
             self._log(f"✘ Invalid SoundVault: {path}\n" + "\n".join(errors))
         self.update_library_info()
 
-    # ── Quality Checker Actions ────────────────────────────────────────
     def scan_duplicates(self):
-        folder = self.library_path_var.get()
-        if not folder:
-            messagebox.showwarning("No Folder", "Please select a library first.")
+        library = self.require_library()
+        if not library:
             return
 
-        debug_enabled = self.dup_debug_var.get()
-        sdf_mod.verbose = debug_enabled
-        fingerprint_cache.verbose = debug_enabled
-        chromaprint_utils.verbose = debug_enabled
-        if debug_enabled:
-            self._open_dup_debug_window()
+        existing = getattr(self, "duplicate_finder_window", None)
+        if existing and existing.winfo_exists():
+            existing.lift()
+            existing.focus_set()
+            return
 
-        self.clear_quality_view()
-        self.scan_btn.config(state="disabled")
-        try:
-            thr = float(self.fp_threshold_var.get())
-        except Exception:
-            thr = load_config().get("duplicate_threshold", 0.03)
-            self._log("! Invalid threshold; using saved value")
-        else:
-            if not (0.0 < thr <= 1.0):
-                thr = load_config().get("duplicate_threshold", 0.03)
-                self._log("! Threshold out of range; using saved value")
-        cfg = load_config()
-        cfg["duplicate_threshold"] = thr
-        try:
-            pref_val = int(self.fp_prefix_var.get())
-        except Exception:
-            pref_val = sdf_mod.FP_PREFIX_LEN
-            self._log("! Invalid prefix length; using saved value")
-        cfg["duplicate_prefix_len"] = pref_val
-        save_config(cfg)
-        controller = ScanProgressController()
-        prog_win = ScanProgressWindow(self, controller.cancel_event)
-        controller.set_callback(prog_win.update_progress)
-
-        def task():
-            self._dup_logging = True
-
-            def cb(msg):
-                self.after(0, lambda m=msg: self._log(m))
-                controller.update("log", 0, 0, msg)
-
-            try:
-                dups, missing = sdf_mod.find_duplicates(
-                    folder,
-                    threshold=thr,
-                    prefix_len=pref_val,
-                    log_callback=cb,
-                    progress_callback=controller.update,
-                    cancel_event=controller.cancel_event,
-                )
-                self.after(0, lambda: self._log(f"Found {len(dups)} duplicate pairs"))
-                self.after(0, lambda: self.populate_quality_table(dups))
-                if missing:
-                    msg = f"{missing} files could not be fingerprinted."
-                    self.after(0, lambda m=msg: self._log(m))
-            finally:
-                self._dup_logging = False
-                self.after(0, lambda: (self.scan_btn.config(state="normal"), prog_win.destroy()))
-
-        threading.Thread(target=task, daemon=True).start()
+        win = DuplicateFinderShell(self, library_path=library)
+        win.bind(
+            "<Destroy>",
+            lambda e: (
+                setattr(self, "duplicate_finder_window", None)
+                if e.widget is win
+                else None
+            ),
+        )
+        self.duplicate_finder_window = win
 
     def run_indexer(self):
         path = self.require_library()
@@ -3437,19 +3351,6 @@ class SoundVaultImporterApp(tk.Tk):
 
         return changed, total
 
-    def _open_dup_debug_window(self) -> None:
-        if (
-            getattr(self, "dup_debug_win", None)
-            and self.dup_debug_win.winfo_exists()
-        ):
-            return
-        win = tk.Toplevel(self)
-        win.title("Duplicate Finder Debug")
-        text = ScrolledText(win, height=20, wrap="word")
-        text.pack(fill="both", expand=True)
-        self.dup_debug_win = win
-        self.dup_text = text
-
     def apply_mapping(self):
         """Persist mapping JSON from text box and apply normalization."""
         if not hasattr(self, "text_map"):
@@ -3552,29 +3453,6 @@ class SoundVaultImporterApp(tk.Tk):
                     "Library Sync", "The Library Sync tab is not available."
                 )
 
-    # ── Quality Checker Helpers ─────────────────────────────────────────
-    def clear_quality_view(self) -> None:
-        for w in self.qc_inner.winfo_children():
-            w.destroy()
-
-    def _validate_threshold(self) -> None:
-        """Enable Scan button only when threshold is valid."""
-        try:
-            val = float(self.fp_threshold_var.get())
-            valid = 0.0 < val <= 1.0
-        except Exception:
-            valid = False
-        try:
-            pref = int(self.fp_prefix_var.get())
-            valid_pref = pref >= 0
-        except Exception:
-            valid_pref = False
-        folder_selected = self.library_path_var.get()
-        if valid and valid_pref and folder_selected:
-            self.scan_btn.config(state="normal")
-        else:
-            self.scan_btn.config(state="disabled")
-
     def _play_preview(
         self,
         path: str,
@@ -3629,21 +3507,12 @@ class SoundVaultImporterApp(tk.Tk):
 
         self._preview_in_progress = False
         self._restore_player_play_icons()
-        self._set_preview_controls_state(enabled=self.preview_backend_available)
         if hasattr(self, "player_status_var"):
             if error:
                 self.player_status_var.set("Playback failed. Check logs.")
                 messagebox.showerror("Playback failed", error)
             else:
                 self.player_status_var.set("Ready to play another track.")
-
-    def _set_preview_controls_state(self, enabled: bool) -> None:
-        state = "!disabled" if enabled else "disabled"
-        for btn in getattr(self, "_quality_play_buttons", []):
-            try:
-                btn.state([state])
-            except Exception:
-                logging.exception("Failed to update preview button state")
 
     def _set_player_play_state_busy(self, item_id: str | None) -> None:
         if not hasattr(self, "player_tree"):
@@ -3918,92 +3787,6 @@ class SoundVaultImporterApp(tk.Tk):
                 subprocess.run(["xdg-open", path], check=False)
         except Exception as exc:
             messagebox.showerror("Open Folder", f"Could not open {path}: {exc}")
-
-    def populate_quality_table(self, matches):
-        self.clear_quality_view()
-        self._quality_play_buttons = []
-        if not matches:
-            ttk.Label(self.qc_inner, text="No duplicates detected in this library").pack(pady=20)
-            return
-
-        for keep_path, dup_path in matches:
-            row = ttk.Frame(self.qc_inner)
-            row.pack(fill="x", padx=10, pady=2)
-
-            btn_state = "normal"
-            if not self.preview_backend_available or self._preview_in_progress:
-                btn_state = "disabled"
-            play_btn = ttk.Button(
-                row,
-                text="▶",
-                width=1,
-                state=btn_state,
-                command=lambda p=dup_path: self._play_preview(p),
-            )
-            play_btn.pack(side="left")
-            self._quality_play_buttons.append(play_btn)
-
-            thumb = self._load_thumbnail(dup_path, size=40)
-            img_label = ttk.Label(row, image=thumb)
-            img_label.image = thumb
-            img_label.pack(side="left", padx=(5, 10))
-
-            tags = get_tags(dup_path)
-            title = tags.get("title") or os.path.basename(dup_path)
-            artist = tags.get("artist") or "Unknown"
-            year = tags.get("year") or "?"
-            ext = os.path.splitext(dup_path)[1].lower()
-            size = os.path.getsize(dup_path) / 1024 / 1024
-
-            info = ttk.Frame(row)
-            info.pack(side="left", fill="x", expand=True)
-            ttk.Label(info, text=title, font=("TkDefaultFont", 9, "bold"), anchor="w").pack(anchor="w")
-            ttk.Label(info, text=f"{artist} • {year}", font=("TkDefaultFont", 8), anchor="w").pack(anchor="w")
-            ttk.Label(info, text=f"{ext[1:].upper()} {size:.1f} MB", font=("TkDefaultFont", 8), anchor="w").pack(anchor="w")
-
-            del_btn = ttk.Button(row, text="Delete", command=lambda p=dup_path, f=row: self._prompt_delete(p, f))
-            del_btn.pack(side="right")
-
-        self.qc_canvas.update_idletasks()
-
-    def _prompt_delete(self, path: str, row: tk.Widget) -> None:
-        if getattr(self, "_skip_delete_confirm", False):
-            proceed = True
-        else:
-            proceed, skip = self._confirm_delete(path)
-            if skip:
-                self._skip_delete_confirm = True
-        if not proceed:
-            return
-        try:
-            os.remove(path)
-            row.destroy()
-            self._log(f"Deleted duplicate {path}")
-        except Exception as e:
-            messagebox.showerror("Delete Failed", str(e))
-
-    def _confirm_delete(self, path: str) -> tuple[bool, bool]:
-        top = tk.Toplevel(self)
-        top.title("Confirm Delete")
-        top.grab_set()
-        ttk.Label(top, text=f"Delete {os.path.basename(path)}?").pack(padx=10, pady=(10, 5))
-        skip_var = tk.BooleanVar()
-        ttk.Checkbutton(top, text="Don't ask again this session", variable=skip_var).pack(padx=10, pady=(0, 5), anchor="w")
-        result = {"ok": False}
-
-        def do_ok() -> None:
-            result["ok"] = True
-            top.destroy()
-
-        def do_cancel() -> None:
-            top.destroy()
-
-        btn_frame = ttk.Frame(top)
-        btn_frame.pack(pady=(0, 10))
-        ttk.Button(btn_frame, text="Delete", command=do_ok).pack(side="left", padx=5)
-        ttk.Button(btn_frame, text="Cancel", command=do_cancel).pack(side="left", padx=5)
-        top.wait_window()
-        return result["ok"], skip_var.get()
 
     def _create_player_library_table(self, parent: tk.Widget) -> ttk.Frame:
         table = ttk.Frame(parent)
@@ -4497,11 +4280,6 @@ class SoundVaultImporterApp(tk.Tk):
         self.output.insert("end", line + "\n")
         self.output.see("end")
         self.output.configure(state="disabled")
-        if getattr(self, "_dup_logging", False) and hasattr(self, "dup_text"):
-            self.dup_text.configure(state="normal")
-            self.dup_text.insert("end", line + "\n")
-            self.dup_text.see("end")
-            self.dup_text.configure(state="disabled")
 
 
 if __name__ == "__main__":
