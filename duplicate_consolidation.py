@@ -8,7 +8,10 @@ before executing any changes.
 """
 from __future__ import annotations
 
+import datetime
 import hashlib
+import html
+import json
 import os
 import threading
 import time
@@ -54,7 +57,12 @@ class DuplicateTrack:
 
     @property
     def is_lossless(self) -> bool:
-        return os.path.splitext(self.ext)[1].lower() in LOSSLESS_EXTS
+        ext = self.ext.lower()
+        if not ext or ext == ".":
+            ext = os.path.splitext(self.path)[1].lower()
+        elif not ext.startswith("."):
+            ext = f".{ext}"
+        return ext in LOSSLESS_EXTS
 
     @property
     def metadata_count(self) -> int:
@@ -88,6 +96,17 @@ class ArtworkDirective:
 
 
 @dataclass
+class PlaylistImpact:
+    """Summary of playlist rewrites driven by a duplicate group."""
+
+    playlists: int = 0
+    entries: int = 0
+
+    def to_dict(self) -> Dict[str, int]:
+        return {"playlists": self.playlists, "entries": self.entries}
+
+
+@dataclass
 class GroupPlan:
     """Planned actions for a duplicate group."""
 
@@ -95,9 +114,12 @@ class GroupPlan:
     winner_path: str
     losers: List[str]
     planned_winner_tags: Dict[str, object]
+    metadata_changes: Dict[str, Dict[str, object]]
+    winner_quality: Dict[str, object]
     artwork: List[ArtworkDirective]
     loser_disposition: Dict[str, str]
     playlist_rewrites: Dict[str, str]
+    playlist_impact: PlaylistImpact
     review_flags: List[str]
     context_summary: Dict[str, List[str]]
 
@@ -107,9 +129,12 @@ class GroupPlan:
             "winner_path": self.winner_path,
             "losers": list(self.losers),
             "planned_winner_tags": dict(self.planned_winner_tags),
+            "metadata_changes": {k: dict(v) for k, v in self.metadata_changes.items()},
+            "winner_quality": dict(self.winner_quality),
             "artwork": [a.to_dict() for a in self.artwork],
             "loser_disposition": dict(self.loser_disposition),
             "playlist_rewrites": dict(self.playlist_rewrites),
+            "playlist_impact": self.playlist_impact.to_dict(),
             "review_flags": list(self.review_flags),
             "context_summary": {k: list(v) for k, v in self.context_summary.items()},
         }
@@ -121,12 +146,24 @@ class ConsolidationPlan:
 
     groups: List[GroupPlan] = field(default_factory=list)
     review_flags: List[str] = field(default_factory=list)
+    generated_at: datetime.datetime = field(default_factory=lambda: datetime.datetime.now(datetime.timezone.utc))
 
     def to_dict(self) -> Dict[str, object]:
         return {
             "groups": [g.to_dict() for g in self.groups],
             "review_flags": list(self.review_flags),
+            "generated_at": self.generated_at.isoformat(),
         }
+
+    @property
+    def review_required_groups(self) -> List[GroupPlan]:
+        """Return groups that need manual review."""
+        return [g for g in self.groups if g.review_flags]
+
+    @property
+    def review_required_count(self) -> int:
+        """Return total number of review-required groups."""
+        return len(self.review_required_groups)
 
 
 def _normalize_track(raw: Mapping[str, object]) -> DuplicateTrack:
@@ -199,6 +236,59 @@ def _merge_tags(existing: MutableMapping[str, object], source: Mapping[str, obje
             continue
         merged[key] = value
     return merged
+
+
+def _metadata_changes(winner: DuplicateTrack, planned_tags: Mapping[str, object]) -> Dict[str, Dict[str, object]]:
+    keys = [
+        "artist",
+        "albumartist",
+        "title",
+        "album",
+        "album_type",
+        "track",
+        "tracknumber",
+        "disc",
+        "discnumber",
+        "date",
+        "year",
+        "genre",
+    ]
+    changes: Dict[str, Dict[str, object]] = {}
+    for key in keys:
+        current = winner.tags.get(key) if isinstance(winner.tags, Mapping) else None
+        planned = planned_tags.get(key)
+        if (current or "") == (planned or ""):
+            continue
+        changes[key] = {"from": current, "to": planned}
+    return changes
+
+
+def _quality_rationale(winner: DuplicateTrack, runner_up: DuplicateTrack | None, context: str) -> Dict[str, object]:
+    reasons: List[str] = []
+    if winner.is_lossless:
+        reasons.append("Lossless format")
+    if runner_up and not runner_up.is_lossless and winner.is_lossless:
+        reasons.append("Higher-quality format than the next candidate")
+    if runner_up and winner.bitrate > runner_up.bitrate:
+        reasons.append("Higher bitrate than the next candidate")
+    if runner_up and winner.sample_rate > runner_up.sample_rate:
+        reasons.append("Higher sample rate than the next candidate")
+    if runner_up and winner.bit_depth > runner_up.bit_depth:
+        reasons.append("Higher bit depth than the next candidate")
+    if context == "album":
+        reasons.append("Album context favored for metadata consistency")
+    elif context == "single":
+        reasons.append("Single context favored for artwork alignment")
+
+    return {
+        "context": context,
+        "is_lossless": winner.is_lossless,
+        "bitrate": winner.bitrate,
+        "sample_rate": winner.sample_rate,
+        "bit_depth": winner.bit_depth,
+        "metadata_count": winner.metadata_count,
+        "reasons": reasons or ["Deterministic ordering by quality"],
+    }
 
 
 def _artwork_score(track: DuplicateTrack) -> tuple:
@@ -333,6 +423,7 @@ def build_consolidation_plan(
         quality_sorted = sorted(cluster, key=lambda t: _quality_tuple(t, contexts[t.path]), reverse=True)
         winner = quality_sorted[0]
         losers = [t.path for t in quality_sorted[1:]]
+        runner_up = quality_sorted[1] if len(quality_sorted) > 1 else None
 
         metadata_source = _select_metadata_source(cluster, contexts)
         planned_tags: Dict[str, object] = dict(winner.tags)
@@ -344,6 +435,10 @@ def build_consolidation_plan(
                 planned_tags.setdefault("album_type", "single")
         else:
             review_flags.append(f"Missing metadata source for group containing {winner.path}.")
+
+        meta_changes = _metadata_changes(winner, planned_tags)
+        winner_context = contexts.get(winner.path, "unknown")
+        winner_quality = _quality_rationale(winner, runner_up, winner_context)
 
         single_candidates = [t for t in cluster if contexts.get(t.path) == "single"]
         best_art, ambiguous_art = _select_artwork_candidate(single_candidates)
@@ -366,15 +461,20 @@ def build_consolidation_plan(
         if not losers:
             group_review.append("No losers to consolidate.")
 
+        playlist_impact = PlaylistImpact(playlists=len(losers), entries=len(losers))
+
         plans.append(
             GroupPlan(
                 group_id=group_id,
                 winner_path=winner.path,
                 losers=losers,
                 planned_winner_tags=planned_tags,
+                metadata_changes=meta_changes,
+                winner_quality=winner_quality,
                 artwork=artwork_actions,
                 loser_disposition=dispositions,
                 playlist_rewrites=playlist_map,
+                playlist_impact=playlist_impact,
                 review_flags=group_review,
                 context_summary={
                     "album": sorted([t.path for t in cluster if contexts.get(t.path) == "album"]),
@@ -385,3 +485,140 @@ def build_consolidation_plan(
         )
 
     return ConsolidationPlan(groups=plans, review_flags=review_flags)
+
+
+def _html_escape(text: object) -> str:
+    return html.escape("" if text is None else str(text))
+
+
+def render_consolidation_preview(plan: ConsolidationPlan, output_html_path: str) -> str:
+    """Render an HTML preview summarizing the consolidation plan."""
+
+    def _render_metadata(changes: Dict[str, Dict[str, object]]) -> str:
+        if not changes:
+            return "<em>No tag changes planned.</em>"
+        rows = []
+        for key in sorted(changes.keys()):
+            diff = changes[key]
+            rows.append(
+                f"<tr><td>{_html_escape(key)}</td><td>{_html_escape(diff.get('from') or '—')}</td>"
+                f"<td>{_html_escape(diff.get('to') or '—')}</td></tr>"
+            )
+        return (
+            "<table class='metadata'>"
+            "<tr><th>Tag</th><th>Current</th><th>Planned</th></tr>"
+            + "".join(rows)
+            + "</table>"
+        )
+
+    def _render_artwork(actions: List[ArtworkDirective]) -> str:
+        if not actions:
+            return "<em>Winner artwork unchanged.</em>"
+        rows = [
+            f"<li>Copy artwork from {_html_escape(act.source)} → {_html_escape(act.target)} "
+            f"({_html_escape(act.reason)})</li>"
+            for act in actions
+        ]
+        return "<ul>" + "".join(rows) + "</ul>"
+
+    review_required = plan.review_required_groups
+    lines = [
+        "<html><head><style>",
+        "body{font-family:Arial, sans-serif; margin:20px;}",
+        ".group{border:1px solid #ddd; padding:12px; margin-bottom:10px; border-radius:6px;}",
+        ".review{background:#fff3cd;}",
+        ".header{display:flex;justify-content:space-between;align-items:center;}",
+        ".muted{color:#666; font-size:0.9em;}",
+        ".metadata{border-collapse:collapse;width:100%;}",
+        ".metadata th,.metadata td{border:1px solid #ddd;padding:4px 6px;text-align:left;}",
+        ".pill{display:inline-block;padding:4px 8px;border-radius:12px;font-size:12px;}",
+        ".ok{background:#e7f5e8;color:#266534;}",
+        ".warn{background:#ffe8cc;color:#b05e00;}",
+        "</style></head><body>",
+        "<h1>Duplicate Consolidation Preview</h1>",
+        f"<p class='muted'>Generated at {plan.generated_at.isoformat()}</p>",
+        f"<p>Total groups: {len(plan.groups)} | Review required: {len(review_required)} | "
+        f"Global flags: {len(plan.review_flags)}</p>",
+    ]
+
+    if plan.review_flags:
+        lines.append("<div class='group review'><strong>Plan Warnings</strong><ul>")
+        for flag in plan.review_flags:
+            lines.append(f"<li>{_html_escape(flag)}</li>")
+        lines.append("</ul></div>")
+
+    for group in plan.groups:
+        review_badge = (
+            "<span class='pill warn'>Review required</span>" if group.review_flags else "<span class='pill ok'>Ready</span>"
+        )
+        lines.append("<div class='group {cls}'>".format(cls="review" if group.review_flags else ""))
+        lines.append(
+            f"<div class='header'><div><strong>Group {group.group_id}</strong></div>{review_badge}</div>"
+        )
+        lines.append(f"<p class='muted'>Winner: {_html_escape(group.winner_path)}</p>")
+        lines.append("<ul>")
+        for loser in group.losers:
+            disposition = group.loser_disposition.get(loser, "quarantine")
+            lines.append(
+                f"<li>Loser: {_html_escape(loser)} → {_html_escape(disposition)} | "
+                f"Playlist rewrite → {_html_escape(group.playlist_rewrites.get(loser, 'n/a'))}</li>"
+            )
+        lines.append("</ul>")
+
+        lines.append("<p><strong>Quality rationale</strong></p>")
+        reasons = group.winner_quality.get("reasons") or []
+        lines.append(
+            "<ul>"
+            + "".join(f"<li>{_html_escape(r)}</li>" for r in reasons)
+            + "</ul>"
+        )
+        lines.append("<p><strong>Metadata normalization</strong></p>")
+        lines.append(_render_metadata(group.metadata_changes))
+
+        lines.append("<p><strong>Artwork</strong></p>")
+        lines.append(_render_artwork(group.artwork))
+
+        lines.append(
+            f"<p><strong>Playlist impact</strong>: {group.playlist_impact.playlists} playlists, "
+            f"{group.playlist_impact.entries} entries</p>"
+        )
+
+        if group.review_flags:
+            lines.append("<p><strong>Review flags:</strong></p><ul>")
+            for flag in group.review_flags:
+                lines.append(f"<li>{_html_escape(flag)}</li>")
+            lines.append("</ul>")
+
+        lines.append(
+            "<details><summary>Context</summary><ul>"
+            + f"<li>Album tracks: {len(group.context_summary.get('album', []))}</li>"
+            + f"<li>Singles: {len(group.context_summary.get('single', []))}</li>"
+            + f"<li>Unknown: {len(group.context_summary.get('unknown', []))}</li>"
+            + "</ul></details>"
+        )
+        lines.append("</div>")
+
+    lines.append("</body></html>")
+
+    with open(output_html_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines))
+    return output_html_path
+
+
+def export_consolidation_preview(plan: ConsolidationPlan, output_json_path: str) -> str:
+    """Write a JSON audit of the consolidation plan."""
+
+    summary = {
+        "groups": len(plan.groups),
+        "review_required": plan.review_required_count,
+        "review_flags": plan.review_flags,
+    }
+    payload = {
+        "generated_at": plan.generated_at.isoformat(),
+        "summary": summary,
+        "plan": plan.to_dict(),
+    }
+
+    with open(output_json_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2)
+    return output_json_path
