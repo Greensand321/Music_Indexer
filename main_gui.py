@@ -41,6 +41,11 @@ from music_indexer_api import (
     find_duplicates as api_find_duplicates,
     get_tags,
 )
+from duplicate_consolidation import (
+    build_consolidation_plan,
+    render_consolidation_preview,
+    export_consolidation_preview,
+)
 from controllers.library_index_controller import generate_index
 from gui.audio_preview import PlaybackError, VlcPreviewPlayer
 from io import BytesIO
@@ -1460,6 +1465,10 @@ class DuplicateFinderShell(tk.Toplevel):
         )
         self.update_playlists_var = tk.BooleanVar(value=False)
         self.quarantine_var = tk.BooleanVar(value=True)
+        self.override_review_var = tk.BooleanVar(value=False)
+        self.preview_html_path: str | None = None
+        self.preview_json_path: str | None = None
+        self._plan = None
 
         container = ttk.Frame(self)
         container.pack(fill="both", expand=True, padx=10, pady=10)
@@ -1509,6 +1518,10 @@ class DuplicateFinderShell(tk.Toplevel):
         ttk.Button(controls, text="Preview", command=self._handle_preview).pack(
             side="left", padx=(0, 6)
         )
+        self.open_preview_btn = ttk.Button(
+            controls, text="Open Preview", command=self._open_preview_output, state="disabled"
+        )
+        self.open_preview_btn.pack(side="left", padx=(0, 6))
         ttk.Button(controls, text="Execute", command=self._handle_execute).pack(
             side="left", padx=(0, 12)
         )
@@ -1524,6 +1537,11 @@ class DuplicateFinderShell(tk.Toplevel):
             variable=self.quarantine_var,
             command=self._toggle_quarantine,
         ).pack(side="left")
+        ttk.Checkbutton(
+            controls,
+            text="Override review blocks",
+            variable=self.override_review_var,
+        ).pack(side="left", padx=(10, 0))
 
         # Progress + status
         status_frame = ttk.Frame(container)
@@ -1565,15 +1583,12 @@ class DuplicateFinderShell(tk.Toplevel):
             width = 90 if cid in ("group", "count") else 160
             self.groups_tree.column(cid, width=width, anchor="w")
         self.groups_tree.pack(fill="both", expand=True, padx=6, pady=6)
+        self.groups_tree.bind("<<TreeviewSelect>>", self._on_group_select)
 
         inspector = ttk.LabelFrame(results, text="Group Details")
         inspector.grid(row=0, column=1, sticky="nsew", padx=(3, 6), pady=6)
-        ttk.Label(
-            inspector,
-            text="Select a group to view details",
-            justify="center",
-            foreground="#555",
-        ).pack(fill="both", expand=True, padx=12, pady=12)
+        self.group_details = ScrolledText(inspector, height=12, state="disabled", wrap="word")
+        self.group_details.pack(fill="both", expand=True, padx=8, pady=8)
 
         self._log_action("Duplicate Finder shell initialized")
 
@@ -1592,6 +1607,69 @@ class DuplicateFinderShell(tk.Toplevel):
         self.log_text.insert("end", line + "\n")
         self.log_text.see("end")
         self.log_text.configure(state="disabled")
+
+    def _update_groups_view(self, plan) -> None:
+        self.groups_tree.delete(*self.groups_tree.get_children())
+        for group in plan.groups:
+            title = plan and group.planned_winner_tags.get("title") if hasattr(group, "planned_winner_tags") else None
+            status = "Review" if group.review_flags else "Ready"
+            self.groups_tree.insert(
+                "",
+                "end",
+                iid=group.group_id,
+                values=(group.group_id, title or os.path.basename(group.winner_path), len(group.losers) + 1, status),
+                tags=("review",) if group.review_flags else (),
+            )
+        self.groups_tree.tag_configure("review", background="#fff3cd")
+        self.group_details.configure(state="normal")
+        self.group_details.delete("1.0", "end")
+        self.group_details.insert("end", "Select a group to view details.")
+        self.group_details.configure(state="disabled")
+
+    def _on_group_select(self, event=None) -> None:
+        sel = self.groups_tree.selection()
+        if not sel or not self._plan:
+            return
+        group_id = sel[0]
+        group = next((g for g in self._plan.groups if g.group_id == group_id), None)
+        if group:
+            self._render_group_details(group)
+
+    def _render_group_details(self, group) -> None:
+        lines = [
+            f"Winner: {group.winner_path}",
+            f"Losers: {len(group.losers)}",
+            "Dispositions:",
+        ]
+        for loser in group.losers:
+            disp = group.loser_disposition.get(loser, "quarantine")
+            playlist = group.playlist_rewrites.get(loser, "n/a")
+            lines.append(f"  - {loser} → {disp} (playlist → {playlist})")
+
+        lines.append("Quality rationale:")
+        for reason in group.winner_quality.get("reasons") or []:
+            lines.append(f"  • {reason}")
+
+        if group.review_flags:
+            lines.append("Review flags:")
+            for flag in group.review_flags:
+                lines.append(f"  ! {flag}")
+
+        lines.append("Tag changes:")
+        if not group.metadata_changes:
+            lines.append("  (none)")
+        else:
+            for key, diff in sorted(group.metadata_changes.items()):
+                lines.append(f"  {key}: {diff.get('from')} → {diff.get('to')}")
+
+        lines.append(
+            f"Playlist impact: {group.playlist_impact.playlists} playlists, {group.playlist_impact.entries} entries"
+        )
+
+        self.group_details.configure(state="normal")
+        self.group_details.delete("1.0", "end")
+        self.group_details.insert("end", "\n".join(lines))
+        self.group_details.configure(state="disabled")
 
     def _set_status(self, status: str, progress: float | None = None) -> None:
         self.status_var.set(status)
@@ -1631,27 +1709,140 @@ class DuplicateFinderShell(tk.Toplevel):
         self.playlist_path_var.set(chosen)
         self._log_action(f"Playlist folder updated to {chosen}")
 
+    def _demo_tracks(self, library_root: str) -> list[dict[str, object]]:
+        base = library_root or "/library"
+        return [
+            {
+                "path": os.path.join(base, "Album", "Track A (Master).flac"),
+                "fingerprint": "fp-demo-001",
+                "ext": ".flac",
+                "bitrate": 1100,
+                "sample_rate": 48000,
+                "bit_depth": 24,
+                "tags": {
+                    "title": "Track A",
+                    "album": "Demo Album",
+                    "album_type": "album",
+                    "track": 1,
+                    "artist": "Demo Artist",
+                    "cover_hash": "cover-a",
+                },
+            },
+            {
+                "path": os.path.join(base, "Album", "Track A (MP3).mp3"),
+                "fingerprint": "fp-demo-001",
+                "ext": ".mp3",
+                "bitrate": 320,
+                "sample_rate": 44100,
+                "bit_depth": 0,
+                "tags": {
+                    "title": "Track A",
+                    "album": "Demo Album",
+                    "track": 1,
+                    "artist": "Demo Artist",
+                    "albumartist": "Demo Artist",
+                },
+            },
+            {
+                "path": os.path.join(base, "Singles", "Track B (Single).m4a"),
+                "fingerprint": "fp-demo-002",
+                "ext": ".m4a",
+                "bitrate": 256,
+                "sample_rate": 44100,
+                "bit_depth": 0,
+                "tags": {
+                    "title": "Track B",
+                    "album": "Track B - Single",
+                    "album_type": "single",
+                    "track": 1,
+                    "artist": "Demo Artist",
+                    "artwork_hash": "art-b",
+                    "genre": "Indie",
+                },
+            },
+            {
+                "path": os.path.join(base, "Singles", "Track B (Lossless).flac"),
+                "fingerprint": "fp-demo-002",
+                "ext": ".flac",
+                "bitrate": 900,
+                "sample_rate": 44100,
+                "bit_depth": 24,
+                "tags": {
+                    "title": "Track B",
+                    "album": "Track B - Single",
+                    "album_type": "single",
+                    "track": 1,
+                    "artist": "Demo Artist",
+                    "cover_hash": "art-b",
+                    "genre": "Indie",
+                },
+            },
+        ]
+
+    def _generate_plan(self, write_preview: bool) -> None:
+        path = self._validate_library_root()
+        if not path:
+            return
+
+        tracks = self._demo_tracks(path)
+        self._set_status("Building plan…", progress=25)
+        plan = build_consolidation_plan(tracks)
+        self._plan = plan
+        self._update_groups_view(plan)
+
+        docs_dir = os.path.join(path, "Docs")
+        os.makedirs(docs_dir, exist_ok=True)
+        if write_preview:
+            html_path = os.path.join(docs_dir, "duplicate_preview.html")
+            json_path = os.path.join(docs_dir, "duplicate_preview.json")
+            render_consolidation_preview(plan, html_path)
+            export_consolidation_preview(plan, json_path)
+            self.preview_html_path = html_path
+            self.preview_json_path = json_path
+            self.open_preview_btn.config(state="normal")
+            self._log_action(f"Preview written to {html_path}")
+            self._log_action(f"Audit JSON written to {json_path}")
+            self._set_status("Preview generated", progress=100)
+        else:
+            self.preview_html_path = None
+            self.preview_json_path = None
+            self.open_preview_btn.config(state="disabled")
+            self._set_status("Plan ready", progress=100)
+
+        self._log_action(
+            f"Plan: {len(plan.groups)} groups, review required={plan.review_required_count}"
+        )
+        if plan.review_required_count:
+            self._log_action("Review required groups will block execution unless overridden.")
+
     def _handle_scan(self) -> None:
         path = self._validate_library_root()
         if not path:
             return
         self._log_action("Scan clicked")
-        self._set_status("Scanning", progress=25)
-        self._set_status("Ready", progress=100)
-        self._log_action("Scan stub completed (no files touched)")
+        self._generate_plan(write_preview=False)
 
     def _handle_preview(self) -> None:
-        path = self._validate_library_root()
-        if not path:
-            return
         self._log_action("Preview clicked")
-        self._set_status("Preview generated", progress=100)
+        self._generate_plan(write_preview=True)
 
     def _handle_execute(self) -> None:
         path = self._validate_library_root()
         if not path:
             return
-        self._log_action("Execute clicked")
+        if not self._plan:
+            messagebox.showwarning("Preview Required", "Generate a preview before executing.")
+            self._log_action("Execute blocked: no plan generated")
+            return
+        if self._plan.review_required_count and not self.override_review_var.get():
+            messagebox.showwarning(
+                "Review Required",
+                "Resolve review-required groups or check Override review blocks to proceed.",
+            )
+            self._log_action("Execute blocked: review required groups pending")
+            return
+
+        self._log_action("Execute clicked (no mutations; preview reused)")
         self._set_status("Executed", progress=100)
 
     def _toggle_update_playlists(self) -> None:
@@ -1661,6 +1852,15 @@ class DuplicateFinderShell(tk.Toplevel):
     def _toggle_quarantine(self) -> None:
         state = "enabled" if self.quarantine_var.get() else "disabled"
         self._log_action(f"Quarantine Duplicates {state}")
+
+    def _open_preview_output(self) -> None:
+        if not self.preview_html_path:
+            messagebox.showinfo("Preview", "No preview has been generated yet.")
+            return
+        if not os.path.exists(self.preview_html_path):
+            messagebox.showerror("Preview Missing", "Preview file could not be found. Generate a new preview.")
+            return
+        webbrowser.open(self.preview_html_path)
 
 class SoundVaultImporterApp(tk.Tk):
     def __init__(self):
