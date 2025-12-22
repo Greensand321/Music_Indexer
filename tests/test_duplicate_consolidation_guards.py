@@ -1,3 +1,4 @@
+import hashlib
 import os
 import threading
 
@@ -5,11 +6,21 @@ from duplicate_consolidation import PlaylistImpact, ConsolidationPlan, GroupPlan
 from duplicate_consolidation_executor import ExecutionConfig, execute_consolidation_plan
 
 
+def _snapshot(path):
+    data = path.read_bytes()
+    stat = path.stat()
+    return {"exists": True, "size": stat.st_size, "mtime": int(stat.st_mtime), "sha256": hashlib.sha256(data).hexdigest()}
+
+
 def _make_group(tmp_path, *, review_flags=None, disposition="quarantine"):
     winner = tmp_path / "winner.flac"
     loser = tmp_path / "loser.mp3"
     winner.write_text("winner")
     loser.write_text("loser")
+    snapshot = {
+        str(winner): _snapshot(winner),
+        str(loser): _snapshot(loser),
+    }
     return GroupPlan(
         group_id="g1",
         winner_path=str(winner),
@@ -36,6 +47,7 @@ def _make_group(tmp_path, *, review_flags=None, disposition="quarantine"):
         track_quality={str(winner): {}, str(loser): {}},
         group_confidence="High",
         artwork_evidence=[],
+        library_state=snapshot,
     )
 
 
@@ -96,4 +108,25 @@ def test_dry_run_execute_skips_loser_cleanup(tmp_path):
 
     assert result.success is True
     assert result.quarantine_index[str(tmp_path / "loser.mp3")] == "retained"
+    assert (tmp_path / "loser.mp3").exists()
+
+
+def test_execution_blocks_library_drift(tmp_path):
+    plan = ConsolidationPlan(groups=[_make_group(tmp_path, review_flags=[])])
+    loser_path = tmp_path / "loser.mp3"
+    loser_path.write_text("modified")
+
+    result = execute_consolidation_plan(plan, _config(tmp_path, allow_review_required=True))
+
+    assert result.success is False
+    assert loser_path.exists()
+
+
+def test_execution_blocks_signature_mismatch(tmp_path):
+    plan = ConsolidationPlan(groups=[_make_group(tmp_path, review_flags=[])])
+    plan.plan_signature = "tampered"
+
+    result = execute_consolidation_plan(plan, _config(tmp_path, allow_review_required=True))
+
+    assert result.success is False
     assert (tmp_path / "loser.mp3").exists()

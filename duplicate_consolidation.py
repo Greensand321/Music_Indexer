@@ -320,6 +320,31 @@ def _placeholder_present(tags: Mapping[str, object]) -> bool:
     return False
 
 
+def _capture_library_state(path: str) -> Dict[str, object]:
+    """Capture stable file attributes to detect changes between preview and execution."""
+
+    state: Dict[str, object] = {"exists": os.path.exists(path)}
+    if not state["exists"]:
+        return state
+    try:
+        stat = os.stat(path)
+        state["size"] = stat.st_size
+        state["mtime"] = int(stat.st_mtime)
+    except Exception as exc:  # pragma: no cover - depends on filesystem permissions
+        state["stat_error"] = str(exc)
+        return state
+
+    hasher = hashlib.sha256()
+    try:
+        with open(ensure_long_path(path), "rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                hasher.update(chunk)
+        state["sha256"] = hasher.hexdigest()
+    except Exception as exc:  # pragma: no cover - depends on filesystem permissions
+        state["hash_error"] = str(exc)
+    return state
+
+
 @dataclass
 class ArtworkCandidate:
     """Discovered artwork and its metadata."""
@@ -362,6 +387,7 @@ class DuplicateTrack:
     context_evidence: List[str] = field(default_factory=list)
     metadata_error: Optional[str] = None
     artwork_error: Optional[str] = None
+    library_state: Dict[str, object] = field(default_factory=dict)
 
     @property
     def cover_hash(self) -> str | None:
@@ -454,6 +480,7 @@ class GroupPlan:
     track_quality: Dict[str, Dict[str, object]]
     group_confidence: str
     artwork_evidence: List[str]
+    library_state: Dict[str, Dict[str, object]] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, object]:
         return {
@@ -482,6 +509,7 @@ class GroupPlan:
             "track_quality": {k: dict(v) for k, v in self.track_quality.items()},
             "group_confidence": self.group_confidence,
             "artwork_evidence": list(self.artwork_evidence),
+            "library_state": {k: dict(v) for k, v in self.library_state.items()},
         }
 
 
@@ -493,6 +521,8 @@ class ConsolidationPlan:
     review_flags: List[str] = field(default_factory=list)
     generated_at: datetime.datetime = field(default_factory=lambda: datetime.datetime.now(datetime.timezone.utc))
     placeholders_present: bool = False
+    source_snapshot: Dict[str, Dict[str, object]] = field(default_factory=dict)
+    plan_signature: str | None = None
 
     def to_dict(self) -> Dict[str, object]:
         return {
@@ -500,6 +530,8 @@ class ConsolidationPlan:
             "review_flags": list(self.review_flags),
             "generated_at": self.generated_at.isoformat(),
             "placeholders_present": self.placeholders_present,
+            "source_snapshot": {k: dict(v) for k, v in self.source_snapshot.items()},
+            "plan_signature": self.plan_signature,
         }
 
     @property
@@ -512,12 +544,31 @@ class ConsolidationPlan:
         """Return total number of review-required groups."""
         return len(self.review_required_groups)
 
+    def __post_init__(self) -> None:
+        if not self.source_snapshot:
+            snapshot: Dict[str, Dict[str, object]] = {}
+            for group in self.groups:
+                for path, state in group.library_state.items():
+                    snapshot[path] = dict(state)
+            self.source_snapshot = snapshot
+        if self.plan_signature is None:
+            canonical = json.dumps(
+                {
+                    "generated_at": self.generated_at.isoformat(),
+                    "groups": [g.to_dict() for g in self.groups],
+                    "snapshot": {k: dict(v) for k, v in self.source_snapshot.items()},
+                },
+                sort_keys=True,
+            )
+            self.plan_signature = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
 
 def _normalize_track(raw: Mapping[str, object]) -> DuplicateTrack:
     path = str(raw.get("path"))
     ext = os.path.splitext(path)[1].lower() or str(raw.get("ext", "")).lower()
     provided_tags = raw.get("tags") if isinstance(raw.get("tags"), Mapping) else {}
     current_tags, artwork, meta_err, art_err, audio_props = _read_tags_and_artwork(path, provided_tags)
+    library_state = _capture_library_state(path)
     provided_artwork: List[ArtworkCandidate] = []
     for art in raw.get("artwork", []) if isinstance(raw.get("artwork"), list) else []:
         try:
@@ -555,6 +606,7 @@ def _normalize_track(raw: Mapping[str, object]) -> DuplicateTrack:
         artwork=artwork,
         metadata_error=meta_err,
         artwork_error=art_err,
+        library_state=library_state,
     )
 
 
@@ -1066,6 +1118,7 @@ def build_consolidation_plan(
             group_review.append("Artwork extraction failed for at least one track.")
 
         playlist_impact = PlaylistImpact(playlists=len(losers), entries=len(losers))
+        track_states = {t.path: dict(t.library_state) for t in cluster}
 
         artwork_candidates: List[ArtworkCandidate] = []
         for t in cluster:
@@ -1104,6 +1157,7 @@ def build_consolidation_plan(
                 track_quality=track_quality,
                 group_confidence=group_confidence,
                 artwork_evidence=artwork_evidence,
+                library_state=track_states,
             )
         )
 
