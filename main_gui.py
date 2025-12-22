@@ -1444,45 +1444,223 @@ class ProgressDialog(tk.Toplevel):
 
 
 class DuplicateFinderShell(tk.Toplevel):
-    """Placeholder shell for the updated Duplicate Finder UI."""
+    """GUI-only shell for the refreshed Duplicate Finder workflow."""
 
     def __init__(self, parent: tk.Widget, library_path: str):
         super().__init__(parent)
         self.title("Duplicate Finder")
         self.transient(parent)
-        self.resizable(True, False)
+        self.resizable(True, True)
+
+        self.status_var = tk.StringVar(value="Idle")
+        self.progress_var = tk.DoubleVar(value=0)
+        self.library_path_var = tk.StringVar(value=library_path or "")
+        self.playlist_path_var = tk.StringVar(
+            value=self._default_playlist_folder(library_path)
+        )
+        self.update_playlists_var = tk.BooleanVar(value=False)
+        self.quarantine_var = tk.BooleanVar(value=True)
+
+        container = ttk.Frame(self)
+        container.pack(fill="both", expand=True, padx=10, pady=10)
 
         ttk.Label(
-            self,
+            container,
             text="Duplicate Finder",
-            font=("TkDefaultFont", 11, "bold"),
-        ).pack(anchor="w", padx=10, pady=(10, 4))
+            font=("TkDefaultFont", 12, "bold"),
+        ).pack(anchor="w")
         ttk.Label(
-            self,
-            text=(
-                "The Duplicate Finder is being redesigned. "
-                "This stub window replaces the previous tool while the new experience is built."
-            ),
-            wraplength=460,
-            justify="left",
-        ).pack(anchor="w", padx=10, pady=(0, 8))
+            container,
+            text="UI shell only – actions are stubbed and do not change your library.",
+            foreground="#555",
+            wraplength=520,
+        ).pack(anchor="w", pady=(0, 8))
 
+        # Library selection
+        lib_frame = ttk.LabelFrame(container, text="Library Selection")
+        lib_frame.pack(fill="x", pady=(0, 10))
+
+        lib_row = ttk.Frame(lib_frame)
+        lib_row.pack(fill="x", padx=8, pady=6)
+        ttk.Label(lib_row, text="Library Root").pack(side="left")
+        lib_entry = ttk.Entry(lib_row, textvariable=self.library_path_var, width=60)
+        lib_entry.pack(side="left", padx=6, expand=True, fill="x")
+        ttk.Button(lib_row, text="Browse…", command=self._browse_library).pack(
+            side="left"
+        )
+
+        playlist_row = ttk.Frame(lib_frame)
+        playlist_row.pack(fill="x", padx=8, pady=(0, 8))
+        ttk.Label(playlist_row, text="Playlist Folder").pack(side="left")
+        playlist_entry = ttk.Entry(
+            playlist_row, textvariable=self.playlist_path_var, width=60
+        )
+        playlist_entry.pack(side="left", padx=6, expand=True, fill="x")
+        ttk.Button(playlist_row, text="Browse…", command=self._browse_playlist).pack(
+            side="left"
+        )
+
+        # Controls
+        controls = ttk.Frame(container)
+        controls.pack(fill="x", pady=(0, 10))
+        ttk.Button(controls, text="Scan Library", command=self._handle_scan).pack(
+            side="left", padx=(0, 6)
+        )
+        ttk.Button(controls, text="Preview", command=self._handle_preview).pack(
+            side="left", padx=(0, 6)
+        )
+        ttk.Button(controls, text="Execute", command=self._handle_execute).pack(
+            side="left", padx=(0, 12)
+        )
+        ttk.Checkbutton(
+            controls,
+            text="Update Playlists",
+            variable=self.update_playlists_var,
+            command=self._toggle_update_playlists,
+        ).pack(side="left", padx=(0, 10))
+        ttk.Checkbutton(
+            controls,
+            text="Quarantine Duplicates",
+            variable=self.quarantine_var,
+            command=self._toggle_quarantine,
+        ).pack(side="left")
+
+        # Progress + status
+        status_frame = ttk.Frame(container)
+        status_frame.pack(fill="x", pady=(0, 10))
+        ttk.Progressbar(
+            status_frame,
+            maximum=100,
+            variable=self.progress_var,
+        ).pack(fill="x", padx=(0, 10), side="left", expand=True)
+        ttk.Label(status_frame, textvariable=self.status_var, width=18).pack(
+            side="left"
+        )
+
+        # Log box
+        log_box = ttk.LabelFrame(container, text="Log")
+        log_box.pack(fill="both", expand=True, pady=(0, 10))
+        self.log_text = ScrolledText(log_box, height=6, state="disabled")
+        self.log_text.pack(fill="both", expand=True, padx=6, pady=6)
+
+        # Results area
+        results = ttk.LabelFrame(container, text="Results")
+        results.pack(fill="both", expand=True)
+        results.columnconfigure(0, weight=1)
+        results.columnconfigure(1, weight=1)
+
+        groups_frame = ttk.LabelFrame(results, text="Duplicate Groups")
+        groups_frame.grid(row=0, column=0, sticky="nsew", padx=(6, 3), pady=6)
+        cols = ("group", "title", "count", "status")
+        self.groups_tree = ttk.Treeview(
+            groups_frame,
+            columns=cols,
+            show="headings",
+            height=8,
+        )
+        for cid, heading in zip(
+            cols, ("Group ID", "Track Title", "Count", "Status")
+        ):
+            self.groups_tree.heading(cid, text=heading)
+            width = 90 if cid in ("group", "count") else 160
+            self.groups_tree.column(cid, width=width, anchor="w")
+        self.groups_tree.pack(fill="both", expand=True, padx=6, pady=6)
+
+        inspector = ttk.LabelFrame(results, text="Group Details")
+        inspector.grid(row=0, column=1, sticky="nsew", padx=(3, 6), pady=6)
         ttk.Label(
-            self,
-            text=f"Library: {library_path or 'No library selected'}",
-            wraplength=460,
-            justify="left",
-        ).pack(anchor="w", padx=10, pady=(0, 8))
+            inspector,
+            text="Select a group to view details",
+            justify="center",
+            foreground="#555",
+        ).pack(fill="both", expand=True, padx=12, pady=12)
 
-        ttk.Label(
-            self,
-            text="No duplicate scans are performed from this stub.",
-            foreground="#666",
-            wraplength=460,
-            justify="left",
-        ).pack(anchor="w", padx=10)
+        self._log_action("Duplicate Finder shell initialized")
 
-        ttk.Button(self, text="Close", command=self.destroy).pack(pady=(0, 10))
+    def _default_playlist_folder(self, library_path: str) -> str:
+        if library_path:
+            candidate = os.path.join(library_path, "Playlists")
+            if os.path.isdir(candidate):
+                return candidate
+            return library_path
+        return ""
+
+    def _log_action(self, message: str) -> None:
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        line = f"{timestamp} {message}"
+        self.log_text.configure(state="normal")
+        self.log_text.insert("end", line + "\n")
+        self.log_text.see("end")
+        self.log_text.configure(state="disabled")
+
+    def _set_status(self, status: str, progress: float | None = None) -> None:
+        self.status_var.set(status)
+        if progress is not None:
+            self.progress_var.set(progress)
+
+    def _validate_library_root(self) -> str | None:
+        path = self.library_path_var.get().strip()
+        if not path:
+            messagebox.showwarning(
+                "Library Required", "Please select a library root before continuing."
+            )
+            self._log_action("Library validation failed: no library selected")
+            self._set_status("Idle", progress=0)
+            return None
+        if not os.path.isdir(path):
+            messagebox.showwarning(
+                "Library Missing", f"The selected library path does not exist:\n{path}"
+            )
+            self._log_action(f"Library validation failed: path not found ({path})")
+            self._set_status("Idle", progress=0)
+            return None
+        return path
+
+    def _browse_library(self) -> None:
+        chosen = filedialog.askdirectory(title="Select Library Root")
+        if not chosen:
+            return
+        self.library_path_var.set(chosen)
+        self.playlist_path_var.set(self._default_playlist_folder(chosen))
+        self._log_action(f"Library path updated to {chosen}")
+
+    def _browse_playlist(self) -> None:
+        chosen = filedialog.askdirectory(title="Select Playlist Folder")
+        if not chosen:
+            return
+        self.playlist_path_var.set(chosen)
+        self._log_action(f"Playlist folder updated to {chosen}")
+
+    def _handle_scan(self) -> None:
+        path = self._validate_library_root()
+        if not path:
+            return
+        self._log_action("Scan clicked")
+        self._set_status("Scanning", progress=25)
+        self._set_status("Ready", progress=100)
+        self._log_action("Scan stub completed (no files touched)")
+
+    def _handle_preview(self) -> None:
+        path = self._validate_library_root()
+        if not path:
+            return
+        self._log_action("Preview clicked")
+        self._set_status("Preview generated", progress=100)
+
+    def _handle_execute(self) -> None:
+        path = self._validate_library_root()
+        if not path:
+            return
+        self._log_action("Execute clicked")
+        self._set_status("Executed", progress=100)
+
+    def _toggle_update_playlists(self) -> None:
+        state = "enabled" if self.update_playlists_var.get() else "disabled"
+        self._log_action(f"Update Playlists {state}")
+
+    def _toggle_quarantine(self) -> None:
+        state = "enabled" if self.quarantine_var.get() else "disabled"
+        self._log_action(f"Quarantine Duplicates {state}")
 
 class SoundVaultImporterApp(tk.Tk):
     def __init__(self):
@@ -1960,8 +2138,8 @@ class SoundVaultImporterApp(tk.Tk):
         ttk.Label(
             df_container,
             text=(
-                "The Duplicate Finder is being refreshed. Launch the new shell to try "
-                "the updated experience when it becomes available."
+                "Preview the refreshed Duplicate Finder workflow. "
+                "This shell is UI-only for now and does not modify your library."
             ),
             wraplength=520,
             justify="left",
