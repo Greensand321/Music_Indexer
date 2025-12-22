@@ -13,6 +13,7 @@ execution pipeline is intentionally conservative:
 from __future__ import annotations
 
 import datetime
+import hashlib
 import importlib.util
 import json
 import os
@@ -22,7 +23,7 @@ import threading
 from dataclasses import dataclass, field
 from typing import Callable, Dict, Iterable, List, Mapping, MutableMapping, Sequence
 
-from duplicate_consolidation import ArtworkDirective, ConsolidationPlan
+from duplicate_consolidation import ArtworkDirective, ConsolidationPlan, _capture_library_state
 from indexer_control import IndexCancelled, cancel_event as global_cancel_event
 from utils.path_helpers import ensure_long_path
 
@@ -247,10 +248,11 @@ def _extract_artwork_bytes(path: str) -> bytes | None:
     return None
 
 
-def _apply_artwork(action: ArtworkDirective) -> bool:
+def _apply_artwork(action: ArtworkDirective) -> tuple[bool, str]:
     payload = _extract_artwork_bytes(action.source)
     if payload is None:
-        return False
+        return False, "No artwork payload available to embed."
+
     sidecar = f"{action.target}.artwork"
     directory = os.path.dirname(sidecar)
     os.makedirs(directory, exist_ok=True)
@@ -266,22 +268,61 @@ def _apply_artwork(action: ArtworkDirective) -> bool:
                 os.unlink(tmp_path)
             except OSError:
                 pass
+
     if MutagenFile is None:
-        return True
-    audio = MutagenFile(ensure_long_path(action.target))
+        return True, "Mutagen unavailable; wrote artwork sidecar only."
+
+    target_path = ensure_long_path(action.target)
+    audio = MutagenFile(target_path)
     if audio is None:
-        return True
+        return False, "Unsupported audio format for embedding."
+
+    ext = os.path.splitext(action.source)[1].lower()
+    mime = "image/jpeg"
+    if ext == ".png":
+        mime = "image/png"
+
     try:
-        pics = getattr(audio, "pictures", None)
-        if pics is not None:
-            pics.clear()
-            pics.append(payload)
-        elif hasattr(audio, "tags"):
-            audio.tags["APIC:Consolidation"] = payload
-        audio.save()
-    except Exception:
-        return False
-    return True
+        if hasattr(audio, "pictures"):
+            # FLAC/APE: replace front cover while preserving other pictures.
+            from mutagen.flac import Picture  # type: ignore
+
+            existing = [p for p in getattr(audio, "pictures") if getattr(p, "type", None) != 3]
+            pic = Picture()
+            pic.data = payload
+            pic.type = 3
+            pic.mime = mime
+            pic.desc = "Front cover"
+            audio.clear_pictures()
+            for p in existing:
+                audio.add_picture(p)
+            audio.add_picture(pic)
+            audio.save()
+            return True, "Embedded FLAC/APE picture."
+        if audio.__class__.__module__.startswith("mutagen.mp4"):
+            from mutagen.mp4 import MP4, MP4Cover  # type: ignore
+
+            mp4 = audio if isinstance(audio, MP4) else MP4(target_path)
+            cover_format = MP4Cover.FORMAT_PNG if mime == "image/png" else MP4Cover.FORMAT_JPEG
+            mp4["covr"] = [MP4Cover(payload, imageformat=cover_format)]
+            mp4.save()
+            return True, "Embedded MP4 cover atom."
+        # Default to ID3/APIC handling
+        from mutagen.id3 import APIC, ID3, ID3NoHeaderError  # type: ignore
+
+        try:
+            tags = ID3(target_path)
+        except ID3NoHeaderError:
+            tags = ID3()
+        preserved = [frame for frame in tags.getall("APIC") if getattr(frame, "type", None) != 3]
+        tags.delall("APIC")
+        for frame in preserved:
+            tags.add(frame)
+        tags.add(APIC(encoding=3, mime=mime, type=3, desc="Front cover", data=payload))
+        tags.save(target_path)
+        return True, "Embedded ID3 cover art."
+    except Exception as exc:
+        return False, f"Artwork embed failed: {exc}"
 
 
 def _apply_metadata(target: str, planned_tags: Mapping[str, object]) -> bool:
@@ -324,6 +365,31 @@ def _quarantine_path(path: str, quarantine_root: str, library_root: str) -> str:
     return dest
 
 
+def _compute_plan_signature(plan: ConsolidationPlan) -> str:
+    canonical = {
+        "generated_at": plan.generated_at.isoformat(),
+        "groups": [g.to_dict() for g in plan.groups],
+        "snapshot": {k: dict(v) for k, v in plan.source_snapshot.items()},
+    }
+    text = json.dumps(canonical, sort_keys=True)
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _detect_state_drift(expected: Mapping[str, object], actual: Mapping[str, object]) -> str | None:
+    if not expected:
+        return "Missing expected snapshot."
+    if not actual.get("exists"):
+        if expected.get("exists"):
+            return "File missing since preview."
+        return None
+    if expected.get("exists") is False and actual.get("exists"):
+        return "File appeared after preview."
+    for key in ("sha256", "size"):
+        if key in expected and key in actual and expected[key] != actual[key]:
+            return f"{key} mismatch (expected {expected.get(key)}, found {actual.get(key)})."
+    return None
+
+
 def execute_consolidation_plan(plan: ConsolidationPlan, config: ExecutionConfig) -> ExecutionResult:
     """Execute the provided consolidation plan with safety guarantees."""
 
@@ -346,12 +412,16 @@ def execute_consolidation_plan(plan: ConsolidationPlan, config: ExecutionConfig)
     loser_disposition: Dict[str, str] = {}
     artwork_actions: List[ArtworkDirective] = []
     planned_tags: Dict[str, Dict[str, object]] = {}
+    path_to_group: Dict[str, str] = {}
+    group_lookup: Dict[str, object] = {g.group_id: g for g in plan.groups}
 
     for group in plan.groups:
         planned_tags[group.winner_path] = dict(group.planned_winner_tags)
         for loser in group.losers:
             loser_to_winner[loser] = group.winner_path
             loser_disposition[loser] = group.loser_disposition.get(loser, "quarantine")
+            path_to_group[loser] = group.group_id
+        path_to_group[group.winner_path] = group.group_id
         artwork_actions.extend(group.artwork)
 
     def _record(step: str, target: str, status: str, detail: str, **metadata: object) -> None:
@@ -362,10 +432,48 @@ def execute_consolidation_plan(plan: ConsolidationPlan, config: ExecutionConfig)
             _record(stage, "execution", "cancelled", "Execution cancelled by user request.")
             raise IndexCancelled()
 
+    def _find_loser_references() -> Dict[str, List[str]]:
+        refs: Dict[str, List[str]] = {}
+        for playlist in _iter_playlists(playlists_dir):
+            try:
+                with open(playlist, "r", encoding="utf-8") as handle:
+                    lines = [ln.rstrip("\n") for ln in handle]
+            except FileNotFoundError:
+                continue
+            playlist_dir = os.path.dirname(playlist)
+            normalized = {_normalize_playlist_entry(ln, playlist_dir) for ln in lines if ln}
+            hits = sorted([loser for loser in loser_to_winner.keys() if loser in normalized])
+            if hits:
+                refs[playlist] = hits
+        return refs
+
     success = True
+    computed_signature = _compute_plan_signature(plan)
 
     try:
         _check_cancel("start")
+
+        if plan.plan_signature and plan.plan_signature != computed_signature:
+            success = False
+            _record(
+                "preflight",
+                "execution",
+                "blocked",
+                "Plan signature mismatch; rerun preview to regenerate the plan.",
+                expected_signature=plan.plan_signature,
+                computed_signature=computed_signature,
+            )
+            raise RuntimeError("Execution blocked: plan signature mismatch.")
+
+        if not plan.source_snapshot:
+            success = False
+            _record(
+                "preflight",
+                "execution",
+                "blocked",
+                "Plan missing source snapshot; rerun preview to capture library state.",
+            )
+            raise RuntimeError("Execution blocked: missing source snapshot.")
 
         if plan.review_required_count and not config.allow_review_required:
             success = False
@@ -391,6 +499,24 @@ def execute_consolidation_plan(plan: ConsolidationPlan, config: ExecutionConfig)
             )
             raise RuntimeError("Execution blocked: operation limit exceeded.")
 
+        drift: Dict[str, str] = {}
+        for path, expected in plan.source_snapshot.items():
+            actual = _capture_library_state(path)
+            delta = _detect_state_drift(expected, actual)
+            if delta:
+                drift[path] = delta
+        if drift:
+            success = False
+            for path, reason in drift.items():
+                _record(
+                    "preflight",
+                    path,
+                    "failed",
+                    f"Library changed since preview: {reason}",
+                    group_id=path_to_group.get(path),
+                )
+            raise RuntimeError("Execution blocked: library drift detected.")
+
         has_deletions = any(disposition == "delete" for disposition in loser_disposition.values())
         if has_deletions and not (config.allow_deletion or config.dry_run_execute):
             success = False
@@ -405,6 +531,7 @@ def execute_consolidation_plan(plan: ConsolidationPlan, config: ExecutionConfig)
 
         # Step 1: backup playlists that will change
         impacted: List[str] = []
+        playlist_groups: Dict[str, set[str]] = {}
         for playlist in _iter_playlists(playlists_dir):
             try:
                 with open(playlist, "r", encoding="utf-8") as handle:
@@ -413,14 +540,25 @@ def execute_consolidation_plan(plan: ConsolidationPlan, config: ExecutionConfig)
                 continue
             playlist_dir = os.path.dirname(playlist)
             normalized = {_normalize_playlist_entry(ln, playlist_dir) for ln in lines if ln}
-            if normalized & loser_to_winner.keys():
+            affected = normalized & loser_to_winner.keys()
+            if affected:
                 impacted.append(playlist)
+                playlist_groups[playlist] = {path_to_group.get(path, "") for path in affected if path in path_to_group}
 
+        playlist_backups: Dict[str, str] = {}
         for playlist in impacted:
             _check_cancel("backup_playlists")
             try:
                 backup_path = _backup_playlist(playlist, backups_dir)
-                _record("backup_playlists", playlist, "success", "Playlist backed up.", backup_path=backup_path)
+                playlist_backups[playlist] = backup_path
+                _record(
+                    "backup_playlists",
+                    playlist,
+                    "success",
+                    "Playlist backed up.",
+                    backup_path=backup_path,
+                    group_ids=sorted(g for g in playlist_groups.get(playlist, []) if g),
+                )
             except Exception as exc:
                 success = False
                 _record("backup_playlists", playlist, "failed", f"Failed to backup playlist: {exc}")
@@ -434,25 +572,38 @@ def execute_consolidation_plan(plan: ConsolidationPlan, config: ExecutionConfig)
                 playlist_results.append(
                     PlaylistRewriteResult(
                         playlist=playlist,
-                        backup_path=_backup_playlist(playlist, backups_dir),
+                        backup_path=playlist_backups.get(playlist, _backup_playlist(playlist, backups_dir)),
                         replaced_entries=0,
                         status="skipped",
                         detail="No matching loser entries found.",
                     )
                 )
-                _record("rewrite_playlists", playlist, "skipped", "No entries required updates.")
+                _record(
+                    "rewrite_playlists",
+                    playlist,
+                    "skipped",
+                    "No entries required updates.",
+                    group_ids=sorted(g for g in playlist_groups.get(playlist, []) if g),
+                )
                 continue
             try:
                 _write_playlist_atomic(playlist, new_lines)
                 playlist_results.append(
                     PlaylistRewriteResult(
                         playlist=playlist,
-                        backup_path=os.path.join(backups_dir, os.path.relpath(playlist, playlists_dir)),
+                        backup_path=playlist_backups.get(playlist, os.path.join(backups_dir, os.path.relpath(playlist, playlists_dir))),
                         replaced_entries=replaced,
                         status="success",
                     )
                 )
-                _record("rewrite_playlists", playlist, "success", "Playlist rewritten.", replaced=replaced)
+                _record(
+                    "rewrite_playlists",
+                    playlist,
+                    "success",
+                    "Playlist rewritten.",
+                    replaced=replaced,
+                    group_ids=sorted(g for g in playlist_groups.get(playlist, []) if g),
+                )
             except Exception as exc:
                 success = False
                 _record("rewrite_playlists", playlist, "failed", f"Failed to rewrite playlist: {exc}")
@@ -474,19 +625,47 @@ def execute_consolidation_plan(plan: ConsolidationPlan, config: ExecutionConfig)
                         "failed",
                         "Playlist validation failed; restored backup.",
                         missing=missing,
+                        group_ids=sorted(g for g in playlist_groups.get(result.playlist, []) if g),
                     )
                 raise RuntimeError(f"Playlist validation failed for {result.playlist}")
-            _record("validate_playlists", result.playlist, "success", "Playlist validated.")
+            _record(
+                "validate_playlists",
+                result.playlist,
+                "success",
+                "Playlist validated.",
+                group_ids=sorted(g for g in playlist_groups.get(result.playlist, []) if g),
+            )
+
+        lingering_refs = _find_loser_references()
+        if lingering_refs:
+            success = False
+            for playlist, losers in lingering_refs.items():
+                _record(
+                    "validate_playlists",
+                    playlist,
+                    "failed",
+                    "Loser references remain after rewrite; aborting cleanup.",
+                    losers=losers,
+                    group_ids=sorted({path_to_group.get(l, "") for l in losers if l in path_to_group}),
+                )
+            raise RuntimeError("Playlist rewrites incomplete; loser references remain.")
 
         # Step 4: apply artwork transfers
         if config.apply_artwork:
             for art in artwork_actions:
                 _check_cancel("artwork")
-                ok = _apply_artwork(art)
+                ok, detail = _apply_artwork(art)
                 status = "success" if ok else "failed"
                 if not ok:
                     success = False
-                _record("artwork", art.target, status, art.reason, source=art.source)
+                _record(
+                    "artwork",
+                    art.target,
+                    status,
+                    detail or art.reason,
+                    source=art.source,
+                    group_id=path_to_group.get(art.target),
+                )
                 if not ok:
                     raise RuntimeError(f"Artwork copy failed for {art.target}")
 
@@ -498,7 +677,7 @@ def execute_consolidation_plan(plan: ConsolidationPlan, config: ExecutionConfig)
                 status = "success" if ok else "failed"
                 if not ok:
                     success = False
-                _record("metadata", target, status, "Metadata normalized.")
+                _record("metadata", target, status, "Metadata normalized.", group_id=path_to_group.get(target))
                 if not ok:
                     raise RuntimeError(f"Metadata normalization failed for {target}")
 
@@ -513,6 +692,7 @@ def execute_consolidation_plan(plan: ConsolidationPlan, config: ExecutionConfig)
                     "skipped",
                     "Dry-run execute enabled; loser not moved or deleted.",
                     disposition=disposition,
+                    group_id=path_to_group.get(loser),
                 )
                 continue
             if disposition == "delete":
@@ -520,10 +700,22 @@ def execute_consolidation_plan(plan: ConsolidationPlan, config: ExecutionConfig)
                     if os.path.exists(loser):
                         os.remove(loser)
                     quarantine_index[loser] = "deleted"
-                    _record("loser_cleanup", loser, "success", "Loser deleted.")
+                    _record(
+                        "loser_cleanup",
+                        loser,
+                        "success",
+                        "Loser deleted.",
+                        group_id=path_to_group.get(loser),
+                    )
                 except Exception as exc:
                     success = False
-                    _record("loser_cleanup", loser, "failed", f"Failed to delete loser: {exc}")
+                    _record(
+                        "loser_cleanup",
+                        loser,
+                        "failed",
+                        f"Failed to delete loser: {exc}",
+                        group_id=path_to_group.get(loser),
+                    )
                     raise
             else:
                 dest = _quarantine_path(loser, quarantine_dir, config.library_root)
@@ -531,10 +723,23 @@ def execute_consolidation_plan(plan: ConsolidationPlan, config: ExecutionConfig)
                     if os.path.exists(loser):
                         shutil.move(loser, dest)
                     quarantine_index[loser] = dest
-                    _record("loser_cleanup", loser, "success", "Loser quarantined.", quarantine_path=dest)
+                    _record(
+                        "loser_cleanup",
+                        loser,
+                        "success",
+                        "Loser quarantined.",
+                        quarantine_path=dest,
+                        group_id=path_to_group.get(loser),
+                    )
                 except Exception as exc:
                     success = False
-                    _record("loser_cleanup", loser, "failed", f"Failed to quarantine loser: {exc}")
+                    _record(
+                        "loser_cleanup",
+                        loser,
+                        "failed",
+                        f"Failed to quarantine loser: {exc}",
+                        group_id=path_to_group.get(loser),
+                    )
                     raise
     except IndexCancelled:
         success = False
@@ -550,6 +755,9 @@ def execute_consolidation_plan(plan: ConsolidationPlan, config: ExecutionConfig)
             "success": success,
             "actions": [a.to_dict() for a in actions],
             "generated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "plan_signature": plan.plan_signature or computed_signature,
+            "computed_signature": computed_signature,
+            "source_snapshot": {k: dict(v) for k, v in plan.source_snapshot.items()},
         }
         playlist_payload = {
             "backups_dir": backups_dir,
@@ -565,31 +773,73 @@ def execute_consolidation_plan(plan: ConsolidationPlan, config: ExecutionConfig)
             pass
 
         try:
+            actions_by_group: Dict[str, List[ExecutionAction]] = {}
+            for action in actions:
+                meta = action.metadata or {}
+                group_ids: set[str] = set()
+                gid = meta.get("group_id")
+                if isinstance(gid, str) and gid:
+                    group_ids.add(gid)
+                meta_groups = meta.get("group_ids")
+                if isinstance(meta_groups, (list, tuple, set)):
+                    group_ids.update([g for g in meta_groups if isinstance(g, str) and g])
+                if not group_ids:
+                    actions_by_group.setdefault("__general__", []).append(action)
+                else:
+                    for gid in group_ids:
+                        actions_by_group.setdefault(gid, []).append(action)
+
             html_lines = [
-                "<html><head><title>Duplicate Consolidation Execution</title></head><body>",
+                "<html><head><title>Duplicate Consolidation Execution</title>",
+                "<style>",
+                "body{font-family:Arial,sans-serif;margin:18px;}",
+                ".group{border:1px solid #ddd;padding:12px;margin-bottom:10px;border-radius:6px;}",
+                ".status-success{color:#1b7a1b;}",
+                ".status-failed{color:#a30000;}",
+                ".muted{color:#666;font-size:0.9em;}",
+                "ul{margin-top:6px;}",
+                "</style></head><body>",
                 "<h1>Execution Report</h1>",
                 f"<p>Status: {'success' if success else 'failed'}</p>",
-                "<ul>",
+                f"<p class='muted'>Plan signature: {plan.plan_signature or computed_signature}</p>",
+                f"<p class='muted'>Reports directory: {reports_dir}</p>",
             ]
-            for action in actions:
-                html_lines.append(
-                    f"<li><strong>{action.step}</strong> — {action.target}: {action.status} ({action.detail})"  # noqa: E501
-                    "</li>"
-                )
-            html_lines.append("</ul>")
+
+            for gid in sorted([g for g in actions_by_group.keys() if g != "__general__"]):
+                grp = group_lookup.get(gid)
+                winner_path = getattr(grp, "winner_path", "Unknown winner")
+                html_lines.append(f"<div class='group'><h2>Group {gid}</h2>")
+                html_lines.append(f"<p class='muted'>Winner: {winner_path}</p>")
+                html_lines.append("<ul>")
+                for act in actions_by_group.get(gid, []):
+                    html_lines.append(
+                        f"<li><strong>{act.step}</strong> — {act.target}: "
+                        f"<span class='status-{act.status}'>{act.status}</span> ({act.detail})</li>"
+                    )
+                html_lines.append("</ul></div>")
+
+            if actions_by_group.get("__general__"):
+                html_lines.append("<div class='group'><h2>General Actions</h2><ul>")
+                for act in actions_by_group["__general__"]:
+                    html_lines.append(
+                        f"<li><strong>{act.step}</strong> — {act.target}: "
+                        f"<span class='status-{act.status}'>{act.status}</span> ({act.detail})</li>"
+                    )
+                html_lines.append("</ul></div>")
+
             if playlist_results:
-                html_lines.append("<h2>Playlist Changes</h2><ul>")
+                html_lines.append("<div class='group'><h2>Playlist Changes</h2><ul>")
                 for res in playlist_results:
                     html_lines.append(
-                        f"<li>{res.playlist} → {res.status} (replaced {res.replaced_entries}); "
-                        f"backup: {res.backup_path}</li>"
+                        f"<li>{res.playlist} → {res.status} "
+                        f"(replaced {res.replaced_entries}); backup: {res.backup_path}</li>"
                     )
-                html_lines.append("</ul>")
+                html_lines.append("</ul></div>")
             if quarantine_index:
-                html_lines.append("<h2>Quarantined/Deleted</h2><ul>")
+                html_lines.append("<div class='group'><h2>Quarantined/Deleted</h2><ul>")
                 for loser, dest in quarantine_index.items():
                     html_lines.append(f"<li>{loser} → {dest}</li>")
-                html_lines.append("</ul>")
+                html_lines.append("</ul></div>")
             html_lines.append("</body></html>")
             _atomic_write_text(html_report_path, "\n".join(html_lines))
         except Exception:
