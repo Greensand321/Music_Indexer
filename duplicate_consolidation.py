@@ -25,6 +25,16 @@ DEFAULT_DISTANCE_THRESHOLD = 0.0
 DEFAULT_MAX_CANDIDATES = 5000
 DEFAULT_MAX_COMPARISONS = 50_000
 DEFAULT_TIMEOUT_SEC = 15.0
+REVIEW_KEYWORDS = (
+    "remix",
+    "edit",
+    "version",
+    "sped up",
+    "slowed",
+    "nightcore",
+    "speed up",
+    "speed-up",
+)
 
 
 def _now() -> float:
@@ -219,6 +229,16 @@ def _stable_group_id(paths: Sequence[str]) -> str:
     return hashlib.sha1(canonical.encode("utf-8")).hexdigest()[:12]
 
 
+def _has_review_keyword(track: DuplicateTrack) -> bool:
+    title = ""
+    tags = track.tags or {}
+    if isinstance(tags, Mapping):
+        title = str(tags.get("title") or tags.get("name") or "").lower()
+    if not title:
+        title = os.path.splitext(os.path.basename(track.path))[0].lower()
+    return any(keyword in title for keyword in REVIEW_KEYWORDS)
+
+
 def _select_metadata_source(candidates: Sequence[DuplicateTrack], contexts: Mapping[str, str]) -> DuplicateTrack | None:
     album_candidates = [c for c in candidates if contexts.get(c.path) == "album"]
     sorted_cands = sorted(
@@ -304,12 +324,11 @@ def _artwork_score(track: DuplicateTrack) -> tuple:
         size_hint,
         track.bitrate,
         track.sample_rate,
-        track.path.lower(),
     )
 
 
 def _select_artwork_candidate(candidates: Sequence[DuplicateTrack]) -> tuple[DuplicateTrack | None, bool]:
-    ranked = sorted(candidates, key=_artwork_score, reverse=True)
+    ranked = sorted(candidates, key=lambda t: (_artwork_score(t), t.path.lower()), reverse=True)
     if not ranked:
         return None, False
     if len(ranked) == 1:
@@ -353,6 +372,12 @@ def _cluster_duplicates(
                 or comparisons >= max_comparisons
                 or (timeout_sec and (_now() - start_time) > timeout_sec)
             ):
+                if cancel_event.is_set() and "Consolidation planning cancelled or timed out during grouping." not in review_flags:
+                    review_flags.append("Consolidation planning cancelled or timed out during grouping.")
+                elif comparisons >= max_comparisons and "Comparison budget reached; grouping may be incomplete." not in review_flags:
+                    review_flags.append("Comparison budget reached; grouping may be incomplete.")
+                elif timeout_sec and (_now() - start_time) > timeout_sec and "Consolidation planning timed out while grouping." not in review_flags:
+                    review_flags.append("Consolidation planning timed out while grouping.")
                 break
             if track.path in used:
                 continue
@@ -446,10 +471,10 @@ def build_consolidation_plan(
         if best_art and (not winner.cover_hash or winner.cover_hash != best_art.cover_hash):
             reason = "Copy single artwork to preserve release look"
             artwork_actions.append(ArtworkDirective(source=best_art.path, target=winner.path, reason=reason))
-            if ambiguous_art:
-                review_flags.append(
-                    f"Artwork selection ambiguous for group {_stable_group_id([t.path for t in cluster])}."
-                )
+        if ambiguous_art:
+            review_flags.append(f"Artwork selection ambiguous for group {_stable_group_id([t.path for t in cluster])}.")
+        if not best_art and not winner.cover_hash:
+            review_flags.append(f"No artwork available for group {_stable_group_id([t.path for t in cluster])}.")
 
         dispositions = {loser: "quarantine" for loser in losers}
         playlist_map = {loser: winner.path for loser in losers}
@@ -460,6 +485,8 @@ def build_consolidation_plan(
             group_review.append("Artwork selection requires review.")
         if not losers:
             group_review.append("No losers to consolidate.")
+        if any(_has_review_keyword(t) for t in cluster):
+            group_review.append("Contains remix/sped-up variant indicators; review recommended.")
 
         playlist_impact = PlaylistImpact(playlists=len(losers), entries=len(losers))
 

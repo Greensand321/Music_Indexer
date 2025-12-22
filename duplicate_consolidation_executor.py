@@ -49,6 +49,11 @@ class ExecutionConfig:
     log_callback: Callable[[str], None] | None = None
     apply_metadata: bool = True
     apply_artwork: bool = True
+    allow_review_required: bool = False
+    operation_limit: int | None = 500
+    confirm_operation_overage: bool = False
+    allow_deletion: bool = False
+    dry_run_execute: bool = False
 
 
 @dataclass
@@ -359,6 +364,42 @@ def execute_consolidation_plan(plan: ConsolidationPlan, config: ExecutionConfig)
     try:
         _check_cancel("start")
 
+        if plan.review_required_count and not config.allow_review_required:
+            success = False
+            _record(
+                "preflight",
+                "execution",
+                "blocked",
+                "Review-required groups present; enable override to continue.",
+                review_required=plan.review_required_count,
+            )
+            raise RuntimeError("Execution blocked: review-required groups present.")
+
+        planned_operations = len(loser_to_winner) + len(artwork_actions) + len(planned_tags)
+        if config.operation_limit and planned_operations > config.operation_limit and not config.confirm_operation_overage:
+            success = False
+            _record(
+                "preflight",
+                "execution",
+                "blocked",
+                "Planned operations exceed configured limit.",
+                planned_operations=planned_operations,
+                operation_limit=config.operation_limit,
+            )
+            raise RuntimeError("Execution blocked: operation limit exceeded.")
+
+        has_deletions = any(disposition == "delete" for disposition in loser_disposition.values())
+        if has_deletions and not (config.allow_deletion or config.dry_run_execute):
+            success = False
+            _record(
+                "preflight",
+                "execution",
+                "blocked",
+                "Deletion requested but confirmation not provided.",
+                deletions_requested=sum(1 for d in loser_disposition.values() if d == "delete"),
+            )
+            raise RuntimeError("Execution blocked: deletions require confirmation.")
+
         # Step 1: backup playlists that will change
         impacted: List[str] = []
         for playlist in _iter_playlists(playlists_dir):
@@ -461,6 +502,16 @@ def execute_consolidation_plan(plan: ConsolidationPlan, config: ExecutionConfig)
         # Step 6: quarantine or delete losers
         for loser, disposition in loser_disposition.items():
             _check_cancel("loser_cleanup")
+            if config.dry_run_execute:
+                quarantine_index[loser] = "retained"
+                _record(
+                    "loser_cleanup",
+                    loser,
+                    "skipped",
+                    "Dry-run execute enabled; loser not moved or deleted.",
+                    disposition=disposition,
+                )
+                continue
             if disposition == "delete":
                 try:
                     if os.path.exists(loser):
@@ -557,4 +608,3 @@ def execute_consolidation_plan(plan: ConsolidationPlan, config: ExecutionConfig)
         quarantine_index=quarantine_index,
         report_paths=report_paths,
     )
-
