@@ -57,6 +57,7 @@ class ExecutionConfig:
     operation_limit: int | None = 500
     confirm_operation_overage: bool = False
     allow_deletion: bool = False
+    confirm_deletion: bool = False
     dry_run_execute: bool = False
 
 
@@ -89,6 +90,7 @@ class PlaylistRewriteResult:
     replaced_entries: int
     status: str
     detail: str = ""
+    original_playlist: str | None = None
 
     def to_dict(self) -> Dict[str, object]:
         return {
@@ -97,6 +99,7 @@ class PlaylistRewriteResult:
             "replaced_entries": self.replaced_entries,
             "status": self.status,
             "detail": self.detail,
+            "original_playlist": self.original_playlist,
         }
 
 
@@ -157,8 +160,8 @@ def _normalize_playlist_entry(entry: str, playlist_dir: str) -> str:
     return os.path.normpath(os.path.join(playlist_dir, entry))
 
 
-def _rewrite_playlist(path: str, mapping: Mapping[str, str]) -> tuple[int, List[str]]:
-    playlist_dir = os.path.dirname(path)
+def _rewrite_playlist(path: str, mapping: Mapping[str, str], *, base_dir: str | None = None) -> tuple[int, List[str]]:
+    playlist_dir = base_dir or os.path.dirname(path)
     replaced = 0
     try:
         with open(path, "r", encoding="utf-8") as handle:
@@ -197,8 +200,8 @@ def _write_playlist_atomic(path: str, lines: Sequence[str]) -> None:
                 pass
 
 
-def _validate_playlist(path: str) -> List[str]:
-    playlist_dir = os.path.dirname(path)
+def _validate_playlist(path: str, *, base_dir: str | None = None) -> List[str]:
+    playlist_dir = base_dir or os.path.dirname(path)
     try:
         with open(path, "r", encoding="utf-8") as handle:
             lines = [ln.rstrip("\n") for ln in handle]
@@ -402,6 +405,7 @@ def execute_consolidation_plan(plan: ConsolidationPlan, config: ExecutionConfig)
     run_root = _timestamped_dir(config.reports_dir)
     reports_dir = os.path.join(run_root, "reports")
     backups_dir = os.path.join(run_root, "playlist_backups")
+    validation_playlists_dir = os.path.join(run_root, "playlist_validation")
     os.makedirs(reports_dir, exist_ok=True)
     os.makedirs(backups_dir, exist_ok=True)
 
@@ -414,6 +418,8 @@ def execute_consolidation_plan(plan: ConsolidationPlan, config: ExecutionConfig)
     planned_tags: Dict[str, Dict[str, object]] = {}
     path_to_group: Dict[str, str] = {}
     group_lookup: Dict[str, object] = {g.group_id: g for g in plan.groups}
+    playlist_targets: Dict[str, str] = {}
+    playlist_base_dirs: Dict[str, str] = {}
 
     for group in plan.groups:
         planned_tags[group.winner_path] = dict(group.planned_winner_tags)
@@ -432,15 +438,18 @@ def execute_consolidation_plan(plan: ConsolidationPlan, config: ExecutionConfig)
             _record(stage, "execution", "cancelled", "Execution cancelled by user request.")
             raise IndexCancelled()
 
-    def _find_loser_references() -> Dict[str, List[str]]:
+    def _find_loser_references(
+        working_playlists: Mapping[str, str],
+        playlist_base_dirs: Mapping[str, str] | None,
+    ) -> Dict[str, List[str]]:
         refs: Dict[str, List[str]] = {}
-        for playlist in _iter_playlists(playlists_dir):
+        for playlist, working_path in working_playlists.items():
             try:
-                with open(playlist, "r", encoding="utf-8") as handle:
+                with open(working_path, "r", encoding="utf-8") as handle:
                     lines = [ln.rstrip("\n") for ln in handle]
             except FileNotFoundError:
                 continue
-            playlist_dir = os.path.dirname(playlist)
+            playlist_dir = (playlist_base_dirs or {}).get(playlist) or os.path.dirname(working_path)
             normalized = {_normalize_playlist_entry(ln, playlist_dir) for ln in lines if ln}
             hits = sorted([loser for loser in loser_to_winner.keys() if loser in normalized])
             if hits:
@@ -475,7 +484,7 @@ def execute_consolidation_plan(plan: ConsolidationPlan, config: ExecutionConfig)
             )
             raise RuntimeError("Execution blocked: missing source snapshot.")
 
-        if plan.review_required_count and not config.allow_review_required:
+        if plan.requires_review and not config.allow_review_required:
             success = False
             _record(
                 "preflight",
@@ -518,16 +527,17 @@ def execute_consolidation_plan(plan: ConsolidationPlan, config: ExecutionConfig)
             raise RuntimeError("Execution blocked: library drift detected.")
 
         has_deletions = any(disposition == "delete" for disposition in loser_disposition.values())
-        if has_deletions and not (config.allow_deletion or config.dry_run_execute):
-            success = False
-            _record(
-                "preflight",
-                "execution",
-                "blocked",
-                "Deletion requested but confirmation not provided.",
-                deletions_requested=sum(1 for d in loser_disposition.values() if d == "delete"),
-            )
-            raise RuntimeError("Execution blocked: deletions require confirmation.")
+        if has_deletions and not config.dry_run_execute:
+            if not (config.allow_deletion and config.confirm_deletion):
+                success = False
+                _record(
+                    "preflight",
+                    "execution",
+                    "blocked",
+                    "Deletion requested but explicit confirmation was not provided.",
+                    deletions_requested=sum(1 for d in loser_disposition.values() if d == "delete"),
+                )
+                raise RuntimeError("Execution blocked: deletions require confirmation.")
 
         # Step 1: backup playlists that will change
         impacted: List[str] = []
@@ -549,16 +559,34 @@ def execute_consolidation_plan(plan: ConsolidationPlan, config: ExecutionConfig)
         for playlist in impacted:
             _check_cancel("backup_playlists")
             try:
-                backup_path = _backup_playlist(playlist, backups_dir)
-                playlist_backups[playlist] = backup_path
-                _record(
-                    "backup_playlists",
-                    playlist,
-                    "success",
-                    "Playlist backed up.",
-                    backup_path=backup_path,
-                    group_ids=sorted(g for g in playlist_groups.get(playlist, []) if g),
-                )
+                if config.dry_run_execute:
+                    working_copy = os.path.join(validation_playlists_dir, os.path.relpath(playlist, playlists_dir))
+                    os.makedirs(os.path.dirname(working_copy), exist_ok=True)
+                    shutil.copy2(playlist, working_copy)
+                    playlist_backups[playlist] = working_copy
+                    playlist_targets[playlist] = working_copy
+                    playlist_base_dirs[playlist] = os.path.dirname(playlist)
+                    _record(
+                        "backup_playlists",
+                        playlist,
+                        "success",
+                        "Playlist copied for dry-run validation.",
+                        backup_path=working_copy,
+                        group_ids=sorted(g for g in playlist_groups.get(playlist, []) if g),
+                    )
+                else:
+                    backup_path = _backup_playlist(playlist, backups_dir)
+                    playlist_backups[playlist] = backup_path
+                    playlist_targets[playlist] = playlist
+                    playlist_base_dirs[playlist] = os.path.dirname(playlist)
+                    _record(
+                        "backup_playlists",
+                        playlist,
+                        "success",
+                        "Playlist backed up.",
+                        backup_path=backup_path,
+                        group_ids=sorted(g for g in playlist_groups.get(playlist, []) if g),
+                    )
             except Exception as exc:
                 success = False
                 _record("backup_playlists", playlist, "failed", f"Failed to backup playlist: {exc}")
@@ -567,52 +595,65 @@ def execute_consolidation_plan(plan: ConsolidationPlan, config: ExecutionConfig)
         # Step 2: rewrite playlists
         for playlist in impacted:
             _check_cancel("rewrite_playlists")
-            replaced, new_lines = _rewrite_playlist(playlist, loser_to_winner)
+            target_playlist = playlist_targets.get(playlist, playlist)
+            base_dir = playlist_base_dirs.get(playlist, os.path.dirname(target_playlist))
+            replaced, new_lines = _rewrite_playlist(target_playlist, loser_to_winner, base_dir=base_dir)
             if replaced == 0:
                 playlist_results.append(
                     PlaylistRewriteResult(
-                        playlist=playlist,
+                        playlist=target_playlist,
                         backup_path=playlist_backups.get(playlist, _backup_playlist(playlist, backups_dir)),
                         replaced_entries=0,
                         status="skipped",
-                        detail="No matching loser entries found.",
+                        detail="No matching loser entries found." + (" (dry-run copy)" if config.dry_run_execute else ""),
+                        original_playlist=playlist if target_playlist != playlist else None,
                     )
                 )
                 _record(
                     "rewrite_playlists",
-                    playlist,
+                    target_playlist,
                     "skipped",
                     "No entries required updates.",
                     group_ids=sorted(g for g in playlist_groups.get(playlist, []) if g),
+                    original_playlist=playlist if target_playlist != playlist else None,
                 )
                 continue
             try:
-                _write_playlist_atomic(playlist, new_lines)
+                _write_playlist_atomic(target_playlist, new_lines)
                 playlist_results.append(
                     PlaylistRewriteResult(
-                        playlist=playlist,
-                        backup_path=playlist_backups.get(playlist, os.path.join(backups_dir, os.path.relpath(playlist, playlists_dir))),
+                        playlist=target_playlist,
+                        backup_path=playlist_backups.get(
+                            playlist,
+                            os.path.join(
+                                backups_dir,
+                                os.path.relpath(playlist, playlists_dir),
+                            ),
+                        ),
                         replaced_entries=replaced,
                         status="success",
+                        original_playlist=playlist if target_playlist != playlist else None,
                     )
                 )
                 _record(
                     "rewrite_playlists",
-                    playlist,
+                    target_playlist,
                     "success",
                     "Playlist rewritten.",
                     replaced=replaced,
                     group_ids=sorted(g for g in playlist_groups.get(playlist, []) if g),
+                    original_playlist=playlist if target_playlist != playlist else None,
                 )
             except Exception as exc:
                 success = False
-                _record("rewrite_playlists", playlist, "failed", f"Failed to rewrite playlist: {exc}")
+                _record("rewrite_playlists", target_playlist, "failed", f"Failed to rewrite playlist: {exc}")
                 raise
 
         # Step 3: validate rewritten playlists
         for result in playlist_results:
             _check_cancel("validate_playlists")
-            missing = _validate_playlist(result.playlist)
+            base_dir = playlist_base_dirs.get(result.original_playlist or result.playlist, os.path.dirname(result.playlist))
+            missing = _validate_playlist(result.playlist, base_dir=base_dir)
             if missing:
                 success = False
                 try:
@@ -625,7 +666,8 @@ def execute_consolidation_plan(plan: ConsolidationPlan, config: ExecutionConfig)
                         "failed",
                         "Playlist validation failed; restored backup.",
                         missing=missing,
-                        group_ids=sorted(g for g in playlist_groups.get(result.playlist, []) if g),
+                        group_ids=sorted(g for g in playlist_groups.get(result.original_playlist or result.playlist, []) if g),
+                        original_playlist=result.original_playlist,
                     )
                 raise RuntimeError(f"Playlist validation failed for {result.playlist}")
             _record(
@@ -633,10 +675,11 @@ def execute_consolidation_plan(plan: ConsolidationPlan, config: ExecutionConfig)
                 result.playlist,
                 "success",
                 "Playlist validated.",
-                group_ids=sorted(g for g in playlist_groups.get(result.playlist, []) if g),
+                group_ids=sorted(g for g in playlist_groups.get(result.original_playlist or result.playlist, []) if g),
+                original_playlist=result.original_playlist,
             )
 
-        lingering_refs = _find_loser_references()
+        lingering_refs = _find_loser_references(playlist_targets or {}, playlist_base_dirs)
         if lingering_refs:
             success = False
             for playlist, losers in lingering_refs.items():
@@ -651,7 +694,17 @@ def execute_consolidation_plan(plan: ConsolidationPlan, config: ExecutionConfig)
             raise RuntimeError("Playlist rewrites incomplete; loser references remain.")
 
         # Step 4: apply artwork transfers
-        if config.apply_artwork:
+        if config.dry_run_execute and config.apply_artwork:
+            for art in artwork_actions:
+                _record(
+                    "artwork",
+                    art.target,
+                    "skipped",
+                    "Dry-run execute enabled; artwork not applied.",
+                    source=art.source,
+                    group_id=path_to_group.get(art.target),
+                )
+        elif config.apply_artwork:
             for art in artwork_actions:
                 _check_cancel("artwork")
                 ok, detail = _apply_artwork(art)
@@ -670,7 +723,16 @@ def execute_consolidation_plan(plan: ConsolidationPlan, config: ExecutionConfig)
                     raise RuntimeError(f"Artwork copy failed for {art.target}")
 
         # Step 5: apply metadata normalization
-        if config.apply_metadata:
+        if config.dry_run_execute and config.apply_metadata:
+            for target, _tags in planned_tags.items():
+                _record(
+                    "metadata",
+                    target,
+                    "skipped",
+                    "Dry-run execute enabled; metadata not written.",
+                    group_id=path_to_group.get(target),
+                )
+        elif config.apply_metadata:
             for target, tags in planned_tags.items():
                 _check_cancel("metadata")
                 ok = _apply_metadata(target, tags)
@@ -830,8 +892,11 @@ def execute_consolidation_plan(plan: ConsolidationPlan, config: ExecutionConfig)
             if playlist_results:
                 html_lines.append("<div class='group'><h2>Playlist Changes</h2><ul>")
                 for res in playlist_results:
+                    label = res.playlist
+                    if res.original_playlist:
+                        label = f"{res.original_playlist} (validated copy: {res.playlist})"
                     html_lines.append(
-                        f"<li>{res.playlist} → {res.status} "
+                        f"<li>{label} → {res.status} "
                         f"(replaced {res.replaced_entries}); backup: {res.backup_path}</li>"
                     )
                 html_lines.append("</ul></div>")

@@ -542,7 +542,12 @@ class ConsolidationPlan:
     @property
     def review_required_count(self) -> int:
         """Return total number of review-required groups."""
-        return len(self.review_required_groups)
+        return len(self.review_required_groups) + (1 if self.review_flags else 0)
+
+    @property
+    def requires_review(self) -> bool:
+        """Return whether any review flags (global or per-group) are present."""
+        return bool(self.review_flags or self.review_required_groups)
 
     def __post_init__(self) -> None:
         if not self.source_snapshot:
@@ -986,12 +991,20 @@ def build_consolidation_plan(
         )
         if not metadata_source:
             review_flags.append(f"Missing metadata source for group containing {winner.path}.")
+            group_review = ["Metadata source missing; tags may be incomplete."]
+        else:
+            group_review: List[str] = []
 
         meta_changes = _metadata_changes(winner, planned_tags)
         winner_context = contexts.get(winner.path, "unknown")
         winner_quality = _quality_rationale(winner, runner_up, winner_context)
 
-        group_review: List[str] = []
+        distance_samples: List[float] = []
+        missing_fingerprints = any(not t.fingerprint for t in cluster)
+        for idx, t in enumerate(cluster):
+            for other in cluster[idx + 1 :]:
+                distance_samples.append(fingerprint_distance(t.fingerprint, other.fingerprint))
+        max_distance = max(distance_samples) if distance_samples else (1.0 if missing_fingerprints else 0.0)
 
         track_quality: Dict[str, Dict[str, object]] = {
             t.path: {
@@ -1097,11 +1110,22 @@ def build_consolidation_plan(
             artwork_status = "none found"
             group_review.append(missing_reason)
 
+        required_tag_gaps = [key for key in ("artist", "title") if not planned_tags.get(key)]
+        if required_tag_gaps:
+            group_review.append(f"Missing critical tags: {', '.join(sorted(required_tag_gaps))}.")
+
+        group_confidence = "High (identical fingerprint cluster)"
+        if missing_fingerprints:
+            group_confidence = "Low (missing fingerprints in cluster)"
+            group_review.append("One or more tracks missing fingerprints; requires review.")
+        if max_distance > 0:
+            group_confidence = f"Low (max fingerprint distance {max_distance:.3f})"
+            group_review.append(f"Audio match requires review (max distance {max_distance:.3f}).")
+
         dispositions = {loser: "quarantine" for loser in losers}
         playlist_map = {loser: winner.path for loser in losers}
 
         group_id = _stable_group_id([t.path for t in cluster])
-        group_confidence = "High (identical fingerprint cluster)"
         if ambiguous_art:
             group_review.append("Artwork selection requires review.")
         if not losers:
