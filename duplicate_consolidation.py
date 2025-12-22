@@ -87,7 +87,22 @@ def _blank_tags() -> Dict[str, object]:
 def _first_value(value: object) -> object:
     if isinstance(value, list):
         return _first_value(value[0]) if value else None
-    return value
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    if isinstance(value, tuple):
+        return _first_value(value[0]) if value else None
+    if hasattr(value, "text"):
+        try:
+            text_value = value.text
+            if isinstance(text_value, (list, tuple)):
+                return _first_value(text_value[0]) if text_value else None
+            return str(text_value) if text_value is not None else None
+        except Exception:
+            pass
+    try:
+        return str(value)
+    except Exception:
+        return None
 
 
 def _parse_int(value: object) -> int | None:
