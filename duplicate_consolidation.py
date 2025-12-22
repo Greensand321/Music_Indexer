@@ -11,12 +11,28 @@ from __future__ import annotations
 import datetime
 import hashlib
 import html
+import importlib.util
+import io
 import json
 import os
 import threading
 import time
 from dataclasses import dataclass, field
 from typing import Callable, Dict, Iterable, List, Mapping, MutableMapping, Optional, Sequence
+
+from utils.path_helpers import ensure_long_path
+
+_MUTAGEN_AVAILABLE = importlib.util.find_spec("mutagen") is not None
+if _MUTAGEN_AVAILABLE:
+    from mutagen import File as MutagenFile  # type: ignore
+else:  # pragma: no cover - optional dependency
+    MutagenFile = None  # type: ignore
+
+_PIL_AVAILABLE = importlib.util.find_spec("PIL") is not None
+if _PIL_AVAILABLE:
+    from PIL import Image  # type: ignore
+else:  # pragma: no cover - optional dependency
+    Image = None  # type: ignore
 
 from near_duplicate_detector import fingerprint_distance
 
@@ -35,6 +51,22 @@ REVIEW_KEYWORDS = (
     "speed up",
     "speed-up",
 )
+PLACEHOLDER_TOKENS = {"demo", "tbd", "placeholder", "sample", "example", "unknown"}
+TAG_KEYS = [
+    "artist",
+    "albumartist",
+    "title",
+    "album",
+    "album_type",
+    "track",
+    "tracknumber",
+    "disc",
+    "discnumber",
+    "date",
+    "year",
+    "genre",
+    "compilation",
+]
 
 
 def _now() -> float:
@@ -43,6 +75,197 @@ def _now() -> float:
 
 def _default_progress(_current: int, _total: int, _msg: str) -> None:
     return None
+
+
+def _blank_tags() -> Dict[str, object]:
+    return {key: None for key in TAG_KEYS}
+
+
+def _first_value(value: object) -> object:
+    if isinstance(value, list):
+        return _first_value(value[0]) if value else None
+    return value
+
+
+def _parse_int(value: object) -> int | None:
+    try:
+        ivalue = int(str(value).split("/")[0])
+        return ivalue
+    except Exception:
+        return None
+
+
+def _extract_image_dimensions(payload: bytes) -> tuple[Optional[int], Optional[int]]:
+    if not payload or not Image:
+        return None, None
+    try:
+        with Image.open(io.BytesIO(payload)) as img:
+            return img.width, img.height
+    except Exception:
+        return None, None
+
+
+def _read_audio_file(path: str):
+    if MutagenFile is None:
+        return None, "mutagen unavailable"
+    try:
+        return MutagenFile(ensure_long_path(path)), None
+    except Exception as exc:  # pragma: no cover - depends on local files
+        return None, f"read failed: {exc}"
+
+
+def _normalize_tags_from_audio(audio) -> Dict[str, object]:
+    if audio is None or not getattr(audio, "tags", None):
+        return _blank_tags()
+
+    tags = audio.tags
+    values: Dict[str, object] = _blank_tags()
+
+    def pick(keys: Sequence[str]) -> object:
+        for key in keys:
+            if key in tags:
+                return _first_value(tags.get(key))
+            if hasattr(tags, "getall"):
+                found = tags.getall(key)
+                if found:
+                    return _first_value(found)
+        return None
+
+    values["artist"] = pick(["artist", "TPE1"])
+    values["albumartist"] = pick(["albumartist", "album artist", "TPE2"])
+    values["title"] = pick(["title", "TIT2"])
+    values["album"] = pick(["album", "TALB"])
+    values["album_type"] = pick(["albumtype", "album_type", "releasetype", "release_type"])
+
+    track_no = pick(["tracknumber", "track", "TRCK"])
+    disc_no = pick(["discnumber", "disc", "TPOS"])
+    values["track"] = _parse_int(track_no) or track_no or None
+    values["tracknumber"] = values["track"]
+    values["disc"] = _parse_int(disc_no) or disc_no or None
+    values["discnumber"] = values["disc"]
+
+    date_val = pick(["date", "year", "TDRC"])
+    values["date"] = str(date_val) if date_val is not None else None
+    values["year"] = _parse_int(date_val) or None
+
+    values["genre"] = pick(["genre", "TCON"])
+    values["compilation"] = pick(["compilation", "TCMP"])
+    return values
+
+
+def _extract_artwork_from_audio(audio, path: str) -> tuple[List[ArtworkCandidate], Optional[str]]:
+    if audio is None:
+        return [], "audio not readable"
+
+    candidates: List[ArtworkCandidate] = []
+
+    def _record(payload: bytes, status: str = "ok") -> None:
+        if not payload:
+            return
+        width, height = _extract_image_dimensions(payload)
+        candidates.append(
+            ArtworkCandidate(
+                path=path,
+                hash=hashlib.sha256(payload).hexdigest(),
+                size=len(payload),
+                width=width,
+                height=height,
+                status=status,
+                bytes=payload,
+            )
+        )
+
+    if hasattr(audio, "pictures"):
+        for pic in getattr(audio, "pictures"):
+            payload = getattr(pic, "data", None)
+            if payload:
+                width = getattr(pic, "width", None)
+                height = getattr(pic, "height", None)
+                _record(payload, status="ok")
+                # Override dimensions if provided by mutagen
+                if candidates[-1].width is None and width:
+                    candidates[-1].width = width
+                if candidates[-1].height is None and height:
+                    candidates[-1].height = height
+    if getattr(audio, "tags", None):
+        try:
+            apics = audio.tags.getall("APIC")
+            for apic in apics:
+                payload = getattr(apic, "data", None)
+                if payload:
+                    _record(payload, status="ok")
+        except Exception:
+            pass
+        if "covr" in audio.tags:
+            for cover in audio.tags.get("covr", []):
+                payload = bytes(cover) if cover else None
+                if payload:
+                    _record(payload, status="ok")
+        if "WM/Picture" in audio.tags:
+            for pic in audio.tags.get("WM/Picture", []):
+                payload = getattr(pic, "value", None)
+                if payload:
+                    _record(payload, status="ok")
+
+    if not candidates and getattr(audio, "tags", None):
+        return [], "no artwork tags"
+    if not candidates:
+        return [], "no artwork found"
+    return candidates, None
+
+
+def _read_tags_and_artwork(path: str, provided_tags: Mapping[str, object] | None) -> tuple[Dict[str, object], List[ArtworkCandidate], Optional[str], Optional[str]]:
+    audio, error = _read_audio_file(path)
+    file_tags = _normalize_tags_from_audio(audio)
+    base = dict(file_tags)
+    fallback = provided_tags or {}
+    for key, val in (fallback or {}).items():
+        if key in base and base[key] not in (None, "", []):
+            continue
+        base[key] = val
+    artwork, art_error = _extract_artwork_from_audio(audio, path)
+    if artwork:
+        base["cover_hash"] = artwork[0].hash
+        base["artwork_hash"] = artwork[0].hash
+    return base, artwork, error, art_error
+
+
+def _placeholder_present(tags: Mapping[str, object]) -> bool:
+    for key, value in tags.items():
+        if value is None:
+            continue
+        if isinstance(value, (list, tuple)):
+            vals = value
+        else:
+            vals = [value]
+        for val in vals:
+            text = str(val).strip().lower()
+            if any(token in text for token in PLACEHOLDER_TOKENS):
+                return True
+    return False
+
+
+@dataclass
+class ArtworkCandidate:
+    """Discovered artwork and its metadata."""
+
+    path: str
+    hash: str
+    size: int
+    width: Optional[int]
+    height: Optional[int]
+    status: str
+    bytes: bytes | None = None
+
+    def to_dict(self) -> Dict[str, object]:
+        return {
+            "path": self.path,
+            "hash": self.hash,
+            "size": self.size,
+            "width": self.width,
+            "height": self.height,
+            "status": self.status,
+        }
 
 
 @dataclass
@@ -56,13 +279,20 @@ class DuplicateTrack:
     sample_rate: int = 0
     bit_depth: int = 0
     tags: Dict[str, object] = field(default_factory=dict)
+    current_tags: Dict[str, object] = field(default_factory=dict)
+    artwork: List[ArtworkCandidate] = field(default_factory=list)
+    context_evidence: List[str] = field(default_factory=list)
+    metadata_error: Optional[str] = None
+    artwork_error: Optional[str] = None
 
     @property
     def cover_hash(self) -> str | None:
-        value = self.tags.get("cover_hash") if isinstance(self.tags, Mapping) else None
+        value = None
+        tag_source = self.current_tags if isinstance(self.current_tags, Mapping) else self.tags
+        value = tag_source.get("cover_hash") if isinstance(tag_source, Mapping) else None
         if value:
             return str(value)
-        art = self.tags.get("artwork_hash") if isinstance(self.tags, Mapping) else None
+        art = tag_source.get("artwork_hash") if isinstance(tag_source, Mapping) else None
         return str(art) if art else None
 
     @property
@@ -76,7 +306,8 @@ class DuplicateTrack:
 
     @property
     def metadata_count(self) -> int:
-        if not isinstance(self.tags, Mapping):
+        tags = self.current_tags if isinstance(self.current_tags, Mapping) else self.tags
+        if not isinstance(tags, Mapping):
             return 0
         keys = [
             "artist",
@@ -90,7 +321,7 @@ class DuplicateTrack:
             "date",
             "year",
         ]
-        return sum(1 for k in keys if self.tags.get(k))
+        return sum(1 for k in keys if tags.get(k))
 
 
 @dataclass
@@ -124,14 +355,22 @@ class GroupPlan:
     winner_path: str
     losers: List[str]
     planned_winner_tags: Dict[str, object]
+    winner_current_tags: Dict[str, object]
+    current_tags: Dict[str, Dict[str, object]]
     metadata_changes: Dict[str, Dict[str, object]]
     winner_quality: Dict[str, object]
     artwork: List[ArtworkDirective]
+    artwork_candidates: List[ArtworkCandidate]
+    chosen_artwork_source: Dict[str, object]
+    artwork_status: str
     loser_disposition: Dict[str, str]
     playlist_rewrites: Dict[str, str]
     playlist_impact: PlaylistImpact
     review_flags: List[str]
     context_summary: Dict[str, List[str]]
+    context_evidence: Dict[str, List[str]]
+    tag_source: Optional[str]
+    placeholders_present: bool
 
     def to_dict(self) -> Dict[str, object]:
         return {
@@ -139,14 +378,22 @@ class GroupPlan:
             "winner_path": self.winner_path,
             "losers": list(self.losers),
             "planned_winner_tags": dict(self.planned_winner_tags),
+            "winner_current_tags": dict(self.winner_current_tags),
+            "current_tags": {k: dict(v) for k, v in self.current_tags.items()},
             "metadata_changes": {k: dict(v) for k, v in self.metadata_changes.items()},
             "winner_quality": dict(self.winner_quality),
             "artwork": [a.to_dict() for a in self.artwork],
+            "artwork_candidates": [a.to_dict() for a in self.artwork_candidates],
+            "chosen_artwork_source": dict(self.chosen_artwork_source),
+            "artwork_status": self.artwork_status,
             "loser_disposition": dict(self.loser_disposition),
             "playlist_rewrites": dict(self.playlist_rewrites),
             "playlist_impact": self.playlist_impact.to_dict(),
             "review_flags": list(self.review_flags),
             "context_summary": {k: list(v) for k, v in self.context_summary.items()},
+            "context_evidence": {k: list(v) for k, v in self.context_evidence.items()},
+            "tag_source": self.tag_source,
+            "placeholders_present": self.placeholders_present,
         }
 
 
@@ -157,12 +404,14 @@ class ConsolidationPlan:
     groups: List[GroupPlan] = field(default_factory=list)
     review_flags: List[str] = field(default_factory=list)
     generated_at: datetime.datetime = field(default_factory=lambda: datetime.datetime.now(datetime.timezone.utc))
+    placeholders_present: bool = False
 
     def to_dict(self) -> Dict[str, object]:
         return {
             "groups": [g.to_dict() for g in self.groups],
             "review_flags": list(self.review_flags),
             "generated_at": self.generated_at.isoformat(),
+            "placeholders_present": self.placeholders_present,
         }
 
     @property
@@ -179,7 +428,9 @@ class ConsolidationPlan:
 def _normalize_track(raw: Mapping[str, object]) -> DuplicateTrack:
     path = str(raw.get("path"))
     ext = os.path.splitext(path)[1].lower() or str(raw.get("ext", "")).lower()
-    tags = raw.get("tags") if isinstance(raw.get("tags"), Mapping) else {}
+    provided_tags = raw.get("tags") if isinstance(raw.get("tags"), Mapping) else {}
+    current_tags, artwork, meta_err, art_err = _read_tags_and_artwork(path, provided_tags)
+    tags = dict(current_tags)
     return DuplicateTrack(
         path=path,
         fingerprint=raw.get("fingerprint"),
@@ -188,29 +439,42 @@ def _normalize_track(raw: Mapping[str, object]) -> DuplicateTrack:
         sample_rate=int(raw.get("sample_rate") or raw.get("samplerate") or 0),
         bit_depth=int(raw.get("bit_depth") or raw.get("bitdepth") or 0),
         tags=dict(tags),
+        current_tags=dict(current_tags),
+        artwork=artwork,
+        metadata_error=meta_err,
+        artwork_error=art_err,
     )
 
 
-def _classify_context(track: DuplicateTrack) -> str:
-    tags = track.tags or {}
+def _classify_context(track: DuplicateTrack) -> tuple[str, List[str]]:
+    tags = track.current_tags or track.tags or {}
     album = str(tags.get("album") or "").strip()
     album_type = str(tags.get("album_type") or tags.get("release_type") or "").lower()
     track_no = tags.get("track") or tags.get("tracknumber")
     disc_no = tags.get("disc") or tags.get("discnumber")
 
+    evidence: List[str] = []
+
     if album_type == "single":
-        return "single"
+        evidence.append("Album type tag indicates single")
+        return "single", evidence
     if album_type in {"album", "lp"}:
-        return "album"
+        evidence.append("Album type tag indicates album/LP")
+        return "album", evidence
     if album.lower().endswith(" - single") or "(single" in album.lower():
-        return "single"
+        evidence.append("Album title formatted like a single")
+        return "single", evidence
     if album and (track_no or disc_no):
-        return "album"
+        evidence.append("Album tag present with track/disc number")
+        return "album", evidence
     if not album:
-        return "single"
+        evidence.append("No album tag present")
+        return "single", evidence
     if track.cover_hash:
-        return "album"
-    return "unknown"
+        evidence.append("Embedded artwork present suggesting album packaging")
+        return "album", evidence
+    evidence.append("Insufficient context to classify")
+    return "unknown", evidence
 
 
 def _quality_tuple(track: DuplicateTrack, context: str) -> tuple:
@@ -250,7 +514,9 @@ def _select_metadata_source(candidates: Sequence[DuplicateTrack], contexts: Mapp
 
 
 def _merge_tags(existing: MutableMapping[str, object], source: Mapping[str, object]) -> Dict[str, object]:
-    merged = dict(existing)
+    merged = _blank_tags()
+    for key, value in existing.items():
+        merged[key] = value
     for key, value in source.items():
         if key in merged and merged[key]:
             continue
@@ -259,23 +525,10 @@ def _merge_tags(existing: MutableMapping[str, object], source: Mapping[str, obje
 
 
 def _metadata_changes(winner: DuplicateTrack, planned_tags: Mapping[str, object]) -> Dict[str, Dict[str, object]]:
-    keys = [
-        "artist",
-        "albumartist",
-        "title",
-        "album",
-        "album_type",
-        "track",
-        "tracknumber",
-        "disc",
-        "discnumber",
-        "date",
-        "year",
-        "genre",
-    ]
+    keys = TAG_KEYS
     changes: Dict[str, Dict[str, object]] = {}
     for key in keys:
-        current = winner.tags.get(key) if isinstance(winner.tags, Mapping) else None
+        current = winner.current_tags.get(key) if isinstance(winner.current_tags, Mapping) else None
         planned = planned_tags.get(key)
         if (current or "") == (planned or ""):
             continue
@@ -312,15 +565,13 @@ def _quality_rationale(winner: DuplicateTrack, runner_up: DuplicateTrack | None,
 
 
 def _artwork_score(track: DuplicateTrack) -> tuple:
-    tags = track.tags or {}
     size_hint = 0
-    art_bytes = tags.get("artwork_bytes") if isinstance(tags, Mapping) else None
-    if isinstance(art_bytes, (bytes, bytearray)):
-        size_hint = len(art_bytes)
-    elif isinstance(art_bytes, int):
-        size_hint = art_bytes
+    has_art = False
+    if track.artwork:
+        has_art = True
+        size_hint = max(c.size for c in track.artwork if c.status == "ok") if any(c.status == "ok" for c in track.artwork) else 0
     return (
-        1 if track.cover_hash else 0,
+        1 if has_art else 0,
         size_hint,
         track.bitrate,
         track.sample_rate,
@@ -328,7 +579,8 @@ def _artwork_score(track: DuplicateTrack) -> tuple:
 
 
 def _select_artwork_candidate(candidates: Sequence[DuplicateTrack]) -> tuple[DuplicateTrack | None, bool]:
-    ranked = sorted(candidates, key=lambda t: (_artwork_score(t), t.path.lower()), reverse=True)
+    usable = [c for c in candidates if c.artwork]
+    ranked = sorted(usable, key=lambda t: (_artwork_score(t), t.path.lower()), reverse=True)
     if not ranked:
         return None, False
     if len(ranked) == 1:
@@ -443,21 +695,31 @@ def build_consolidation_plan(
     )
 
     plans: List[GroupPlan] = []
+    plan_placeholders = False
     for cluster in sorted(clusters, key=lambda c: _stable_group_id([t.path for t in c])):
-        contexts = {t.path: _classify_context(t) for t in cluster}
+        contexts: Dict[str, str] = {}
+        context_evidence: Dict[str, List[str]] = {}
+        for t in cluster:
+            ctx, evidence = _classify_context(t)
+            contexts[t.path] = ctx
+            t.context_evidence = evidence
+            context_evidence[t.path] = evidence
+
         quality_sorted = sorted(cluster, key=lambda t: _quality_tuple(t, contexts[t.path]), reverse=True)
         winner = quality_sorted[0]
         losers = [t.path for t in quality_sorted[1:]]
         runner_up = quality_sorted[1] if len(quality_sorted) > 1 else None
 
         metadata_source = _select_metadata_source(cluster, contexts)
-        planned_tags: Dict[str, object] = dict(winner.tags)
+        planned_tags: Dict[str, object] = _merge_tags(_blank_tags(), winner.current_tags)
+        tag_source: Optional[str] = None
         if metadata_source:
-            planned_tags = _merge_tags(planned_tags, metadata_source.tags)
+            planned_tags = _merge_tags(planned_tags, metadata_source.current_tags)
             if contexts.get(metadata_source.path) == "album":
                 planned_tags.setdefault("album_type", "album")
             elif contexts.get(metadata_source.path) == "single":
                 planned_tags.setdefault("album_type", "single")
+            tag_source = metadata_source.path
         else:
             review_flags.append(f"Missing metadata source for group containing {winner.path}.")
 
@@ -465,30 +727,67 @@ def build_consolidation_plan(
         winner_context = contexts.get(winner.path, "unknown")
         winner_quality = _quality_rationale(winner, runner_up, winner_context)
 
+        group_review: List[str] = []
+
         single_candidates = [t for t in cluster if contexts.get(t.path) == "single"]
-        best_art, ambiguous_art = _select_artwork_candidate(single_candidates)
+        album_candidates = [t for t in cluster if contexts.get(t.path) == "album"]
+        art_candidates_order = single_candidates or album_candidates or cluster
+        distinct_hashes = {t.cover_hash for t in art_candidates_order if t.cover_hash}
+        tag_artwork_conflict = len(distinct_hashes) > 1
+        best_art, ambiguous_art = _select_artwork_candidate(art_candidates_order)
+        ambiguous_art = ambiguous_art or tag_artwork_conflict
         artwork_actions: List[ArtworkDirective] = []
-        if best_art and (not winner.cover_hash or winner.cover_hash != best_art.cover_hash):
-            reason = "Copy single artwork to preserve release look"
-            artwork_actions.append(ArtworkDirective(source=best_art.path, target=winner.path, reason=reason))
+        chosen_artwork_source: Dict[str, object] = {"path": None, "reason": ""}
+        artwork_status = "missing"
+        if best_art and best_art.artwork:
+            best_blob = next((c for c in best_art.artwork if c.status == "ok"), best_art.artwork[0])
+            chosen_artwork_source = {
+                "path": best_art.path,
+                "hash": best_blob.hash,
+                "size": best_blob.size,
+                "reason": "best artwork candidate",
+            }
+            artwork_status = "selected"
+            if not winner.cover_hash or winner.cover_hash != best_blob.hash:
+                reason = "Copy artwork from best candidate to winner"
+                artwork_actions.append(ArtworkDirective(source=best_art.path, target=winner.path, reason=reason))
         if ambiguous_art:
             review_flags.append(f"Artwork selection ambiguous for group {_stable_group_id([t.path for t in cluster])}.")
-        if not best_art and not winner.cover_hash:
-            review_flags.append(f"No artwork available for group {_stable_group_id([t.path for t in cluster])}.")
+        if not best_art:
+            missing_reason = "No artwork candidates available"
+            if any(t.artwork_error for t in cluster):
+                missing_reason = "Artwork present but unreadable"
+            review_flags.append(f"{missing_reason} for group {_stable_group_id([t.path for t in cluster])}.")
+            chosen_artwork_source["reason"] = missing_reason
+            artwork_status = "none found"
+            group_review.append(missing_reason)
 
         dispositions = {loser: "quarantine" for loser in losers}
         playlist_map = {loser: winner.path for loser in losers}
 
         group_id = _stable_group_id([t.path for t in cluster])
-        group_review: List[str] = []
         if ambiguous_art:
             group_review.append("Artwork selection requires review.")
         if not losers:
             group_review.append("No losers to consolidate.")
         if any(_has_review_keyword(t) for t in cluster):
             group_review.append("Contains remix/sped-up variant indicators; review recommended.")
+        placeholders = _placeholder_present(planned_tags) or any(_placeholder_present(t.current_tags) for t in cluster)
+        if placeholders:
+            group_review.append("Placeholder metadata detected; requires review.")
+            plan_placeholders = True
+        if winner.metadata_error:
+            group_review.append(f"Metadata read issue for winner: {winner.metadata_error}")
+        if any(t.artwork_error for t in cluster):
+            group_review.append("Artwork extraction failed for at least one track.")
 
         playlist_impact = PlaylistImpact(playlists=len(losers), entries=len(losers))
+
+        artwork_candidates: List[ArtworkCandidate] = []
+        for t in cluster:
+            artwork_candidates.extend(t.artwork)
+
+        current_tags = {t.path: _merge_tags(_blank_tags(), t.current_tags) for t in cluster}
 
         plans.append(
             GroupPlan(
@@ -496,9 +795,14 @@ def build_consolidation_plan(
                 winner_path=winner.path,
                 losers=losers,
                 planned_winner_tags=planned_tags,
+                winner_current_tags=_merge_tags(_blank_tags(), winner.current_tags),
+                current_tags=current_tags,
                 metadata_changes=meta_changes,
                 winner_quality=winner_quality,
                 artwork=artwork_actions,
+                artwork_candidates=artwork_candidates,
+                chosen_artwork_source=chosen_artwork_source,
+                artwork_status=artwork_status,
                 loser_disposition=dispositions,
                 playlist_rewrites=playlist_map,
                 playlist_impact=playlist_impact,
@@ -508,10 +812,16 @@ def build_consolidation_plan(
                     "single": sorted([t.path for t in cluster if contexts.get(t.path) == "single"]),
                     "unknown": sorted([t.path for t in cluster if contexts.get(t.path) == "unknown"]),
                 },
+                context_evidence=context_evidence,
+                tag_source=tag_source,
+                placeholders_present=placeholders,
             )
         )
 
-    return ConsolidationPlan(groups=plans, review_flags=review_flags)
+    if plan_placeholders and "Placeholder metadata detected; review required." not in review_flags:
+        review_flags.append("Placeholder metadata detected; review required.")
+
+    return ConsolidationPlan(groups=plans, review_flags=review_flags, placeholders_present=plan_placeholders)
 
 
 def _html_escape(text: object) -> str:
@@ -604,6 +914,10 @@ def render_consolidation_preview(plan: ConsolidationPlan, output_html_path: str)
 
         lines.append("<p><strong>Artwork</strong></p>")
         lines.append(_render_artwork(group.artwork))
+        art_source = group.chosen_artwork_source or {}
+        source_path = art_source.get("path") or "None"
+        source_reason = art_source.get("reason") or group.artwork_status
+        lines.append(f"<p class='muted'>Chosen artwork source: {_html_escape(source_path)} ({_html_escape(source_reason)})</p>")
 
         lines.append(
             f"<p><strong>Playlist impact</strong>: {group.playlist_impact.playlists} playlists, "
@@ -621,7 +935,16 @@ def render_consolidation_preview(plan: ConsolidationPlan, output_html_path: str)
             + f"<li>Album tracks: {len(group.context_summary.get('album', []))}</li>"
             + f"<li>Singles: {len(group.context_summary.get('single', []))}</li>"
             + f"<li>Unknown: {len(group.context_summary.get('unknown', []))}</li>"
-            + "</ul></details>"
+            + "</ul>"
+            + "<ul>"
+            + "".join(
+                f"<li><strong>{_html_escape(path)}</strong>: "
+                + "; ".join(_html_escape(ev) for ev in group.context_evidence.get(path, []))
+                + "</li>"
+                for path in sorted(group.context_evidence.keys())
+            )
+            + "</ul>"
+            + "</details>"
         )
         lines.append("</div>")
 

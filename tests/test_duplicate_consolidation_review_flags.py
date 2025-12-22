@@ -55,7 +55,7 @@ def test_missing_artwork_sets_global_review_flag(tmp_path):
 
     plan = build_consolidation_plan(tracks, cancel_event=threading.Event())
     assert plan.review_flags
-    assert any("No artwork available" in flag for flag in plan.review_flags)
+    assert any("artwork" in flag.lower() for flag in plan.review_flags)
 
 
 def test_cancellation_sets_review_flag(tmp_path):
