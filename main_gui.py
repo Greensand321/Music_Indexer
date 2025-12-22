@@ -51,6 +51,8 @@ from gui.audio_preview import PlaybackError, VlcPreviewPlayer
 from io import BytesIO
 from PIL import Image, ImageTk
 from mutagen import File as MutagenFile
+from fingerprint_cache import get_fingerprint
+from simple_duplicate_finder import SUPPORTED_EXTS, _compute_fp
 from tag_fixer import MIN_INTERACTIVE_SCORE, FileRecord
 from typing import Any, Callable, List
 from indexer_control import cancel_event, IndexCancelled
@@ -1709,82 +1711,65 @@ class DuplicateFinderShell(tk.Toplevel):
         self.playlist_path_var.set(chosen)
         self._log_action(f"Playlist folder updated to {chosen}")
 
-    def _demo_tracks(self, library_root: str) -> list[dict[str, object]]:
-        base = library_root or "/library"
-        return [
-            {
-                "path": os.path.join(base, "Album", "Track A (Master).flac"),
-                "fingerprint": "fp-demo-001",
-                "ext": ".flac",
-                "bitrate": 1100,
-                "sample_rate": 48000,
-                "bit_depth": 24,
-                "tags": {
-                    "title": "Track A",
-                    "album": "Demo Album",
-                    "album_type": "album",
-                    "track": 1,
-                    "artist": "Demo Artist",
-                    "cover_hash": "cover-a",
-                },
-            },
-            {
-                "path": os.path.join(base, "Album", "Track A (MP3).mp3"),
-                "fingerprint": "fp-demo-001",
-                "ext": ".mp3",
-                "bitrate": 320,
-                "sample_rate": 44100,
-                "bit_depth": 0,
-                "tags": {
-                    "title": "Track A",
-                    "album": "Demo Album",
-                    "track": 1,
-                    "artist": "Demo Artist",
-                    "albumartist": "Demo Artist",
-                },
-            },
-            {
-                "path": os.path.join(base, "Singles", "Track B (Single).m4a"),
-                "fingerprint": "fp-demo-002",
-                "ext": ".m4a",
-                "bitrate": 256,
-                "sample_rate": 44100,
-                "bit_depth": 0,
-                "tags": {
-                    "title": "Track B",
-                    "album": "Track B - Single",
-                    "album_type": "single",
-                    "track": 1,
-                    "artist": "Demo Artist",
-                    "artwork_hash": "art-b",
-                    "genre": "Indie",
-                },
-            },
-            {
-                "path": os.path.join(base, "Singles", "Track B (Lossless).flac"),
-                "fingerprint": "fp-demo-002",
-                "ext": ".flac",
-                "bitrate": 900,
-                "sample_rate": 44100,
-                "bit_depth": 24,
-                "tags": {
-                    "title": "Track B",
-                    "album": "Track B - Single",
-                    "album_type": "single",
-                    "track": 1,
-                    "artist": "Demo Artist",
-                    "cover_hash": "art-b",
-                    "genre": "Indie",
-                },
-            },
-        ]
+    def _gather_tracks(self, library_root: str) -> list[dict[str, object]]:
+        if not library_root:
+            return []
+        docs_dir = os.path.join(library_root, "Docs")
+        os.makedirs(docs_dir, exist_ok=True)
+        db_path = os.path.join(docs_dir, ".duplicate_fingerprints.db")
+
+        audio_paths: list[str] = []
+        for dirpath, _dirs, files in os.walk(library_root):
+            rel = os.path.relpath(dirpath, library_root)
+            parts = {p.lower() for p in rel.split(os.sep)}
+            if {"not sorted", "playlists"} & parts:
+                continue
+            for fname in files:
+                ext = os.path.splitext(fname)[1].lower()
+                if ext in SUPPORTED_EXTS:
+                    audio_paths.append(os.path.join(dirpath, fname))
+
+        tracks: list[dict[str, object]] = []
+        total = len(audio_paths) or 1
+        for idx, path in enumerate(sorted(audio_paths), start=1):
+            fp = get_fingerprint(path, db_path, _compute_fp, log_callback=self._log_action)
+            if not fp:
+                continue
+            bitrate = 0
+            sample_rate = 0
+            bit_depth = 0
+            try:
+                audio = MutagenFile(path)
+                info = getattr(audio, "info", None)
+                if info:
+                    bitrate = int(getattr(info, "bitrate", 0) or 0)
+                    sample_rate = int(getattr(info, "sample_rate", 0) or getattr(info, "samplerate", 0) or 0)
+                    bit_depth = int(getattr(info, "bits_per_sample", 0) or getattr(info, "bitdepth", 0) or 0)
+            except Exception:
+                pass
+            tracks.append(
+                {
+                    "path": path,
+                    "fingerprint": fp,
+                    "ext": os.path.splitext(path)[1].lower(),
+                    "bitrate": bitrate,
+                    "sample_rate": sample_rate,
+                    "bit_depth": bit_depth,
+                }
+            )
+            self._set_status("Scanning…", progress=min(90, int(idx / total * 70) + 20))
+        return tracks
 
     def _generate_plan(self, write_preview: bool) -> None:
         path = self._validate_library_root()
         if not path:
             return
 
-        tracks = self._demo_tracks(path)
+        tracks = self._gather_tracks(path)
+        if not tracks:
+            messagebox.showwarning("No Tracks", "No audio tracks were found in the selected library.")
+            self._set_status("Idle", progress=0)
+            return
         self._set_status("Building plan…", progress=25)
         plan = build_consolidation_plan(tracks)
         self._plan = plan
