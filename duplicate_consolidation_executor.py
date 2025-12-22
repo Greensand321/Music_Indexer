@@ -26,7 +26,10 @@ from duplicate_consolidation import ArtworkDirective, ConsolidationPlan
 from indexer_control import IndexCancelled, cancel_event as global_cancel_event
 from utils.path_helpers import ensure_long_path
 
-_MUTAGEN_AVAILABLE = importlib.util.find_spec("mutagen") is not None
+try:
+    _MUTAGEN_AVAILABLE = importlib.util.find_spec("mutagen") is not None
+except ValueError:  # pragma: no cover - defensive: broken mutagen installs
+    _MUTAGEN_AVAILABLE = False
 if _MUTAGEN_AVAILABLE:
     from mutagen import File as MutagenFile  # type: ignore
 else:  # pragma: no cover - optional dependency

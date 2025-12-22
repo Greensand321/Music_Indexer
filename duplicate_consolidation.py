@@ -21,8 +21,11 @@ from dataclasses import dataclass, field
 from typing import Callable, Dict, Iterable, List, Mapping, MutableMapping, Optional, Sequence
 
 from utils.path_helpers import ensure_long_path
+try:
+    _MUTAGEN_AVAILABLE = importlib.util.find_spec("mutagen") is not None
+except ValueError:  # pragma: no cover - defensive: broken mutagen installs
+    _MUTAGEN_AVAILABLE = False
 
-_MUTAGEN_AVAILABLE = importlib.util.find_spec("mutagen") is not None
 if _MUTAGEN_AVAILABLE:
     from mutagen import File as MutagenFile  # type: ignore
 else:  # pragma: no cover - optional dependency
@@ -214,7 +217,78 @@ def _extract_artwork_from_audio(audio, path: str) -> tuple[List[ArtworkCandidate
     return candidates, None
 
 
-def _read_tags_and_artwork(path: str, provided_tags: Mapping[str, object] | None) -> tuple[Dict[str, object], List[ArtworkCandidate], Optional[str], Optional[str]]:
+def _coerce_int(value: object) -> int | None:
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _extract_audio_properties(audio, path: str, provided_tags: Mapping[str, object], ext: str) -> Dict[str, object]:
+    info = getattr(audio, "info", None)
+
+    def pick_int(*candidates: object) -> int:
+        for candidate in candidates:
+            if candidate in (None, "", []):
+                continue
+            coerced = _coerce_int(candidate)
+            if coerced is not None:
+                return coerced
+        return 0
+
+    container = (
+        str(provided_tags.get("container") or provided_tags.get("format") or ext or "")
+        .replace(".", "")
+        .upper()
+    )
+    if not container and audio is not None:
+        container = audio.__class__.__name__.upper()
+
+    codec = str(
+        provided_tags.get("codec")
+        or provided_tags.get("codec_name")
+        or getattr(info, "codec_name", "")
+        or getattr(info, "codec", "")
+    )
+    if not codec and hasattr(info, "pprint"):
+        codec = str(info.pprint()).split(",")[0]
+    if not codec:
+        codec = container or os.path.splitext(path)[1].replace(".", "").upper()
+
+    bitrate = pick_int(
+        provided_tags.get("bitrate"),
+        getattr(info, "bitrate", None),
+        getattr(info, "bit_rate", None),
+    )
+    sample_rate = pick_int(
+        provided_tags.get("sample_rate"),
+        provided_tags.get("samplerate"),
+        getattr(info, "sample_rate", None),
+        getattr(info, "samplerate", None),
+    )
+    bit_depth = pick_int(
+        provided_tags.get("bit_depth"),
+        provided_tags.get("bitdepth"),
+        getattr(info, "bits_per_sample", None),
+        getattr(info, "bitdepth", None),
+    )
+    channels = pick_int(
+        provided_tags.get("channels"),
+        getattr(info, "channels", None),
+        getattr(info, "channel", None),
+    )
+
+    return {
+        "container": container,
+        "codec": codec,
+        "bitrate": bitrate,
+        "sample_rate": sample_rate,
+        "bit_depth": bit_depth,
+        "channels": channels,
+    }
+
+
+def _read_tags_and_artwork(path: str, provided_tags: Mapping[str, object] | None) -> tuple[Dict[str, object], List[ArtworkCandidate], Optional[str], Optional[str], Dict[str, object]]:
     audio, error = _read_audio_file(path)
     file_tags = _normalize_tags_from_audio(audio)
     base = dict(file_tags)
@@ -227,7 +301,8 @@ def _read_tags_and_artwork(path: str, provided_tags: Mapping[str, object] | None
     if artwork:
         base["cover_hash"] = artwork[0].hash
         base["artwork_hash"] = artwork[0].hash
-    return base, artwork, error, art_error
+    audio_props = _extract_audio_properties(audio, path, provided_tags or {}, os.path.splitext(path)[1])
+    return base, artwork, error, art_error, audio_props
 
 
 def _placeholder_present(tags: Mapping[str, object]) -> bool:
@@ -278,6 +353,9 @@ class DuplicateTrack:
     bitrate: int = 0
     sample_rate: int = 0
     bit_depth: int = 0
+    channels: int = 0
+    codec: str = ""
+    container: str = ""
     tags: Dict[str, object] = field(default_factory=dict)
     current_tags: Dict[str, object] = field(default_factory=dict)
     artwork: List[ArtworkCandidate] = field(default_factory=list)
@@ -371,6 +449,11 @@ class GroupPlan:
     context_evidence: Dict[str, List[str]]
     tag_source: Optional[str]
     placeholders_present: bool
+    tag_source_reason: str
+    tag_source_evidence: List[str]
+    track_quality: Dict[str, Dict[str, object]]
+    group_confidence: str
+    artwork_evidence: List[str]
 
     def to_dict(self) -> Dict[str, object]:
         return {
@@ -394,6 +477,11 @@ class GroupPlan:
             "context_evidence": {k: list(v) for k, v in self.context_evidence.items()},
             "tag_source": self.tag_source,
             "placeholders_present": self.placeholders_present,
+            "tag_source_reason": self.tag_source_reason,
+            "tag_source_evidence": list(self.tag_source_evidence),
+            "track_quality": {k: dict(v) for k, v in self.track_quality.items()},
+            "group_confidence": self.group_confidence,
+            "artwork_evidence": list(self.artwork_evidence),
         }
 
 
@@ -429,15 +517,39 @@ def _normalize_track(raw: Mapping[str, object]) -> DuplicateTrack:
     path = str(raw.get("path"))
     ext = os.path.splitext(path)[1].lower() or str(raw.get("ext", "")).lower()
     provided_tags = raw.get("tags") if isinstance(raw.get("tags"), Mapping) else {}
-    current_tags, artwork, meta_err, art_err = _read_tags_and_artwork(path, provided_tags)
+    current_tags, artwork, meta_err, art_err, audio_props = _read_tags_and_artwork(path, provided_tags)
+    provided_artwork: List[ArtworkCandidate] = []
+    for art in raw.get("artwork", []) if isinstance(raw.get("artwork"), list) else []:
+        try:
+            provided_artwork.append(
+                ArtworkCandidate(
+                    path=path,
+                    hash=str(art.get("hash")),
+                    size=int(art.get("size") or 0),
+                    width=art.get("width"),
+                    height=art.get("height"),
+                    status=art.get("status", "ok"),
+                    bytes=art.get("bytes"),
+                )
+            )
+        except Exception:
+            continue
+    if provided_artwork and not artwork:
+        artwork = provided_artwork
+        if "cover_hash" not in current_tags:
+            current_tags["cover_hash"] = provided_artwork[0].hash
+            current_tags["artwork_hash"] = provided_artwork[0].hash
     tags = dict(current_tags)
     return DuplicateTrack(
         path=path,
         fingerprint=raw.get("fingerprint"),
         ext=ext,
-        bitrate=int(raw.get("bitrate") or 0),
-        sample_rate=int(raw.get("sample_rate") or raw.get("samplerate") or 0),
-        bit_depth=int(raw.get("bit_depth") or raw.get("bitdepth") or 0),
+        bitrate=int(audio_props.get("bitrate") or raw.get("bitrate") or 0),
+        sample_rate=int(audio_props.get("sample_rate") or raw.get("sample_rate") or raw.get("samplerate") or 0),
+        bit_depth=int(audio_props.get("bit_depth") or raw.get("bit_depth") or raw.get("bitdepth") or 0),
+        channels=int(audio_props.get("channels") or raw.get("channels") or 0),
+        codec=str(audio_props.get("codec") or raw.get("codec") or ""),
+        container=str(audio_props.get("container") or raw.get("container") or ext.replace(".", "")),
         tags=dict(tags),
         current_tags=dict(current_tags),
         artwork=artwork,
@@ -483,7 +595,7 @@ def _quality_tuple(track: DuplicateTrack, context: str) -> tuple:
         track.bitrate,
         track.sample_rate,
         track.bit_depth,
-        1 if context == "single" else 0,
+        track.channels,
         track.path.lower(),
     )
 
@@ -524,6 +636,48 @@ def _merge_tags(existing: MutableMapping[str, object], source: Mapping[str, obje
     return merged
 
 
+def _build_planned_tags(
+    winner: DuplicateTrack,
+    metadata_source: DuplicateTrack | None,
+    contexts: Mapping[str, str],
+) -> tuple[Dict[str, object], Optional[str], str, List[str]]:
+    planned_tags: Dict[str, object] = _merge_tags(_blank_tags(), winner.current_tags)
+    tag_source: Optional[str] = None
+    tag_source_reason = "Winner tags retained (no metadata source found)"
+    tag_source_evidence: List[str] = []
+
+    if metadata_source:
+        tag_source = metadata_source.path
+        src_context = contexts.get(metadata_source.path, "unknown")
+        tag_source_reason = f"Selected {src_context} metadata source with {metadata_source.metadata_count} populated fields"
+        src_tags = metadata_source.current_tags if isinstance(metadata_source.current_tags, Mapping) else {}
+        normalized_keys = [
+            "album",
+            "albumartist",
+            "artist",
+            "album_type",
+            "track",
+            "tracknumber",
+            "disc",
+            "discnumber",
+            "date",
+            "year",
+        ]
+        for key in normalized_keys:
+            if src_tags.get(key) in (None, "", []):
+                continue
+            planned_tags[key] = src_tags.get(key)
+        if src_context == "album":
+            planned_tags["album_type"] = src_tags.get("album_type") or "album"
+        elif src_context == "single":
+            planned_tags["album_type"] = src_tags.get("album_type") or "single"
+        tag_source_evidence.append(tag_source_reason)
+    else:
+        tag_source_evidence.append("No album-context source available; keeping winner metadata")
+
+    return planned_tags, tag_source, tag_source_reason, tag_source_evidence
+
+
 def _metadata_changes(winner: DuplicateTrack, planned_tags: Mapping[str, object]) -> Dict[str, Dict[str, object]]:
     keys = TAG_KEYS
     changes: Dict[str, Dict[str, object]] = {}
@@ -538,20 +692,37 @@ def _metadata_changes(winner: DuplicateTrack, planned_tags: Mapping[str, object]
 
 def _quality_rationale(winner: DuplicateTrack, runner_up: DuplicateTrack | None, context: str) -> Dict[str, object]:
     reasons: List[str] = []
+
+    def fmt_codec(t: DuplicateTrack) -> str:
+        container = t.container or t.ext.replace(".", "").upper()
+        codec = t.codec or container
+        return f"{container} / {codec}"
+
+    reasons.append(f"Container/codec: {fmt_codec(winner)}")
     if winner.is_lossless:
-        reasons.append("Lossless format")
-    if runner_up and not runner_up.is_lossless and winner.is_lossless:
-        reasons.append("Higher-quality format than the next candidate")
-    if runner_up and winner.bitrate > runner_up.bitrate:
-        reasons.append("Higher bitrate than the next candidate")
-    if runner_up and winner.sample_rate > runner_up.sample_rate:
-        reasons.append("Higher sample rate than the next candidate")
-    if runner_up and winner.bit_depth > runner_up.bit_depth:
-        reasons.append("Higher bit depth than the next candidate")
-    if context == "album":
-        reasons.append("Album context favored for metadata consistency")
-    elif context == "single":
-        reasons.append("Single context favored for artwork alignment")
+        reasons.append("Lossless encoding")
+    if runner_up and winner.is_lossless and not runner_up.is_lossless:
+        reasons.append(f"Lossless beats lossy ({fmt_codec(winner)} > {fmt_codec(runner_up)})")
+    if runner_up and winner.bitrate != runner_up.bitrate:
+        if winner.bitrate > runner_up.bitrate:
+            reasons.append(f"Higher bitrate: {winner.bitrate} vs {runner_up.bitrate} kbps")
+        else:
+            reasons.append(f"Bitrate tie broken by other properties ({winner.bitrate} vs {runner_up.bitrate} kbps)")
+    if runner_up and winner.sample_rate != runner_up.sample_rate:
+        if winner.sample_rate > runner_up.sample_rate:
+            reasons.append(f"Higher sample rate: {winner.sample_rate} Hz vs {runner_up.sample_rate} Hz")
+        else:
+            reasons.append("Sample rate tie handled by deterministic ordering")
+    if runner_up and winner.bit_depth != runner_up.bit_depth:
+        if winner.bit_depth > runner_up.bit_depth:
+            reasons.append(f"Higher bit depth: {winner.bit_depth}-bit vs {runner_up.bit_depth}-bit")
+        else:
+            reasons.append("Bit depth tie handled by deterministic ordering")
+    if runner_up and winner.channels != runner_up.channels:
+        if winner.channels > runner_up.channels:
+            reasons.append(f"More channels: {winner.channels} vs {runner_up.channels}")
+        else:
+            reasons.append("Channel count tie handled by deterministic ordering")
 
     return {
         "context": context,
@@ -559,35 +730,82 @@ def _quality_rationale(winner: DuplicateTrack, runner_up: DuplicateTrack | None,
         "bitrate": winner.bitrate,
         "sample_rate": winner.sample_rate,
         "bit_depth": winner.bit_depth,
+        "channels": winner.channels,
+        "codec": winner.codec or "",
+        "container": winner.container or winner.ext.replace(".", "").upper(),
         "metadata_count": winner.metadata_count,
         "reasons": reasons or ["Deterministic ordering by quality"],
+        "runner_up": {
+            "bitrate": runner_up.bitrate if runner_up else None,
+            "sample_rate": runner_up.sample_rate if runner_up else None,
+            "bit_depth": runner_up.bit_depth if runner_up else None,
+            "channels": runner_up.channels if runner_up else None,
+            "codec": runner_up.codec if runner_up else "",
+            "container": runner_up.container if runner_up else "",
+            "path": runner_up.path if runner_up else None,
+        },
     }
 
 
-def _artwork_score(track: DuplicateTrack) -> tuple:
-    size_hint = 0
-    has_art = False
-    if track.artwork:
-        has_art = True
-        size_hint = max(c.size for c in track.artwork if c.status == "ok") if any(c.status == "ok" for c in track.artwork) else 0
-    return (
-        1 if has_art else 0,
-        size_hint,
-        track.bitrate,
-        track.sample_rate,
-    )
+def _artwork_blob_score(blob: ArtworkCandidate) -> tuple:
+    resolution = 0
+    if blob.width and blob.height:
+        resolution = blob.width * blob.height
+    has_dims = 1 if blob.width and blob.height else 0
+    return has_dims, resolution, blob.size
 
 
-def _select_artwork_candidate(candidates: Sequence[DuplicateTrack]) -> tuple[DuplicateTrack | None, bool]:
-    usable = [c for c in candidates if c.artwork]
-    ranked = sorted(usable, key=lambda t: (_artwork_score(t), t.path.lower()), reverse=True)
-    if not ranked:
-        return None, False
-    if len(ranked) == 1:
-        return ranked[0], False
-    top_score = _artwork_score(ranked[0])
-    ambiguous = sum(1 for c in ranked if _artwork_score(c) == top_score) > 1
-    return ranked[0], ambiguous
+def _best_artwork_blob(candidates: Sequence[ArtworkCandidate]) -> ArtworkCandidate | None:
+    usable = [c for c in candidates if c.status == "ok"] or list(candidates)
+    if not usable:
+        return None
+    return sorted(usable, key=lambda c: (_artwork_blob_score(c), c.hash), reverse=True)[0]
+
+
+def _select_single_artwork_candidate(
+    candidates: Sequence[DuplicateTrack], contexts: Mapping[str, str]
+) -> tuple[DuplicateTrack | None, ArtworkCandidate | None, bool]:
+    best_track: DuplicateTrack | None = None
+    best_blob: ArtworkCandidate | None = None
+    best_score: tuple | None = None
+    ambiguous = False
+    for track in candidates:
+        if contexts.get(track.path) != "single" or not track.artwork:
+            continue
+        blob = _best_artwork_blob(track.artwork)
+        if not blob:
+            continue
+        score = _artwork_blob_score(blob)
+        if best_score is None or score > best_score:
+            best_score = score
+            best_track = track
+            best_blob = blob
+            ambiguous = False
+        elif score == best_score:
+            ambiguous = True
+    return best_track, best_blob, ambiguous
+
+
+def _select_overall_artwork_candidate(candidates: Sequence[DuplicateTrack]) -> tuple[DuplicateTrack | None, ArtworkCandidate | None, bool]:
+    best_track: DuplicateTrack | None = None
+    best_blob: ArtworkCandidate | None = None
+    best_score: tuple | None = None
+    ambiguous = False
+    for track in candidates:
+        if not track.artwork:
+            continue
+        blob = _best_artwork_blob(track.artwork)
+        if not blob:
+            continue
+        score = _artwork_blob_score(blob)
+        if best_score is None or score > best_score:
+            best_score = score
+            best_track = track
+            best_blob = blob
+            ambiguous = False
+        elif score == best_score:
+            ambiguous = True
+    return best_track, best_blob, ambiguous
 
 
 def _cluster_duplicates(
@@ -711,16 +929,10 @@ def build_consolidation_plan(
         runner_up = quality_sorted[1] if len(quality_sorted) > 1 else None
 
         metadata_source = _select_metadata_source(cluster, contexts)
-        planned_tags: Dict[str, object] = _merge_tags(_blank_tags(), winner.current_tags)
-        tag_source: Optional[str] = None
-        if metadata_source:
-            planned_tags = _merge_tags(planned_tags, metadata_source.current_tags)
-            if contexts.get(metadata_source.path) == "album":
-                planned_tags.setdefault("album_type", "album")
-            elif contexts.get(metadata_source.path) == "single":
-                planned_tags.setdefault("album_type", "single")
-            tag_source = metadata_source.path
-        else:
+        planned_tags, tag_source, tag_source_reason, tag_source_evidence = _build_planned_tags(
+            winner, metadata_source, contexts
+        )
+        if not metadata_source:
             review_flags.append(f"Missing metadata source for group containing {winner.path}.")
 
         meta_changes = _metadata_changes(winner, planned_tags)
@@ -729,31 +941,102 @@ def build_consolidation_plan(
 
         group_review: List[str] = []
 
-        single_candidates = [t for t in cluster if contexts.get(t.path) == "single"]
-        album_candidates = [t for t in cluster if contexts.get(t.path) == "album"]
-        art_candidates_order = single_candidates or album_candidates or cluster
-        distinct_hashes = {t.cover_hash for t in art_candidates_order if t.cover_hash}
-        tag_artwork_conflict = len(distinct_hashes) > 1
-        best_art, ambiguous_art = _select_artwork_candidate(art_candidates_order)
-        ambiguous_art = ambiguous_art or tag_artwork_conflict
+        track_quality: Dict[str, Dict[str, object]] = {
+            t.path: {
+                "container": t.container or t.ext.replace(".", "").upper(),
+                "codec": t.codec,
+                "bitrate": t.bitrate,
+                "sample_rate": t.sample_rate,
+                "bit_depth": t.bit_depth,
+                "channels": t.channels,
+                "is_lossless": t.is_lossless,
+            }
+            for t in quality_sorted
+        }
+
+        single_art_track, single_art_blob, ambiguous_single_art = _select_single_artwork_candidate(cluster, contexts)
+        overall_art_track, overall_art_blob, ambiguous_overall_art = _select_overall_artwork_candidate(cluster)
         artwork_actions: List[ArtworkDirective] = []
         chosen_artwork_source: Dict[str, object] = {"path": None, "reason": ""}
-        artwork_status = "missing"
-        if best_art and best_art.artwork:
-            best_blob = next((c for c in best_art.artwork if c.status == "ok"), best_art.artwork[0])
+        artwork_status = "unchanged"
+        artwork_evidence: List[str] = []
+
+        if single_art_blob:
             chosen_artwork_source = {
-                "path": best_art.path,
-                "hash": best_blob.hash,
-                "size": best_blob.size,
-                "reason": "best artwork candidate",
+                "path": single_art_track.path if single_art_track else None,
+                "hash": single_art_blob.hash,
+                "size": single_art_blob.size,
+                "width": single_art_blob.width,
+                "height": single_art_blob.height,
+                "context": "single",
+                "reason": "Best single artwork by resolution/size",
             }
-            artwork_status = "selected"
-            if not winner.cover_hash or winner.cover_hash != best_blob.hash:
-                reason = "Copy artwork from best candidate to winner"
-                artwork_actions.append(ArtworkDirective(source=best_art.path, target=winner.path, reason=reason))
+            artwork_evidence.append(
+                f"Single artwork selected from {single_art_track.path if single_art_track else 'unknown'} "
+                f"({single_art_blob.width}x{single_art_blob.height}, {single_art_blob.size} bytes)"
+            )
+        elif overall_art_blob:
+            chosen_artwork_source = {
+                "path": overall_art_track.path if overall_art_track else None,
+                "hash": overall_art_blob.hash,
+                "size": overall_art_blob.size,
+                "width": overall_art_blob.width,
+                "height": overall_art_blob.height,
+                "context": "fallback",
+                "reason": "No single artwork found; best available artwork",
+            }
+            artwork_evidence.append(
+                f"No single artwork found; using best available artwork from {overall_art_track.path if overall_art_track else 'unknown'} "
+                f"({overall_art_blob.width}x{overall_art_blob.height}, {overall_art_blob.size} bytes)"
+            )
+        else:
+            chosen_artwork_source["reason"] = "No artwork candidates available"
+            artwork_status = "none found"
+            artwork_evidence.append("No readable artwork candidates were discovered.")
+
+        if winner_context == "album" and single_art_blob and single_art_track:
+            if not winner.cover_hash or winner.cover_hash != single_art_blob.hash:
+                artwork_status = "apply"
+                artwork_actions.append(
+                    ArtworkDirective(
+                        source=single_art_track.path,
+                        target=winner.path,
+                        reason="Apply single artwork to album-context winner",
+                    )
+                )
+                artwork_evidence.append("Album-context winner will receive single artwork to preserve single cover.")
+            else:
+                artwork_status = "unchanged"
+                chosen_artwork_source["reason"] = "Winner already has selected single artwork"
+                artwork_evidence.append("Winner already matches selected single artwork hash; no copy needed.")
+        elif winner_context == "album" and not single_art_blob and overall_art_blob and overall_art_track:
+            if not winner.cover_hash or winner.cover_hash != overall_art_blob.hash:
+                artwork_status = "apply"
+                artwork_actions.append(
+                    ArtworkDirective(
+                        source=overall_art_track.path,
+                        target=winner.path,
+                        reason="Fill missing album artwork from best available source",
+                    )
+                )
+                artwork_evidence.append("No single artwork available; applying best available artwork to album winner.")
+            else:
+                artwork_evidence.append("Album winner artwork already matches best available source.")
+        else:
+            if winner_context == "single":
+                artwork_evidence.append("Single-context winner retains its own artwork; album art will not be pulled.")
+                chosen_artwork_source["reason"] = chosen_artwork_source.get("reason") or "Single winner keeps artwork"
+            elif not single_art_blob and not overall_art_blob:
+                group_review.append("No artwork available to apply.")
+
+        cover_hashes = {t.cover_hash for t in cluster if t.cover_hash}
+        ambiguous_art = ambiguous_single_art or ambiguous_overall_art
+        if len(cover_hashes) > 1:
+            ambiguous_art = True
+            artwork_evidence.append("Conflicting embedded artwork hashes between candidates.")
         if ambiguous_art:
             review_flags.append(f"Artwork selection ambiguous for group {_stable_group_id([t.path for t in cluster])}.")
-        if not best_art:
+        if not (single_art_blob or overall_art_blob):
             missing_reason = "No artwork candidates available"
             if any(t.artwork_error for t in cluster):
                 missing_reason = "Artwork present but unreadable"
@@ -766,6 +1049,7 @@ def build_consolidation_plan(
         playlist_map = {loser: winner.path for loser in losers}
 
         group_id = _stable_group_id([t.path for t in cluster])
+        group_confidence = "High (identical fingerprint cluster)"
         if ambiguous_art:
             group_review.append("Artwork selection requires review.")
         if not losers:
@@ -815,6 +1099,11 @@ def build_consolidation_plan(
                 context_evidence=context_evidence,
                 tag_source=tag_source,
                 placeholders_present=placeholders,
+                tag_source_reason=tag_source_reason,
+                tag_source_evidence=tag_source_evidence,
+                track_quality=track_quality,
+                group_confidence=group_confidence,
+                artwork_evidence=artwork_evidence,
             )
         )
 
@@ -848,15 +1137,82 @@ def render_consolidation_preview(plan: ConsolidationPlan, output_html_path: str)
             + "</table>"
         )
 
-    def _render_artwork(actions: List[ArtworkDirective]) -> str:
-        if not actions:
-            return "<em>Winner artwork unchanged.</em>"
+    def _render_quality(group: GroupPlan) -> str:
+        winner = group.winner_path
+        q = group.track_quality.get(winner, {})
         rows = [
-            f"<li>Copy artwork from {_html_escape(act.source)} → {_html_escape(act.target)} "
-            f"({_html_escape(act.reason)})</li>"
-            for act in actions
+            ("Container / Codec", f"{_html_escape(q.get('container') or '—')} / {_html_escape(q.get('codec') or '—')}"),
+            ("Bitrate", f"{_html_escape(q.get('bitrate') or '0')} kbps"),
+            ("Sample Rate", f"{_html_escape(q.get('sample_rate') or '0')} Hz"),
+            ("Bit Depth", f"{_html_escape(q.get('bit_depth') or '0')} bit"),
+            ("Channels", _html_escape(q.get("channels") or "—")),
         ]
-        return "<ul>" + "".join(rows) + "</ul>"
+        table = (
+            "<table class='metadata'>"
+            "<tr><th>Metric</th><th>Value</th></tr>"
+            + "".join(f"<tr><td>{label}</td><td>{value}</td></tr>" for label, value in rows)
+            + "</table>"
+        )
+        reasons = group.winner_quality.get("reasons") or []
+        return (
+            "<div class='quality'>"
+            f"<p><strong>Winner audio</strong></p>"
+            f"<p class='muted'>Context: {_html_escape(group.winner_quality.get('context', 'unknown'))}</p>"
+            f"{table}"
+            "<p><strong>Why this is the winner</strong></p>"
+            "<ul>"
+            + "".join(f"<li>{_html_escape(r)}</li>" for r in reasons)
+            + "</ul>"
+            "</div>"
+        )
+
+    def _render_losers(group: GroupPlan) -> str:
+        if not group.losers:
+            return "<em>No losers to consolidate.</em>"
+        rows = []
+        for loser in group.losers:
+            disposition = group.loser_disposition.get(loser, "quarantine")
+            rewrite = group.playlist_rewrites.get(loser, "n/a")
+            q = group.track_quality.get(loser, {})
+            quality = f"{_html_escape(q.get('container') or '—')} / {_html_escape(q.get('codec') or '—')} ({_html_escape(q.get('bitrate') or '0')} kbps)"
+            rows.append(
+                f"<tr><td>{_html_escape(loser)}</td><td>{quality}</td><td>{_html_escape(disposition)}</td>"
+                f"<td>{_html_escape(rewrite)}</td></tr>"
+            )
+        return (
+            "<table class='metadata losers'>"
+            "<tr><th>Path</th><th>Quality</th><th>Action</th><th>Playlist rewrite</th></tr>"
+            + "".join(rows)
+            + "</table>"
+        )
+
+    def _render_artwork_section(group: GroupPlan) -> str:
+        source = group.chosen_artwork_source or {}
+        source_path = source.get("path") or "None"
+        source_hash = source.get("hash") or "unknown"
+        dims = "×".join(str(v) for v in (source.get("width"), source.get("height")) if v) if source.get("width") or source.get("height") else "unknown"
+        size = f"{source.get('size') or 0} bytes"
+        lines = []
+        if group.artwork:
+            lines.append("<p><strong>Artwork will be applied</strong></p><ul>")
+            for act in group.artwork:
+                lines.append(
+                    "<li>"
+                    f"{_html_escape(act.source)} → {_html_escape(act.target)}"
+                    f" ({_html_escape(source_hash)}, {dims}, {size}; {_html_escape(act.reason)})"
+                    "</li>"
+                )
+            lines.append("</ul>")
+        else:
+            reason = source.get("reason") or group.artwork_status or "Winner artwork unchanged."
+            lines.append(f"<p><strong>Artwork unchanged</strong> — {_html_escape(reason)}</p>")
+        lines.append(
+            f"<p class='muted'>Artwork source: {_html_escape(source_path)} "
+            f"(hash={_html_escape(source_hash)}, size={_html_escape(size)}, dimensions={_html_escape(dims)})</p>"
+        )
+        if group.artwork_evidence:
+            lines.append("<ul>" + "".join(f"<li>{_html_escape(ev)}</li>" for ev in group.artwork_evidence) + "</ul>")
+        return "".join(lines)
 
     review_required = plan.review_required_groups
     lines = [
@@ -871,6 +1227,9 @@ def render_consolidation_preview(plan: ConsolidationPlan, output_html_path: str)
         ".pill{display:inline-block;padding:4px 8px;border-radius:12px;font-size:12px;}",
         ".ok{background:#e7f5e8;color:#266534;}",
         ".warn{background:#ffe8cc;color:#b05e00;}",
+        ".section{margin-top:8px;}",
+        ".losers td{font-size:0.9em;}",
+        "details{margin-top:6px;}",
         "</style></head><body>",
         "<h1>Duplicate Consolidation Preview</h1>",
         f"<p class='muted'>Generated at {plan.generated_at.isoformat()}</p>",
@@ -890,34 +1249,26 @@ def render_consolidation_preview(plan: ConsolidationPlan, output_html_path: str)
         )
         lines.append("<div class='group {cls}'>".format(cls="review" if group.review_flags else ""))
         lines.append(
-            f"<div class='header'><div><strong>Group {group.group_id}</strong></div>{review_badge}</div>"
+            f"<div class='header'><div><strong>Group {group.group_id}</strong>"
+            f"<div class='muted'>Confidence: {_html_escape(group.group_confidence)}</div></div>{review_badge}</div>"
         )
-        lines.append(f"<p class='muted'>Winner: {_html_escape(group.winner_path)}</p>")
-        lines.append("<ul>")
-        for loser in group.losers:
-            disposition = group.loser_disposition.get(loser, "quarantine")
-            lines.append(
-                f"<li>Loser: {_html_escape(loser)} → {_html_escape(disposition)} | "
-                f"Playlist rewrite → {_html_escape(group.playlist_rewrites.get(loser, 'n/a'))}</li>"
-            )
-        lines.append("</ul>")
+        lines.append(f"<p><strong>Winner</strong>: {_html_escape(group.winner_path)}</p>")
+        lines.append(_render_quality(group))
 
-        lines.append("<p><strong>Quality rationale</strong></p>")
-        reasons = group.winner_quality.get("reasons") or []
-        lines.append(
-            "<ul>"
-            + "".join(f"<li>{_html_escape(r)}</li>" for r in reasons)
-            + "</ul>"
-        )
-        lines.append("<p><strong>Metadata normalization</strong></p>")
+        lines.append("<div class='section'><p><strong>Losers</strong></p>")
+        lines.append(_render_losers(group))
+        lines.append("</div>")
+
+        lines.append("<div class='section'><p><strong>Metadata normalization</strong></p>")
         lines.append(_render_metadata(group.metadata_changes))
+        lines.append(f"<p class='muted'>Tag source: {_html_escape(group.tag_source or 'None')} — {_html_escape(group.tag_source_reason)}</p>")
+        if group.tag_source_evidence:
+            lines.append("<ul>" + "".join(f"<li>{_html_escape(ev)}</li>" for ev in group.tag_source_evidence) + "</ul>")
+        lines.append("</div>")
 
-        lines.append("<p><strong>Artwork</strong></p>")
-        lines.append(_render_artwork(group.artwork))
-        art_source = group.chosen_artwork_source or {}
-        source_path = art_source.get("path") or "None"
-        source_reason = art_source.get("reason") or group.artwork_status
-        lines.append(f"<p class='muted'>Chosen artwork source: {_html_escape(source_path)} ({_html_escape(source_reason)})</p>")
+        lines.append("<div class='section'><p><strong>Artwork</strong></p>")
+        lines.append(_render_artwork_section(group))
+        lines.append("</div>")
 
         lines.append(
             f"<p><strong>Playlist impact</strong>: {group.playlist_impact.playlists} playlists, "
@@ -943,6 +1294,12 @@ def render_consolidation_preview(plan: ConsolidationPlan, output_html_path: str)
                 + "</li>"
                 for path in sorted(group.context_evidence.keys())
             )
+            + "</ul>"
+            + "<p><strong>Artwork evidence</strong></p><ul>"
+            + "".join(f"<li>{_html_escape(ev)}</li>" for ev in group.artwork_evidence)
+            + "</ul>"
+            + "<p><strong>Tag source selection</strong></p><ul>"
+            + "".join(f"<li>{_html_escape(ev)}</li>" for ev in group.tag_source_evidence)
             + "</ul>"
             + "</details>"
         )

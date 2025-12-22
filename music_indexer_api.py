@@ -766,9 +766,10 @@ def render_dry_run_html_from_plan(
     *,
     heading_text="Phase A – Exact Metadata",
     title_prefix="Music Index (Dry Run)",
+    coord: DryRunCoordinator | None = None,
 ):
     """Render a dry-run preview from an already computed move plan."""
-    coord = DryRunCoordinator()
+    coord = coord or DryRunCoordinator()
 
     def _decision_annotation(decision: str, action: str | None = None):
         normalized_action = (action or "").lower()
@@ -816,9 +817,13 @@ def render_dry_run_html_from_plan(
         decision_map = {}
         decision_keys = set()
         decision_actions = {}
+        source_map = {}
         if plan_items:
             for item in plan_items:
                 dst = item.get("destination")
+                src = item.get("source")
+                if dst and src:
+                    source_map[dst] = src
                 decision = (item.get("decision") or "").upper()
                 annotation = _decision_annotation(decision, item.get("action"))
                 if dst and annotation:
@@ -858,7 +863,11 @@ def render_dry_run_html_from_plan(
                     label_text, css_class = annotation
                     classes.append(css_class)
                     label = f" <span class=\"decision-label {css_class}\">{sanitize(label_text)}</span>"
-                line = f"{indent}<span class=\"{' '.join(classes)}\">- {sanitize(fname)}{label}</span>"
+                source_label = ""
+                src_path = source_map.get(node)
+                if src_path:
+                    source_label = f" <span class=\"source\">(from {sanitize(os.path.basename(src_path))})</span>"
+                line = f"{indent}<span class=\"{' '.join(classes)}\">- {sanitize(fname)}{label}{source_label}</span>"
                 if tags_str:
                     line += f"  <span class=\"tags\">[{sanitize(tags_str)}]</span>"
                 lines.append(line)
@@ -874,7 +883,7 @@ def render_dry_run_html_from_plan(
         out.write(
             "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n  <meta charset=\"UTF-8\">\n  "
             f"<title>{title_prefix} – {sanitize(os.path.basename(root_path))}</title>\n  "
-            "<style>\n    body { background:#2e3440; color:#d8dee9; font-family:'Courier New', monospace; }\n    pre  { font-size:14px; }\n    .folder { color:#81a1c1; }\n    .song   { color:#a3be8c; }\n    .tags   { color:#88c0d0; font-size:12px; margin-left:1em; }\n    .legend { margin:0 0 8px 0; font-size:13px; color:#e5e9f0; }\n    .legend-note { color:#cfd6e3; font-size:12px; }\n    .decision-label { color:#b5bcc9; font-size:12px; margin-left:0.5em; }\n    .decision-skip { color:#c0c8d8; opacity:0.7; }\n    .decision-review { color:#ebcb8b; }\n    .decision-replace { color:#bf616a; }\n    .decision-copy { color:#8fbcbb; }\n    .decision-move { color:#88c0d0; }\n  </style>\n</head>\n<body>\n"
+            "<style>\n    body { background:#2e3440; color:#d8dee9; font-family:'Courier New', monospace; }\n    pre  { font-size:14px; }\n    .folder { color:#81a1c1; }\n    .song   { color:#a3be8c; }\n    .tags   { color:#88c0d0; font-size:12px; margin-left:1em; }\n    .legend { margin:0 0 8px 0; font-size:13px; color:#e5e9f0; }\n    .legend-note { color:#cfd6e3; font-size:12px; }\n    .decision-label { color:#b5bcc9; font-size:12px; margin-left:0.5em; }\n    .decision-skip { color:#c0c8d8; opacity:0.7; }\n    .decision-review { color:#ebcb8b; }\n    .decision-replace { color:#bf616a; }\n    .decision-copy { color:#8fbcbb; }\n    .decision-move { color:#88c0d0; }\n    .source { color:#cfd6e3; font-size:12px; margin-left:0.5em; }\n  </style>\n</head>\n<body>\n"
         )
         out.write(html_body)
         if html_body and not html_body.endswith("\n"):
@@ -913,7 +922,7 @@ def build_dry_run_html(
 
     log_callback("5/6: Writing dry-run HTML…")
 
-    render_dry_run_html_from_plan(root_path, output_html_path, moves, tag_index)
+    render_dry_run_html_from_plan(root_path, output_html_path, moves, tag_index, coord=coord)
     log_callback(f"✓ Dry-run HTML written to: {output_html_path}")
     return {"moved": 0, "html": output_html_path, "dry_run": True}
 
