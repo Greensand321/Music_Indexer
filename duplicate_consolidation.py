@@ -15,10 +15,12 @@ import importlib.util
 import io
 import json
 import os
+import re
 import threading
 import time
 from dataclasses import dataclass, field
 from typing import Callable, Dict, Iterable, List, Mapping, MutableMapping, Optional, Sequence
+from collections import defaultdict
 
 from utils.path_helpers import ensure_long_path
 try:
@@ -37,7 +39,8 @@ if _PIL_AVAILABLE:
 else:  # pragma: no cover - optional dependency
     Image = None  # type: ignore
 
-from near_duplicate_detector import fingerprint_distance
+from music_indexer_api import extract_primary_and_collabs
+from near_duplicate_detector import fingerprint_distance, _parse_fp as _parse_fingerprint
 
 LOSSLESS_EXTS = {".flac", ".wav", ".alac", ".ape", ".aiff", ".aif"}
 DEFAULT_DISTANCE_THRESHOLD = 0.0
@@ -70,6 +73,20 @@ TAG_KEYS = [
     "genre",
     "compilation",
 ]
+TITLE_JUNK_TOKENS = {
+    "remaster",
+    "remastered",
+    "explicit",
+    "clean",
+    "mono",
+    "stereo",
+    "version",
+    "deluxe",
+    "bonus",
+}
+COARSE_FP_BAND_SIZE = 8
+COARSE_FP_BANDS = 6
+COARSE_FP_QUANTIZATION = 4
 
 
 def _now() -> float:
@@ -111,6 +128,103 @@ def _parse_int(value: object) -> int | None:
         return ivalue
     except Exception:
         return None
+
+
+def _normalized_tokens(text: str) -> List[str]:
+    lowered = (text or "").lower()
+    cleaned = re.sub(r"[\\[\\]{}()]+", " ", lowered)
+    tokens = [tok for tok in re.split(r"[^a-z0-9]+", cleaned) if tok]
+    return tokens
+
+
+def _normalize_primary_artist(tags: Mapping[str, object], path: str) -> str:
+    raw_artist = str(tags.get("artist") or tags.get("albumartist") or "").strip()
+    lowered = raw_artist.lower()
+    placeholders = {"various", "various artists", "va", "unknown"}
+    if lowered in placeholders:
+        raw_artist = ""
+    if not raw_artist:
+        stem = os.path.splitext(os.path.basename(path))[0]
+        if " - " in stem:
+            candidate = stem.split(" - ", 1)[0].strip()
+            if candidate.lower() not in placeholders:
+                raw_artist = candidate
+    primary, _ = extract_primary_and_collabs(raw_artist) if raw_artist else ("", [])
+    tokens = _normalized_tokens(primary)
+    return " ".join(tokens or ["unknown"])
+
+
+def _normalize_title(tags: Mapping[str, object], path: str) -> str:
+    raw_title = str(tags.get("title") or "").strip()
+    if not raw_title:
+        raw_title = os.path.splitext(os.path.basename(path))[0]
+    tokens = _normalized_tokens(raw_title)
+    filtered = [tok for tok in tokens if tok not in TITLE_JUNK_TOKENS]
+    filtered = [tok for tok in filtered if not (tok.isdigit() and len(tok) == 4)]
+    return " ".join(filtered or tokens or ["unknown"])
+
+
+def _metadata_bucket_key(track: DuplicateTrack) -> tuple[str, str]:
+    tags = track.current_tags if isinstance(track.current_tags, Mapping) else track.tags
+    tags = tags or {}
+    return _normalize_primary_artist(tags, track.path), _normalize_title(tags, track.path)
+
+
+def _build_metadata_buckets(tracks: Sequence[DuplicateTrack]) -> Dict[tuple[str, str], List[DuplicateTrack]]:
+    title_to_artists: Dict[str, set[str]] = defaultdict(set)
+    normalized: List[tuple[DuplicateTrack, tuple[str, str]]] = []
+    for track in tracks:
+        key = _metadata_bucket_key(track)
+        normalized.append((track, key))
+        artist, title = key
+        if artist and artist != "unknown":
+            title_to_artists[title].add(artist)
+    buckets: Dict[tuple[str, str], List[DuplicateTrack]] = defaultdict(list)
+    for track, (artist, title) in normalized:
+        artist_key = artist
+        known_artists = title_to_artists.get(title, set())
+        if artist_key == "unknown" and len(known_artists) == 1:
+            artist_key = next(iter(known_artists))
+        buckets[(artist_key, title)].append(track)
+    return buckets
+
+
+def _fingerprint_to_ints(fp: str | None, *, limit: int = COARSE_FP_BAND_SIZE * COARSE_FP_BANDS) -> List[int]:
+    if not fp:
+        return []
+    parsed = _parse_fingerprint(fp) if "_parse_fingerprint" in globals() else None
+    ints: List[int] = []
+    if parsed:
+        kind, payload = parsed
+        if kind == "ints":
+            ints = list(payload)
+        elif kind == "bytes":
+            ints = list(payload)
+    if not ints:
+        try:
+            ints = [int(tok) for tok in fp.replace(",", " ").split() if tok]
+        except Exception:
+            ints = [ord(ch) for ch in fp]
+    return ints[:limit]
+
+
+def _coarse_fingerprint_keys(fp: str | None) -> List[str]:
+    if not fp:
+        return []
+    ints = _fingerprint_to_ints(fp)
+    if not ints:
+        return []
+    quantized = [val // COARSE_FP_QUANTIZATION for val in ints]
+    keys: List[str] = []
+    for idx in range(0, len(quantized), COARSE_FP_BAND_SIZE):
+        band = quantized[idx : idx + COARSE_FP_BAND_SIZE]
+        if not band:
+            break
+        digest = hashlib.blake2s(",".join(map(str, band)).encode("utf-8"), digest_size=4).hexdigest()
+        keys.append(f"{idx // COARSE_FP_BAND_SIZE}:{digest}")
+    if not keys:
+        keys.append(f"band0:{hashlib.blake2s(fp.encode('utf-8'), digest_size=4).hexdigest()}")
+    return keys
 
 
 def _extract_image_dimensions(payload: bytes) -> tuple[Optional[int], Optional[int]]:
@@ -891,22 +1005,28 @@ def _cluster_duplicates(
     start_time: float,
     review_flags: List[str],
 ) -> List[List[DuplicateTrack]]:
-    buckets: Dict[str, List[DuplicateTrack]] = {}
-    for track in tracks:
-        if not track.fingerprint:
-            continue
-        key = str(track.fingerprint) if threshold <= 0 else str(track.fingerprint)[:20]
-        buckets.setdefault(key, []).append(track)
-
+    buckets = _build_metadata_buckets(tracks)
+    bucket_items = sorted(buckets.items(), key=lambda x: x[0])
     clusters: List[List[DuplicateTrack]] = []
     comparisons = 0
     processed = 0
-    bucket_items = sorted(buckets.items(), key=lambda x: x[0])
     for _, bucket_tracks in bucket_items:
         if cancel_event.is_set() or (timeout_sec and (_now() - start_time) > timeout_sec):
             review_flags.append("Consolidation planning cancelled or timed out during grouping.")
             break
+        bucket_tracks = [t for t in bucket_tracks if t.fingerprint]
+        if not bucket_tracks:
+            continue
         bucket_tracks = sorted(bucket_tracks, key=lambda t: t.path.lower())
+        path_to_track = {t.path: t for t in bucket_tracks}
+        path_order = {t.path: idx for idx, t in enumerate(bucket_tracks)}
+
+        track_keys: Dict[str, List[str]] = {t.path: _coarse_fingerprint_keys(t.fingerprint) for t in bucket_tracks}
+        coarse_index: Dict[str, set[str]] = defaultdict(set)
+        for path, keys in track_keys.items():
+            for key in keys:
+                coarse_index[key].add(path)
+
         used: set[str] = set()
         for idx, track in enumerate(bucket_tracks):
             if (
@@ -925,14 +1045,22 @@ def _cluster_duplicates(
                 continue
             group = [track]
             used.add(track.path)
-            for other in bucket_tracks[idx + 1 :]:
+            candidate_paths: set[str] = set()
+            for key in track_keys.get(track.path, []):
+                candidate_paths.update(coarse_index.get(key, set()))
+            if not candidate_paths:
+                candidate_paths.update(t.path for t in bucket_tracks[idx + 1 :])
+            for other_path in sorted(candidate_paths, key=lambda p: path_order.get(p, len(bucket_tracks))):
                 if cancel_event.is_set() or comparisons >= max_comparisons:
                     review_flags.append("Comparison budget reached; grouping may be incomplete.")
                     break
                 if timeout_sec and (_now() - start_time) > timeout_sec:
                     review_flags.append("Consolidation planning timed out while grouping.")
                     break
+                if other_path in used or path_order.get(other_path, 0) <= idx:
+                    continue
                 comparisons += 1
+                other = path_to_track[other_path]
                 dist = fingerprint_distance(track.fingerprint, other.fingerprint)
                 if dist <= threshold:
                     group.append(other)

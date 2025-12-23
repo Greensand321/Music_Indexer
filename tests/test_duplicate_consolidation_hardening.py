@@ -187,3 +187,65 @@ def test_truncation_sets_review_required_count(tmp_path):
     assert plan.review_flags
     assert plan.requires_review
     assert plan.review_required_count >= 1
+
+
+def test_coarse_fingerprint_gate_allows_cross_codec_matches(tmp_path):
+    flac = tmp_path / "Song.flac"
+    m4a = tmp_path / "Song.m4a"
+    flac.write_text("a")
+    m4a.write_text("b")
+    tracks = [
+        {
+            "path": str(flac),
+            "fingerprint": " ".join(str(v) for v in range(40)),
+            "ext": ".flac",
+            "tags": {"artist": "Artist", "title": "Song"},
+        },
+        {
+            "path": str(m4a),
+            "fingerprint": " ".join([str(v) for v in range(39)] + ["99"]),
+            "ext": ".m4a",
+            "tags": {"artist": "Artist", "title": "Song"},
+        },
+    ]
+
+    plan = build_consolidation_plan(tracks, distance_threshold=0.2)
+    assert len(plan.groups) == 1
+    group_paths = {plan.groups[0].winner_path, *plan.groups[0].losers}
+    assert group_paths == {str(flac), str(m4a)}
+
+
+def test_metadata_gate_uses_normalized_titles(tmp_path):
+    base_a = tmp_path / "Track (Remastered 2014).flac"
+    base_b = tmp_path / "Track.m4a"
+    other = tmp_path / "Different.mp3"
+    for p in (base_a, base_b, other):
+        p.write_text("x")
+    fp_a = " ".join(["10"] * 20 + ["12"] * 10)
+    fp_b = " ".join(["10"] * 20 + ["12"] * 9 + ["11"])
+    fp_other = " ".join(["10"] * 30)
+    tracks = [
+        {
+            "path": str(base_a),
+            "fingerprint": fp_a,
+            "ext": ".flac",
+            "tags": {"artist": "Artist", "title": "Track (Remastered 2014)"},
+        },
+        {
+            "path": str(base_b),
+            "fingerprint": fp_b,
+            "ext": ".m4a",
+            "tags": {"artist": "Artist", "title": "Track"},
+        },
+        {
+            "path": str(other),
+            "fingerprint": fp_other,
+            "ext": ".mp3",
+            "tags": {"artist": "Artist", "title": "Different Song"},
+        },
+    ]
+
+    plan = build_consolidation_plan(tracks, distance_threshold=0.2)
+    assert len(plan.groups) == 1
+    group_paths = {plan.groups[0].winner_path, *plan.groups[0].losers}
+    assert group_paths == {str(base_a), str(base_b)}
