@@ -47,6 +47,7 @@ def _make_group(tmp_path, *, review_flags=None, disposition="quarantine"):
         track_quality={str(winner): {}, str(loser): {}},
         group_confidence="High",
         artwork_evidence=[],
+        fingerprint_distances={},
         library_state=snapshot,
     )
 

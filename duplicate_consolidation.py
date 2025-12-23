@@ -43,7 +43,8 @@ from music_indexer_api import extract_primary_and_collabs
 from near_duplicate_detector import fingerprint_distance, _parse_fp as _parse_fingerprint
 
 LOSSLESS_EXTS = {".flac", ".wav", ".alac", ".ape", ".aiff", ".aif"}
-DEFAULT_DISTANCE_THRESHOLD = 0.0
+EXACT_DUPLICATE_THRESHOLD = 0.02
+NEAR_DUPLICATE_THRESHOLD = 0.10
 DEFAULT_MAX_CANDIDATES = 5000
 DEFAULT_MAX_COMPARISONS = 50_000
 DEFAULT_TIMEOUT_SEC = 15.0
@@ -609,6 +610,7 @@ class GroupPlan:
     track_quality: Dict[str, Dict[str, object]]
     group_confidence: str
     artwork_evidence: List[str]
+    fingerprint_distances: Dict[str, Dict[str, float]] = field(default_factory=dict)
     library_state: Dict[str, Dict[str, object]] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, object]:
@@ -638,6 +640,7 @@ class GroupPlan:
             "track_quality": {k: dict(v) for k, v in self.track_quality.items()},
             "group_confidence": self.group_confidence,
             "artwork_evidence": list(self.artwork_evidence),
+            "fingerprint_distances": {k: dict(v) for k, v in self.fingerprint_distances.items()},
             "library_state": {k: dict(v) for k, v in self.library_state.items()},
         }
 
@@ -997,7 +1000,8 @@ def _select_overall_artwork_candidate(candidates: Sequence[DuplicateTrack]) -> t
 def _cluster_duplicates(
     tracks: Sequence[DuplicateTrack],
     *,
-    threshold: float,
+    exact_duplicate_threshold: float,
+    near_duplicate_threshold: float,
     cancel_event: threading.Event,
     max_comparisons: int,
     timeout_sec: float,
@@ -1005,6 +1009,7 @@ def _cluster_duplicates(
     start_time: float,
     review_flags: List[str],
 ) -> List[List[DuplicateTrack]]:
+    near_duplicate_threshold = max(near_duplicate_threshold, exact_duplicate_threshold)
     buckets = _build_metadata_buckets(tracks)
     bucket_items = sorted(buckets.items(), key=lambda x: x[0])
     clusters: List[List[DuplicateTrack]] = []
@@ -1062,7 +1067,17 @@ def _cluster_duplicates(
                 comparisons += 1
                 other = path_to_track[other_path]
                 dist = fingerprint_distance(track.fingerprint, other.fingerprint)
-                if dist <= threshold:
+                if dist > near_duplicate_threshold:
+                    continue
+                compatible = True
+                for member in group:
+                    if member.path == other.path:
+                        continue
+                    cmp_dist = fingerprint_distance(member.fingerprint, other.fingerprint)
+                    if cmp_dist > near_duplicate_threshold:
+                        compatible = False
+                        break
+                if compatible:
                     group.append(other)
                     used.add(other.path)
             if len(group) > 1:
@@ -1077,7 +1092,8 @@ def _cluster_duplicates(
 def build_consolidation_plan(
     tracks: Iterable[Mapping[str, object]],
     *,
-    distance_threshold: float = DEFAULT_DISTANCE_THRESHOLD,
+    exact_duplicate_threshold: float = EXACT_DUPLICATE_THRESHOLD,
+    near_duplicate_threshold: float = NEAR_DUPLICATE_THRESHOLD,
     max_candidates: int = DEFAULT_MAX_CANDIDATES,
     max_comparisons: int = DEFAULT_MAX_COMPARISONS,
     timeout_sec: float = DEFAULT_TIMEOUT_SEC,
@@ -1103,7 +1119,8 @@ def build_consolidation_plan(
 
     clusters = _cluster_duplicates(
         normalized,
-        threshold=distance_threshold,
+        exact_duplicate_threshold=exact_duplicate_threshold,
+        near_duplicate_threshold=near_duplicate_threshold,
         cancel_event=cancel_event,
         max_comparisons=max_comparisons,
         timeout_sec=timeout_sec,
@@ -1143,10 +1160,14 @@ def build_consolidation_plan(
         winner_quality = _quality_rationale(winner, runner_up, winner_context)
 
         distance_samples: List[float] = []
+        pair_distances: Dict[str, Dict[str, float]] = {t.path: {} for t in cluster}
         missing_fingerprints = any(not t.fingerprint for t in cluster)
         for idx, t in enumerate(cluster):
             for other in cluster[idx + 1 :]:
-                distance_samples.append(fingerprint_distance(t.fingerprint, other.fingerprint))
+                dist = fingerprint_distance(t.fingerprint, other.fingerprint)
+                distance_samples.append(dist)
+                pair_distances[t.path][other.path] = dist
+                pair_distances[other.path][t.path] = dist
         max_distance = max(distance_samples) if distance_samples else (1.0 if missing_fingerprints else 0.0)
 
         track_quality: Dict[str, Dict[str, object]] = {
@@ -1261,9 +1282,18 @@ def build_consolidation_plan(
         if missing_fingerprints:
             group_confidence = "Low (missing fingerprints in cluster)"
             group_review.append("One or more tracks missing fingerprints; requires review.")
-        if max_distance > 0:
+        near_distances = [d for d in distance_samples if d > exact_duplicate_threshold]
+        if near_distances:
+            group_confidence = f"Medium (near-duplicate fingerprint distance up to {max_distance:.3f})"
+            group_review.append(
+                f"Audio match requires review (max distance {max_distance:.3f}; near-duplicate threshold {near_duplicate_threshold:.3f})."
+            )
+        if max_distance > near_duplicate_threshold:
             group_confidence = f"Low (max fingerprint distance {max_distance:.3f})"
-            group_review.append(f"Audio match requires review (max distance {max_distance:.3f}).")
+            if not missing_fingerprints:
+                group_review.append(
+                    f"Fingerprint distances exceed near-duplicate threshold ({near_duplicate_threshold:.3f}); grouping may be unsafe."
+                )
 
         dispositions = {loser: "quarantine" for loser in losers}
         playlist_map = {loser: winner.path for loser in losers}
@@ -1324,6 +1354,7 @@ def build_consolidation_plan(
                 track_quality=track_quality,
                 group_confidence=group_confidence,
                 artwork_evidence=artwork_evidence,
+                fingerprint_distances=pair_distances,
                 library_state=track_states,
             )
         )
