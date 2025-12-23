@@ -128,6 +128,7 @@ def test_playlist_rewrite_validation_dry_run(tmp_path):
                 track_quality={str(winner): {}, str(loser): {}},
                 group_confidence="High",
                 artwork_evidence=[],
+                fingerprint_distances={},
                 library_state=snapshot,
             )
         ]
@@ -209,7 +210,7 @@ def test_coarse_fingerprint_gate_allows_cross_codec_matches(tmp_path):
         },
     ]
 
-    plan = build_consolidation_plan(tracks, distance_threshold=0.2)
+    plan = build_consolidation_plan(tracks, near_duplicate_threshold=0.2)
     assert len(plan.groups) == 1
     group_paths = {plan.groups[0].winner_path, *plan.groups[0].losers}
     assert group_paths == {str(flac), str(m4a)}
@@ -245,7 +246,7 @@ def test_metadata_gate_uses_normalized_titles(tmp_path):
         },
     ]
 
-    plan = build_consolidation_plan(tracks, distance_threshold=0.2)
+    plan = build_consolidation_plan(tracks, near_duplicate_threshold=0.2)
     assert len(plan.groups) == 1
     group_paths = {plan.groups[0].winner_path, *plan.groups[0].losers}
     assert group_paths == {str(base_a), str(base_b)}
