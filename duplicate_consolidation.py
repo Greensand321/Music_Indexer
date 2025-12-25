@@ -1353,12 +1353,14 @@ def build_consolidation_plan(
             ambiguous_art = True
             artwork_evidence.append("Conflicting embedded artwork hashes between candidates.")
         if ambiguous_art:
-            review_flags.append(f"Artwork selection ambiguous for group {_stable_group_id([t.path for t in cluster])}.")
+            review_flags.append(
+                f"Artwork selection ambiguous for group {_stable_group_id([t.path for t in cluster_tracks])}."
+            )
         if not (single_art_blob or overall_art_blob):
             missing_reason = "No artwork candidates available"
-            if any(t.artwork_error for t in cluster):
+            if any(t.artwork_error for t in cluster_tracks):
                 missing_reason = "Artwork present but unreadable"
-            review_flags.append(f"{missing_reason} for group {_stable_group_id([t.path for t in cluster])}.")
+            review_flags.append(f"{missing_reason} for group {_stable_group_id([t.path for t in cluster_tracks])}.")
             chosen_artwork_source["reason"] = missing_reason
             artwork_status = "none found"
             group_review.append(missing_reason)
@@ -1387,7 +1389,7 @@ def build_consolidation_plan(
         dispositions = {loser: "quarantine" for loser in losers}
         playlist_map = {loser: winner.path for loser in losers}
 
-        group_id = _stable_group_id([t.path for t in cluster])
+        group_id = _stable_group_id([t.path for t in cluster_tracks])
         if ambiguous_art:
             group_review.append("Artwork selection requires review.")
         if not losers:
