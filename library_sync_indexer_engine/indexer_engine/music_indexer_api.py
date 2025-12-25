@@ -459,6 +459,16 @@ def compute_moves_and_tag_index(
         coord,
         max_workers,
     )
+    if near_dupes.review_required:
+        log_callback(
+            f"   ! Near-duplicate candidates require review ({len(near_dupes.review_groups)} group(s)); "
+            "no automatic merges will be applied."
+        )
+        for group in near_dupes.review_groups:
+            log_callback(
+                f"     - Review {os.path.basename(group.winner)} vs {len(group.losers)} candidates "
+                f"(max fp distance {group.max_distance:.3f})"
+            )
     for loser, reason in near_dupes.items():
         if loser not in to_delete:
             to_delete[loser] = reason
