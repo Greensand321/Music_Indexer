@@ -582,6 +582,48 @@ class PlaylistImpact:
 
 
 @dataclass
+class GroupingDecision:
+    """Evidence for why a candidate joined a duplicate group."""
+
+    anchor_path: str
+    candidate_path: str
+    metadata_key: tuple[str, str]
+    coarse_keys_anchor: List[str]
+    coarse_keys_candidate: List[str]
+    shared_coarse_keys: List[str]
+    distance_to_anchor: float
+    max_group_distance: float
+    threshold: float
+    match_type: str
+    coarse_gate: str
+
+    def to_dict(self) -> Dict[str, object]:
+        return {
+            "anchor_path": self.anchor_path,
+            "candidate_path": self.candidate_path,
+            "metadata_key": list(self.metadata_key),
+            "coarse_keys_anchor": list(self.coarse_keys_anchor),
+            "coarse_keys_candidate": list(self.coarse_keys_candidate),
+            "shared_coarse_keys": list(self.shared_coarse_keys),
+            "distance_to_anchor": self.distance_to_anchor,
+            "max_group_distance": self.max_group_distance,
+            "threshold": self.threshold,
+            "match_type": self.match_type,
+            "coarse_gate": self.coarse_gate,
+        }
+
+
+@dataclass
+class ClusterResult:
+    """Grouping outcome with evidence for why tracks clustered."""
+
+    tracks: List[DuplicateTrack]
+    metadata_key: tuple[str, str]
+    decisions: List[GroupingDecision]
+    exact_threshold: float
+    near_threshold: float
+
+@dataclass
 class GroupPlan:
     """Planned actions for a duplicate group."""
 
@@ -609,6 +651,10 @@ class GroupPlan:
     tag_source_evidence: List[str]
     track_quality: Dict[str, Dict[str, object]]
     group_confidence: str
+    group_match_type: str
+    grouping_metadata_key: tuple[str, str]
+    grouping_thresholds: Dict[str, float]
+    grouping_decisions: List[GroupingDecision]
     artwork_evidence: List[str]
     fingerprint_distances: Dict[str, Dict[str, float]] = field(default_factory=dict)
     library_state: Dict[str, Dict[str, object]] = field(default_factory=dict)
@@ -639,6 +685,10 @@ class GroupPlan:
             "tag_source_evidence": list(self.tag_source_evidence),
             "track_quality": {k: dict(v) for k, v in self.track_quality.items()},
             "group_confidence": self.group_confidence,
+            "group_match_type": self.group_match_type,
+            "grouping_metadata_key": list(self.grouping_metadata_key),
+            "grouping_thresholds": dict(self.grouping_thresholds),
+            "grouping_decisions": [d.to_dict() for d in self.grouping_decisions],
             "artwork_evidence": list(self.artwork_evidence),
             "fingerprint_distances": {k: dict(v) for k, v in self.fingerprint_distances.items()},
             "library_state": {k: dict(v) for k, v in self.library_state.items()},
@@ -1008,14 +1058,14 @@ def _cluster_duplicates(
     progress_callback: Callable[[int, int, str], None],
     start_time: float,
     review_flags: List[str],
-) -> List[List[DuplicateTrack]]:
+) -> List[ClusterResult]:
     near_duplicate_threshold = max(near_duplicate_threshold, exact_duplicate_threshold)
     buckets = _build_metadata_buckets(tracks)
     bucket_items = sorted(buckets.items(), key=lambda x: x[0])
-    clusters: List[List[DuplicateTrack]] = []
+    clusters: List[ClusterResult] = []
     comparisons = 0
     processed = 0
-    for _, bucket_tracks in bucket_items:
+    for bucket_key, bucket_tracks in bucket_items:
         if cancel_event.is_set() or (timeout_sec and (_now() - start_time) > timeout_sec):
             review_flags.append("Consolidation planning cancelled or timed out during grouping.")
             break
@@ -1049,12 +1099,16 @@ def _cluster_duplicates(
             if track.path in used:
                 continue
             group = [track]
+            decisions: List[GroupingDecision] = []
             used.add(track.path)
             candidate_paths: set[str] = set()
             for key in track_keys.get(track.path, []):
                 candidate_paths.update(coarse_index.get(key, set()))
             if not candidate_paths:
+                fallback_candidates = True
                 candidate_paths.update(t.path for t in bucket_tracks[idx + 1 :])
+            else:
+                fallback_candidates = False
             for other_path in sorted(candidate_paths, key=lambda p: path_order.get(p, len(bucket_tracks))):
                 if cancel_event.is_set() or comparisons >= max_comparisons:
                     review_flags.append("Comparison budget reached; grouping may be incomplete.")
@@ -1070,18 +1124,48 @@ def _cluster_duplicates(
                 if dist > near_duplicate_threshold:
                     continue
                 compatible = True
+                max_candidate_distance = dist
                 for member in group:
                     if member.path == other.path:
                         continue
                     cmp_dist = fingerprint_distance(member.fingerprint, other.fingerprint)
+                    max_candidate_distance = max(max_candidate_distance, cmp_dist)
                     if cmp_dist > near_duplicate_threshold:
                         compatible = False
                         break
                 if compatible:
+                    anchor_keys = track_keys.get(track.path, [])
+                    candidate_keys = track_keys.get(other.path, [])
+                    shared_keys = sorted(set(anchor_keys) & set(candidate_keys))
+                    coarse_gate = "match" if shared_keys else "fallback (no shared coarse keys)" if fallback_candidates else "none"
+                    match_type = "exact" if max_candidate_distance <= exact_duplicate_threshold else "near"
+                    decisions.append(
+                        GroupingDecision(
+                            anchor_path=track.path,
+                            candidate_path=other.path,
+                            metadata_key=bucket_key,
+                            coarse_keys_anchor=anchor_keys,
+                            coarse_keys_candidate=candidate_keys,
+                            shared_coarse_keys=shared_keys,
+                            distance_to_anchor=dist,
+                            max_group_distance=max_candidate_distance,
+                            threshold=near_duplicate_threshold,
+                            match_type=match_type,
+                            coarse_gate=coarse_gate,
+                        )
+                    )
                     group.append(other)
                     used.add(other.path)
             if len(group) > 1:
-                clusters.append(group)
+                clusters.append(
+                    ClusterResult(
+                        tracks=group,
+                        metadata_key=bucket_key,
+                        decisions=decisions,
+                        exact_threshold=exact_duplicate_threshold,
+                        near_threshold=near_duplicate_threshold,
+                    )
+                )
             processed += 1
             progress_callback(processed, len(bucket_tracks), track.path)
         if cancel_event.is_set() or comparisons >= max_comparisons or (timeout_sec and (_now() - start_time) > timeout_sec):
@@ -1131,21 +1215,22 @@ def build_consolidation_plan(
 
     plans: List[GroupPlan] = []
     plan_placeholders = False
-    for cluster in sorted(clusters, key=lambda c: _stable_group_id([t.path for t in c])):
+    for cluster in sorted(clusters, key=lambda c: _stable_group_id([t.path for t in c.tracks])):
+        cluster_tracks = cluster.tracks
         contexts: Dict[str, str] = {}
         context_evidence: Dict[str, List[str]] = {}
-        for t in cluster:
+        for t in cluster_tracks:
             ctx, evidence = _classify_context(t)
             contexts[t.path] = ctx
             t.context_evidence = evidence
             context_evidence[t.path] = evidence
 
-        quality_sorted = sorted(cluster, key=lambda t: _quality_tuple(t, contexts[t.path]), reverse=True)
+        quality_sorted = sorted(cluster_tracks, key=lambda t: _quality_tuple(t, contexts[t.path]), reverse=True)
         winner = quality_sorted[0]
         losers = [t.path for t in quality_sorted[1:]]
         runner_up = quality_sorted[1] if len(quality_sorted) > 1 else None
 
-        metadata_source = _select_metadata_source(cluster, contexts)
+        metadata_source = _select_metadata_source(cluster_tracks, contexts)
         planned_tags, tag_source, tag_source_reason, tag_source_evidence = _build_planned_tags(
             winner, metadata_source, contexts
         )
@@ -1160,10 +1245,10 @@ def build_consolidation_plan(
         winner_quality = _quality_rationale(winner, runner_up, winner_context)
 
         distance_samples: List[float] = []
-        pair_distances: Dict[str, Dict[str, float]] = {t.path: {} for t in cluster}
-        missing_fingerprints = any(not t.fingerprint for t in cluster)
-        for idx, t in enumerate(cluster):
-            for other in cluster[idx + 1 :]:
+        pair_distances: Dict[str, Dict[str, float]] = {t.path: {} for t in cluster_tracks}
+        missing_fingerprints = any(not t.fingerprint for t in cluster_tracks)
+        for idx, t in enumerate(cluster_tracks):
+            for other in cluster_tracks[idx + 1 :]:
                 dist = fingerprint_distance(t.fingerprint, other.fingerprint)
                 distance_samples.append(dist)
                 pair_distances[t.path][other.path] = dist
@@ -1183,8 +1268,12 @@ def build_consolidation_plan(
             for t in quality_sorted
         }
 
-        single_art_track, single_art_blob, ambiguous_single_art = _select_single_artwork_candidate(cluster, contexts)
-        overall_art_track, overall_art_blob, ambiguous_overall_art = _select_overall_artwork_candidate(cluster)
+        single_art_track, single_art_blob, ambiguous_single_art = _select_single_artwork_candidate(
+            cluster_tracks, contexts
+        )
+        overall_art_track, overall_art_blob, ambiguous_overall_art = _select_overall_artwork_candidate(
+            cluster_tracks
+        )
         artwork_actions: List[ArtworkDirective] = []
         chosen_artwork_source: Dict[str, object] = {"path": None, "reason": ""}
         artwork_status = "unchanged"
@@ -1258,7 +1347,7 @@ def build_consolidation_plan(
             elif not single_art_blob and not overall_art_blob:
                 group_review.append("No artwork available to apply.")
 
-        cover_hashes = {t.cover_hash for t in cluster if t.cover_hash}
+        cover_hashes = {t.cover_hash for t in cluster_tracks if t.cover_hash}
         ambiguous_art = ambiguous_single_art or ambiguous_overall_art
         if len(cover_hashes) > 1:
             ambiguous_art = True
@@ -1303,25 +1392,27 @@ def build_consolidation_plan(
             group_review.append("Artwork selection requires review.")
         if not losers:
             group_review.append("No losers to consolidate.")
-        if any(_has_review_keyword(t) for t in cluster):
+        if any(_has_review_keyword(t) for t in cluster_tracks):
             group_review.append("Contains remix/sped-up variant indicators; review recommended.")
-        placeholders = _placeholder_present(planned_tags) or any(_placeholder_present(t.current_tags) for t in cluster)
+        placeholders = _placeholder_present(planned_tags) or any(
+            _placeholder_present(t.current_tags) for t in cluster_tracks
+        )
         if placeholders:
             group_review.append("Placeholder metadata detected; requires review.")
             plan_placeholders = True
         if winner.metadata_error:
             group_review.append(f"Metadata read issue for winner: {winner.metadata_error}")
-        if any(t.artwork_error for t in cluster):
+        if any(t.artwork_error for t in cluster_tracks):
             group_review.append("Artwork extraction failed for at least one track.")
 
         playlist_impact = PlaylistImpact(playlists=len(losers), entries=len(losers))
-        track_states = {t.path: dict(t.library_state) for t in cluster}
+        track_states = {t.path: dict(t.library_state) for t in cluster_tracks}
 
         artwork_candidates: List[ArtworkCandidate] = []
-        for t in cluster:
+        for t in cluster_tracks:
             artwork_candidates.extend(t.artwork)
 
-        current_tags = {t.path: _merge_tags(_blank_tags(), t.current_tags) for t in cluster}
+        current_tags = {t.path: _merge_tags(_blank_tags(), t.current_tags) for t in cluster_tracks}
 
         plans.append(
             GroupPlan(
@@ -1342,9 +1433,9 @@ def build_consolidation_plan(
                 playlist_impact=playlist_impact,
                 review_flags=group_review,
                 context_summary={
-                    "album": sorted([t.path for t in cluster if contexts.get(t.path) == "album"]),
-                    "single": sorted([t.path for t in cluster if contexts.get(t.path) == "single"]),
-                    "unknown": sorted([t.path for t in cluster if contexts.get(t.path) == "unknown"]),
+                    "album": sorted([t.path for t in cluster_tracks if contexts.get(t.path) == "album"]),
+                    "single": sorted([t.path for t in cluster_tracks if contexts.get(t.path) == "single"]),
+                    "unknown": sorted([t.path for t in cluster_tracks if contexts.get(t.path) == "unknown"]),
                 },
                 context_evidence=context_evidence,
                 tag_source=tag_source,
@@ -1353,6 +1444,13 @@ def build_consolidation_plan(
                 tag_source_evidence=tag_source_evidence,
                 track_quality=track_quality,
                 group_confidence=group_confidence,
+                group_match_type="Exact" if max_distance <= exact_duplicate_threshold else "Near-duplicate",
+                grouping_metadata_key=cluster.metadata_key,
+                grouping_thresholds={
+                    "exact": cluster.exact_threshold,
+                    "near": cluster.near_threshold,
+                },
+                grouping_decisions=cluster.decisions,
                 artwork_evidence=artwork_evidence,
                 fingerprint_distances=pair_distances,
                 library_state=track_states,
@@ -1417,6 +1515,78 @@ def render_consolidation_preview(plan: ConsolidationPlan, output_html_path: str)
             + "</ul>"
             "</div>"
         )
+
+    def _render_codec_mix_warning(group: GroupPlan) -> str:
+        labels: List[str] = []
+        for path, quality in group.track_quality.items():
+            container = str(quality.get("container") or "").strip()
+            if not container:
+                ext = os.path.splitext(path)[1].replace(".", "").upper()
+                container = ext or "UNKNOWN"
+            labels.append(container.upper())
+        unique = sorted(set(labels))
+        if len(unique) <= 1:
+            return ""
+        return f"<p class='warn'><strong>Codec mix warning:</strong> {' + '.join(unique)} in group</p>"
+
+    def _render_grouping_evidence(group: GroupPlan) -> str:
+        meta_artist, meta_title = group.grouping_metadata_key
+        lines = [
+            "<div class='section'><p><strong>Grouping rationale</strong></p>",
+            f"<p><strong>Metadata gate</strong>: artist '{_html_escape(meta_artist)}', title '{_html_escape(meta_title)}'</p>",
+            f"<p><strong>Fingerprint thresholds</strong>: exact ≤ {_html_escape(group.grouping_thresholds.get('exact'))}, "
+            f"near ≤ {_html_escape(group.grouping_thresholds.get('near'))}</p>",
+            f"<p><strong>Grouping type</strong>: {_html_escape(group.group_match_type)}</p>",
+        ]
+        if group.grouping_decisions:
+            rows = []
+            for decision in group.grouping_decisions:
+                shared = ", ".join(decision.shared_coarse_keys) if decision.shared_coarse_keys else "—"
+                rows.append(
+                    "<tr>"
+                    f"<td>{_html_escape(decision.candidate_path)}</td>"
+                    f"<td>{_html_escape(decision.anchor_path)}</td>"
+                    f"<td>{_html_escape(decision.coarse_gate)}</td>"
+                    f"<td>{_html_escape(shared)}</td>"
+                    f"<td>{decision.distance_to_anchor:.4f}</td>"
+                    f"<td>{decision.max_group_distance:.4f}</td>"
+                    f"<td>{_html_escape(decision.match_type)}</td>"
+                    "</tr>"
+                )
+            lines.append(
+                "<table class='metadata'>"
+                "<tr><th>Candidate</th><th>Anchor</th><th>Coarse gate</th><th>Shared coarse keys</th>"
+                "<th>Anchor distance</th><th>Max group distance</th><th>Match</th></tr>"
+                + "".join(rows)
+                + "</table>"
+            )
+        else:
+            lines.append("<em>No grouping decisions recorded.</em>")
+        if group.fingerprint_distances:
+            rows = []
+            for left, right_map in sorted(group.fingerprint_distances.items()):
+                for right, dist in sorted(right_map.items()):
+                    if left >= right:
+                        continue
+                    match_type = "exact" if dist <= group.grouping_thresholds.get("exact", 0.0) else "near"
+                    rows.append(
+                        "<tr>"
+                        f"<td>{_html_escape(left)}</td>"
+                        f"<td>{_html_escape(right)}</td>"
+                        f"<td>{dist:.4f}</td>"
+                        f"<td>{_html_escape(match_type)}</td>"
+                        "</tr>"
+                    )
+            if rows:
+                lines.append(
+                    "<p><strong>Fingerprint distances</strong></p>"
+                    "<table class='metadata'>"
+                    "<tr><th>Track A</th><th>Track B</th><th>Distance</th><th>Match</th></tr>"
+                    + "".join(rows)
+                    + "</table>"
+                )
+        lines.append("</div>")
+        return "".join(lines)
 
     def _render_losers(group: GroupPlan) -> str:
         if not group.losers:
@@ -1504,8 +1674,12 @@ def render_consolidation_preview(plan: ConsolidationPlan, output_html_path: str)
             f"<div class='header'><div><strong>Group {group.group_id}</strong>"
             f"<div class='muted'>Confidence: {_html_escape(group.group_confidence)}</div></div>{review_badge}</div>"
         )
+        codec_warning = _render_codec_mix_warning(group)
+        if codec_warning:
+            lines.append(codec_warning)
         lines.append(f"<p><strong>Winner</strong>: {_html_escape(group.winner_path)}</p>")
         lines.append(_render_quality(group))
+        lines.append(_render_grouping_evidence(group))
 
         lines.append("<div class='section'><p><strong>Losers</strong></p>")
         lines.append(_render_losers(group))
