@@ -165,6 +165,44 @@ def _normalize_title(tags: Mapping[str, object], path: str) -> str:
     return " ".join(filtered or tokens or ["unknown"])
 
 
+def _normalize_album_key(tags: Mapping[str, object], path: str) -> tuple[str, str] | None:
+    raw_album = str(tags.get("album") or "").strip()
+    if not raw_album:
+        return None
+    album_tokens = _normalized_tokens(raw_album)
+    if not album_tokens:
+        return None
+    album_title = " ".join(album_tokens)
+    album_artist = _normalize_primary_artist(tags, path)
+    if album_artist == "unknown":
+        album_artist = ""
+    return album_artist, album_title
+
+
+def _album_display_label(tags: Mapping[str, object]) -> str:
+    album = str(tags.get("album") or "").strip()
+    artist = str(tags.get("albumartist") or tags.get("artist") or "").strip()
+    if album and artist:
+        return f"{artist} — {album}"
+    return album or artist or "Unknown album"
+
+
+def _build_album_track_counts(tracks: Sequence["DuplicateTrack"]) -> Dict[tuple[str, str], int]:
+    album_titles: Dict[tuple[str, str], set[str]] = defaultdict(set)
+    for track in tracks:
+        context, _ = _classify_context(track)
+        if context == "unknown":
+            continue
+        tags = track.current_tags if isinstance(track.current_tags, Mapping) else track.tags
+        tags = tags or {}
+        album_key = _normalize_album_key(tags, track.path)
+        if not album_key:
+            continue
+        title_key = _normalize_title(tags, track.path)
+        album_titles[album_key].add(title_key)
+    return {key: len(titles) for key, titles in album_titles.items()}
+
+
 def _metadata_bucket_key(track: DuplicateTrack) -> tuple[str, str]:
     tags = track.current_tags if isinstance(track.current_tags, Mapping) else track.tags
     tags = tags or {}
@@ -1201,6 +1239,8 @@ def build_consolidation_plan(
             review_flags.append(f"Truncated candidate set to {max_candidates} items to protect runtime.")
             break
 
+    album_track_counts = _build_album_track_counts(normalized)
+
     clusters = _cluster_duplicates(
         normalized,
         exact_duplicate_threshold=exact_duplicate_threshold,
@@ -1225,239 +1265,311 @@ def build_consolidation_plan(
             t.context_evidence = evidence
             context_evidence[t.path] = evidence
 
-        quality_sorted = sorted(cluster_tracks, key=lambda t: _quality_tuple(t, contexts[t.path]), reverse=True)
-        winner = quality_sorted[0]
-        losers = [t.path for t in quality_sorted[1:]]
-        runner_up = quality_sorted[1] if len(quality_sorted) > 1 else None
-
-        metadata_source = _select_metadata_source(cluster_tracks, contexts)
-        planned_tags, tag_source, tag_source_reason, tag_source_evidence = _build_planned_tags(
-            winner, metadata_source, contexts
-        )
-        if not metadata_source:
-            review_flags.append(f"Missing metadata source for group containing {winner.path}.")
-            group_review = ["Metadata source missing; tags may be incomplete."]
-        else:
-            group_review: List[str] = []
-
-        meta_changes = _metadata_changes(winner, planned_tags)
-        winner_context = contexts.get(winner.path, "unknown")
-        winner_quality = _quality_rationale(winner, runner_up, winner_context)
-
-        distance_samples: List[float] = []
-        pair_distances: Dict[str, Dict[str, float]] = {t.path: {} for t in cluster_tracks}
-        missing_fingerprints = any(not t.fingerprint for t in cluster_tracks)
-        for idx, t in enumerate(cluster_tracks):
-            for other in cluster_tracks[idx + 1 :]:
-                dist = fingerprint_distance(t.fingerprint, other.fingerprint)
-                distance_samples.append(dist)
-                pair_distances[t.path][other.path] = dist
-                pair_distances[other.path][t.path] = dist
-        max_distance = max(distance_samples) if distance_samples else (1.0 if missing_fingerprints else 0.0)
-
-        track_quality: Dict[str, Dict[str, object]] = {
-            t.path: {
-                "container": t.container or t.ext.replace(".", "").upper(),
-                "codec": t.codec,
-                "bitrate": t.bitrate,
-                "sample_rate": t.sample_rate,
-                "bit_depth": t.bit_depth,
-                "channels": t.channels,
-                "is_lossless": t.is_lossless,
-            }
-            for t in quality_sorted
-        }
-
-        single_art_track, single_art_blob, ambiguous_single_art = _select_single_artwork_candidate(
-            cluster_tracks, contexts
-        )
-        overall_art_track, overall_art_blob, ambiguous_overall_art = _select_overall_artwork_candidate(
-            cluster_tracks
-        )
-        artwork_actions: List[ArtworkDirective] = []
-        chosen_artwork_source: Dict[str, object] = {"path": None, "reason": ""}
-        artwork_status = "unchanged"
-        artwork_evidence: List[str] = []
-
-        if single_art_blob:
-            chosen_artwork_source = {
-                "path": single_art_track.path if single_art_track else None,
-                "hash": single_art_blob.hash,
-                "size": single_art_blob.size,
-                "width": single_art_blob.width,
-                "height": single_art_blob.height,
-                "context": "single",
-                "reason": "Best single artwork by resolution/size",
-            }
-            artwork_evidence.append(
-                f"Single artwork selected from {single_art_track.path if single_art_track else 'unknown'} "
-                f"({single_art_blob.width}x{single_art_blob.height}, {single_art_blob.size} bytes)"
-            )
-        elif overall_art_blob:
-            chosen_artwork_source = {
-                "path": overall_art_track.path if overall_art_track else None,
-                "hash": overall_art_blob.hash,
-                "size": overall_art_blob.size,
-                "width": overall_art_blob.width,
-                "height": overall_art_blob.height,
-                "context": "fallback",
-                "reason": "No single artwork found; best available artwork",
-            }
-            artwork_evidence.append(
-                f"No single artwork found; using best available artwork from {overall_art_track.path if overall_art_track else 'unknown'} "
-                f"({overall_art_blob.width}x{overall_art_blob.height}, {overall_art_blob.size} bytes)"
-            )
-        else:
-            chosen_artwork_source["reason"] = "No artwork candidates available"
-            artwork_status = "none found"
-            artwork_evidence.append("No readable artwork candidates were discovered.")
-
-        if winner_context == "album" and single_art_blob and single_art_track:
-            if not winner.cover_hash or winner.cover_hash != single_art_blob.hash:
-                artwork_status = "apply"
-                artwork_actions.append(
-                    ArtworkDirective(
-                        source=single_art_track.path,
-                        target=winner.path,
-                        reason="Apply single artwork to album-context winner",
-                    )
-                )
-                artwork_evidence.append("Album-context winner will receive single artwork to preserve single cover.")
-            else:
-                artwork_status = "unchanged"
-                chosen_artwork_source["reason"] = "Winner already has selected single artwork"
-                artwork_evidence.append("Winner already matches selected single artwork hash; no copy needed.")
-        elif winner_context == "album" and not single_art_blob and overall_art_blob and overall_art_track:
-            if not winner.cover_hash or winner.cover_hash != overall_art_blob.hash:
-                artwork_status = "apply"
-                artwork_actions.append(
-                    ArtworkDirective(
-                        source=overall_art_track.path,
-                        target=winner.path,
-                        reason="Fill missing album artwork from best available source",
-                    )
-                )
-                artwork_evidence.append("No single artwork available; applying best available artwork to album winner.")
-            else:
-                artwork_evidence.append("Album winner artwork already matches best available source.")
-        else:
-            if winner_context == "single":
-                artwork_evidence.append("Single-context winner retains its own artwork; album art will not be pulled.")
-                chosen_artwork_source["reason"] = chosen_artwork_source.get("reason") or "Single winner keeps artwork"
-            elif not single_art_blob and not overall_art_blob:
-                group_review.append("No artwork available to apply.")
-
-        cover_hashes = {t.cover_hash for t in cluster_tracks if t.cover_hash}
-        ambiguous_art = ambiguous_single_art or ambiguous_overall_art
-        if len(cover_hashes) > 1:
-            ambiguous_art = True
-            artwork_evidence.append("Conflicting embedded artwork hashes between candidates.")
-        if ambiguous_art:
-            review_flags.append(
-                f"Artwork selection ambiguous for group {_stable_group_id([t.path for t in cluster_tracks])}."
-            )
-        if not (single_art_blob or overall_art_blob):
-            missing_reason = "No artwork candidates available"
-            if any(t.artwork_error for t in cluster_tracks):
-                missing_reason = "Artwork present but unreadable"
-            review_flags.append(f"{missing_reason} for group {_stable_group_id([t.path for t in cluster_tracks])}.")
-            chosen_artwork_source["reason"] = missing_reason
-            artwork_status = "none found"
-            group_review.append(missing_reason)
-
-        required_tag_gaps = [key for key in ("artist", "title") if not planned_tags.get(key)]
-        if required_tag_gaps:
-            group_review.append(f"Missing critical tags: {', '.join(sorted(required_tag_gaps))}.")
-
-        group_confidence = "High (identical fingerprint cluster)"
-        if missing_fingerprints:
-            group_confidence = "Low (missing fingerprints in cluster)"
-            group_review.append("One or more tracks missing fingerprints; requires review.")
-        near_distances = [d for d in distance_samples if d > exact_duplicate_threshold]
-        if near_distances:
-            group_confidence = f"Medium (near-duplicate fingerprint distance up to {max_distance:.3f})"
-            group_review.append(
-                f"Audio match requires review (max distance {max_distance:.3f}; near-duplicate threshold {near_duplicate_threshold:.3f})."
-            )
-        if max_distance > near_duplicate_threshold:
-            group_confidence = f"Low (max fingerprint distance {max_distance:.3f})"
-            if not missing_fingerprints:
-                group_review.append(
-                    f"Fingerprint distances exceed near-duplicate threshold ({near_duplicate_threshold:.3f}); grouping may be unsafe."
-                )
-
-        dispositions = {loser: "quarantine" for loser in losers}
-        playlist_map = {loser: winner.path for loser in losers}
-
-        group_id = _stable_group_id([t.path for t in cluster_tracks])
-        if ambiguous_art:
-            group_review.append("Artwork selection requires review.")
-        if not losers:
-            group_review.append("No losers to consolidate.")
-        if any(_has_review_keyword(t) for t in cluster_tracks):
-            group_review.append("Contains remix/sped-up variant indicators; review recommended.")
-        placeholders = _placeholder_present(planned_tags) or any(
-            _placeholder_present(t.current_tags) for t in cluster_tracks
-        )
-        if placeholders:
-            group_review.append("Placeholder metadata detected; requires review.")
-            plan_placeholders = True
-        if winner.metadata_error:
-            group_review.append(f"Metadata read issue for winner: {winner.metadata_error}")
-        if any(t.artwork_error for t in cluster_tracks):
-            group_review.append("Artwork extraction failed for at least one track.")
-
-        playlist_impact = PlaylistImpact(playlists=len(losers), entries=len(losers))
-        track_states = {t.path: dict(t.library_state) for t in cluster_tracks}
-
-        artwork_candidates: List[ArtworkCandidate] = []
+        album_key_by_path: Dict[str, tuple[str, str] | None] = {}
+        release_by_path: Dict[str, str] = {}
+        album_label_by_key: Dict[tuple[str, str], str] = {}
         for t in cluster_tracks:
-            artwork_candidates.extend(t.artwork)
+            tags = t.current_tags if isinstance(t.current_tags, Mapping) else t.tags
+            tags = tags or {}
+            album_key = _normalize_album_key(tags, t.path)
+            album_key_by_path[t.path] = album_key
+            if album_key and album_key not in album_label_by_key:
+                album_label_by_key[album_key] = _album_display_label(tags)
+            context = contexts.get(t.path, "unknown")
+            if context == "unknown" or not album_key:
+                release_by_path[t.path] = "unknown"
+                continue
+            album_count = album_track_counts.get(album_key, 0)
+            if album_count >= 2:
+                release_by_path[t.path] = "album"
+            elif album_count == 1:
+                release_by_path[t.path] = "single"
+            else:
+                release_by_path[t.path] = "unknown"
 
-        current_tags = {t.path: _merge_tags(_blank_tags(), t.current_tags) for t in cluster_tracks}
+        album_groups: Dict[tuple[str, str], List[DuplicateTrack]] = defaultdict(list)
+        single_tracks: List[DuplicateTrack] = []
+        unknown_tracks: List[DuplicateTrack] = []
+        for t in cluster_tracks:
+            release_type = release_by_path.get(t.path, "unknown")
+            if release_type == "album" and album_key_by_path.get(t.path):
+                album_groups[album_key_by_path[t.path]].append(t)
+            elif release_type == "single":
+                single_tracks.append(t)
+            else:
+                unknown_tracks.append(t)
 
-        plans.append(
-            GroupPlan(
-                group_id=group_id,
-                winner_path=winner.path,
-                losers=losers,
-                planned_winner_tags=planned_tags,
-                winner_current_tags=_merge_tags(_blank_tags(), winner.current_tags),
-                current_tags=current_tags,
-                metadata_changes=meta_changes,
-                winner_quality=winner_quality,
-                artwork=artwork_actions,
-                artwork_candidates=artwork_candidates,
-                chosen_artwork_source=chosen_artwork_source,
-                artwork_status=artwork_status,
-                loser_disposition=dispositions,
-                playlist_rewrites=playlist_map,
-                playlist_impact=playlist_impact,
-                review_flags=group_review,
-                context_summary={
-                    "album": sorted([t.path for t in cluster_tracks if contexts.get(t.path) == "album"]),
-                    "single": sorted([t.path for t in cluster_tracks if contexts.get(t.path) == "single"]),
-                    "unknown": sorted([t.path for t in cluster_tracks if contexts.get(t.path) == "unknown"]),
-                },
-                context_evidence=context_evidence,
-                tag_source=tag_source,
-                placeholders_present=placeholders,
-                tag_source_reason=tag_source_reason,
-                tag_source_evidence=tag_source_evidence,
-                track_quality=track_quality,
-                group_confidence=group_confidence,
-                group_match_type="Exact" if max_distance <= exact_duplicate_threshold else "Near-duplicate",
-                grouping_metadata_key=cluster.metadata_key,
-                grouping_thresholds={
-                    "exact": cluster.exact_threshold,
-                    "near": cluster.near_threshold,
-                },
-                grouping_decisions=cluster.decisions,
-                artwork_evidence=artwork_evidence,
-                fingerprint_distances=pair_distances,
-                library_state=track_states,
+        release_groups: List[tuple[List[DuplicateTrack], List[str]]] = []
+        if len(album_groups) > 1:
+            album_labels = [
+                album_label_by_key.get(key, "Unknown album") for key in sorted(album_groups.keys())
+            ]
+            album_summary = ", ".join(sorted({label for label in album_labels if label}))
+            cross_album_note = "Identical recording across albums; preserving tracks for distinct releases."
+            if album_summary:
+                cross_album_note = f"{cross_album_note} Albums: {album_summary}."
+            for album_key, tracks in sorted(
+                album_groups.items(), key=lambda item: album_label_by_key.get(item[0], "")
+            ):
+                if tracks:
+                    release_groups.append((tracks, [cross_album_note]))
+            if single_tracks:
+                release_groups.append(
+                    (
+                        single_tracks,
+                        [
+                            cross_album_note,
+                            "Singles consolidated separately from multi-album matches.",
+                        ],
+                    )
+                )
+            if unknown_tracks:
+                release_groups.append((unknown_tracks, [cross_album_note, "Unknown release context kept separate."]))
+        else:
+            release_groups.append((cluster_tracks, []))
+
+        for group_tracks, release_notes in release_groups:
+            group_paths = {t.path for t in group_tracks}
+            group_contexts = {path: contexts[path] for path in group_paths}
+            group_context_evidence = {path: context_evidence[path] for path in group_paths}
+            group_decisions = [
+                d for d in cluster.decisions if d.anchor_path in group_paths and d.candidate_path in group_paths
+            ]
+
+            quality_sorted = sorted(group_tracks, key=lambda t: _quality_tuple(t, group_contexts[t.path]), reverse=True)
+            winner = quality_sorted[0]
+            losers = [t.path for t in quality_sorted[1:]]
+            runner_up = quality_sorted[1] if len(quality_sorted) > 1 else None
+
+            metadata_source = _select_metadata_source(group_tracks, group_contexts)
+            planned_tags, tag_source, tag_source_reason, tag_source_evidence = _build_planned_tags(
+                winner, metadata_source, group_contexts
             )
-        )
+            group_review: List[str] = list(release_notes)
+            if not metadata_source:
+                review_flags.append(f"Missing metadata source for group containing {winner.path}.")
+                group_review.append("Metadata source missing; tags may be incomplete.")
+
+            meta_changes = _metadata_changes(winner, planned_tags)
+            winner_context = group_contexts.get(winner.path, "unknown")
+            winner_quality = _quality_rationale(winner, runner_up, winner_context)
+
+            distance_samples: List[float] = []
+            pair_distances: Dict[str, Dict[str, float]] = {t.path: {} for t in group_tracks}
+            missing_fingerprints = any(not t.fingerprint for t in group_tracks)
+            for idx, t in enumerate(group_tracks):
+                for other in group_tracks[idx + 1 :]:
+                    dist = fingerprint_distance(t.fingerprint, other.fingerprint)
+                    distance_samples.append(dist)
+                    pair_distances[t.path][other.path] = dist
+                    pair_distances[other.path][t.path] = dist
+            max_distance = max(distance_samples) if distance_samples else (1.0 if missing_fingerprints else 0.0)
+
+            track_quality: Dict[str, Dict[str, object]] = {
+                t.path: {
+                    "container": t.container or t.ext.replace(".", "").upper(),
+                    "codec": t.codec,
+                    "bitrate": t.bitrate,
+                    "sample_rate": t.sample_rate,
+                    "bit_depth": t.bit_depth,
+                    "channels": t.channels,
+                    "is_lossless": t.is_lossless,
+                }
+                for t in quality_sorted
+            }
+
+            single_art_track, single_art_blob, ambiguous_single_art = _select_single_artwork_candidate(
+                group_tracks, group_contexts
+            )
+            overall_art_track, overall_art_blob, ambiguous_overall_art = _select_overall_artwork_candidate(
+                group_tracks
+            )
+            artwork_actions: List[ArtworkDirective] = []
+            chosen_artwork_source: Dict[str, object] = {"path": None, "reason": ""}
+            artwork_status = "unchanged"
+            artwork_evidence: List[str] = []
+
+            if single_art_blob:
+                chosen_artwork_source = {
+                    "path": single_art_track.path if single_art_track else None,
+                    "hash": single_art_blob.hash,
+                    "size": single_art_blob.size,
+                    "width": single_art_blob.width,
+                    "height": single_art_blob.height,
+                    "context": "single",
+                    "reason": "Best single artwork by resolution/size",
+                }
+                artwork_evidence.append(
+                    f"Single artwork selected from {single_art_track.path if single_art_track else 'unknown'} "
+                    f"({single_art_blob.width}x{single_art_blob.height}, {single_art_blob.size} bytes)"
+                )
+            elif overall_art_blob:
+                chosen_artwork_source = {
+                    "path": overall_art_track.path if overall_art_track else None,
+                    "hash": overall_art_blob.hash,
+                    "size": overall_art_blob.size,
+                    "width": overall_art_blob.width,
+                    "height": overall_art_blob.height,
+                    "context": "fallback",
+                    "reason": "No single artwork found; best available artwork",
+                }
+                artwork_evidence.append(
+                    f"No single artwork found; using best available artwork from {overall_art_track.path if overall_art_track else 'unknown'} "
+                    f"({overall_art_blob.width}x{overall_art_blob.height}, {overall_art_blob.size} bytes)"
+                )
+            else:
+                chosen_artwork_source["reason"] = "No artwork candidates available"
+                artwork_status = "none found"
+                artwork_evidence.append("No readable artwork candidates were discovered.")
+
+            if winner_context == "album" and single_art_blob and single_art_track:
+                if not winner.cover_hash or winner.cover_hash != single_art_blob.hash:
+                    artwork_status = "apply"
+                    artwork_actions.append(
+                        ArtworkDirective(
+                            source=single_art_track.path,
+                            target=winner.path,
+                            reason="Apply single artwork to album-context winner",
+                        )
+                    )
+                    artwork_evidence.append("Album-context winner will receive single artwork to preserve single cover.")
+                else:
+                    artwork_status = "unchanged"
+                    chosen_artwork_source["reason"] = "Winner already has selected single artwork"
+                    artwork_evidence.append("Winner already matches selected single artwork hash; no copy needed.")
+            elif winner_context == "album" and not single_art_blob and overall_art_blob and overall_art_track:
+                if not winner.cover_hash or winner.cover_hash != overall_art_blob.hash:
+                    artwork_status = "apply"
+                    artwork_actions.append(
+                        ArtworkDirective(
+                            source=overall_art_track.path,
+                            target=winner.path,
+                            reason="Fill missing album artwork from best available source",
+                        )
+                    )
+                    artwork_evidence.append("No single artwork available; applying best available artwork to album winner.")
+                else:
+                    artwork_evidence.append("Album winner artwork already matches best available source.")
+            else:
+                if winner_context == "single":
+                    artwork_evidence.append("Single-context winner retains its own artwork; album art will not be pulled.")
+                    chosen_artwork_source["reason"] = (
+                        chosen_artwork_source.get("reason") or "Single winner keeps artwork"
+                    )
+                elif not single_art_blob and not overall_art_blob:
+                    group_review.append("No artwork available to apply.")
+
+            cover_hashes = {t.cover_hash for t in group_tracks if t.cover_hash}
+            ambiguous_art = ambiguous_single_art or ambiguous_overall_art
+            if len(cover_hashes) > 1:
+                ambiguous_art = True
+                artwork_evidence.append("Conflicting embedded artwork hashes between candidates.")
+            if ambiguous_art:
+                review_flags.append(
+                    f"Artwork selection ambiguous for group {_stable_group_id([t.path for t in group_tracks])}."
+                )
+            if not (single_art_blob or overall_art_blob):
+                missing_reason = "No artwork candidates available"
+                if any(t.artwork_error for t in group_tracks):
+                    missing_reason = "Artwork present but unreadable"
+                review_flags.append(f"{missing_reason} for group {_stable_group_id([t.path for t in group_tracks])}.")
+                chosen_artwork_source["reason"] = missing_reason
+                artwork_status = "none found"
+                group_review.append(missing_reason)
+
+            required_tag_gaps = [key for key in ("artist", "title") if not planned_tags.get(key)]
+            if required_tag_gaps:
+                group_review.append(f"Missing critical tags: {', '.join(sorted(required_tag_gaps))}.")
+
+            group_confidence = "High (identical fingerprint cluster)"
+            if missing_fingerprints:
+                group_confidence = "Low (missing fingerprints in cluster)"
+                group_review.append("One or more tracks missing fingerprints; requires review.")
+            near_distances = [d for d in distance_samples if d > exact_duplicate_threshold]
+            if near_distances:
+                group_confidence = f"Medium (near-duplicate fingerprint distance up to {max_distance:.3f})"
+                group_review.append(
+                    f"Audio match requires review (max distance {max_distance:.3f}; near-duplicate threshold {near_duplicate_threshold:.3f})."
+                )
+            if max_distance > near_duplicate_threshold:
+                group_confidence = f"Low (max fingerprint distance {max_distance:.3f})"
+                if not missing_fingerprints:
+                    group_review.append(
+                        f"Fingerprint distances exceed near-duplicate threshold ({near_duplicate_threshold:.3f}); grouping may be unsafe."
+                    )
+
+            dispositions = {loser: "quarantine" for loser in losers}
+            playlist_map = {loser: winner.path for loser in losers}
+
+            group_id = _stable_group_id([t.path for t in group_tracks])
+            if ambiguous_art:
+                group_review.append("Artwork selection requires review.")
+            if not losers:
+                group_review.append("No losers to consolidate.")
+            if any(_has_review_keyword(t) for t in group_tracks):
+                group_review.append("Contains remix/sped-up variant indicators; review recommended.")
+            placeholders = _placeholder_present(planned_tags) or any(
+                _placeholder_present(t.current_tags) for t in group_tracks
+            )
+            if placeholders:
+                group_review.append("Placeholder metadata detected; requires review.")
+                plan_placeholders = True
+            if winner.metadata_error:
+                group_review.append(f"Metadata read issue for winner: {winner.metadata_error}")
+            if any(t.artwork_error for t in group_tracks):
+                group_review.append("Artwork extraction failed for at least one track.")
+
+            playlist_impact = PlaylistImpact(playlists=len(losers), entries=len(losers))
+            track_states = {t.path: dict(t.library_state) for t in group_tracks}
+
+            artwork_candidates: List[ArtworkCandidate] = []
+            for t in group_tracks:
+                artwork_candidates.extend(t.artwork)
+
+            current_tags = {t.path: _merge_tags(_blank_tags(), t.current_tags) for t in group_tracks}
+
+            plans.append(
+                GroupPlan(
+                    group_id=group_id,
+                    winner_path=winner.path,
+                    losers=losers,
+                    planned_winner_tags=planned_tags,
+                    winner_current_tags=_merge_tags(_blank_tags(), winner.current_tags),
+                    current_tags=current_tags,
+                    metadata_changes=meta_changes,
+                    winner_quality=winner_quality,
+                    artwork=artwork_actions,
+                    artwork_candidates=artwork_candidates,
+                    chosen_artwork_source=chosen_artwork_source,
+                    artwork_status=artwork_status,
+                    loser_disposition=dispositions,
+                    playlist_rewrites=playlist_map,
+                    playlist_impact=playlist_impact,
+                    review_flags=group_review,
+                    context_summary={
+                        "album": sorted([p for p in group_paths if group_contexts.get(p) == "album"]),
+                        "single": sorted([p for p in group_paths if group_contexts.get(p) == "single"]),
+                        "unknown": sorted([p for p in group_paths if group_contexts.get(p) == "unknown"]),
+                    },
+                    context_evidence=group_context_evidence,
+                    tag_source=tag_source,
+                    placeholders_present=placeholders,
+                    tag_source_reason=tag_source_reason,
+                    tag_source_evidence=tag_source_evidence,
+                    track_quality=track_quality,
+                    group_confidence=group_confidence,
+                    group_match_type="Exact" if max_distance <= exact_duplicate_threshold else "Near-duplicate",
+                    grouping_metadata_key=cluster.metadata_key,
+                    grouping_thresholds={
+                        "exact": cluster.exact_threshold,
+                        "near": cluster.near_threshold,
+                    },
+                    grouping_decisions=group_decisions,
+                    artwork_evidence=artwork_evidence,
+                    fingerprint_distances=pair_distances,
+                    library_state=track_states,
+                )
+            )
 
     if plan_placeholders and "Placeholder metadata detected; review required." not in review_flags:
         review_flags.append("Placeholder metadata detected; review required.")
