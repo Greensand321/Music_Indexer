@@ -46,6 +46,7 @@ from duplicate_consolidation import (
     render_consolidation_preview,
     export_consolidation_preview,
 )
+from duplicate_consolidation_executor import ExecutionConfig, execute_consolidation_plan
 from controllers.library_index_controller import generate_index
 from gui.audio_preview import PlaybackError, VlcPreviewPlayer
 from io import BytesIO
@@ -1451,7 +1452,7 @@ class ProgressDialog(tk.Toplevel):
 
 
 class DuplicateFinderShell(tk.Toplevel):
-    """GUI-only shell for the refreshed Duplicate Finder workflow."""
+    """GUI shell for the refreshed Duplicate Finder workflow."""
 
     def __init__(self, parent: tk.Widget, library_path: str):
         super().__init__(parent)
@@ -1482,7 +1483,10 @@ class DuplicateFinderShell(tk.Toplevel):
         ).pack(anchor="w")
         ttk.Label(
             container,
-            text="UI shell only – actions are stubbed and do not change your library.",
+            text=(
+                "Generate a preview of duplicate groups and execute the consolidation plan. "
+                "Execution writes backups and reports under the library Docs folder."
+            ),
             foreground="#555",
             wraplength=520,
         ).pack(anchor="w", pady=(0, 8))
@@ -1592,7 +1596,7 @@ class DuplicateFinderShell(tk.Toplevel):
         self.group_details = ScrolledText(inspector, height=12, state="disabled", wrap="word")
         self.group_details.pack(fill="both", expand=True, padx=8, pady=8)
 
-        self._log_action("Duplicate Finder shell initialized")
+        self._log_action("Duplicate Finder initialized")
 
     def _default_playlist_folder(self, library_path: str) -> str:
         if library_path:
@@ -1827,8 +1831,66 @@ class DuplicateFinderShell(tk.Toplevel):
             self._log_action("Execute blocked: review required groups pending")
             return
 
-        self._log_action("Execute clicked (no mutations; preview reused)")
-        self._set_status("Executed", progress=100)
+        playlists_dir = self.playlist_path_var.get().strip()
+        if not self.update_playlists_var.get():
+            playlists_dir = ""
+            self._log_action("Playlist updates disabled; playlists will not be rewritten.")
+        elif playlists_dir and not os.path.isdir(playlists_dir):
+            messagebox.showwarning(
+                "Playlist Folder Missing",
+                f"The selected playlist folder does not exist:\n{playlists_dir}",
+            )
+            self._log_action(f"Execute blocked: playlist folder missing ({playlists_dir})")
+            return
+
+        docs_dir = os.path.join(path, "Docs")
+        os.makedirs(docs_dir, exist_ok=True)
+        reports_dir = os.path.join(docs_dir, "duplicate_execution_reports")
+
+        def log_callback(msg: str) -> None:
+            self.after(0, self._log_action, msg)
+
+        config = ExecutionConfig(
+            library_root=path,
+            reports_dir=reports_dir,
+            playlists_dir=playlists_dir,
+            quarantine_dir=os.path.join(path, "Quarantine"),
+            log_callback=log_callback,
+            allow_review_required=self.override_review_var.get(),
+            retain_losers=not self.quarantine_var.get(),
+        )
+
+        if not self.quarantine_var.get():
+            self._log_action("Quarantine disabled; duplicates will be retained in place.")
+
+        self._set_status("Executing…", progress=10)
+        self._log_action("Execute started")
+
+        def finish(result, error: Exception | None = None) -> None:
+            if error is not None:
+                self._log_action(f"Execution failed: {error}")
+                self._set_status("Execution failed", progress=100)
+                messagebox.showerror("Execution Failed", str(error))
+                return
+            status = "Executed" if result.success else "Execution failed"
+            self._set_status(status, progress=100)
+            self._log_action(f"Execution complete: {'success' if result.success else 'failed'}")
+            self._log_action(f"Execution report: {result.report_paths.get('html_report')}")
+            if not result.success:
+                messagebox.showwarning(
+                    "Execution Failed",
+                    "Execution completed with errors. Review the report for details.",
+                )
+
+        def worker() -> None:
+            try:
+                result = execute_consolidation_plan(self._plan, config)
+            except Exception as exc:
+                self.after(0, finish, None, exc)
+                return
+            self.after(0, finish, result, None)
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def _toggle_update_playlists(self) -> None:
         state = "enabled" if self.update_playlists_var.get() else "disabled"
@@ -2323,8 +2385,8 @@ class SoundVaultImporterApp(tk.Tk):
         ttk.Label(
             df_container,
             text=(
-                "Preview the refreshed Duplicate Finder workflow. "
-                "This shell is UI-only for now and does not modify your library."
+                "Preview duplicate groups and launch the Duplicate Finder workflow. "
+                "Execution writes backups and reports under the library Docs folder."
             ),
             wraplength=520,
             justify="left",

@@ -59,6 +59,7 @@ class ExecutionConfig:
     allow_deletion: bool = False
     confirm_deletion: bool = False
     dry_run_execute: bool = False
+    retain_losers: bool = False
 
 
 @dataclass
@@ -746,6 +747,17 @@ def execute_consolidation_plan(plan: ConsolidationPlan, config: ExecutionConfig)
         # Step 6: quarantine or delete losers
         for loser, disposition in loser_disposition.items():
             _check_cancel("loser_cleanup")
+            if config.retain_losers:
+                quarantine_index[loser] = "retained"
+                _record(
+                    "loser_cleanup",
+                    loser,
+                    "skipped",
+                    "Loser retained; quarantine disabled.",
+                    disposition=disposition,
+                    group_id=path_to_group.get(loser),
+                )
+                continue
             if config.dry_run_execute:
                 quarantine_index[loser] = "retained"
                 _record(
