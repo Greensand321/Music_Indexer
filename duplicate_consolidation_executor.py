@@ -124,13 +124,15 @@ def _timestamped_dir(base: str) -> str:
 
 def _atomic_write_text(path: str, content: str, *, encoding: str = "utf-8") -> None:
     directory = os.path.dirname(path) or "."
-    os.makedirs(directory, exist_ok=True)
-    tmp = tempfile.NamedTemporaryFile(delete=False, dir=directory)
+    safe_directory = ensure_long_path(directory)
+    safe_path = ensure_long_path(path)
+    os.makedirs(safe_directory, exist_ok=True)
+    tmp = tempfile.NamedTemporaryFile(delete=False, dir=safe_directory)
     tmp_path = tmp.name
     try:
         with open(tmp_path, "w", encoding=encoding) as handle:
             handle.write(content)
-        os.replace(tmp_path, path)
+        os.replace(ensure_long_path(tmp_path), safe_path)
     finally:
         if os.path.exists(tmp_path):
             try:
@@ -919,8 +921,10 @@ def execute_consolidation_plan(plan: ConsolidationPlan, config: ExecutionConfig)
                 html_lines.append("</ul></div>")
             html_lines.append("</body></html>")
             _atomic_write_text(html_report_path, "\n".join(html_lines))
-        except Exception:
-            pass
+            if not os.path.exists(ensure_long_path(html_report_path)):
+                log(f"Report write failed: HTML report not found at {html_report_path}")
+        except Exception as exc:
+            log(f"Report write failed: unable to create HTML report at {html_report_path} ({exc})")
 
     report_paths = {
         "audit": audit_path,
