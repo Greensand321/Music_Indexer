@@ -1875,11 +1875,16 @@ class DuplicateFinderShell(tk.Toplevel):
             status = "Executed" if result.success else "Execution failed"
             self._set_status(status, progress=100)
             self._log_action(f"Execution complete: {'success' if result.success else 'failed'}")
-            self._log_action(f"Execution report: {result.report_paths.get('html_report')}")
+            report_path = result.report_paths.get("html_report")
+            self._log_action(f"Execution report: {report_path}")
             if not result.success:
+                report_line = (
+                    f"\n\nReport (HTML): {report_path}" if report_path else ""
+                )
                 messagebox.showwarning(
                     "Execution Failed",
-                    "Execution completed with errors. Review the report for details.",
+                    "Execution completed with errors. Review the report for details."
+                    f"{report_line}",
                 )
 
         def worker() -> None:
