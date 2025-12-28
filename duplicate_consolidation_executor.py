@@ -819,8 +819,10 @@ def execute_consolidation_plan(plan: ConsolidationPlan, config: ExecutionConfig)
                     raise
     except IndexCancelled:
         success = False
-    except Exception:
+        _record("execution", "execution", "cancelled", "Execution cancelled by user request.")
+    except Exception as exc:
         success = False
+        _record("execution", "execution", "failed", f"Execution failed: {exc}")
     finally:
         audit_path = os.path.join(reports_dir, "audit.json")
         playlist_report_path = os.path.join(reports_dir, "playlist_report.json")
