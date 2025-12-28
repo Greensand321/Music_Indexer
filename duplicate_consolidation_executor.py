@@ -126,10 +126,17 @@ INTERNAL_TAG_KEYS = {"album_type"}
 
 
 def _timestamped_dir(base: str) -> str:
-    ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d_%H%M%S")
-    path = os.path.join(base, f"consolidation_run_{ts}")
-    os.makedirs(path, exist_ok=True)
-    return path
+    os.makedirs(base, exist_ok=True)
+    ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
+    for attempt in range(1000):
+        suffix = f"_{attempt}" if attempt else ""
+        path = os.path.join(base, f"consolidation_run_{ts}{suffix}")
+        try:
+            os.makedirs(path)
+        except FileExistsError:
+            continue
+        return path
+    raise RuntimeError("Unable to create unique consolidation report directory.")
 
 
 def _atomic_write_text(path: str, content: str, *, encoding: str = "utf-8") -> None:
