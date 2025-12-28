@@ -4,6 +4,7 @@ import sys
 import logging
 import webbrowser
 import re
+from pathlib import Path
 
 if sys.platform == "win32":
     try:
@@ -88,6 +89,7 @@ import playlist_engine
 from playlist_engine import bucket_by_tempo_energy, autodj_playlist
 from controllers.cluster_controller import gather_tracks
 from playlist_generator import write_playlist
+from utils.path_helpers import ensure_long_path, strip_ext_prefix
 
 FilterFn = Callable[[FileRecord], bool]
 _cached_filters = None
@@ -1882,7 +1884,7 @@ class DuplicateFinderShell(tk.Toplevel):
             self._log_action(f"Execution complete: {'success' if result.success else 'failed'}")
             report_path = self._normalize_html_report_path(result.report_paths.get("html_report"))
             self._log_action(f"Execution report: {report_path}")
-            if report_path and os.path.exists(report_path):
+            if report_path and os.path.exists(ensure_long_path(report_path)):
                 self.execution_report_path = report_path
                 self.open_report_btn.config(state="normal")
             else:
@@ -1923,13 +1925,12 @@ class DuplicateFinderShell(tk.Toplevel):
         self._log_action(f"Quarantine Duplicates {state}")
 
     def _open_preview_output(self) -> None:
-        if not self.preview_html_path:
-            messagebox.showinfo("Preview", "No preview has been generated yet.")
-            return
-        if not os.path.exists(self.preview_html_path):
-            messagebox.showerror("Preview Missing", "Preview file could not be found. Generate a new preview.")
-            return
-        webbrowser.open(self.preview_html_path)
+        self._open_local_html(
+            self.preview_html_path,
+            title="Preview",
+            missing_message="Preview file could not be found. Generate a new preview.",
+            empty_message="No preview has been generated yet.",
+        )
 
     def _normalize_html_report_path(self, report_path: str | None) -> str | None:
         if not report_path:
@@ -1939,16 +1940,36 @@ class DuplicateFinderShell(tk.Toplevel):
         return f"{report_path}.html"
 
     def _open_execution_report(self) -> None:
-        if not self.execution_report_path:
-            messagebox.showinfo("Execution Report", "No execution report is available yet.")
+        self._open_local_html(
+            self.execution_report_path,
+            title="Execution Report",
+            missing_message=(
+                "Execution report could not be found. Run the execution again to generate a new report."
+            ),
+            empty_message="No execution report is available yet.",
+        )
+
+    def _open_local_html(
+        self,
+        path: str | None,
+        *,
+        title: str,
+        missing_message: str,
+        empty_message: str,
+    ) -> None:
+        if not path:
+            messagebox.showinfo(title, empty_message)
             return
-        if not os.path.exists(self.execution_report_path):
-            messagebox.showerror(
-                "Execution Report Missing",
-                "Execution report could not be found. Run the execution again to generate a new report.",
-            )
+        safe_path = ensure_long_path(path)
+        if not os.path.exists(safe_path):
+            messagebox.showerror(f"{title} Missing", missing_message)
             return
-        webbrowser.open(self.execution_report_path)
+        display_path = strip_ext_prefix(path)
+        try:
+            uri = Path(display_path).resolve().as_uri()
+        except Exception:
+            uri = display_path
+        webbrowser.open(uri)
 
 class SoundVaultImporterApp(tk.Tk):
     def __init__(self):
