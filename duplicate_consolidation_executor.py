@@ -151,6 +151,12 @@ def _atomic_write_json(path: str, payload: Mapping[str, object]) -> None:
     _atomic_write_text(path, text)
 
 
+def _ensure_html_extension(path: str) -> str:
+    if path.lower().endswith(".html"):
+        return path
+    return f"{path}.html"
+
+
 def _iter_playlists(playlists_dir: str) -> Iterable[str]:
     if not os.path.isdir(playlists_dir):
         return []
@@ -871,7 +877,9 @@ def execute_consolidation_plan(
         audit_path = os.path.join(reports_dir, "audit.json")
         playlist_report_path = os.path.join(reports_dir, "playlist_report.json")
         quarantine_index_path = os.path.join(reports_dir, "quarantine_index.json")
-        html_report_path = os.path.join(reports_dir, "execution_report.html")
+        html_report_path = _ensure_html_extension(
+            os.path.join(reports_dir, "execution_report")
+        )
 
         plan_signature = plan.plan_signature if plan else None
         source_snapshot = plan.source_snapshot if plan else {}
