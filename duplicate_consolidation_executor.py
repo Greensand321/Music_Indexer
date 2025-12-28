@@ -23,7 +23,12 @@ import threading
 from dataclasses import dataclass, field
 from typing import Callable, Dict, Iterable, List, Mapping, MutableMapping, Sequence
 
-from duplicate_consolidation import ArtworkDirective, ConsolidationPlan, _capture_library_state
+from duplicate_consolidation import (
+    ArtworkDirective,
+    ConsolidationPlan,
+    _capture_library_state,
+    consolidation_plan_from_dict,
+)
 from indexer_control import IndexCancelled, cancel_event as global_cancel_event
 from utils.path_helpers import ensure_long_path
 
@@ -396,7 +401,35 @@ def _detect_state_drift(expected: Mapping[str, object], actual: Mapping[str, obj
     return None
 
 
-def execute_consolidation_plan(plan: ConsolidationPlan, config: ExecutionConfig) -> ExecutionResult:
+def _coerce_consolidation_plan(
+    plan_input: ConsolidationPlan | Mapping[str, object] | str,
+    log: Callable[[str], None],
+) -> tuple[ConsolidationPlan, str]:
+    if isinstance(plan_input, ConsolidationPlan):
+        return plan_input, "in-memory plan"
+    payload: object = plan_input
+    source = "plan payload"
+    if isinstance(plan_input, str):
+        try:
+            payload = json.loads(plan_input)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"Plan JSON could not be decoded: {exc}") from exc
+        source = "json payload"
+    if isinstance(payload, Mapping):
+        if "plan" in payload:
+            inner = payload.get("plan")
+            if not isinstance(inner, Mapping):
+                raise ValueError("Plan payload has a non-mapping 'plan' field.")
+            payload = inner
+            source = f"{source} (wrapped)"
+        return consolidation_plan_from_dict(payload), source
+    raise ValueError("Plan input must be a ConsolidationPlan, mapping, or JSON string.")
+
+
+def execute_consolidation_plan(
+    plan_input: ConsolidationPlan | Mapping[str, object] | str,
+    config: ExecutionConfig,
+) -> ExecutionResult:
     """Execute the provided consolidation plan with safety guarantees."""
 
     cancel = config.cancel_event or global_cancel_event
@@ -404,6 +437,9 @@ def execute_consolidation_plan(plan: ConsolidationPlan, config: ExecutionConfig)
     actions: List[ExecutionAction] = []
     playlist_results: List[PlaylistRewriteResult] = []
     quarantine_index: Dict[str, str] = {}
+    group_lookup: Dict[str, object] = {}
+    plan: ConsolidationPlan | None = None
+    computed_signature = ""
 
     run_root = _timestamped_dir(config.reports_dir)
     reports_dir = os.path.join(run_root, "reports")
@@ -415,24 +451,6 @@ def execute_consolidation_plan(plan: ConsolidationPlan, config: ExecutionConfig)
     playlists_dir = config.playlists_dir or os.path.join(config.library_root, "Playlists")
     quarantine_dir = config.quarantine_dir or os.path.join(config.library_root, "Quarantine")
 
-    loser_to_winner: Dict[str, str] = {}
-    loser_disposition: Dict[str, str] = {}
-    artwork_actions: List[ArtworkDirective] = []
-    planned_tags: Dict[str, Dict[str, object]] = {}
-    path_to_group: Dict[str, str] = {}
-    group_lookup: Dict[str, object] = {g.group_id: g for g in plan.groups}
-    playlist_targets: Dict[str, str] = {}
-    playlist_base_dirs: Dict[str, str] = {}
-
-    for group in plan.groups:
-        planned_tags[group.winner_path] = dict(group.planned_winner_tags)
-        for loser in group.losers:
-            loser_to_winner[loser] = group.winner_path
-            loser_disposition[loser] = group.loser_disposition.get(loser, "quarantine")
-            path_to_group[loser] = group.group_id
-        path_to_group[group.winner_path] = group.group_id
-        artwork_actions.extend(group.artwork)
-
     def _record(step: str, target: str, status: str, detail: str, **metadata: object) -> None:
         actions.append(ExecutionAction(step=step, target=target, status=status, detail=detail, metadata=metadata))
 
@@ -440,6 +458,14 @@ def execute_consolidation_plan(plan: ConsolidationPlan, config: ExecutionConfig)
         if cancel.is_set():
             _record(stage, "execution", "cancelled", "Execution cancelled by user request.")
             raise IndexCancelled()
+
+    loser_to_winner: Dict[str, str] = {}
+    loser_disposition: Dict[str, str] = {}
+    artwork_actions: List[ArtworkDirective] = []
+    planned_tags: Dict[str, Dict[str, object]] = {}
+    path_to_group: Dict[str, str] = {}
+    playlist_targets: Dict[str, str] = {}
+    playlist_base_dirs: Dict[str, str] = {}
 
     def _find_loser_references(
         working_playlists: Mapping[str, str],
@@ -460,9 +486,27 @@ def execute_consolidation_plan(plan: ConsolidationPlan, config: ExecutionConfig)
         return refs
 
     success = True
-    computed_signature = _compute_plan_signature(plan)
 
     try:
+        try:
+            plan, plan_source = _coerce_consolidation_plan(plan_input, log)
+            log(f"Execute plan input resolved from {plan_source}.")
+        except ValueError as exc:
+            success = False
+            _record("preflight", "plan", "blocked", f"Invalid consolidation plan: {exc}")
+            raise RuntimeError(f"Execution blocked: invalid consolidation plan ({exc})") from exc
+
+        group_lookup = {g.group_id: g for g in plan.groups}
+        for group in plan.groups:
+            planned_tags[group.winner_path] = dict(group.planned_winner_tags)
+            for loser in group.losers:
+                loser_to_winner[loser] = group.winner_path
+                loser_disposition[loser] = group.loser_disposition.get(loser, "quarantine")
+                path_to_group[loser] = group.group_id
+            path_to_group[group.winner_path] = group.group_id
+            artwork_actions.extend(group.artwork)
+
+        computed_signature = _compute_plan_signature(plan)
         _check_cancel("start")
 
         if plan.plan_signature and plan.plan_signature != computed_signature:
@@ -829,13 +873,15 @@ def execute_consolidation_plan(plan: ConsolidationPlan, config: ExecutionConfig)
         quarantine_index_path = os.path.join(reports_dir, "quarantine_index.json")
         html_report_path = os.path.join(reports_dir, "execution_report.html")
 
+        plan_signature = plan.plan_signature if plan else None
+        source_snapshot = plan.source_snapshot if plan else {}
         audit_payload = {
             "success": success,
             "actions": [a.to_dict() for a in actions],
             "generated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-            "plan_signature": plan.plan_signature or computed_signature,
+            "plan_signature": plan_signature or computed_signature,
             "computed_signature": computed_signature,
-            "source_snapshot": {k: dict(v) for k, v in plan.source_snapshot.items()},
+            "source_snapshot": {k: dict(v) for k, v in source_snapshot.items()},
         }
         playlist_payload = {
             "backups_dir": backups_dir,
@@ -879,7 +925,7 @@ def execute_consolidation_plan(plan: ConsolidationPlan, config: ExecutionConfig)
                 "</style></head><body>",
                 "<h1>Execution Report</h1>",
                 f"<p>Status: {'success' if success else 'failed'}</p>",
-                f"<p class='muted'>Plan signature: {plan.plan_signature or computed_signature}</p>",
+                f"<p class='muted'>Plan signature: {plan_signature or computed_signature}</p>",
                 f"<p class='muted'>Reports directory: {reports_dir}</p>",
             ]
 

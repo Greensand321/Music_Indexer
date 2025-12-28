@@ -788,6 +788,178 @@ class ConsolidationPlan:
             self.plan_signature = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+def _expect_mapping(value: object, field: str) -> Mapping[str, object]:
+    if not isinstance(value, Mapping):
+        raise ValueError(f"{field} must be a mapping.")
+    return value
+
+
+def _expect_list(value: object, field: str) -> List[object]:
+    if not isinstance(value, list):
+        raise ValueError(f"{field} must be a list.")
+    return value
+
+
+def _expect_str(value: object, field: str) -> str:
+    if not isinstance(value, str):
+        raise ValueError(f"{field} must be a string.")
+    return value
+
+
+def _expect_bool(value: object, field: str) -> bool:
+    if not isinstance(value, bool):
+        raise ValueError(f"{field} must be a boolean.")
+    return value
+
+
+def _expect_optional_str(value: object, field: str) -> Optional[str]:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError(f"{field} must be a string or null.")
+    return value
+
+
+def _expect_datetime(value: object, field: str) -> datetime.datetime:
+    if not isinstance(value, str):
+        raise ValueError(f"{field} must be an ISO-8601 datetime string.")
+    try:
+        return datetime.datetime.fromisoformat(value)
+    except ValueError as exc:
+        raise ValueError(f"{field} must be an ISO-8601 datetime string.") from exc
+
+
+def _expect_str_list(value: object, field: str) -> List[str]:
+    items = _expect_list(value, field)
+    out: List[str] = []
+    for item in items:
+        if not isinstance(item, str):
+            raise ValueError(f"{field} must contain strings.")
+        out.append(item)
+    return out
+
+
+def _expect_str_mapping(value: object, field: str) -> Dict[str, object]:
+    mapping = _expect_mapping(value, field)
+    return {str(k): v for k, v in mapping.items()}
+
+
+def _artwork_candidate_from_dict(raw: Mapping[str, object]) -> ArtworkCandidate:
+    return ArtworkCandidate(
+        path=_expect_str(raw.get("path"), "artwork_candidates.path"),
+        hash=_expect_str(raw.get("hash"), "artwork_candidates.hash"),
+        size=int(raw.get("size") or 0),
+        width=raw.get("width") if raw.get("width") is None else int(raw.get("width") or 0),
+        height=raw.get("height") if raw.get("height") is None else int(raw.get("height") or 0),
+        status=_expect_str(raw.get("status"), "artwork_candidates.status"),
+    )
+
+
+def _artwork_directive_from_dict(raw: Mapping[str, object]) -> ArtworkDirective:
+    return ArtworkDirective(
+        source=_expect_str(raw.get("source"), "artwork.source"),
+        target=_expect_str(raw.get("target"), "artwork.target"),
+        reason=_expect_str(raw.get("reason"), "artwork.reason"),
+    )
+
+
+def _playlist_impact_from_dict(raw: Mapping[str, object]) -> PlaylistImpact:
+    return PlaylistImpact(
+        playlists=int(raw.get("playlists") or 0),
+        entries=int(raw.get("entries") or 0),
+    )
+
+
+def _grouping_decision_from_dict(raw: Mapping[str, object]) -> GroupingDecision:
+    metadata_key = raw.get("metadata_key")
+    if not isinstance(metadata_key, (list, tuple)) or len(metadata_key) != 2:
+        raise ValueError("grouping_decisions.metadata_key must be a 2-item list.")
+    return GroupingDecision(
+        anchor_path=_expect_str(raw.get("anchor_path"), "grouping_decisions.anchor_path"),
+        candidate_path=_expect_str(raw.get("candidate_path"), "grouping_decisions.candidate_path"),
+        metadata_key=(str(metadata_key[0]), str(metadata_key[1])),
+        coarse_keys_anchor=_expect_str_list(raw.get("coarse_keys_anchor"), "grouping_decisions.coarse_keys_anchor"),
+        coarse_keys_candidate=_expect_str_list(raw.get("coarse_keys_candidate"), "grouping_decisions.coarse_keys_candidate"),
+        shared_coarse_keys=_expect_str_list(raw.get("shared_coarse_keys"), "grouping_decisions.shared_coarse_keys"),
+        distance_to_anchor=float(raw.get("distance_to_anchor") or 0.0),
+        max_group_distance=float(raw.get("max_group_distance") or 0.0),
+        threshold=float(raw.get("threshold") or 0.0),
+        match_type=_expect_str(raw.get("match_type"), "grouping_decisions.match_type"),
+        coarse_gate=_expect_str(raw.get("coarse_gate"), "grouping_decisions.coarse_gate"),
+    )
+
+
+def _group_plan_from_dict(raw: Mapping[str, object]) -> GroupPlan:
+    metadata_key = raw.get("grouping_metadata_key")
+    if not isinstance(metadata_key, (list, tuple)) or len(metadata_key) != 2:
+        raise ValueError("grouping_metadata_key must be a 2-item list.")
+
+    artwork_raw = _expect_list(raw.get("artwork"), "artwork")
+    artwork_candidates_raw = _expect_list(raw.get("artwork_candidates"), "artwork_candidates")
+    decisions_raw = _expect_list(raw.get("grouping_decisions"), "grouping_decisions")
+    playlist_impact_raw = _expect_mapping(raw.get("playlist_impact"), "playlist_impact")
+
+    return GroupPlan(
+        group_id=_expect_str(raw.get("group_id"), "group_id"),
+        winner_path=_expect_str(raw.get("winner_path"), "winner_path"),
+        losers=_expect_str_list(raw.get("losers"), "losers"),
+        planned_winner_tags=_expect_str_mapping(raw.get("planned_winner_tags"), "planned_winner_tags"),
+        winner_current_tags=_expect_str_mapping(raw.get("winner_current_tags"), "winner_current_tags"),
+        current_tags=_expect_mapping(raw.get("current_tags"), "current_tags"),
+        metadata_changes=_expect_mapping(raw.get("metadata_changes"), "metadata_changes"),
+        winner_quality=_expect_mapping(raw.get("winner_quality"), "winner_quality"),
+        artwork=[_artwork_directive_from_dict(_expect_mapping(item, "artwork[]")) for item in artwork_raw],
+        artwork_candidates=[
+            _artwork_candidate_from_dict(_expect_mapping(item, "artwork_candidates[]")) for item in artwork_candidates_raw
+        ],
+        chosen_artwork_source=_expect_mapping(raw.get("chosen_artwork_source"), "chosen_artwork_source"),
+        artwork_status=_expect_str(raw.get("artwork_status"), "artwork_status"),
+        loser_disposition=_expect_str_mapping(raw.get("loser_disposition"), "loser_disposition"),
+        playlist_rewrites=_expect_str_mapping(raw.get("playlist_rewrites"), "playlist_rewrites"),
+        playlist_impact=_playlist_impact_from_dict(playlist_impact_raw),
+        review_flags=_expect_str_list(raw.get("review_flags"), "review_flags"),
+        context_summary=_expect_mapping(raw.get("context_summary"), "context_summary"),
+        context_evidence=_expect_mapping(raw.get("context_evidence"), "context_evidence"),
+        tag_source=_expect_optional_str(raw.get("tag_source"), "tag_source"),
+        placeholders_present=_expect_bool(raw.get("placeholders_present"), "placeholders_present"),
+        tag_source_reason=_expect_str(raw.get("tag_source_reason"), "tag_source_reason"),
+        tag_source_evidence=_expect_str_list(raw.get("tag_source_evidence"), "tag_source_evidence"),
+        track_quality=_expect_mapping(raw.get("track_quality"), "track_quality"),
+        group_confidence=_expect_str(raw.get("group_confidence"), "group_confidence"),
+        group_match_type=_expect_str(raw.get("group_match_type"), "group_match_type"),
+        grouping_metadata_key=(str(metadata_key[0]), str(metadata_key[1])),
+        grouping_thresholds=_expect_mapping(raw.get("grouping_thresholds"), "grouping_thresholds"),
+        grouping_decisions=[
+            _grouping_decision_from_dict(_expect_mapping(item, "grouping_decisions[]")) for item in decisions_raw
+        ],
+        artwork_evidence=_expect_str_list(raw.get("artwork_evidence"), "artwork_evidence"),
+        fingerprint_distances=_expect_mapping(raw.get("fingerprint_distances"), "fingerprint_distances"),
+        library_state=_expect_mapping(raw.get("library_state"), "library_state"),
+    )
+
+
+def consolidation_plan_from_dict(raw: Mapping[str, object]) -> ConsolidationPlan:
+    """Convert a serialized plan mapping into a ConsolidationPlan."""
+    groups_raw = _expect_list(raw.get("groups"), "groups")
+    review_flags = _expect_str_list(raw.get("review_flags"), "review_flags")
+    generated_at = _expect_datetime(raw.get("generated_at"), "generated_at")
+    placeholders_present = _expect_bool(raw.get("placeholders_present"), "placeholders_present")
+    source_snapshot = _expect_mapping(raw.get("source_snapshot"), "source_snapshot")
+    plan_signature = raw.get("plan_signature")
+    if plan_signature is not None and not isinstance(plan_signature, str):
+        raise ValueError("plan_signature must be a string or null.")
+
+    groups = [_group_plan_from_dict(_expect_mapping(item, "groups[]")) for item in groups_raw]
+    return ConsolidationPlan(
+        groups=groups,
+        review_flags=review_flags,
+        generated_at=generated_at,
+        placeholders_present=placeholders_present,
+        source_snapshot=source_snapshot,
+        plan_signature=plan_signature,
+    )
+
+
 def _normalize_track(raw: Mapping[str, object]) -> DuplicateTrack:
     path = str(raw.get("path"))
     ext = os.path.splitext(path)[1].lower() or str(raw.get("ext", "")).lower()
