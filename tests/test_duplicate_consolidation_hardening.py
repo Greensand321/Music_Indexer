@@ -11,6 +11,7 @@ from duplicate_consolidation import (
     _extract_artwork_from_audio,
     _metadata_changes,
     build_consolidation_plan,
+    export_consolidation_preview,
 )
 from duplicate_consolidation_executor import ExecutionConfig, _apply_artwork, execute_consolidation_plan
 
@@ -156,6 +157,81 @@ def test_playlist_rewrite_validation_dry_run(tmp_path):
     assert rewritten_text in rewritten_lines
     assert (tmp_path / "loser.mp3").exists()
 
+
+def test_execute_from_preview_output_path(tmp_path):
+    playlists_dir = tmp_path / "Playlists"
+    playlists_dir.mkdir()
+    winner = tmp_path / "winner.flac"
+    loser = tmp_path / "loser.mp3"
+    winner.write_text("winner")
+    loser.write_text("loser")
+
+    playlist = playlists_dir / "mix.m3u"
+    playlist.write_text(os.path.relpath(str(loser), playlists_dir) + "\n")
+
+    snapshot = {str(winner): _snapshot(winner), str(loser): _snapshot(loser)}
+    plan = ConsolidationPlan(
+        groups=[
+            GroupPlan(
+                group_id="g-preview",
+                winner_path=str(winner),
+                losers=[str(loser)],
+                planned_winner_tags={"title": "Winner"},
+                winner_current_tags={"title": "Old"},
+                current_tags={str(winner): {"title": "Old"}, str(loser): {"title": "Old"}},
+                metadata_changes={"title": {"from": "Old", "to": "Winner"}},
+                winner_quality={"reasons": ["test"]},
+                artwork=[],
+                artwork_candidates=[],
+                chosen_artwork_source={},
+                artwork_status="unchanged",
+                loser_disposition={str(loser): "quarantine"},
+                playlist_rewrites={str(loser): str(winner)},
+                playlist_impact=PlaylistImpact(playlists=1, entries=1),
+                review_flags=[],
+                context_summary={"album": [], "single": [], "unknown": [str(winner)]},
+                context_evidence={str(winner): [], str(loser): []},
+                tag_source=str(winner),
+                placeholders_present=False,
+                tag_source_reason="winner",
+                tag_source_evidence=[],
+                track_quality={str(winner): {}, str(loser): {}},
+                group_confidence="High",
+                group_match_type="Exact",
+                grouping_metadata_key=("artist", "title"),
+                grouping_thresholds={"exact": 0.01, "near": 0.03},
+                grouping_decisions=[],
+                artwork_evidence=[],
+                fingerprint_distances={},
+                library_state=snapshot,
+            )
+        ]
+    )
+
+    preview_path = tmp_path / "duplicate_preview.json"
+    export_consolidation_preview(plan, str(preview_path))
+
+    cfg = _config(
+        tmp_path,
+        allow_review_required=True,
+        dry_run_execute=True,
+    )
+
+    result = execute_consolidation_plan(str(preview_path), cfg)
+    assert result.success is True
+    assert result.playlist_reports
+    assert result.report_paths.get("audit")
+
+
+def test_invalid_preview_output_fails_safely(tmp_path):
+    preview_path = tmp_path / "duplicate_preview.json"
+    preview_path.write_text("{\"plan\": \"invalid\"}")
+
+    cfg = _config(tmp_path)
+
+    result = execute_consolidation_plan(str(preview_path), cfg)
+    assert result.success is False
+    assert any("Invalid consolidation plan" in action.detail for action in result.actions)
 
 def test_missing_tags_and_placeholders_require_review(tmp_path):
     winner = tmp_path / "winner.flac"

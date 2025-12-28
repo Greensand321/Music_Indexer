@@ -416,11 +416,23 @@ def _coerce_consolidation_plan(
     payload: object = plan_input
     source = "plan payload"
     if isinstance(plan_input, str):
-        try:
-            payload = json.loads(plan_input)
-        except json.JSONDecodeError as exc:
-            raise ValueError(f"Plan JSON could not be decoded: {exc}") from exc
-        source = "json payload"
+        if os.path.exists(plan_input):
+            if not os.path.isfile(plan_input):
+                raise ValueError(f"Plan path is not a file: {plan_input}")
+            try:
+                with open(plan_input, "r", encoding="utf-8") as handle:
+                    payload = json.load(handle)
+            except OSError as exc:
+                raise ValueError(f"Plan file could not be read: {exc}") from exc
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"Plan JSON could not be decoded: {exc}") from exc
+            source = f"preview output {plan_input}"
+        else:
+            try:
+                payload = json.loads(plan_input)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"Plan JSON could not be decoded: {exc}") from exc
+            source = "json payload"
     if isinstance(payload, Mapping):
         if "plan" in payload:
             inner = payload.get("plan")

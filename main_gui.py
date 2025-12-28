@@ -44,6 +44,7 @@ from music_indexer_api import (
 )
 from duplicate_consolidation import (
     build_consolidation_plan,
+    consolidation_plan_from_dict,
     render_consolidation_preview,
     export_consolidation_preview,
 )
@@ -1905,6 +1906,22 @@ class DuplicateFinderShell(tk.Toplevel):
         if plan.review_required_count:
             self._log_action("Review required groups will block execution unless overridden.")
 
+    def _load_preview_plan(self, preview_path: str):
+        try:
+            with open(preview_path, "r", encoding="utf-8") as handle:
+                payload = json.load(handle)
+        except (OSError, json.JSONDecodeError) as exc:
+            self._log_action(f"Preview plan could not be loaded: {exc}")
+            return None
+        if not isinstance(payload, dict) or "plan" not in payload:
+            self._log_action("Preview plan could not be loaded: missing plan payload.")
+            return None
+        try:
+            return consolidation_plan_from_dict(payload["plan"])
+        except ValueError as exc:
+            self._log_action(f"Preview plan could not be loaded: {exc}")
+            return None
+
     def _handle_scan(self) -> None:
         path = self._validate_library_root()
         if not path:
@@ -1920,11 +1937,24 @@ class DuplicateFinderShell(tk.Toplevel):
         path = self._validate_library_root()
         if not path:
             return
-        if not self._plan:
+        preview_plan_path = self.preview_json_path or os.path.join(path, "Docs", "duplicate_preview.json")
+        plan_input = self._plan
+        plan_for_checks = self._plan
+        if preview_plan_path and os.path.exists(preview_plan_path):
+            if not self.preview_json_path:
+                self.preview_json_path = preview_plan_path
+            if not plan_for_checks:
+                plan_for_checks = self._load_preview_plan(preview_plan_path)
+                if plan_for_checks:
+                    self._plan = plan_for_checks
+            plan_input = preview_plan_path
+            self._log_action(f"Using preview output for execution: {preview_plan_path}")
+
+        if not plan_input:
             messagebox.showwarning("Preview Required", "Generate a preview before executing.")
             self._log_action("Execute blocked: no plan generated")
             return
-        if self._plan.review_required_count and not self.override_review_var.get():
+        if plan_for_checks and plan_for_checks.review_required_count and not self.override_review_var.get():
             messagebox.showwarning(
                 "Review Required",
                 "Resolve review-required groups or check Override review blocks to proceed.",
@@ -2022,7 +2052,7 @@ class DuplicateFinderShell(tk.Toplevel):
 
         def worker() -> None:
             try:
-                result = execute_consolidation_plan(self._plan, config)
+                result = execute_consolidation_plan(plan_input, config)
             except Exception as exc:
                 self.after(0, finish, None, exc)
                 return
