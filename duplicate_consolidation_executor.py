@@ -976,60 +976,227 @@ def execute_consolidation_plan(
                     for gid in group_ids:
                         actions_by_group.setdefault(gid, []).append(action)
 
+            def _basename(path: str) -> str:
+                return os.path.basename(path) or path
+
+            def _group_state(group_actions: List[ExecutionAction]) -> str:
+                statuses = {act.status for act in group_actions}
+                for state in ("failed", "blocked", "cancelled"):
+                    if state in statuses:
+                        return state
+                if statuses == {"skipped"}:
+                    return "skipped"
+                return "success" if "success" in statuses else "unknown"
+
+            def _action_badges(group_actions: List[ExecutionAction]) -> List[str]:
+                badges: List[str] = []
+                meta_actions = [act for act in group_actions if act.step == "metadata"]
+                meta_success = sum(1 for act in meta_actions if act.status == "success")
+                meta_skipped = sum(1 for act in meta_actions if act.status == "skipped")
+                meta_failed = sum(1 for act in meta_actions if act.status == "failed")
+                if meta_success:
+                    badges.append(f"metadata normalized ({meta_success})")
+                if meta_skipped:
+                    badges.append(f"metadata skipped ({meta_skipped})")
+                if meta_failed:
+                    badges.append(f"metadata failed ({meta_failed})")
+
+                cleanup_actions = [act for act in group_actions if act.step == "loser_cleanup"]
+                quarantined = sum(
+                    1
+                    for act in cleanup_actions
+                    if act.metadata.get("disposition") == "quarantine"
+                )
+                deleted = sum(
+                    1
+                    for act in cleanup_actions
+                    if act.metadata.get("disposition") == "delete"
+                )
+                retained = sum(
+                    1
+                    for act in cleanup_actions
+                    if act.metadata.get("disposition") == "retain"
+                )
+                if quarantined:
+                    badges.append(f"quarantined ({quarantined})")
+                if deleted:
+                    badges.append(f"deleted ({deleted})")
+                if retained:
+                    badges.append(f"retained ({retained})")
+
+                art_actions = [act for act in group_actions if act.step == "artwork"]
+                art_success = sum(1 for act in art_actions if act.status == "success")
+                if art_success:
+                    badges.append(f"artwork copied ({art_success})")
+                return badges
+
+            def _format_metadata_notes(meta: Dict[str, object]) -> str:
+                notes = []
+                for key, value in meta.items():
+                    if key in {"group_id", "group_ids"}:
+                        continue
+                    if isinstance(value, (list, tuple, set)):
+                        rendered = ", ".join(str(v) for v in value)
+                    else:
+                        rendered = str(value)
+                    notes.append(f"{key}: {rendered}")
+                return " | ".join(notes)
+
+            metadata_actions = [act for act in actions if act.step == "metadata"]
+            metadata_success = sum(1 for act in metadata_actions if act.status == "success")
+            metadata_failed = sum(1 for act in metadata_actions if act.status == "failed")
+            metadata_skipped = sum(1 for act in metadata_actions if act.status == "skipped")
+            quarantined_count = sum(
+                1 for dest in quarantine_index.values() if dest not in {"retained", "deleted"}
+            )
+            deleted_count = sum(1 for dest in quarantine_index.values() if dest == "deleted")
+            groups_processed = len(group_lookup)
+            winners_kept = groups_processed
+
             html_lines = [
                 "<html><head><title>Duplicate Consolidation Execution</title>",
                 "<style>",
-                "body{font-family:Arial,sans-serif;margin:18px;}",
-                ".group{border:1px solid #ddd;padding:12px;margin-bottom:10px;border-radius:6px;}",
+                "body{font-family:Arial,sans-serif;margin:18px;color:#1b1b1b;}",
+                "h1{margin-bottom:6px;}",
+                ".summary-card{border:1px solid #dcdcdc;border-radius:10px;padding:14px;background:#f9fafb;}",
+                ".summary-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px;}",
+                ".summary-item{background:white;border:1px solid #eee;border-radius:8px;padding:10px;}",
+                ".summary-label{font-size:0.8em;color:#666;text-transform:uppercase;letter-spacing:.04em;}",
+                ".summary-value{font-size:1.1em;font-weight:600;margin-top:4px;}",
+                ".group{border:1px solid #ddd;padding:10px;margin-bottom:10px;border-radius:8px;}",
+                ".group-summary{display:flex;flex-wrap:wrap;gap:8px;align-items:center;}",
+                ".group-title{font-weight:600;}",
+                ".badge{background:#eef2ff;color:#1a237e;border-radius:999px;padding:2px 8px;font-size:0.8em;}",
                 ".status-success{color:#1b7a1b;}",
                 ".status-failed{color:#a30000;}",
+                ".status-blocked{color:#a35b00;}",
+                ".status-cancelled{color:#8a4b00;}",
+                ".status-skipped{color:#555;}",
                 ".muted{color:#666;font-size:0.9em;}",
-                "ul{margin-top:6px;}",
+                ".context{margin-top:10px;}",
+                "details>summary{cursor:pointer;list-style:none;}",
+                "details>summary::-webkit-details-marker{display:none;}",
+                "table{width:100%;border-collapse:collapse;margin-top:8px;}",
+                "th,td{border-bottom:1px solid #eee;padding:6px 4px;text-align:left;vertical-align:top;}",
+                "th{font-size:0.85em;color:#555;}",
+                "code{background:#f3f4f6;padding:2px 4px;border-radius:4px;font-size:0.85em;}",
+                ".meta{color:#555;font-size:0.85em;margin-top:2px;}",
                 "</style></head><body>",
                 "<h1>Execution Report</h1>",
-                f"<p>Status: {'success' if success else 'failed'}</p>",
-                f"<p class='muted'>Plan signature: {plan_signature or computed_signature}</p>",
-                f"<p class='muted'>Reports directory: {reports_dir}</p>",
+                "<div class='summary-card'>",
+                "<div class='summary-grid'>",
+                f"<div class='summary-item'><div class='summary-label'>Overall status</div>"
+                f"<div class='summary-value'>{'success' if success else 'failed'}</div></div>",
+                f"<div class='summary-item'><div class='summary-label'>Groups processed</div>"
+                f"<div class='summary-value'>{groups_processed}</div></div>",
+                f"<div class='summary-item'><div class='summary-label'>Winners kept</div>"
+                f"<div class='summary-value'>{winners_kept}</div></div>",
+                f"<div class='summary-item'><div class='summary-label'>Files quarantined</div>"
+                f"<div class='summary-value'>{quarantined_count}"
+                f"{' (deleted: ' + str(deleted_count) + ')' if deleted_count else ''}</div></div>",
+                "<div class='summary-item'><div class='summary-label'>Metadata operations</div>"
+                f"<div class='summary-value'>{metadata_success} ok / {metadata_failed} failed / {metadata_skipped} skipped</div></div>",
+                "</div>",
+                "<div class='muted' style='margin-top:10px;'>",
+                f"Plan signature: <code>{plan_signature or computed_signature}</code><br/>",
+                f"Reports directory: <code>{reports_dir}</code>",
+                "</div>",
+                "</div>",
+                "<h2>Duplicate Groups</h2>",
             ]
 
             for gid in sorted([g for g in actions_by_group.keys() if g != "__general__"]):
                 grp = group_lookup.get(gid)
                 winner_path = getattr(grp, "winner_path", "Unknown winner")
-                html_lines.append(f"<div class='group'><h2>Group {gid}</h2>")
-                html_lines.append(f"<p class='muted'>Winner: {winner_path}</p>")
-                html_lines.append("<ul>")
-                for act in actions_by_group.get(gid, []):
+                group_actions = actions_by_group.get(gid, [])
+                state = _group_state(group_actions)
+                badges = _action_badges(group_actions)
+                badge_html = " ".join([f"<span class='badge'>{badge}</span>" for badge in badges])
+                html_lines.append("<details class='group'>")
+                html_lines.append(
+                    "<summary>"
+                    "<div class='group-summary'>"
+                    f"<span class='group-title'>Group {gid}</span>"
+                    f"<span class='muted'>• Winner: {_basename(winner_path)}</span>"
+                    f"<span class='badge status-{state}'>"
+                    f"{state}</span>"
+                    f"{badge_html}"
+                    "</div>"
+                    "</summary>"
+                )
+                html_lines.append("<div class='context'>")
+                html_lines.append(f"<div class='muted'>Winner path: <code>{winner_path}</code></div>")
+                html_lines.append("<table>")
+                html_lines.append(
+                    "<tr><th>Operation</th><th>Target</th><th>Status</th><th>Notes</th></tr>"
+                )
+                for act in group_actions:
+                    meta_notes = _format_metadata_notes(act.metadata)
+                    notes = act.detail
+                    if meta_notes:
+                        notes = f"{notes}<div class='meta'>{meta_notes}</div>"
                     html_lines.append(
-                        f"<li><strong>{act.step}</strong> — {act.target}: "
-                        f"<span class='status-{act.status}'>{act.status}</span> ({act.detail})</li>"
+                        "<tr>"
+                        f"<td><strong>{act.step}</strong></td>"
+                        f"<td><span title='{act.target}'>{_basename(act.target)}</span></td>"
+                        f"<td class='status-{act.status}'>{act.status}</td>"
+                        f"<td>{notes}</td>"
+                        "</tr>"
                     )
-                html_lines.append("</ul></div>")
+                html_lines.append("</table></div></details>")
 
             if actions_by_group.get("__general__"):
-                html_lines.append("<div class='group'><h2>General Actions</h2><ul>")
+                html_lines.append("<details class='group'>")
+                html_lines.append("<summary><div class='group-summary'>General Actions</div></summary>")
+                html_lines.append("<div class='context'><table>")
+                html_lines.append(
+                    "<tr><th>Operation</th><th>Target</th><th>Status</th><th>Notes</th></tr>"
+                )
                 for act in actions_by_group["__general__"]:
+                    meta_notes = _format_metadata_notes(act.metadata)
+                    notes = act.detail
+                    if meta_notes:
+                        notes = f"{notes}<div class='meta'>{meta_notes}</div>"
                     html_lines.append(
-                        f"<li><strong>{act.step}</strong> — {act.target}: "
-                        f"<span class='status-{act.status}'>{act.status}</span> ({act.detail})</li>"
+                        "<tr>"
+                        f"<td><strong>{act.step}</strong></td>"
+                        f"<td><span title='{act.target}'>{_basename(act.target)}</span></td>"
+                        f"<td class='status-{act.status}'>{act.status}</td>"
+                        f"<td>{notes}</td>"
+                        "</tr>"
                     )
-                html_lines.append("</ul></div>")
+                html_lines.append("</table></div></details>")
 
             if playlist_results:
-                html_lines.append("<div class='group'><h2>Playlist Changes</h2><ul>")
+                html_lines.append("<details class='group'>")
+                html_lines.append("<summary><div class='group-summary'>Playlist Changes</div></summary>")
+                html_lines.append("<div class='context'><table>")
+                html_lines.append(
+                    "<tr><th>Playlist</th><th>Status</th><th>Details</th></tr>"
+                )
                 for res in playlist_results:
                     label = res.playlist
                     if res.original_playlist:
                         label = f"{res.original_playlist} (validated copy: {res.playlist})"
                     html_lines.append(
-                        f"<li>{label} → {res.status} "
-                        f"(replaced {res.replaced_entries}); backup: {res.backup_path}</li>"
+                        "<tr>"
+                        f"<td><code>{label}</code></td>"
+                        f"<td class='status-{res.status}'>{res.status}</td>"
+                        f"<td>replaced {res.replaced_entries}; backup: <code>{res.backup_path}</code></td>"
+                        "</tr>"
                     )
-                html_lines.append("</ul></div>")
+                html_lines.append("</table></div></details>")
+
             if quarantine_index:
-                html_lines.append("<div class='group'><h2>Quarantined/Deleted</h2><ul>")
+                html_lines.append("<details class='group'>")
+                html_lines.append("<summary><div class='group-summary'>Quarantined Files</div></summary>")
+                html_lines.append("<div class='context'><table>")
+                html_lines.append("<tr><th>Original</th><th>Destination</th></tr>")
                 for loser, dest in quarantine_index.items():
-                    html_lines.append(f"<li>{loser} → {dest}</li>")
-                html_lines.append("</ul></div>")
+                    html_lines.append(
+                        f"<tr><td><code>{loser}</code></td><td><code>{dest}</code></td></tr>"
+                    )
+                html_lines.append("</table></div></details>")
             html_lines.append("</body></html>")
             _atomic_write_text(html_report_path, "\n".join(html_lines))
             if not os.path.exists(ensure_long_path(html_report_path)):
