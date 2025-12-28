@@ -132,11 +132,10 @@ def _atomic_write_text(path: str, content: str, *, encoding: str = "utf-8") -> N
     safe_directory = ensure_long_path(directory)
     safe_path = ensure_long_path(path)
     os.makedirs(safe_directory, exist_ok=True)
-    tmp = tempfile.NamedTemporaryFile(delete=False, dir=safe_directory)
-    tmp_path = tmp.name
+    with tempfile.NamedTemporaryFile("w", delete=False, dir=safe_directory, encoding=encoding) as tmp:
+        tmp.write(content)
+        tmp_path = tmp.name
     try:
-        with open(tmp_path, "w", encoding=encoding) as handle:
-            handle.write(content)
         os.replace(ensure_long_path(tmp_path), safe_path)
     finally:
         if os.path.exists(tmp_path):
@@ -249,19 +248,22 @@ def _extract_artwork_bytes(path: str) -> bytes | None:
     if MutagenFile is None:
         return None
     audio = MutagenFile(ensure_long_path(path))
-    if audio is None:
-        return None
-    pictures = getattr(audio, "pictures", None)
-    if pictures:
-        pic = pictures[0]
-        return bytes(pic.data) if hasattr(pic, "data") else bytes(pic)
-    tags = getattr(audio, "tags", {}) or {}
-    for key in list(tags.keys()):
-        if key.startswith("APIC"):
-            frame = tags[key]
-            data = getattr(frame, "data", None)
-            if data:
-                return bytes(data)
+    try:
+        if audio is None:
+            return None
+        pictures = getattr(audio, "pictures", None)
+        if pictures:
+            pic = pictures[0]
+            return bytes(pic.data) if hasattr(pic, "data") else bytes(pic)
+        tags = getattr(audio, "tags", {}) or {}
+        for key in list(tags.keys()):
+            if key.startswith("APIC"):
+                frame = tags[key]
+                data = getattr(frame, "data", None)
+                if data:
+                    return bytes(data)
+    finally:
+        _close_mutagen_audio(audio)
     return None
 
 
@@ -273,11 +275,10 @@ def _apply_artwork(action: ArtworkDirective) -> tuple[bool, str]:
     sidecar = f"{action.target}.artwork"
     directory = os.path.dirname(sidecar)
     os.makedirs(directory, exist_ok=True)
-    tmp = tempfile.NamedTemporaryFile(delete=False, dir=directory)
-    tmp_path = tmp.name
+    with tempfile.NamedTemporaryFile("wb", delete=False, dir=directory) as tmp:
+        tmp.write(payload)
+        tmp_path = tmp.name
     try:
-        with open(tmp_path, "wb") as handle:
-            handle.write(payload)
         os.replace(tmp_path, sidecar)
     finally:
         if os.path.exists(tmp_path):
@@ -291,55 +292,58 @@ def _apply_artwork(action: ArtworkDirective) -> tuple[bool, str]:
 
     target_path = ensure_long_path(action.target)
     audio = MutagenFile(target_path)
-    if audio is None:
-        return False, "Unsupported audio format for embedding."
-
-    ext = os.path.splitext(action.source)[1].lower()
-    mime = "image/jpeg"
-    if ext == ".png":
-        mime = "image/png"
-
     try:
-        if hasattr(audio, "pictures"):
-            # FLAC/APE: replace front cover while preserving other pictures.
-            from mutagen.flac import Picture  # type: ignore
+        if audio is None:
+            return False, "Unsupported audio format for embedding."
 
-            existing = [p for p in getattr(audio, "pictures") if getattr(p, "type", None) != 3]
-            pic = Picture()
-            pic.data = payload
-            pic.type = 3
-            pic.mime = mime
-            pic.desc = "Front cover"
-            audio.clear_pictures()
-            for p in existing:
-                audio.add_picture(p)
-            audio.add_picture(pic)
-            audio.save()
-            return True, "Embedded FLAC/APE picture."
-        if audio.__class__.__module__.startswith("mutagen.mp4"):
-            from mutagen.mp4 import MP4, MP4Cover  # type: ignore
-
-            mp4 = audio if isinstance(audio, MP4) else MP4(target_path)
-            cover_format = MP4Cover.FORMAT_PNG if mime == "image/png" else MP4Cover.FORMAT_JPEG
-            mp4["covr"] = [MP4Cover(payload, imageformat=cover_format)]
-            mp4.save()
-            return True, "Embedded MP4 cover atom."
-        # Default to ID3/APIC handling
-        from mutagen.id3 import APIC, ID3, ID3NoHeaderError  # type: ignore
+        ext = os.path.splitext(action.source)[1].lower()
+        mime = "image/jpeg"
+        if ext == ".png":
+            mime = "image/png"
 
         try:
-            tags = ID3(target_path)
-        except ID3NoHeaderError:
-            tags = ID3()
-        preserved = [frame for frame in tags.getall("APIC") if getattr(frame, "type", None) != 3]
-        tags.delall("APIC")
-        for frame in preserved:
-            tags.add(frame)
-        tags.add(APIC(encoding=3, mime=mime, type=3, desc="Front cover", data=payload))
-        tags.save(target_path)
-        return True, "Embedded ID3 cover art."
-    except Exception as exc:
-        return False, f"Artwork embed failed: {exc}"
+            if hasattr(audio, "pictures"):
+                # FLAC/APE: replace front cover while preserving other pictures.
+                from mutagen.flac import Picture  # type: ignore
+
+                existing = [p for p in getattr(audio, "pictures") if getattr(p, "type", None) != 3]
+                pic = Picture()
+                pic.data = payload
+                pic.type = 3
+                pic.mime = mime
+                pic.desc = "Front cover"
+                audio.clear_pictures()
+                for p in existing:
+                    audio.add_picture(p)
+                audio.add_picture(pic)
+                audio.save()
+                return True, "Embedded FLAC/APE picture."
+            if audio.__class__.__module__.startswith("mutagen.mp4"):
+                from mutagen.mp4 import MP4, MP4Cover  # type: ignore
+
+                mp4 = audio if isinstance(audio, MP4) else MP4(target_path)
+                cover_format = MP4Cover.FORMAT_PNG if mime == "image/png" else MP4Cover.FORMAT_JPEG
+                mp4["covr"] = [MP4Cover(payload, imageformat=cover_format)]
+                mp4.save()
+                return True, "Embedded MP4 cover atom."
+            # Default to ID3/APIC handling
+            from mutagen.id3 import APIC, ID3, ID3NoHeaderError  # type: ignore
+
+            try:
+                tags = ID3(target_path)
+            except ID3NoHeaderError:
+                tags = ID3()
+            preserved = [frame for frame in tags.getall("APIC") if getattr(frame, "type", None) != 3]
+            tags.delall("APIC")
+            for frame in preserved:
+                tags.add(frame)
+            tags.add(APIC(encoding=3, mime=mime, type=3, desc="Front cover", data=payload))
+            tags.save(target_path)
+            return True, "Embedded ID3 cover art."
+        except Exception as exc:
+            return False, f"Artwork embed failed: {exc}"
+    finally:
+        _close_mutagen_audio(audio)
 
 
 def _apply_metadata(target: str, planned_tags: Mapping[str, object]) -> bool:
@@ -351,23 +355,45 @@ def _apply_metadata(target: str, planned_tags: Mapping[str, object]) -> bool:
     if MutagenFile is None:
         return True
     audio = MutagenFile(ensure_long_path(target), easy=True)
-    if audio is None:
+    try:
+        if audio is None:
+            return True
+        changed = False
+        for key, value in planned_tags.items():
+            if value is None:
+                continue
+            current = audio.tags.get(key) if audio.tags else None
+            normalized = [str(value)] if not isinstance(value, list) else [str(v) for v in value]
+            if current != normalized:
+                audio[key] = normalized
+                changed = True
+        if changed:
+            try:
+                audio.save()
+            except Exception:
+                return False
         return True
-    changed = False
-    for key, value in planned_tags.items():
-        if value is None:
-            continue
-        current = audio.tags.get(key) if audio.tags else None
-        normalized = [str(value)] if not isinstance(value, list) else [str(v) for v in value]
-        if current != normalized:
-            audio[key] = normalized
-            changed = True
-    if changed:
+    finally:
+        _close_mutagen_audio(audio)
+
+
+def _close_mutagen_audio(audio: object | None) -> None:
+    if audio is None:
+        return
+    closer = getattr(audio, "close", None)
+    if callable(closer):
         try:
-            audio.save()
+            closer()
         except Exception:
-            return False
-    return True
+            pass
+    fileobj = getattr(audio, "fileobj", None)
+    if fileobj is not None:
+        file_close = getattr(fileobj, "close", None)
+        if callable(file_close):
+            try:
+                file_close()
+            except Exception:
+                pass
 
 
 def _quarantine_path(path: str, quarantine_root: str, library_root: str) -> str:
