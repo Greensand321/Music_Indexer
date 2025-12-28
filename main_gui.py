@@ -1470,6 +1470,7 @@ class DuplicateFinderShell(tk.Toplevel):
         )
         self.update_playlists_var = tk.BooleanVar(value=False)
         self.quarantine_var = tk.BooleanVar(value=True)
+        self.delete_losers_var = tk.BooleanVar(value=False)
         self.override_review_var = tk.BooleanVar(value=False)
         self.preview_html_path: str | None = None
         self.preview_json_path: str | None = None
@@ -1550,6 +1551,12 @@ class DuplicateFinderShell(tk.Toplevel):
             variable=self.quarantine_var,
             command=self._toggle_quarantine,
         ).pack(side="left")
+        ttk.Checkbutton(
+            controls,
+            text="Delete losers (permanent)",
+            variable=self.delete_losers_var,
+            command=self._toggle_delete_losers,
+        ).pack(side="left", padx=(10, 0))
         ttk.Checkbutton(
             controls,
             text="Override review blocks",
@@ -1784,7 +1791,7 @@ class DuplicateFinderShell(tk.Toplevel):
         self._set_status("Building plan…", progress=25)
         plan = build_consolidation_plan(tracks)
         self._plan = plan
-        self._update_groups_view(plan)
+        self._apply_deletion_mode()
 
         docs_dir = os.path.join(path, "Docs")
         os.makedirs(docs_dir, exist_ok=True)
@@ -1837,6 +1844,13 @@ class DuplicateFinderShell(tk.Toplevel):
             )
             self._log_action("Execute blocked: review required groups pending")
             return
+        if self.delete_losers_var.get() and not self.quarantine_var.get():
+            messagebox.showwarning(
+                "Cleanup Required",
+                "Deletion requires cleanup to be enabled. Check Quarantine Duplicates or disable deletion.",
+            )
+            self._log_action("Execute blocked: deletion enabled while cleanup disabled")
+            return
 
         playlists_dir = self.playlist_path_var.get().strip()
         if not self.update_playlists_var.get():
@@ -1865,10 +1879,14 @@ class DuplicateFinderShell(tk.Toplevel):
             log_callback=log_callback,
             allow_review_required=self.override_review_var.get(),
             retain_losers=not self.quarantine_var.get(),
+            allow_deletion=self.delete_losers_var.get(),
+            confirm_deletion=self.delete_losers_var.get(),
         )
 
         if not self.quarantine_var.get():
             self._log_action("Quarantine disabled; duplicates will be retained in place.")
+        if self.delete_losers_var.get():
+            self._log_action("Deletion enabled; losers will be deleted during execution.")
 
         self._set_status("Executing…", progress=10)
         self._log_action("Execute started")
@@ -1923,6 +1941,43 @@ class DuplicateFinderShell(tk.Toplevel):
     def _toggle_quarantine(self) -> None:
         state = "enabled" if self.quarantine_var.get() else "disabled"
         self._log_action(f"Quarantine Duplicates {state}")
+        if not self.quarantine_var.get() and self.delete_losers_var.get():
+            messagebox.showwarning(
+                "Cleanup Required",
+                "Deletion requires cleanup to be enabled. Re-enabling Quarantine Duplicates.",
+            )
+            self.quarantine_var.set(True)
+            self._log_action("Quarantine Duplicates enabled to support deletions.")
+        self._reset_preview_if_needed()
+
+    def _toggle_delete_losers(self) -> None:
+        if self.delete_losers_var.get():
+            if not self.quarantine_var.get():
+                self.quarantine_var.set(True)
+                self._log_action("Quarantine Duplicates enabled to support deletions.")
+            self._log_action("Delete losers enabled; preview will mark losers for deletion.")
+        else:
+            self._log_action("Delete losers disabled; preview will quarantine losers.")
+        self._apply_deletion_mode()
+        self._reset_preview_if_needed()
+
+    def _apply_deletion_mode(self) -> None:
+        if not self._plan:
+            return
+        delete_mode = self.delete_losers_var.get()
+        for group in self._plan.groups:
+            for loser in group.losers:
+                current = group.loser_disposition.get(loser, "quarantine")
+                if current in ("quarantine", "delete"):
+                    group.loser_disposition[loser] = "delete" if delete_mode else "quarantine"
+        self._update_groups_view(self._plan)
+
+    def _reset_preview_if_needed(self) -> None:
+        if self.preview_html_path or self.preview_json_path:
+            self.preview_html_path = None
+            self.preview_json_path = None
+            self.open_preview_btn.config(state="disabled")
+            self._log_action("Preview cleared; generate a new preview to reflect delete settings.")
 
     def _open_preview_output(self) -> None:
         self._open_local_html(
