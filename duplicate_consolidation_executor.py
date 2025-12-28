@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import datetime
 import hashlib
+import html
 import importlib.util
 import json
 import os
@@ -1046,57 +1047,383 @@ def execute_consolidation_plan(
             deleted_count = sum(1 for dest in quarantine_index.values() if dest == "deleted")
             groups_processed = len(group_lookup)
             winners_kept = groups_processed
+            generated_at_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
+            host_name = os.uname().nodename
+
+            def _status_badge_class(status: str) -> str:
+                if status == "success":
+                    return "ok"
+                if status == "failed":
+                    return "fail"
+                return "warn"
+
+            def _format_notes(detail: str, meta_notes: str) -> str:
+                detail_html = html.escape(detail)
+                if meta_notes:
+                    meta_html = html.escape(meta_notes)
+                    return f"{detail_html}<div class='tiny muted'>{meta_html}</div>"
+                return detail_html
+
+            def _group_type_hint(group_actions: List[ExecutionAction]) -> str:
+                if not group_actions:
+                    return "unknown"
+                if all(act.step == "metadata" for act in group_actions):
+                    return "metadata-only"
+                return "mixed"
+
+            def _group_quarantine_count(group_actions: List[ExecutionAction]) -> int:
+                return sum(
+                    1
+                    for act in group_actions
+                    if act.step == "loser_cleanup"
+                    and act.metadata.get("disposition") == "quarantine"
+                )
+
+            def _group_has_quarantine(group_actions: List[ExecutionAction]) -> bool:
+                return _group_quarantine_count(group_actions) > 0
+
+            def _group_has_failure(group_actions: List[ExecutionAction]) -> bool:
+                return any(
+                    act.status in {"failed", "blocked", "cancelled"} for act in group_actions
+                )
+
+            def _run_status() -> tuple[str, str, str]:
+                status = "success" if success else "failed"
+                status_class = "ok" if success else "fail"
+                emoji = "✅" if success else "❌"
+                return status, status_class, f"{emoji} {status}"
 
             html_lines = [
-                "<html><head><title>Duplicate Consolidation Execution</title>",
+                "<!doctype html>",
+                "<html lang='en'>",
+                "<head>",
+                "<meta charset='utf-8' />",
+                "<meta name='viewport' content='width=device-width,initial-scale=1' />",
+                "<title>Execution Report</title>",
                 "<style>",
-                "body{font-family:Arial,sans-serif;margin:18px;color:#1b1b1b;}",
-                "h1{margin-bottom:6px;}",
-                ".summary-card{border:1px solid #dcdcdc;border-radius:10px;padding:14px;background:#f9fafb;}",
-                ".summary-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px;}",
-                ".summary-item{background:white;border:1px solid #eee;border-radius:8px;padding:10px;}",
-                ".summary-label{font-size:0.8em;color:#666;text-transform:uppercase;letter-spacing:.04em;}",
-                ".summary-value{font-size:1.1em;font-weight:600;margin-top:4px;}",
-                ".group{border:1px solid #ddd;padding:10px;margin-bottom:10px;border-radius:8px;}",
-                ".group-summary{display:flex;flex-wrap:wrap;gap:8px;align-items:center;}",
-                ".group-title{font-weight:600;}",
-                ".badge{background:#eef2ff;color:#1a237e;border-radius:999px;padding:2px 8px;font-size:0.8em;}",
-                ".status-success{color:#1b7a1b;}",
-                ".status-failed{color:#a30000;}",
-                ".status-blocked{color:#a35b00;}",
-                ".status-cancelled{color:#8a4b00;}",
-                ".status-skipped{color:#555;}",
-                ".muted{color:#666;font-size:0.9em;}",
-                ".context{margin-top:10px;}",
-                "details>summary{cursor:pointer;list-style:none;}",
-                "details>summary::-webkit-details-marker{display:none;}",
-                "table{width:100%;border-collapse:collapse;margin-top:8px;}",
-                "th,td{border-bottom:1px solid #eee;padding:6px 4px;text-align:left;vertical-align:top;}",
-                "th{font-size:0.85em;color:#555;}",
-                "code{background:#f3f4f6;padding:2px 4px;border-radius:4px;font-size:0.85em;}",
-                ".meta{color:#555;font-size:0.85em;margin-top:2px;}",
-                "</style></head><body>",
+                ":root{",
+                "--bg:#ffffff;",
+                "--text:#111;",
+                "--muted:#666;",
+                "--border:#e6e6e6;",
+                "--card:#fafafa;",
+                "--good:#1b7a1b;",
+                "--bad:#a30000;",
+                "--warn:#8a5b00;",
+                "--chip:#f2f2f2;",
+                "--mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, \"Liberation Mono\", \"Courier New\", monospace;",
+                "--sans: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, \"Apple Color Emoji\",\"Segoe UI Emoji\";",
+                "}",
+                "* { box-sizing: border-box; }",
+                "body{",
+                "margin: 18px;",
+                "font-family: var(--sans);",
+                "background: var(--bg);",
+                "color: var(--text);",
+                "line-height: 1.35;",
+                "}",
+                "header{",
+                "display:flex;",
+                "flex-wrap:wrap;",
+                "gap:12px 16px;",
+                "align-items:baseline;",
+                "justify-content:space-between;",
+                "margin-bottom: 12px;",
+                "}",
+                "h1{",
+                "font-size: 20px;",
+                "margin: 0;",
+                "letter-spacing: .2px;",
+                "}",
+                ".row{",
+                "display:flex;",
+                "flex-wrap:wrap;",
+                "gap:10px;",
+                "align-items:center;",
+                "}",
+                ".card{",
+                "border:1px solid var(--border);",
+                "border-radius: 10px;",
+                "padding: 12px;",
+                "background: var(--card);",
+                "}",
+                ".summary{",
+                "display:grid;",
+                "grid-template-columns: 1fr;",
+                "gap: 10px;",
+                "margin-bottom: 14px;",
+                "}",
+                "@media (min-width: 900px){",
+                ".summary{ grid-template-columns: 2fr 1fr; }",
+                "}",
+                ".kv{",
+                "display:grid;",
+                "grid-template-columns: 160px 1fr;",
+                "gap:6px 10px;",
+                "align-items:start;",
+                "}",
+                ".k{ color: var(--muted); font-size: 12px; }",
+                ".v{ font-size: 13px; }",
+                ".mono{ font-family: var(--mono); font-size: 12px; }",
+                ".path{",
+                "font-family: var(--mono);",
+                "font-size: 12px;",
+                "word-break: break-all;",
+                "}",
+                ".status{",
+                "font-weight: 600;",
+                "display:inline-flex;",
+                "align-items:center;",
+                "gap:6px;",
+                "}",
+                ".ok{ color: var(--good); }",
+                ".fail{ color: var(--bad); }",
+                ".warn{ color: var(--warn); }",
+                ".pill{",
+                "display:inline-flex;",
+                "align-items:center;",
+                "gap:8px;",
+                "padding: 6px 10px;",
+                "border-radius: 999px;",
+                "background: var(--chip);",
+                "border: 1px solid var(--border);",
+                "font-size: 12px;",
+                "white-space: nowrap;",
+                "}",
+                ".pill strong{ font-weight: 700; }",
+                ".controls{",
+                "display:flex;",
+                "flex-wrap:wrap;",
+                "gap:10px;",
+                "align-items:center;",
+                "justify-content:space-between;",
+                "margin: 14px 0 10px;",
+                "}",
+                ".controls .left, .controls .right{",
+                "display:flex; flex-wrap:wrap; gap:10px; align-items:center;",
+                "}",
+                "input[type='search']{",
+                "padding: 9px 10px;",
+                "border:1px solid var(--border);",
+                "border-radius: 10px;",
+                "width: min(520px, 92vw);",
+                "font-size: 13px;",
+                "background: #fff;",
+                "}",
+                "select{",
+                "padding: 9px 10px;",
+                "border:1px solid var(--border);",
+                "border-radius: 10px;",
+                "font-size: 13px;",
+                "background: #fff;",
+                "}",
+                "button.copy{",
+                "border:1px solid var(--border);",
+                "background:#fff;",
+                "border-radius: 10px;",
+                "padding: 8px 10px;",
+                "font-size: 12px;",
+                "cursor:pointer;",
+                "}",
+                "button.copy:active{ transform: translateY(1px); }",
+                "details.group{",
+                "border:1px solid var(--border);",
+                "border-radius: 10px;",
+                "background: #fff;",
+                "margin-bottom: 10px;",
+                "overflow:hidden;",
+                "}",
+                "details.group[open]{ box-shadow: 0 1px 0 rgba(0,0,0,.03); }",
+                "summary.group-summary{",
+                "list-style:none;",
+                "cursor:pointer;",
+                "padding: 12px 12px;",
+                "display:grid;",
+                "grid-template-columns: 1fr;",
+                "gap:8px;",
+                "background: #fff;",
+                "}",
+                "summary.group-summary::-webkit-details-marker{ display:none; }",
+                ".group-top{",
+                "display:flex;",
+                "flex-wrap:wrap;",
+                "gap:10px 12px;",
+                "align-items:center;",
+                "justify-content:space-between;",
+                "}",
+                ".group-title{",
+                "display:flex;",
+                "align-items:baseline;",
+                "gap:10px;",
+                "min-width: 240px;",
+                "}",
+                ".gid{",
+                "font-family: var(--mono);",
+                "font-size: 12px;",
+                "color: var(--muted);",
+                "}",
+                ".winner-short{",
+                "font-weight: 650;",
+                "font-size: 13px;",
+                "max-width: 74ch;",
+                "overflow:hidden;",
+                "text-overflow: ellipsis;",
+                "white-space: nowrap;",
+                "}",
+                ".chips{",
+                "display:flex;",
+                "flex-wrap:wrap;",
+                "gap:8px;",
+                "justify-content:flex-end;",
+                "}",
+                ".group-body{",
+                "border-top: 1px solid var(--border);",
+                "background: var(--card);",
+                "padding: 12px;",
+                "display:grid;",
+                "grid-template-columns: 1fr;",
+                "gap: 10px;",
+                "}",
+                "@media (min-width: 980px){",
+                ".group-body{ grid-template-columns: 1fr 1.2fr; }",
+                "}",
+                ".section h3{",
+                "font-size: 12px;",
+                "margin: 0 0 8px;",
+                "color: var(--muted);",
+                "text-transform: uppercase;",
+                "letter-spacing: .08em;",
+                "}",
+                "table.ops{",
+                "width:100%;",
+                "border-collapse: collapse;",
+                "background:#fff;",
+                "border:1px solid var(--border);",
+                "border-radius: 10px;",
+                "overflow:hidden;",
+                "}",
+                "table.ops th, table.ops td{",
+                "border-bottom:1px solid var(--border);",
+                "padding: 9px 10px;",
+                "font-size: 12px;",
+                "vertical-align: top;",
+                "}",
+                "table.ops th{",
+                "text-align:left;",
+                "color: var(--muted);",
+                "background: #fcfcfc;",
+                "font-weight: 650;",
+                "}",
+                "table.ops tr:last-child td{ border-bottom: none; }",
+                ".op-key{",
+                "font-family: var(--mono);",
+                "font-size: 12px;",
+                "color:#222;",
+                "white-space:nowrap;",
+                "}",
+                ".note{",
+                "color: var(--muted);",
+                "}",
+                ".badge{",
+                "display:inline-flex;",
+                "align-items:center;",
+                "padding: 3px 8px;",
+                "border-radius: 999px;",
+                "border:1px solid var(--border);",
+                "font-size: 12px;",
+                "font-weight: 650;",
+                "background: #fff;",
+                "white-space: nowrap;",
+                "}",
+                ".badge.ok{ border-color: rgba(27,122,27,.25); }",
+                ".badge.fail{ border-color: rgba(163,0,0,.25); }",
+                "details.quarantine{",
+                "border:1px solid var(--border);",
+                "border-radius: 10px;",
+                "background:#fff;",
+                "margin-top: 14px;",
+                "overflow:hidden;",
+                "}",
+                "summary.quarantine-summary{",
+                "cursor:pointer;",
+                "padding: 12px;",
+                "list-style:none;",
+                "}",
+                "summary.quarantine-summary::-webkit-details-marker{ display:none; }",
+                "ul.q-list{",
+                "margin:0;",
+                "padding: 0 12px 12px 28px;",
+                "color:#222;",
+                "}",
+                "ul.q-list li{",
+                "font-family: var(--mono);",
+                "font-size: 12px;",
+                "word-break: break-all;",
+                "margin: 6px 0;",
+                "}",
+                ".muted{ color: var(--muted); }",
+                ".tiny{ font-size: 12px; }",
+                ".hidden{ display:none !important; }",
+                "</style>",
+                "</head>",
+                "<body>",
+                "<header>",
                 "<h1>Execution Report</h1>",
-                "<div class='summary-card'>",
-                "<div class='summary-grid'>",
-                f"<div class='summary-item'><div class='summary-label'>Overall status</div>"
-                f"<div class='summary-value'>{'success' if success else 'failed'}</div></div>",
-                f"<div class='summary-item'><div class='summary-label'>Groups processed</div>"
-                f"<div class='summary-value'>{groups_processed}</div></div>",
-                f"<div class='summary-item'><div class='summary-label'>Winners kept</div>"
-                f"<div class='summary-value'>{winners_kept}</div></div>",
-                f"<div class='summary-item'><div class='summary-label'>Files quarantined</div>"
-                f"<div class='summary-value'>{quarantined_count}"
-                f"{' (deleted: ' + str(deleted_count) + ')' if deleted_count else ''}</div></div>",
-                "<div class='summary-item'><div class='summary-label'>Metadata operations</div>"
-                f"<div class='summary-value'>{metadata_success} ok / {metadata_failed} failed / {metadata_skipped} skipped</div></div>",
+                f"<div class='status {_run_status()[1]}' id='runStatus' data-status='{_run_status()[0]}'>"
+                f"{_run_status()[2]}</div>",
+                "</header>",
+                "<section class='summary'>",
+                "<div class='card'>",
+                "<div class='row' style='justify-content:space-between;'>",
+                "<div class='row' style='gap:8px;'>",
+                "<span class='pill'><strong>Groups</strong> <span id='statGroups'>0</span></span>",
+                "<span class='pill'><strong>Winners</strong> <span id='statWinners'>0</span></span>",
+                "<span class='pill'><strong>Quarantined</strong> <span id='statQuarantined'>0</span></span>",
+                "<span class='pill'><strong>Ops</strong> <span id='statOpsOk'>0</span>/<span id='statOpsTotal'>0</span> ok</span>",
                 "</div>",
-                "<div class='muted' style='margin-top:10px;'>",
-                f"Plan signature: <code>{plan_signature or computed_signature}</code><br/>",
-                f"Reports directory: <code>{reports_dir}</code>",
+                "<div class='row'>",
+                "<button class='copy' data-copy='#planSignature'>Copy plan signature</button>",
+                "<button class='copy' data-copy='#reportsDir'>Copy reports dir</button>",
                 "</div>",
                 "</div>",
-                "<h2>Duplicate Groups</h2>",
+                "<div style='height:10px'></div>",
+                "<div class='kv'>",
+                "<div class='k'>Plan signature</div>",
+                f"<div class='v mono' id='planSignature'>{html.escape(plan_signature or computed_signature)}</div>",
+                "<div class='k'>Reports directory</div>",
+                f"<div class='v path' id='reportsDir'>{html.escape(reports_dir)}</div>",
+                "</div>",
+                "</div>",
+                "<div class='card'>",
+                "<div class='kv'>",
+                "<div class='k'>Generated</div>",
+                f"<div class='v tiny'>{html.escape(generated_at_iso)}</div>",
+                "<div class='k'>Host</div>",
+                f"<div class='v tiny'>{html.escape(host_name)}</div>",
+                "<div class='k'>Notes</div>",
+                "<div class='v tiny muted'>",
+                "Groups are collapsed by default. Full paths and verbose messages are in “Context”.",
+                "</div>",
+                "</div>",
+                "</div>",
+                "</section>",
+                "<section class='controls'>",
+                "<div class='left'>",
+                "<input id='search' type='search' placeholder='Search groups, winner filename, paths, notes…' />",
+                "<select id='filter'>",
+                "<option value='all'>All groups</option>",
+                "<option value='has-quarantine'>Has quarantine</option>",
+                "<option value='metadata-only'>Metadata only</option>",
+                "<option value='failed'>Any failures</option>",
+                "</select>",
+                "</div>",
+                "<div class='right'>",
+                "<span class='tiny muted' id='visibleCount'>0 visible</span>",
+                "<button class='copy' id='expandAll'>Expand all</button>",
+                "<button class='copy' id='collapseAll'>Collapse all</button>",
+                "</div>",
+                "</section>",
+                "<main id='groups'>",
             ]
 
             for gid in sorted([g for g in actions_by_group.keys() if g != "__general__"]):
@@ -1105,92 +1432,270 @@ def execute_consolidation_plan(
                 group_actions = actions_by_group.get(gid, [])
                 state = _group_state(group_actions)
                 badges = _action_badges(group_actions)
-                badge_html = " ".join([f"<span class='badge'>{badge}</span>" for badge in badges])
-                html_lines.append("<details class='group'>")
-                html_lines.append(
-                    "<summary>"
-                    "<div class='group-summary'>"
-                    f"<span class='group-title'>Group {gid}</span>"
-                    f"<span class='muted'>• Winner: {_basename(winner_path)}</span>"
-                    f"<span class='badge status-{state}'>"
-                    f"{state}</span>"
-                    f"{badge_html}"
-                    "</div>"
-                    "</summary>"
+                group_quarantine_count = _group_quarantine_count(group_actions)
+                group_type_hint = _group_type_hint(group_actions)
+                group_has_quarantine = _group_has_quarantine(group_actions)
+                group_has_failure = _group_has_failure(group_actions)
+                search_tokens = [gid, winner_path, _basename(winner_path), state]
+                search_tokens.extend(badges)
+                for act in group_actions:
+                    search_tokens.extend([act.step, act.target, act.status, act.detail])
+                    meta_notes = _format_metadata_notes(act.metadata)
+                    if meta_notes:
+                        search_tokens.append(meta_notes)
+                search_text = " ".join(str(token) for token in search_tokens if token)
+                summary_line = (
+                    f"Status: {state}. " + "; ".join(badges) if badges else f"Status: {state}."
                 )
-                html_lines.append("<div class='context'>")
-                html_lines.append(f"<div class='muted'>Winner path: <code>{winner_path}</code></div>")
-                html_lines.append("<table>")
                 html_lines.append(
-                    "<tr><th>Operation</th><th>Target</th><th>Status</th><th>Notes</th></tr>"
+                    "<details class='group' "
+                    f"data-group-id='{html.escape(gid)}' "
+                    f"data-has-quarantine='{str(group_has_quarantine).lower()}' "
+                    f"data-has-failure='{str(group_has_failure).lower()}' "
+                    f"data-type='{html.escape(group_type_hint)}' "
+                    f"data-search='{html.escape(search_text.lower())}' "
+                    f"data-quarantine-count='{group_quarantine_count}'>"
                 )
+                html_lines.append("<summary class='group-summary'>")
+                html_lines.append("<div class='group-top'>")
+                html_lines.append("<div class='group-title'>")
+                html_lines.append(f"<span class='gid'>Group {html.escape(gid)}</span>")
+                html_lines.append(
+                    "<span class='winner-short' "
+                    f"title='{html.escape(winner_path)}'>{html.escape(_basename(winner_path))}</span>"
+                )
+                html_lines.append("</div>")
+                html_lines.append("<div class='chips'>")
+                html_lines.append(
+                    f"<span class='badge {_status_badge_class(state)}' data-status='{html.escape(state)}'>"
+                    f"{html.escape(state)}</span>"
+                )
+                for badge in badges:
+                    html_lines.append(f"<span class='pill'>{html.escape(badge)}</span>")
+                html_lines.append("</div>")
+                html_lines.append("</div>")
+                html_lines.append(f"<div class='tiny muted'>{html.escape(summary_line)}</div>")
+                html_lines.append("</summary>")
+                html_lines.append("<div class='group-body'>")
+                html_lines.append("<div class='section'>")
+                html_lines.append("<h3>Context</h3>")
+                html_lines.append("<div class='card' style='background:#fff;'>")
+                html_lines.append("<div class='kv'>")
+                html_lines.append("<div class='k'>Kept file (winner)</div>")
+                html_lines.append(f"<div class='v path'>{html.escape(winner_path)}</div>")
+                html_lines.append("<div class='k'>Group ID</div>")
+                html_lines.append(f"<div class='v mono'>{html.escape(gid)}</div>")
+                html_lines.append("<div class='k'>Debug</div>")
+                html_lines.append(
+                    "<div class='v tiny muted'>Shown for traceability; safe to ignore for normal review.</div>"
+                )
+                html_lines.append("</div>")
+                html_lines.append("</div>")
+                html_lines.append("</div>")
+                html_lines.append("<div class='section'>")
+                html_lines.append("<h3>Operations</h3>")
+                html_lines.append("<table class='ops'>")
+                html_lines.append("<thead>")
+                html_lines.append("<tr>")
+                html_lines.append("<th style='width: 160px;'>Operation</th>")
+                html_lines.append("<th>Target</th>")
+                html_lines.append("<th style='width: 110px;'>Status</th>")
+                html_lines.append("<th>Notes</th>")
+                html_lines.append("</tr>")
+                html_lines.append("</thead>")
+                html_lines.append("<tbody>")
                 for act in group_actions:
                     meta_notes = _format_metadata_notes(act.metadata)
-                    notes = act.detail
-                    if meta_notes:
-                        notes = f"{notes}<div class='meta'>{meta_notes}</div>"
+                    notes = _format_notes(act.detail, meta_notes)
+                    status_class = _status_badge_class(act.status)
                     html_lines.append(
                         "<tr>"
-                        f"<td><strong>{act.step}</strong></td>"
-                        f"<td><span title='{act.target}'>{_basename(act.target)}</span></td>"
-                        f"<td class='status-{act.status}'>{act.status}</td>"
-                        f"<td>{notes}</td>"
+                        f"<td class='op-key'>{html.escape(act.step)}</td>"
+                        f"<td class='path' title='{html.escape(act.target)}'>"
+                        f"{html.escape(_basename(act.target))}</td>"
+                        f"<td><span class='badge {status_class}'>{html.escape(act.status)}</span></td>"
+                        f"<td class='note'>{notes}</td>"
                         "</tr>"
                     )
-                html_lines.append("</table></div></details>")
+                html_lines.append("</tbody>")
+                html_lines.append("</table>")
+                html_lines.append("</div>")
+                html_lines.append("</div>")
+                html_lines.append("</details>")
 
-            if actions_by_group.get("__general__"):
-                html_lines.append("<details class='group'>")
-                html_lines.append("<summary><div class='group-summary'>General Actions</div></summary>")
-                html_lines.append("<div class='context'><table>")
+            html_lines.append("</main>")
+            html_lines.append("<details class='quarantine' id='quarantineIndex'>")
+            html_lines.append("<summary class='quarantine-summary'>")
+            html_lines.append("<div class='row' style='justify-content:space-between;'>")
+            html_lines.append(
+                "<div><strong>Quarantined Files</strong> <span class='muted'>(<span id='qCount'>0</span>)</span></div>"
+            )
+            html_lines.append("<div class='muted tiny'>Collapsed by default</div>")
+            html_lines.append("</div>")
+            html_lines.append("</summary>")
+            html_lines.append("<ul class='q-list' id='qList'>")
+            for loser, dest in quarantine_index.items():
                 html_lines.append(
-                    "<tr><th>Operation</th><th>Target</th><th>Status</th><th>Notes</th></tr>"
+                    f"<li>{html.escape(loser)} → {html.escape(dest)}</li>"
                 )
-                for act in actions_by_group["__general__"]:
+            html_lines.append("</ul>")
+            html_lines.append("</details>")
+
+            missing_sections: List[str] = []
+            missing_sections.append(
+                f"Metadata operations: {metadata_success} ok / {metadata_failed} failed / {metadata_skipped} skipped"
+            )
+            if deleted_count:
+                missing_sections.append(
+                    f"Files quarantined: {quarantined_count} (deleted: {deleted_count})"
+                )
+            else:
+                missing_sections.append(f"Files quarantined: {quarantined_count}")
+
+            general_actions = actions_by_group.get("__general__", [])
+            playlist_results = playlist_results or []
+            if general_actions or playlist_results:
+                missing_sections.append("")
+            if general_actions:
+                missing_sections.append("General Actions")
+                missing_sections.append("<table class='ops'>")
+                missing_sections.append(
+                    "<thead><tr><th>Operation</th><th>Target</th><th>Status</th><th>Notes</th></tr></thead>"
+                )
+                missing_sections.append("<tbody>")
+                for act in general_actions:
                     meta_notes = _format_metadata_notes(act.metadata)
-                    notes = act.detail
-                    if meta_notes:
-                        notes = f"{notes}<div class='meta'>{meta_notes}</div>"
-                    html_lines.append(
+                    notes = _format_notes(act.detail, meta_notes)
+                    status_class = _status_badge_class(act.status)
+                    missing_sections.append(
                         "<tr>"
-                        f"<td><strong>{act.step}</strong></td>"
-                        f"<td><span title='{act.target}'>{_basename(act.target)}</span></td>"
-                        f"<td class='status-{act.status}'>{act.status}</td>"
-                        f"<td>{notes}</td>"
+                        f"<td class='op-key'>{html.escape(act.step)}</td>"
+                        f"<td class='path' title='{html.escape(act.target)}'>"
+                        f"{html.escape(_basename(act.target))}</td>"
+                        f"<td><span class='badge {status_class}'>{html.escape(act.status)}</span></td>"
+                        f"<td class='note'>{notes}</td>"
                         "</tr>"
                     )
-                html_lines.append("</table></div></details>")
-
+                missing_sections.append("</tbody></table>")
             if playlist_results:
-                html_lines.append("<details class='group'>")
-                html_lines.append("<summary><div class='group-summary'>Playlist Changes</div></summary>")
-                html_lines.append("<div class='context'><table>")
-                html_lines.append(
-                    "<tr><th>Playlist</th><th>Status</th><th>Details</th></tr>"
+                missing_sections.append("Playlist Changes")
+                missing_sections.append("<table class='ops'>")
+                missing_sections.append(
+                    "<thead><tr><th>Playlist</th><th>Status</th><th>Details</th></tr></thead>"
                 )
+                missing_sections.append("<tbody>")
                 for res in playlist_results:
                     label = res.playlist
                     if res.original_playlist:
                         label = f"{res.original_playlist} (validated copy: {res.playlist})"
-                    html_lines.append(
+                    status_class = _status_badge_class(res.status)
+                    missing_sections.append(
                         "<tr>"
-                        f"<td><code>{label}</code></td>"
-                        f"<td class='status-{res.status}'>{res.status}</td>"
-                        f"<td>replaced {res.replaced_entries}; backup: <code>{res.backup_path}</code></td>"
+                        f"<td class='path'>{html.escape(label)}</td>"
+                        f"<td><span class='badge {status_class}'>{html.escape(res.status)}</span></td>"
+                        f"<td class='note'>replaced {res.replaced_entries}; backup: {html.escape(res.backup_path)}</td>"
                         "</tr>"
                     )
-                html_lines.append("</table></div></details>")
+                missing_sections.append("</tbody></table>")
 
-            if quarantine_index:
-                html_lines.append("<details class='group'>")
-                html_lines.append("<summary><div class='group-summary'>Quarantined Files</div></summary>")
-                html_lines.append("<div class='context'><table>")
-                html_lines.append("<tr><th>Original</th><th>Destination</th></tr>")
-                for loser, dest in quarantine_index.items():
-                    html_lines.append(
-                        f"<tr><td><code>{loser}</code></td><td><code>{dest}</code></td></tr>"
-                    )
-                html_lines.append("</table></div></details>")
+            if missing_sections:
+                html_lines.append(
+                    "<div style='margin-top:14px;'>"
+                    "<strong>NEED TO INCORPORATE AT LATER DATE</strong>"
+                    "</div>"
+                )
+                for section in missing_sections:
+                    if not section:
+                        html_lines.append("<div style='height:10px'></div>")
+                        continue
+                    html_lines.append(f"<div class='tiny'>{section}</div>")
+            html_lines.append(
+                "<script>"
+                "(function(){"
+                "const $ = (s, r=document) => r.querySelector(s);"
+                "const $$ = (s, r=document) => Array.from(r.querySelectorAll(s));"
+                "const groupsEl = $('#groups');"
+                "const groups = () => $$('#groups details.group');"
+                "const searchEl = $('#search');"
+                "const filterEl = $('#filter');"
+                "const visibleCountEl = $('#visibleCount');"
+                "const expandAllBtn = $('#expandAll');"
+                "const collapseAllBtn = $('#collapseAll');"
+                "function computeStats(){"
+                "const g = groups();"
+                "$('#statGroups').textContent = g.length.toString();"
+                "$('#statWinners').textContent = g.length.toString();"
+                "let qTotal = 0;"
+                "for (const d of g){"
+                "const chip = d.querySelector('.pill');"
+                "const attr = d.getAttribute('data-quarantine-count');"
+                "if (attr) qTotal += Number(attr) || 0;"
+                "}"
+                "$('#statQuarantined').textContent = qTotal.toString();"
+                "let opsTotal = 0, opsOk = 0;"
+                "for (const d of g){"
+                "const rows = $$('table.ops tbody tr', d);"
+                "opsTotal += rows.length;"
+                "for (const r of rows){"
+                "const badge = r.querySelector('.badge');"
+                "if (badge && badge.textContent.trim().toLowerCase() === 'success') opsOk += 1;"
+                "}"
+                "}"
+                "$('#statOpsTotal').textContent = opsTotal.toString();"
+                "$('#statOpsOk').textContent = opsOk.toString();"
+                "const qItems = $$('#qList li').filter(li => li.textContent.trim().length > 0);"
+                "$('#qCount').textContent = qItems.length.toString();"
+                "}"
+                "function applyFilters(){"
+                "const term = (searchEl.value || '').trim().toLowerCase();"
+                "const mode = filterEl.value;"
+                "let visible = 0;"
+                "for (const d of groups()){"
+                "const hay = (d.getAttribute('data-search') || '').toLowerCase();"
+                "const matchesSearch = !term || hay.includes(term);"
+                "const hasQuarantine = (d.getAttribute('data-has-quarantine') || 'false') === 'true';"
+                "const hasFailure = (d.getAttribute('data-has-failure') || 'false') === 'true';"
+                "const typeHint = (d.getAttribute('data-type') || '').toLowerCase();"
+                "let matchesFilter = true;"
+                "if (mode === 'has-quarantine') matchesFilter = hasQuarantine;"
+                "if (mode === 'metadata-only') matchesFilter = typeHint === 'metadata-only';"
+                "if (mode === 'failed') matchesFilter = hasFailure;"
+                "const show = matchesSearch && matchesFilter;"
+                "d.classList.toggle('hidden', !show);"
+                "if (show) visible += 1;"
+                "}"
+                "visibleCountEl.textContent = `${visible} visible`;"
+                "}"
+                "for (const btn of $$('button.copy[data-copy]')){"
+                "btn.addEventListener('click', async () => {"
+                "const sel = btn.getAttribute('data-copy');"
+                "const el = sel ? $(sel) : null;"
+                "const text = el ? el.textContent.trim() : '';"
+                "if (!text) return;"
+                "try{"
+                "await navigator.clipboard.writeText(text);"
+                "const old = btn.textContent;"
+                "btn.textContent = 'Copied';"
+                "setTimeout(()=>btn.textContent=old, 900);"
+                "}catch(e){"
+                "const ta = document.createElement('textarea');"
+                "ta.value = text;"
+                "document.body.appendChild(ta);"
+                "ta.select();"
+                "document.execCommand('copy');"
+                "ta.remove();"
+                "}"
+                "});"
+                "}"
+                "expandAllBtn?.addEventListener('click', () => groups().forEach(d => d.open = true));"
+                "collapseAllBtn?.addEventListener('click', () => groups().forEach(d => d.open = false));"
+                "searchEl?.addEventListener('input', applyFilters);"
+                "filterEl?.addEventListener('change', applyFilters);"
+                "computeStats();"
+                "applyFilters();"
+                "})();"
+                "</script>"
+            )
             html_lines.append("</body></html>")
             _atomic_write_text(html_report_path, "\n".join(html_lines))
             if not os.path.exists(ensure_long_path(html_report_path)):
