@@ -121,6 +121,7 @@ class ExecutionResult:
 
 
 EXECUTION_REPORT_FILENAME = "execution_report.html"
+INTERNAL_TAG_KEYS = {"album_type"}
 
 
 def _timestamped_dir(base: str) -> str:
@@ -343,33 +344,43 @@ def _apply_artwork(action: ArtworkDirective) -> tuple[bool, str]:
         _close_mutagen_audio(audio)
 
 
-def _apply_metadata(target: str, planned_tags: Mapping[str, object]) -> bool:
+def _apply_metadata(target: str, planned_tags: Mapping[str, object]) -> tuple[bool, str]:
     meta_path = f"{target}.metadata.json"
     try:
         _atomic_write_json(meta_path, dict(planned_tags))
     except Exception:
-        return False
+        return False, "Failed to write metadata sidecar."
     if MutagenFile is None:
-        return True
+        return True, "Mutagen unavailable; wrote metadata sidecar only."
     audio = MutagenFile(ensure_long_path(target), easy=True)
     try:
         if audio is None:
-            return True
+            return True, "Unsupported audio format; wrote metadata sidecar only."
         changed = False
+        skipped: List[str] = []
         for key, value in planned_tags.items():
             if value is None:
                 continue
-            current = audio.tags.get(key) if audio.tags else None
+            if key in INTERNAL_TAG_KEYS:
+                skipped.append(key)
+                continue
             normalized = [str(value)] if not isinstance(value, list) else [str(v) for v in value]
-            if current != normalized:
-                audio[key] = normalized
-                changed = True
+            try:
+                current = audio.tags.get(key) if audio.tags else None
+                if current != normalized:
+                    audio[key] = normalized
+                    changed = True
+            except Exception:
+                skipped.append(key)
         if changed:
             try:
                 audio.save()
             except Exception:
-                return False
-        return True
+                return False, "Failed to save metadata tags."
+        if skipped:
+            skipped_list = ", ".join(sorted(set(skipped)))
+            return True, f"Metadata normalized; skipped unsupported keys: {skipped_list}."
+        return True, "Metadata normalized."
     finally:
         _close_mutagen_audio(audio)
 
@@ -823,11 +834,11 @@ def execute_consolidation_plan(
         elif config.apply_metadata:
             for target, tags in planned_tags.items():
                 _check_cancel("metadata")
-                ok = _apply_metadata(target, tags)
+                ok, detail = _apply_metadata(target, tags)
                 status = "success" if ok else "failed"
                 if not ok:
                     success = False
-                _record("metadata", target, status, "Metadata normalized.", group_id=path_to_group.get(target))
+                _record("metadata", target, status, detail, group_id=path_to_group.get(target))
                 if not ok:
                     raise RuntimeError(f"Metadata normalization failed for {target}")
 
