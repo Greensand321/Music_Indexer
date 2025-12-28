@@ -1471,6 +1471,7 @@ class DuplicateFinderShell(tk.Toplevel):
         self.override_review_var = tk.BooleanVar(value=False)
         self.preview_html_path: str | None = None
         self.preview_json_path: str | None = None
+        self.execution_report_path: str | None = None
         self._plan = None
 
         container = ttk.Frame(self)
@@ -1528,6 +1529,10 @@ class DuplicateFinderShell(tk.Toplevel):
             controls, text="Open Preview", command=self._open_preview_output, state="disabled"
         )
         self.open_preview_btn.pack(side="left", padx=(0, 6))
+        self.open_report_btn = ttk.Button(
+            controls, text="Open Report", command=self._open_execution_report, state="disabled"
+        )
+        self.open_report_btn.pack(side="left", padx=(0, 6))
         ttk.Button(controls, text="Execute", command=self._handle_execute).pack(
             side="left", padx=(0, 12)
         )
@@ -1875,8 +1880,14 @@ class DuplicateFinderShell(tk.Toplevel):
             status = "Executed" if result.success else "Execution failed"
             self._set_status(status, progress=100)
             self._log_action(f"Execution complete: {'success' if result.success else 'failed'}")
-            report_path = result.report_paths.get("html_report")
+            report_path = self._normalize_html_report_path(result.report_paths.get("html_report"))
             self._log_action(f"Execution report: {report_path}")
+            if report_path and os.path.exists(report_path):
+                self.execution_report_path = report_path
+                self.open_report_btn.config(state="normal")
+            else:
+                self.execution_report_path = None
+                self.open_report_btn.config(state="disabled")
             if not result.success:
                 report_line = ""
                 if report_path:
@@ -1919,6 +1930,25 @@ class DuplicateFinderShell(tk.Toplevel):
             messagebox.showerror("Preview Missing", "Preview file could not be found. Generate a new preview.")
             return
         webbrowser.open(self.preview_html_path)
+
+    def _normalize_html_report_path(self, report_path: str | None) -> str | None:
+        if not report_path:
+            return None
+        if report_path.lower().endswith(".html"):
+            return report_path
+        return f"{report_path}.html"
+
+    def _open_execution_report(self) -> None:
+        if not self.execution_report_path:
+            messagebox.showinfo("Execution Report", "No execution report is available yet.")
+            return
+        if not os.path.exists(self.execution_report_path):
+            messagebox.showerror(
+                "Execution Report Missing",
+                "Execution report could not be found. Run the execution again to generate a new report.",
+            )
+            return
+        webbrowser.open(self.execution_report_path)
 
 class SoundVaultImporterApp(tk.Tk):
     def __init__(self):
