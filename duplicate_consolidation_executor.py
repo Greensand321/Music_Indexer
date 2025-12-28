@@ -345,17 +345,12 @@ def _apply_artwork(action: ArtworkDirective) -> tuple[bool, str]:
 
 
 def _apply_metadata(target: str, planned_tags: Mapping[str, object]) -> tuple[bool, str]:
-    meta_path = f"{target}.metadata.json"
-    try:
-        _atomic_write_json(meta_path, dict(planned_tags))
-    except Exception:
-        return False, "Failed to write metadata sidecar."
     if MutagenFile is None:
-        return True, "Mutagen unavailable; wrote metadata sidecar only."
+        return True, "Mutagen unavailable; metadata not written."
     audio = MutagenFile(ensure_long_path(target), easy=True)
     try:
         if audio is None:
-            return True, "Unsupported audio format; wrote metadata sidecar only."
+            return True, "Unsupported audio format; metadata not written."
         changed = False
         skipped: List[str] = []
         for key, value in planned_tags.items():
@@ -931,31 +926,30 @@ def execute_consolidation_plan(
         success = False
         _record("execution", "execution", "failed", f"Execution failed: {exc}")
     finally:
-        audit_path = os.path.join(reports_dir, "audit.json")
-        playlist_report_path = os.path.join(reports_dir, "playlist_report.json")
-        quarantine_index_path = os.path.join(reports_dir, "quarantine_index.json")
+        consolidated_report_path = os.path.join(reports_dir, "execution_report.json")
         html_report_path = os.path.join(reports_dir, EXECUTION_REPORT_FILENAME)
 
         plan_signature = plan.plan_signature if plan else None
         source_snapshot = plan.source_snapshot if plan else {}
-        audit_payload = {
+        consolidated_payload = {
             "success": success,
             "actions": [a.to_dict() for a in actions],
             "generated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
             "plan_signature": plan_signature or computed_signature,
             "computed_signature": computed_signature,
             "source_snapshot": {k: dict(v) for k, v in source_snapshot.items()},
-        }
-        playlist_payload = {
-            "backups_dir": backups_dir,
+            "plan": plan.to_dict() if plan else None,
             "playlists": [p.to_dict() for p in playlist_results],
+            "quarantine_index": dict(quarantine_index),
+            "metadata_plans": {path: dict(tags) for path, tags in planned_tags.items()},
+            "run_paths": {
+                "reports_dir": reports_dir,
+                "backups_dir": backups_dir,
+            },
         }
-        quarantine_payload = dict(quarantine_index)
 
         try:
-            _atomic_write_json(audit_path, audit_payload)
-            _atomic_write_json(playlist_report_path, playlist_payload)
-            _atomic_write_json(quarantine_index_path, quarantine_payload)
+            _atomic_write_json(consolidated_report_path, consolidated_payload)
         except Exception:
             pass
 
@@ -1205,9 +1199,7 @@ def execute_consolidation_plan(
             log(f"Report write failed: unable to create HTML report at {html_report_path} ({exc})")
 
     report_paths = {
-        "audit": audit_path,
-        "playlist_report": playlist_report_path,
-        "quarantine_index": quarantine_index_path,
+        "json_report": consolidated_report_path,
         "html_report": html_report_path,
         "reports_root": reports_dir,
         "backups_root": backups_dir,
