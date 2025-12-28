@@ -17,6 +17,7 @@ import hashlib
 import html
 import importlib.util
 import json
+import platform
 import os
 import shutil
 import tempfile
@@ -1055,7 +1056,7 @@ def execute_consolidation_plan(
             groups_processed = len(group_lookup)
             winners_kept = groups_processed
             generated_at_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
-            host_name = os.uname().nodename
+            host_name = platform.node() or "unknown-host"
 
             def _status_badge_class(status: str) -> str:
                 if status == "success":
