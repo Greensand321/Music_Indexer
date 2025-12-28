@@ -1923,78 +1923,137 @@ def render_consolidation_preview(plan: ConsolidationPlan, output_html_path: str)
         return "".join(lines)
 
     review_required = plan.review_required_groups
+
+    def _basename(path: str) -> str:
+        base = os.path.basename(path)
+        return base or path
+
     lines = [
         "<html><head><style>",
-        "body{font-family:Arial, sans-serif; margin:20px;}",
-        ".group{border:1px solid #ddd; padding:12px; margin-bottom:10px; border-radius:6px;}",
-        ".review{background:#fff3cd;}",
-        ".header{display:flex;justify-content:space-between;align-items:center;}",
-        ".muted{color:#666; font-size:0.9em;}",
-        ".metadata{border-collapse:collapse;width:100%;}",
-        ".metadata th,.metadata td{border:1px solid #ddd;padding:4px 6px;text-align:left;}",
-        ".pill{display:inline-block;padding:4px 8px;border-radius:12px;font-size:12px;}",
-        ".ok{background:#e7f5e8;color:#266534;}",
-        ".warn{background:#ffe8cc;color:#b05e00;}",
-        ".section{margin-top:8px;}",
-        ".losers td{font-size:0.9em;}",
-        "details{margin-top:6px;}",
+        ":root{",
+        "--bg:#f7f7fb;",
+        "--card:#f2f3f7;",
+        "--text:#1f2328;",
+        "--muted:#6b7280;",
+        "--border:#e0e4ea;",
+        "--chip:#f6f7fb;",
+        "--mono:'SFMono-Regular',Consolas,'Liberation Mono',Menlo,monospace;",
+        "}",
+        "body{font-family:Arial,sans-serif;margin:20px;background:var(--bg);color:var(--text);}",
+        "header{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;}",
+        "h1{margin:0;font-size:24px;}",
+        ".summary{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin:12px 0;}",
+        ".card{background:#fff;border:1px solid var(--border);border-radius:12px;padding:12px;}",
+        ".pill{display:inline-flex;align-items:center;gap:6px;padding:4px 10px;border-radius:999px;",
+        "border:1px solid var(--border);background:var(--chip);font-size:12px;}",
+        ".badge{display:inline-flex;align-items:center;padding:4px 10px;border-radius:999px;",
+        "border:1px solid var(--border);font-size:12px;font-weight:600;background:#fff;}",
+        ".badge.ok{border-color:rgba(27,122,27,.25);color:#1b7a1b;}",
+        ".badge.warn{border-color:rgba(176,94,0,.25);color:#b05e00;}",
+        ".muted{color:var(--muted);font-size:12px;}",
+        "details.group{border:1px solid var(--border);border-radius:12px;background:#fff;margin-bottom:12px;overflow:hidden;}",
+        "summary.group-summary{list-style:none;cursor:pointer;padding:12px;display:grid;gap:8px;}",
+        "summary.group-summary::-webkit-details-marker{display:none;}",
+        ".group-top{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;}",
+        ".group-title{display:flex;gap:8px;align-items:baseline;}",
+        ".gid{font-family:var(--mono);font-size:12px;color:var(--muted);}",
+        ".winner-short{font-weight:600;max-width:70ch;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}",
+        ".group-body{border-top:1px solid var(--border);background:var(--card);padding:12px;display:grid;gap:12px;}",
+        "@media (min-width: 980px){.group-body{grid-template-columns:1fr 1.1fr;}}",
+        ".section h3{margin:0 0 8px;font-size:12px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);}",
+        ".metadata{border-collapse:collapse;width:100%;background:#fff;border:1px solid var(--border);border-radius:10px;overflow:hidden;}",
+        ".metadata th,.metadata td{border-bottom:1px solid var(--border);padding:8px 10px;text-align:left;font-size:12px;}",
+        ".metadata th{background:#fafafa;color:var(--muted);font-weight:600;}",
+        ".metadata tr:last-child td{border-bottom:none;}",
+        ".losers td{font-size:12px;}",
+        "details.context{margin-top:6px;}",
         "</style></head><body>",
+        "<header>",
+        "<div>",
         "<h1>Duplicate Consolidation Preview</h1>",
-        f"<p class='muted'>Generated at {plan.generated_at.isoformat()}</p>",
-        f"<p>Total groups: {len(plan.groups)} | Review required: {len(review_required)} | "
-        f"Global flags: {len(plan.review_flags)}</p>",
+        f"<div class='muted'>Generated at {plan.generated_at.isoformat()}</div>",
+        "</div>",
+        f"<div class='pill'><strong>Total groups</strong> {len(plan.groups)}</div>",
+        "</header>",
+        "<section class='summary'>",
+        f"<div class='card'><div class='muted'>Review required</div><div><strong>{len(review_required)}</strong></div></div>",
+        f"<div class='card'><div class='muted'>Global flags</div><div><strong>{len(plan.review_flags)}</strong></div></div>",
+        "</section>",
     ]
 
     if plan.review_flags:
-        lines.append("<div class='group review'><strong>Plan Warnings</strong><ul>")
+        lines.append("<section class='card'><strong>Plan Warnings</strong><ul>")
         for flag in plan.review_flags:
             lines.append(f"<li>{_html_escape(flag)}</li>")
-        lines.append("</ul></div>")
+        lines.append("</ul></section>")
 
     for group in plan.groups:
         review_badge = (
-            "<span class='pill warn'>Review required</span>" if group.review_flags else "<span class='pill ok'>Ready</span>"
+            "<span class='badge warn'>Review required</span>"
+            if group.review_flags
+            else "<span class='badge ok'>Ready</span>"
         )
-        lines.append("<div class='group {cls}'>".format(cls="review" if group.review_flags else ""))
+        winner_basename = _basename(group.winner_path)
+        lines.append("<details class='group' open>")
+        lines.append("<summary class='group-summary'>")
+        lines.append("<div class='group-top'>")
+        lines.append("<div class='group-title'>")
+        lines.append(f"<span class='gid'>Group {group.group_id}</span>")
         lines.append(
-            f"<div class='header'><div><strong>Group {group.group_id}</strong>"
-            f"<div class='muted'>Confidence: {_html_escape(group.group_confidence)}</div></div>{review_badge}</div>"
+            f"<span class='winner-short' title='{_html_escape(group.winner_path)}'>"
+            f"{_html_escape(winner_basename)}</span>"
         )
+        lines.append("</div>")
+        lines.append(review_badge)
+        lines.append("</div>")
+        lines.append(f"<div class='muted'>Confidence: {_html_escape(group.group_confidence)}</div>")
+        lines.append("</summary>")
+
+        lines.append("<div class='group-body'>")
+        lines.append("<div>")
         codec_warning = _render_codec_mix_warning(group)
         if codec_warning:
             lines.append(codec_warning)
-        lines.append(f"<p><strong>Winner</strong>: {_html_escape(group.winner_path)}</p>")
+        lines.append("<div class='section'><h3>Winner</h3>")
+        lines.append(f"<div class='card'><div class='muted'>{_html_escape(group.winner_path)}</div>")
         lines.append(_render_quality(group))
+        lines.append("</div></div>")
         lines.append(_render_grouping_evidence(group))
-
-        lines.append("<div class='section'><p><strong>Losers</strong></p>")
+        lines.append("<div class='section'><h3>Losers</h3>")
         lines.append(_render_losers(group))
         lines.append("</div>")
+        lines.append("</div>")
 
-        lines.append("<div class='section'><p><strong>Metadata normalization</strong></p>")
+        lines.append("<div>")
+        lines.append("<div class='section'><h3>Metadata normalization</h3>")
         lines.append(_render_metadata(group.metadata_changes))
-        lines.append(f"<p class='muted'>Tag source: {_html_escape(group.tag_source or 'None')} — {_html_escape(group.tag_source_reason)}</p>")
+        lines.append(
+            "<div class='muted'>"
+            f"Tag source: {_html_escape(group.tag_source or 'None')} — "
+            f"{_html_escape(group.tag_source_reason)}</div>"
+        )
         if group.tag_source_evidence:
             lines.append("<ul>" + "".join(f"<li>{_html_escape(ev)}</li>" for ev in group.tag_source_evidence) + "</ul>")
         lines.append("</div>")
 
-        lines.append("<div class='section'><p><strong>Artwork</strong></p>")
+        lines.append("<div class='section'><h3>Artwork</h3>")
         lines.append(_render_artwork_section(group))
         lines.append("</div>")
 
         lines.append(
-            f"<p><strong>Playlist impact</strong>: {group.playlist_impact.playlists} playlists, "
-            f"{group.playlist_impact.entries} entries</p>"
+            "<div class='section'><h3>Playlist impact</h3>"
+            f"<div class='card'><strong>{group.playlist_impact.playlists}</strong> playlists, "
+            f"<strong>{group.playlist_impact.entries}</strong> entries</div></div>"
         )
 
         if group.review_flags:
-            lines.append("<p><strong>Review flags:</strong></p><ul>")
+            lines.append("<div class='section'><h3>Review flags</h3><ul>")
             for flag in group.review_flags:
                 lines.append(f"<li>{_html_escape(flag)}</li>")
-            lines.append("</ul>")
+            lines.append("</ul></div>")
 
         lines.append(
-            "<details><summary>Context</summary><ul>"
+            "<details class='context'><summary class='muted'>Context & evidence</summary><ul>"
             + f"<li>Album tracks: {len(group.context_summary.get('album', []))}</li>"
             + f"<li>Singles: {len(group.context_summary.get('single', []))}</li>"
             + f"<li>Unknown: {len(group.context_summary.get('unknown', []))}</li>"
@@ -2016,6 +2075,8 @@ def render_consolidation_preview(plan: ConsolidationPlan, output_html_path: str)
             + "</details>"
         )
         lines.append("</div>")
+        lines.append("</div>")
+        lines.append("</details>")
 
     lines.append("</body></html>")
 
