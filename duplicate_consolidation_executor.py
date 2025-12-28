@@ -799,14 +799,20 @@ def execute_consolidation_plan(
         # Step 6: quarantine or delete losers
         for loser, disposition in loser_disposition.items():
             _check_cancel("loser_cleanup")
-            if config.retain_losers:
+            effective = disposition if disposition in ("retain", "quarantine", "delete") else None
+            if effective is None:
+                effective = "retain" if config.retain_losers else "quarantine"
+            if effective == "retain":
                 quarantine_index[loser] = "retained"
+                detail = "Loser retained by plan disposition."
+                if config.dry_run_execute:
+                    detail = "Dry-run execute enabled; loser retained in place."
                 _record(
                     "loser_cleanup",
                     loser,
                     "skipped",
-                    "Loser retained; quarantine disabled.",
-                    disposition=disposition,
+                    detail,
+                    disposition=effective,
                     group_id=path_to_group.get(loser),
                 )
                 continue
@@ -817,11 +823,11 @@ def execute_consolidation_plan(
                     loser,
                     "skipped",
                     "Dry-run execute enabled; loser not moved or deleted.",
-                    disposition=disposition,
+                    disposition=effective,
                     group_id=path_to_group.get(loser),
                 )
                 continue
-            if disposition == "delete":
+            if effective == "delete":
                 try:
                     if os.path.exists(loser):
                         os.remove(loser)
@@ -831,6 +837,7 @@ def execute_consolidation_plan(
                         loser,
                         "success",
                         "Loser deleted.",
+                        disposition=effective,
                         group_id=path_to_group.get(loser),
                     )
                 except Exception as exc:
@@ -840,6 +847,7 @@ def execute_consolidation_plan(
                         loser,
                         "failed",
                         f"Failed to delete loser: {exc}",
+                        disposition=effective,
                         group_id=path_to_group.get(loser),
                     )
                     raise
@@ -855,6 +863,7 @@ def execute_consolidation_plan(
                         "success",
                         "Loser quarantined.",
                         quarantine_path=dest,
+                        disposition=effective,
                         group_id=path_to_group.get(loser),
                     )
                 except Exception as exc:
@@ -864,6 +873,8 @@ def execute_consolidation_plan(
                         loser,
                         "failed",
                         f"Failed to quarantine loser: {exc}",
+                        quarantine_path=dest,
+                        disposition=effective,
                         group_id=path_to_group.get(loser),
                     )
                     raise

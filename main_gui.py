@@ -1472,6 +1472,9 @@ class DuplicateFinderShell(tk.Toplevel):
         self.quarantine_var = tk.BooleanVar(value=True)
         self.delete_losers_var = tk.BooleanVar(value=False)
         self.override_review_var = tk.BooleanVar(value=False)
+        self.group_disposition_var = tk.StringVar(value="")
+        self.group_disposition_overrides: dict[str, str] = {}
+        self._selected_group_id: str | None = None
         self.preview_html_path: str | None = None
         self.preview_json_path: str | None = None
         self.execution_report_path: str | None = None
@@ -1607,8 +1610,20 @@ class DuplicateFinderShell(tk.Toplevel):
 
         inspector = ttk.LabelFrame(results, text="Group Details")
         inspector.grid(row=0, column=1, sticky="nsew", padx=(3, 6), pady=6)
+        disposition_row = ttk.Frame(inspector)
+        disposition_row.pack(fill="x", padx=8, pady=(8, 4))
+        ttk.Label(disposition_row, text="Group disposition").pack(side="left")
+        self.group_disposition_menu = ttk.Combobox(
+            disposition_row,
+            textvariable=self.group_disposition_var,
+            state="disabled",
+            width=22,
+            values=("Default (global)", "Retain", "Quarantine", "Delete"),
+        )
+        self.group_disposition_menu.pack(side="left", padx=(6, 0))
+        self.group_disposition_menu.bind("<<ComboboxSelected>>", self._on_group_disposition_change)
         self.group_details = ScrolledText(inspector, height=12, state="disabled", wrap="word")
-        self.group_details.pack(fill="both", expand=True, padx=8, pady=8)
+        self.group_details.pack(fill="both", expand=True, padx=8, pady=(0, 8))
 
         self._log_action("Duplicate Finder initialized")
 
@@ -1628,6 +1643,18 @@ class DuplicateFinderShell(tk.Toplevel):
         self.log_text.see("end")
         self.log_text.configure(state="disabled")
 
+    def _default_group_disposition(self) -> str:
+        if not self.quarantine_var.get():
+            return "retain"
+        if self.delete_losers_var.get():
+            return "delete"
+        return "quarantine"
+
+    def _reset_group_selection(self) -> None:
+        self._selected_group_id = None
+        self.group_disposition_var.set("Default (global)")
+        self.group_disposition_menu.configure(state="disabled")
+
     def _update_groups_view(self, plan) -> None:
         self.groups_tree.delete(*self.groups_tree.get_children())
         for group in plan.groups:
@@ -1645,6 +1672,7 @@ class DuplicateFinderShell(tk.Toplevel):
         self.group_details.delete("1.0", "end")
         self.group_details.insert("end", "Select a group to view details.")
         self.group_details.configure(state="disabled")
+        self._reset_group_selection()
 
     def _on_group_select(self, event=None) -> None:
         sel = self.groups_tree.selection()
@@ -1653,16 +1681,31 @@ class DuplicateFinderShell(tk.Toplevel):
         group_id = sel[0]
         group = next((g for g in self._plan.groups if g.group_id == group_id), None)
         if group:
+            self._selected_group_id = group.group_id
+            self.group_disposition_menu.configure(state="readonly")
+            override = self.group_disposition_overrides.get(group.group_id)
+            if override == "retain":
+                self.group_disposition_var.set("Retain")
+            elif override == "quarantine":
+                self.group_disposition_var.set("Quarantine")
+            elif override == "delete":
+                self.group_disposition_var.set("Delete")
+            else:
+                self.group_disposition_var.set("Default (global)")
             self._render_group_details(group)
 
     def _render_group_details(self, group) -> None:
+        default_disp = self._default_group_disposition()
+        override = self.group_disposition_overrides.get(group.group_id)
+        disposition_label = f"{override} (override)" if override else f"{default_disp} (default)"
         lines = [
             f"Winner: {group.winner_path}",
             f"Losers: {len(group.losers)}",
+            f"Group disposition: {disposition_label}",
             "Dispositions:",
         ]
         for loser in group.losers:
-            disp = group.loser_disposition.get(loser, "quarantine")
+            disp = group.loser_disposition.get(loser, default_disp)
             playlist = group.playlist_rewrites.get(loser, "n/a")
             lines.append(f"  - {loser} → {disp} (playlist → {playlist})")
 
@@ -1690,6 +1733,49 @@ class DuplicateFinderShell(tk.Toplevel):
         self.group_details.delete("1.0", "end")
         self.group_details.insert("end", "\n".join(lines))
         self.group_details.configure(state="disabled")
+
+    def _on_group_disposition_change(self, event=None) -> None:
+        if not self._plan or not self._selected_group_id:
+            return
+        group = next(
+            (g for g in self._plan.groups if g.group_id == self._selected_group_id),
+            None,
+        )
+        if not group:
+            return
+        selection = self.group_disposition_var.get()
+        choice_map = {
+            "Default (global)": None,
+            "Retain": "retain",
+            "Quarantine": "quarantine",
+            "Delete": "delete",
+        }
+        disposition = choice_map.get(selection)
+        if disposition is None:
+            self.group_disposition_overrides.pop(group.group_id, None)
+            disposition = self._default_group_disposition()
+            self._log_action(f"Group {group.group_id} disposition reset to default ({disposition}).")
+        else:
+            self.group_disposition_overrides[group.group_id] = disposition
+            self._log_action(f"Group {group.group_id} disposition override set to {disposition}.")
+
+        for loser in group.losers:
+            group.loser_disposition[loser] = disposition
+
+        self._render_group_details(group)
+        self._reset_preview_if_needed()
+
+    def _count_group_dispositions(self) -> dict[str, int]:
+        counts = {"retain": 0, "quarantine": 0, "delete": 0}
+        if not self._plan:
+            return counts
+        default_disposition = self._default_group_disposition()
+        for group in self._plan.groups:
+            for loser in group.losers:
+                disp = group.loser_disposition.get(loser, default_disposition)
+                if disp in counts:
+                    counts[disp] += 1
+        return counts
 
     def _set_status(self, status: str, progress: float | None = None) -> None:
         self.status_var.set(status)
@@ -1791,6 +1877,7 @@ class DuplicateFinderShell(tk.Toplevel):
         self._set_status("Building plan…", progress=25)
         plan = build_consolidation_plan(tracks)
         self._plan = plan
+        self.group_disposition_overrides.clear()
         self._apply_deletion_mode()
 
         docs_dir = os.path.join(path, "Docs")
@@ -1871,6 +1958,10 @@ class DuplicateFinderShell(tk.Toplevel):
         def log_callback(msg: str) -> None:
             self.after(0, self._log_action, msg)
 
+        disposition_counts = self._count_group_dispositions()
+        deletions_requested = disposition_counts.get("delete", 0) > 0
+        quarantines_requested = disposition_counts.get("quarantine", 0) > 0
+
         config = ExecutionConfig(
             library_root=path,
             reports_dir=reports_dir,
@@ -1879,14 +1970,19 @@ class DuplicateFinderShell(tk.Toplevel):
             log_callback=log_callback,
             allow_review_required=self.override_review_var.get(),
             retain_losers=not self.quarantine_var.get(),
-            allow_deletion=self.delete_losers_var.get(),
-            confirm_deletion=self.delete_losers_var.get(),
+            allow_deletion=deletions_requested,
+            confirm_deletion=deletions_requested,
         )
 
         if not self.quarantine_var.get():
-            self._log_action("Quarantine disabled; duplicates will be retained in place.")
-        if self.delete_losers_var.get():
-            self._log_action("Deletion enabled; losers will be deleted during execution.")
+            if quarantines_requested or deletions_requested:
+                self._log_action(
+                    "Quarantine disabled globally; group overrides will still move or delete selected losers."
+                )
+            else:
+                self._log_action("Quarantine disabled; duplicates will be retained in place.")
+        if deletions_requested:
+            self._log_action("Deletion enabled; selected losers will be deleted during execution.")
 
         self._set_status("Executing…", progress=10)
         self._log_action("Execute started")
@@ -1964,12 +2060,14 @@ class DuplicateFinderShell(tk.Toplevel):
     def _apply_deletion_mode(self) -> None:
         if not self._plan:
             return
-        delete_mode = self.delete_losers_var.get()
+        default_disposition = self._default_group_disposition()
         for group in self._plan.groups:
+            if group.group_id in self.group_disposition_overrides:
+                continue
             for loser in group.losers:
                 current = group.loser_disposition.get(loser, "quarantine")
-                if current in ("quarantine", "delete"):
-                    group.loser_disposition[loser] = "delete" if delete_mode else "quarantine"
+                if current in ("retain", "quarantine", "delete"):
+                    group.loser_disposition[loser] = default_disposition
         self._update_groups_view(self._plan)
 
     def _reset_preview_if_needed(self) -> None:
