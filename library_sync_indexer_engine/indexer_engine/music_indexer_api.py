@@ -75,15 +75,8 @@ def build_primary_counts(root_path, progress_callback=None, phase="A"):
 
             # Normalize artist identically to Phase 4
             raw = (tags.get("artist") or "").strip()
-
             if not raw:
-                name_only = os.path.splitext(fname)[0]
-                if "_" in name_only:
-                    raw = name_only.split("_", 1)[0]
-                elif " - " in name_only:
-                    raw = name_only.split(" - ", 1)[0]
-                else:
-                    raw = name_only
+                raw = _fallback_artist_from_filename(fname)
 
             primary, _ = extract_primary_and_collabs(raw)
             p_lower = primary.lower()
@@ -95,6 +88,14 @@ def build_primary_counts(root_path, progress_callback=None, phase="A"):
 def sanitize(name: str) -> str:
     invalid = r'<>:"/\\|?*'
     return "".join(c for c in (name or "Unknown") if c not in invalid).strip() or "Unknown"
+
+def _fallback_artist_from_filename(filename: str) -> str:
+    name_only = os.path.splitext(os.path.basename(filename))[0]
+    if "_" in name_only:
+        return name_only.split("_", 1)[0]
+    if " - " in name_only:
+        return name_only.split(" - ", 1)[0]
+    return name_only
 
 def collapse_repeats(name: str) -> str:
     """
@@ -124,16 +125,46 @@ def is_repeated(name: str) -> bool:
                 return True
     return False
 
+def _normalize_part_of_set(raw_value: str | None) -> str | None:
+    if not raw_value:
+        return None
+    text = str(raw_value).strip()
+    if not text:
+        return None
+    first = text.split("/", 1)[0].strip()
+    if not first:
+        return None
+    if first.isdigit():
+        return f"Part {int(first)}"
+    return first
+
+
+def _apply_part_of_set(
+    base_folder: str,
+    album: str,
+    part_of_set: str | None,
+    decision_log: list[str],
+) -> str:
+    if part_of_set and album and os.path.basename(base_folder) == sanitize(album):
+        part_folder = sanitize(part_of_set)
+        decision_log.append(
+            f"  → Part of set '{part_of_set}' detected; placed under subfolder '{part_folder}'"
+        )
+        return os.path.join(base_folder, part_folder)
+    return base_folder
+
+
 def get_tags(path: str):
     """
-    Read basic tags using Mutagen (artist, title, album, year, track, genre).
+    Read basic tags using Mutagen (artist, title, album, year, track, genre, part_of_set).
     Return a dict with those fields (or None if missing).
     """
     try:
         audio = MutagenFile(path, easy=True)
         if not audio or not audio.tags:
             return {"artist": None, "title": None, "album": None,
-                    "year": None, "track": None, "genre": None}
+                    "year": None, "track": None, "genre": None,
+                    "part_of_set": None}
         tags = audio.tags
         artist = tags.get("artist", [None])[0]
         title  = tags.get("title",  [None])[0]
@@ -148,11 +179,21 @@ def get_tags(path: str):
             except Exception:
                 track = None
         genre = tags.get("genre", [None])[0]
+        raw_part_of_set = (
+            tags.get("partofset", [None])[0]
+            or tags.get("part_of_set", [None])[0]
+            or tags.get("part of set", [None])[0]
+            or tags.get("discnumber", [None])[0]
+            or tags.get("disc", [None])[0]
+        )
+        part_of_set = _normalize_part_of_set(raw_part_of_set)
         return {"artist": artist, "title": title, "album": album,
-                "year": year, "track": track, "genre": genre}
+                "year": year, "track": track, "genre": genre,
+                "part_of_set": part_of_set}
     except Exception:
         return {"artist": None, "title": None, "album": None,
-                "year": None, "track": None, "genre": None}
+                "year": None, "track": None, "genre": None,
+                "part_of_set": None}
 
 def extract_primary_and_collabs(raw_artist: str):
     """
@@ -379,7 +420,7 @@ def compute_moves_and_tag_index(
         if idx % 50 == 0 or idx == total_audio:
             log_callback(f"   • Processing file {idx}/{total_audio} for dedupe")
         data = get_tags(fullpath)
-        raw_artist = data["artist"] or os.path.splitext(os.path.basename(fullpath))[0]
+        raw_artist = data["artist"] or _fallback_artist_from_filename(fullpath)
         raw_artist = collapse_repeats(raw_artist)
         title = data["title"] or os.path.splitext(os.path.basename(fullpath))[0]
         album = data["album"] or ""
@@ -512,13 +553,14 @@ def compute_moves_and_tag_index(
         progress_callback(idx, total_kept, f"Metadata {os.path.relpath(fullpath, root_path)}", "B")
 
         data = get_tags(fullpath)
-        raw_artist = data["artist"] or os.path.splitext(os.path.basename(fullpath))[0]
+        raw_artist = data["artist"] or _fallback_artist_from_filename(fullpath)
         raw_artist = collapse_repeats(raw_artist)
         title   = data["title"] or os.path.splitext(os.path.basename(fullpath))[0]
         album   = data["album"]
         year    = data["year"]
         genre   = data["genre"]
         track   = data["track"]
+        part_of_set = data["part_of_set"]
 
         # 1) Primary & collabs (preserve original case)
         primary, collabs = extract_primary_and_collabs(raw_artist)
@@ -566,6 +608,7 @@ def compute_moves_and_tag_index(
             "year":       year,
             "genre":      genre,
             "track":      track,
+            "part_of_set": part_of_set,
             "cover_hash": cover_hash,
             "folder_tags": folder_tags,
             "missing_core": not data.get("artist") or not data.get("title"),
@@ -594,6 +637,7 @@ def compute_moves_and_tag_index(
         album      = info["album"] or ""
         year       = info["year"] or "Unknown"
         track      = info["track"]
+        part_of_set = info.get("part_of_set")
         folders    = info["folder_tags"]
         if info.get("missing_core"):
             candidate = os.path.join(review_root, os.path.basename(old_path))
@@ -662,6 +706,7 @@ def compute_moves_and_tag_index(
                 )
                 artist_folder = os.path.join(MUSIC_ROOT, "By Artist", sanitize(main_artist))
                 base_folder = os.path.join(artist_folder, sanitize(album))
+                base_folder = _apply_part_of_set(base_folder, album, part_of_set, decision_log)
 
                 # Build filename (skip normal album logic)
                 basename = os.path.basename(old_path)
@@ -728,6 +773,8 @@ def compute_moves_and_tag_index(
                     f"album_count={c2} ≤ 3 → group under '{primary} - Singles'"
                 )
 
+        base_folder = _apply_part_of_set(base_folder, album, part_of_set, decision_log)
+
         # Build filename for all “common” tracks
         basename = os.path.basename(old_path)
         if "/" in raw_artist or is_repeated(raw_artist):
@@ -752,6 +799,8 @@ def compute_moves_and_tag_index(
         leftover.discard(primary)
         if album:
             leftover.discard(album)
+        if part_of_set:
+            leftover.discard(part_of_set)
         leftover.discard(year)
         if genre:
             leftover.add(genre)
