@@ -2026,7 +2026,7 @@ class DuplicateFinderShell(tk.Toplevel):
             status = "Executed" if result.success else "Execution failed"
             self._set_status(status, progress=100)
             self._log_action(f"Execution complete: {'success' if result.success else 'failed'}")
-            report_path = self._normalize_html_report_path(result.report_paths.get("html_report"))
+            report_path = result.report_paths.get("html_report")
             self._log_action(f"Execution report: {report_path}")
             if report_path and os.path.exists(ensure_long_path(report_path)):
                 self.execution_report_path = report_path
@@ -2037,7 +2037,7 @@ class DuplicateFinderShell(tk.Toplevel):
             if not result.success:
                 report_line = ""
                 if report_path:
-                    if os.path.exists(report_path):
+                    if os.path.exists(ensure_long_path(report_path)):
                         report_line = f"\n\nReport (HTML): {report_path}"
                     else:
                         report_line = (
@@ -2114,13 +2114,6 @@ class DuplicateFinderShell(tk.Toplevel):
             missing_message="Preview file could not be found. Generate a new preview.",
             empty_message="No preview has been generated yet.",
         )
-
-    def _normalize_html_report_path(self, report_path: str | None) -> str | None:
-        if not report_path:
-            return None
-        if report_path.lower().endswith(".html"):
-            return report_path
-        return f"{report_path}.html"
 
     def _open_execution_report(self) -> None:
         self._open_local_html(

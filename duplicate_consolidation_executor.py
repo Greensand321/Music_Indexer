@@ -120,6 +120,9 @@ class ExecutionResult:
     report_paths: Dict[str, str]
 
 
+EXECUTION_REPORT_FILENAME = "execution_report.html"
+
+
 def _timestamped_dir(base: str) -> str:
     ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d_%H%M%S")
     path = os.path.join(base, f"consolidation_run_{ts}")
@@ -148,12 +151,6 @@ def _atomic_write_text(path: str, content: str, *, encoding: str = "utf-8") -> N
 def _atomic_write_json(path: str, payload: Mapping[str, object]) -> None:
     text = json.dumps(payload, indent=2, sort_keys=True)
     _atomic_write_text(path, text)
-
-
-def _ensure_html_extension(path: str) -> str:
-    if path.lower().endswith(".html"):
-        return path
-    return f"{path}.html"
 
 
 def _iter_playlists(playlists_dir: str) -> Iterable[str]:
@@ -926,9 +923,7 @@ def execute_consolidation_plan(
         audit_path = os.path.join(reports_dir, "audit.json")
         playlist_report_path = os.path.join(reports_dir, "playlist_report.json")
         quarantine_index_path = os.path.join(reports_dir, "quarantine_index.json")
-        html_report_path = _ensure_html_extension(
-            os.path.join(reports_dir, "execution_report")
-        )
+        html_report_path = os.path.join(reports_dir, EXECUTION_REPORT_FILENAME)
 
         plan_signature = plan.plan_signature if plan else None
         source_snapshot = plan.source_snapshot if plan else {}
