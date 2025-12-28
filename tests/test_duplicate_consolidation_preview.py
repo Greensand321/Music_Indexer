@@ -4,7 +4,6 @@ import os
 
 from duplicate_consolidation import (
     build_consolidation_plan,
-    render_consolidation_preview,
     export_consolidation_preview,
 )
 
@@ -64,17 +63,11 @@ def test_plan_contains_metadata_and_quality_summary(tmp_path) -> None:
     assert group.tag_source is not None
 
 
-def test_preview_render_and_export(tmp_path) -> None:
+def test_preview_export(tmp_path) -> None:
     plan = build_consolidation_plan(_sample_tracks(str(tmp_path)))
-    html_path = tmp_path / "preview.html"
     json_path = tmp_path / "preview.json"
 
-    render_consolidation_preview(plan, str(html_path))
     export_consolidation_preview(plan, str(json_path))
-
-    html = html_path.read_text()
-    assert "Duplicate Consolidation Preview" in html
-    assert plan.groups[0].winner_path in html
 
     data = json.loads(json_path.read_text())
     assert data["summary"]["groups"] == len(plan.groups)

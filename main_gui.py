@@ -45,7 +45,6 @@ from music_indexer_api import (
 from duplicate_consolidation import (
     build_consolidation_plan,
     consolidation_plan_from_dict,
-    render_consolidation_preview,
     export_consolidation_preview,
 )
 from duplicate_consolidation_executor import ExecutionConfig, execute_consolidation_plan
@@ -1476,7 +1475,6 @@ class DuplicateFinderShell(tk.Toplevel):
         self.group_disposition_var = tk.StringVar(value="")
         self.group_disposition_overrides: dict[str, str] = {}
         self._selected_group_id: str | None = None
-        self.preview_html_path: str | None = None
         self.preview_json_path: str | None = None
         self.execution_report_path: str | None = None
         self._plan = None
@@ -1532,10 +1530,6 @@ class DuplicateFinderShell(tk.Toplevel):
         ttk.Button(controls, text="Preview", command=self._handle_preview).pack(
             side="left", padx=(0, 6)
         )
-        self.open_preview_btn = ttk.Button(
-            controls, text="Open Preview", command=self._open_preview_output, state="disabled"
-        )
-        self.open_preview_btn.pack(side="left", padx=(0, 6))
         self.open_report_btn = ttk.Button(
             controls, text="Open Report", command=self._open_execution_report, state="disabled"
         )
@@ -1884,20 +1878,13 @@ class DuplicateFinderShell(tk.Toplevel):
         docs_dir = os.path.join(path, "Docs")
         os.makedirs(docs_dir, exist_ok=True)
         if write_preview:
-            html_path = os.path.join(docs_dir, "duplicate_preview.html")
             json_path = os.path.join(docs_dir, "duplicate_preview.json")
-            render_consolidation_preview(plan, html_path)
             export_consolidation_preview(plan, json_path)
-            self.preview_html_path = html_path
             self.preview_json_path = json_path
-            self.open_preview_btn.config(state="normal")
-            self._log_action(f"Preview written to {html_path}")
             self._log_action(f"Audit JSON written to {json_path}")
             self._set_status("Preview generated", progress=100)
         else:
-            self.preview_html_path = None
             self.preview_json_path = None
-            self.open_preview_btn.config(state="disabled")
             self._set_status("Plan ready", progress=100)
 
         self._log_action(
@@ -2101,19 +2088,9 @@ class DuplicateFinderShell(tk.Toplevel):
         self._update_groups_view(self._plan)
 
     def _reset_preview_if_needed(self) -> None:
-        if self.preview_html_path or self.preview_json_path:
-            self.preview_html_path = None
+        if self.preview_json_path:
             self.preview_json_path = None
-            self.open_preview_btn.config(state="disabled")
             self._log_action("Preview cleared; generate a new preview to reflect delete settings.")
-
-    def _open_preview_output(self) -> None:
-        self._open_local_html(
-            self.preview_html_path,
-            title="Preview",
-            missing_message="Preview file could not be found. Generate a new preview.",
-            empty_message="No preview has been generated yet.",
-        )
 
     def _open_execution_report(self) -> None:
         self._open_local_html(
