@@ -46,6 +46,7 @@ from duplicate_consolidation import (
     build_consolidation_plan,
     consolidation_plan_from_dict,
     export_consolidation_preview,
+    export_consolidation_preview_html,
 )
 from duplicate_consolidation_executor import ExecutionConfig, execute_consolidation_plan
 from controllers.library_index_controller import generate_index
@@ -1476,6 +1477,7 @@ class DuplicateFinderShell(tk.Toplevel):
         self.group_disposition_overrides: dict[str, str] = {}
         self._selected_group_id: str | None = None
         self.preview_json_path: str | None = None
+        self.preview_html_path: str | None = None
         self.execution_report_path: str | None = None
         self._plan = None
 
@@ -1882,9 +1884,14 @@ class DuplicateFinderShell(tk.Toplevel):
             export_consolidation_preview(plan, json_path)
             self.preview_json_path = json_path
             self._log_action(f"Audit JSON written to {json_path}")
+            html_path = os.path.join(docs_dir, "duplicate_preview.html")
+            export_consolidation_preview_html(plan, html_path)
+            self.preview_html_path = html_path
+            self._log_action(f"Preview HTML written to {html_path}")
             self._set_status("Preview generated", progress=100)
         else:
             self.preview_json_path = None
+            self.preview_html_path = None
             self._set_status("Plan ready", progress=100)
 
         self._log_action(
@@ -1919,7 +1926,7 @@ class DuplicateFinderShell(tk.Toplevel):
     def _handle_preview(self) -> None:
         self._log_action("Preview clicked")
         self._generate_plan(write_preview=True)
-        if self.preview_json_path:
+        if self.preview_html_path:
             self._open_preview()
 
     def _handle_execute(self) -> None:
@@ -1934,6 +1941,12 @@ class DuplicateFinderShell(tk.Toplevel):
         if preview_plan_path and os.path.exists(preview_plan_path):
             if not self.preview_json_path:
                 self.preview_json_path = preview_plan_path
+            if not self.preview_html_path:
+                preview_html_path = os.path.join(path, "Docs", "duplicate_preview.html")
+                plan_for_html = plan_for_checks or self._load_preview_plan(preview_plan_path)
+                if plan_for_html:
+                    export_consolidation_preview_html(plan_for_html, preview_html_path)
+                    self.preview_html_path = preview_html_path
             if not plan_for_checks:
                 plan_for_checks = self._load_preview_plan(preview_plan_path)
                 if plan_for_checks:
@@ -2096,11 +2109,12 @@ class DuplicateFinderShell(tk.Toplevel):
     def _reset_preview_if_needed(self) -> None:
         if self.preview_json_path:
             self.preview_json_path = None
+            self.preview_html_path = None
             self._log_action("Preview cleared; generate a new preview to reflect delete settings.")
 
     def _open_preview(self) -> None:
         self._open_local_html(
-            self.preview_json_path,
+            self.preview_html_path,
             title="Preview Output",
             missing_message="Preview output could not be found. Generate a new preview.",
             empty_message="No preview output is available yet.",
