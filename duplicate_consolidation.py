@@ -9,6 +9,7 @@ before executing any changes.
 from __future__ import annotations
 
 import datetime
+import html
 import hashlib
 import importlib.util
 import io
@@ -1765,3 +1766,110 @@ def export_consolidation_preview(plan: ConsolidationPlan, output_json_path: str)
     with open(output_json_path, "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2)
     return output_json_path
+
+
+def export_consolidation_preview_html(plan: ConsolidationPlan, output_html_path: str) -> str:
+    """Write an HTML preview of the consolidation plan."""
+
+    def esc(value: object) -> str:
+        return html.escape(str(value))
+
+    summary = {
+        "Groups": len(plan.groups),
+        "Review required": plan.review_required_count,
+        "Placeholders present": "Yes" if plan.placeholders_present else "No",
+        "Generated at": plan.generated_at.isoformat(),
+    }
+
+    html_lines = [
+        "<!doctype html>",
+        "<html lang='en'>",
+        "<head>",
+        "<meta charset='utf-8' />",
+        "<meta name='viewport' content='width=device-width, initial-scale=1' />",
+        "<title>Duplicate Finder Preview</title>",
+        "<style>",
+        "body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;"
+        "margin:24px;background:#f6f7fb;color:#1f2937;}",
+        "h1{margin-bottom:4px;}",
+        ".summary{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin:16px 0;}",
+        ".card{background:#fff;border-radius:10px;padding:12px;box-shadow:0 2px 8px rgba(0,0,0,0.06);}",
+        ".card .label{font-size:12px;text-transform:uppercase;color:#6b7280;letter-spacing:.04em;}",
+        ".card .value{font-size:18px;font-weight:600;margin-top:4px;}",
+        "table{width:100%;border-collapse:collapse;background:#fff;border-radius:10px;"
+        "overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,0.06);}",
+        "th,td{text-align:left;padding:10px 12px;border-bottom:1px solid #e5e7eb;}",
+        "th{background:#f9fafb;font-size:12px;text-transform:uppercase;color:#6b7280;letter-spacing:.04em;}",
+        "tr:last-child td{border-bottom:none;}",
+        ".badge{display:inline-block;padding:2px 8px;border-radius:999px;font-size:12px;}",
+        ".badge.review{background:#fef3c7;color:#92400e;}",
+        ".badge.ready{background:#d1fae5;color:#065f46;}",
+        "details{margin-top:12px;}",
+        "details > summary{cursor:pointer;font-weight:600;}",
+        ".paths{margin-top:8px;background:#f9fafb;border-radius:8px;padding:8px;font-family:monospace;"
+        "font-size:12px;white-space:pre-wrap;}",
+        ".section{margin-top:16px;}",
+        "</style>",
+        "</head>",
+        "<body>",
+        "<h1>Duplicate Finder Preview</h1>",
+        "<p class='muted'>Review the duplicate consolidation plan before executing.</p>",
+        "<div class='summary'>",
+    ]
+    for label, value in summary.items():
+        html_lines.append("<div class='card'>")
+        html_lines.append(f"<div class='label'>{esc(label)}</div>")
+        html_lines.append(f"<div class='value'>{esc(value)}</div>")
+        html_lines.append("</div>")
+    html_lines.append("</div>")
+
+    if plan.review_flags:
+        html_lines.append("<div class='section'>")
+        html_lines.append("<h2>Global review flags</h2>")
+        html_lines.append("<ul>")
+        for flag in plan.review_flags:
+            html_lines.append(f"<li>{esc(flag)}</li>")
+        html_lines.append("</ul>")
+        html_lines.append("</div>")
+
+    html_lines.extend(
+        [
+            "<div class='section'>",
+            "<h2>Duplicate groups</h2>",
+            "<table>",
+            "<thead><tr><th>Group</th><th>Winner</th><th>Losers</th><th>Status</th></tr></thead>",
+            "<tbody>",
+        ]
+    )
+    for group in plan.groups:
+        status = "Review" if group.review_flags else "Ready"
+        badge_class = "review" if group.review_flags else "ready"
+        html_lines.append("<tr>")
+        html_lines.append(f"<td>{esc(group.group_id)}</td>")
+        html_lines.append(f"<td>{esc(os.path.basename(group.winner_path))}</td>")
+        html_lines.append(f"<td>{esc(len(group.losers))}</td>")
+        html_lines.append(f"<td><span class='badge {badge_class}'>{esc(status)}</span></td>")
+        html_lines.append("</tr>")
+    html_lines.append("</tbody></table>")
+
+    for group in plan.groups:
+        html_lines.append("<details>")
+        html_lines.append(f"<summary>Group {esc(group.group_id)}</summary>")
+        html_lines.append("<div class='paths'>")
+        html_lines.append(f"Winner:\n{esc(group.winner_path)}\n")
+        if group.losers:
+            html_lines.append("Losers:")
+            for loser in group.losers:
+                html_lines.append(f"\n- {esc(loser)}")
+        if group.review_flags:
+            html_lines.append("\n\nReview flags:")
+            for flag in group.review_flags:
+                html_lines.append(f"\n- {esc(flag)}")
+        html_lines.append("</div>")
+        html_lines.append("</details>")
+
+    html_lines.extend(["</div>", "</body>", "</html>"])
+
+    with open(ensure_long_path(output_html_path), "w", encoding="utf-8") as handle:
+        handle.write("\n".join(html_lines))
+    return output_html_path
