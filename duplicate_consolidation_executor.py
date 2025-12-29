@@ -449,11 +449,12 @@ def _detect_state_drift(expected: Mapping[str, object], actual: Mapping[str, obj
 def _coerce_consolidation_plan(
     plan_input: ConsolidationPlan | Mapping[str, object] | str,
     log: Callable[[str], None],
-) -> tuple[ConsolidationPlan, str]:
+) -> tuple[ConsolidationPlan, str, str | None]:
     if isinstance(plan_input, ConsolidationPlan):
-        return plan_input, "in-memory plan"
+        return plan_input, "in-memory plan", None
     payload: object = plan_input
     source = "plan payload"
+    plan_path: str | None = None
     if isinstance(plan_input, str):
         if os.path.exists(plan_input):
             if not os.path.isfile(plan_input):
@@ -466,6 +467,7 @@ def _coerce_consolidation_plan(
             except json.JSONDecodeError as exc:
                 raise ValueError(f"Plan JSON could not be decoded: {exc}") from exc
             source = f"preview output {plan_input}"
+            plan_path = plan_input
         else:
             try:
                 payload = json.loads(plan_input)
@@ -479,7 +481,7 @@ def _coerce_consolidation_plan(
                 raise ValueError("Plan payload has a non-mapping 'plan' field.")
             payload = inner
             source = f"{source} (wrapped)"
-        return consolidation_plan_from_dict(payload), source
+        return consolidation_plan_from_dict(payload), source, plan_path
     raise ValueError("Plan input must be a ConsolidationPlan, mapping, or JSON string.")
 
 
@@ -546,7 +548,7 @@ def execute_consolidation_plan(
 
     try:
         try:
-            plan, plan_source = _coerce_consolidation_plan(plan_input, log)
+            plan, plan_source, plan_path = _coerce_consolidation_plan(plan_input, log)
             log(f"Execute plan input resolved from {plan_source}.")
         except ValueError as exc:
             success = False
@@ -567,14 +569,42 @@ def execute_consolidation_plan(
         _check_cancel("start")
 
         if plan.plan_signature and plan.plan_signature != computed_signature:
+            generated_at_iso = plan.generated_at.isoformat()
+            snapshot_count = len(plan.source_snapshot)
+            snapshot_id = hashlib.sha256(
+                json.dumps(plan.source_snapshot, sort_keys=True).encode("utf-8")
+            ).hexdigest()
+            log(
+                "Plan signature mismatch summary: "
+                + json.dumps(
+                    {
+                        "plan_path": plan_path,
+                        "plan_source": plan_source,
+                        "plan_signature": plan.plan_signature,
+                        "computed_signature": computed_signature,
+                        "generated_at": generated_at_iso,
+                        "snapshot_id": snapshot_id,
+                        "snapshot_count": snapshot_count,
+                        "group_count": len(plan.groups),
+                    },
+                    sort_keys=True,
+                )
+            )
             success = False
             _record(
                 "preflight",
                 "execution",
                 "blocked",
-                "Plan signature mismatch; rerun preview to regenerate the plan.",
+                "Plan signature mismatch; rerun preview to regenerate the plan. "
+                "Plan signature mismatch → your preview plan is stale or not the one being executed.",
                 expected_signature=plan.plan_signature,
                 computed_signature=computed_signature,
+                plan_path=plan_path or "unknown",
+                plan_source=plan_source,
+                generated_at=generated_at_iso,
+                snapshot_id=snapshot_id,
+                snapshot_count=snapshot_count,
+                group_count=len(plan.groups),
             )
             raise RuntimeError("Execution blocked: plan signature mismatch.")
 
