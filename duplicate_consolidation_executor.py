@@ -12,11 +12,13 @@ execution pipeline is intentionally conservative:
 """
 from __future__ import annotations
 
+import base64
 import datetime
 import hashlib
 import html
 import importlib.util
 import json
+import mimetypes
 import platform
 import os
 import shutil
@@ -271,6 +273,40 @@ def _extract_artwork_bytes(path: str) -> bytes | None:
                     return bytes(data)
     finally:
         _close_mutagen_audio(audio)
+    return None
+
+
+def _artwork_data_uri_for_group(group: object | None) -> str | None:
+    if group is None:
+        return None
+
+    candidate_paths: List[str] = []
+    chosen_source = getattr(group, "chosen_artwork_source", None)
+    if isinstance(chosen_source, Mapping):
+        chosen_path = chosen_source.get("path")
+        if isinstance(chosen_path, str) and chosen_path:
+            candidate_paths.append(chosen_path)
+
+    for art in getattr(group, "artwork", []) or []:
+        source = getattr(art, "source", None)
+        if not source and isinstance(art, Mapping):
+            source = art.get("source")
+        if isinstance(source, str) and source:
+            candidate_paths.append(source)
+
+    for candidate in getattr(group, "artwork_candidates", []) or []:
+        path = getattr(candidate, "path", None)
+        if not path and isinstance(candidate, Mapping):
+            path = candidate.get("path")
+        if isinstance(path, str) and path:
+            candidate_paths.append(path)
+
+    for path in candidate_paths:
+        payload = _extract_artwork_bytes(path)
+        if payload:
+            mime = mimetypes.guess_type(path)[0] or "image/jpeg"
+            encoded = base64.b64encode(payload).decode("ascii")
+            return f"data:{mime};base64,{encoded}"
     return None
 
 
@@ -1250,8 +1286,33 @@ def execute_consolidation_plan(
                 "grid-template-columns: 1fr;",
                 "gap:8px;",
                 "background: #fff;",
+                "position: relative;",
                 "}",
                 "summary.group-summary::-webkit-details-marker{ display:none; }",
+                ".group-artwork{",
+                "position:absolute;",
+                "right:12px;",
+                "bottom:12px;",
+                "width:40px;",
+                "height:40px;",
+                "border-radius: 8px;",
+                "overflow:hidden;",
+                "pointer-events:none;",
+                "box-shadow: 0 0 0 1px rgba(0,0,0,0.04);",
+                "}",
+                ".group-artwork img{",
+                "width:100%;",
+                "height:100%;",
+                "object-fit:cover;",
+                "display:block;",
+                "}",
+                ".group-artwork::after{",
+                "content:'';",
+                "position:absolute;",
+                "inset:0;",
+                "border-radius: 8px;",
+                "box-shadow: inset 0 0 14px rgba(0,0,0,0.35);",
+                "}",
                 ".group-top{",
                 "display:flex;",
                 "flex-wrap:wrap;",
@@ -1452,6 +1513,7 @@ def execute_consolidation_plan(
                     if meta_notes:
                         search_tokens.append(meta_notes)
                 search_text = " ".join(str(token) for token in search_tokens if token)
+                artwork_uri = _artwork_data_uri_for_group(grp)
                 summary_line = (
                     f"Status: {state}. " + "; ".join(badges) if badges else f"Status: {state}."
                 )
@@ -1465,6 +1527,12 @@ def execute_consolidation_plan(
                     f"data-quarantine-count='{group_quarantine_count}'>"
                 )
                 html_lines.append("<summary class='group-summary'>")
+                if artwork_uri:
+                    html_lines.append(
+                        "<div class='group-artwork'>"
+                        f"<img src='{html.escape(artwork_uri)}' alt='' loading='lazy' />"
+                        "</div>"
+                    )
                 html_lines.append("<div class='group-top'>")
                 html_lines.append("<div class='group-title'>")
                 html_lines.append(f"<span class='gid'>Group {html.escape(gid)}</span>")
