@@ -12,6 +12,7 @@ execution pipeline is intentionally conservative:
 """
 from __future__ import annotations
 
+import base64
 import datetime
 import hashlib
 import html
@@ -1033,6 +1034,36 @@ def execute_consolidation_plan(
                     badges.append(f"artwork copied ({art_success})")
                 return badges
 
+            def _album_art_src(group: object, winner_path: str) -> str | None:
+                candidates: List[str] = []
+                if group is not None:
+                    chosen = getattr(group, "chosen_artwork_source", None)
+                    if isinstance(chosen, Mapping):
+                        chosen_path = chosen.get("path")
+                        if isinstance(chosen_path, str) and chosen_path:
+                            candidates.append(chosen_path)
+                if winner_path:
+                    candidates.append(winner_path)
+                for path in candidates:
+                    payload = _extract_artwork_bytes(path)
+                    if payload:
+                        return _image_data_uri(payload)
+                return None
+
+            def _image_data_uri(payload: bytes) -> str:
+                mime = _image_mime(payload)
+                encoded = base64.b64encode(payload).decode("ascii")
+                return f"data:{mime};base64,{encoded}"
+
+            def _image_mime(payload: bytes) -> str:
+                if payload.startswith(b"\x89PNG\r\n\x1a\n"):
+                    return "image/png"
+                if payload.startswith(b"\xff\xd8"):
+                    return "image/jpeg"
+                if payload[:4] == b"RIFF" and payload[8:12] == b"WEBP":
+                    return "image/webp"
+                return "image/jpeg"
+
             def _format_metadata_notes(meta: Dict[str, object]) -> str:
                 notes = []
                 for key, value in meta.items():
@@ -1247,17 +1278,50 @@ def execute_consolidation_plan(
                 "cursor:pointer;",
                 "padding: 12px 12px;",
                 "display:grid;",
-                "grid-template-columns: 1fr;",
-                "gap:8px;",
+                "grid-template-columns: auto 1fr;",
+                "grid-template-rows: auto auto;",
+                "column-gap: 12px;",
+                "row-gap: 6px;",
                 "background: #fff;",
                 "}",
                 "summary.group-summary::-webkit-details-marker{ display:none; }",
+                ".album-art{",
+                "width: 42px;",
+                "height: 42px;",
+                "grid-column: 1;",
+                "grid-row: 1 / span 2;",
+                "align-self: center;",
+                "border-radius: 8px;",
+                "border: 1px solid var(--border);",
+                "position: relative;",
+                "overflow: hidden;",
+                "background: #f7f7f7;",
+                "}",
+                ".album-art::after{",
+                "content: \"\";",
+                "position: absolute;",
+                "inset: 0;",
+                "pointer-events: none;",
+                "box-shadow: inset 0 0 0 1px rgba(0,0,0,.06), inset 0 0 10px rgba(0,0,0,.20);",
+                "}",
+                ".album-art img{",
+                "width: 100%;",
+                "height: 100%;",
+                "object-fit: cover;",
+                "display: block;",
+                "}",
                 ".group-top{",
+                "grid-column: 2;",
+                "grid-row: 1;",
                 "display:flex;",
                 "flex-wrap:wrap;",
                 "gap:10px 12px;",
                 "align-items:center;",
                 "justify-content:space-between;",
+                "}",
+                "summary.group-summary .tiny{",
+                "grid-column: 2;",
+                "grid-row: 2;",
                 "}",
                 ".group-title{",
                 "display:flex;",
@@ -1464,7 +1528,12 @@ def execute_consolidation_plan(
                     f"data-search='{html.escape(search_text.lower())}' "
                     f"data-quarantine-count='{group_quarantine_count}'>"
                 )
+                album_art_src = _album_art_src(grp, winner_path)
                 html_lines.append("<summary class='group-summary'>")
+                html_lines.append("<span class='album-art' title='Album Art'>")
+                if album_art_src:
+                    html_lines.append(f"<img src='{album_art_src}' alt='' />")
+                html_lines.append("</span>")
                 html_lines.append("<div class='group-top'>")
                 html_lines.append("<div class='group-title'>")
                 html_lines.append(f"<span class='gid'>Group {html.escape(gid)}</span>")
