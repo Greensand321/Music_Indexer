@@ -49,6 +49,14 @@ def _default_log(msg: str) -> None:
     return None
 
 
+@dataclass(frozen=True)
+class PlanLoadResult:
+    plan: ConsolidationPlan
+    source: str
+    path: str | None
+    input_type: str
+
+
 @dataclass
 class ExecutionConfig:
     """Configuration for consolidation execution."""
@@ -449,11 +457,13 @@ def _detect_state_drift(expected: Mapping[str, object], actual: Mapping[str, obj
 def _coerce_consolidation_plan(
     plan_input: ConsolidationPlan | Mapping[str, object] | str,
     log: Callable[[str], None],
-) -> tuple[ConsolidationPlan, str]:
+) -> PlanLoadResult:
     if isinstance(plan_input, ConsolidationPlan):
-        return plan_input, "in-memory plan"
+        return PlanLoadResult(plan=plan_input, source="in-memory plan", path=None, input_type="in-memory")
     payload: object = plan_input
     source = "plan payload"
+    plan_path: str | None = None
+    input_type = "mapping"
     if isinstance(plan_input, str):
         if os.path.exists(plan_input):
             if not os.path.isfile(plan_input):
@@ -466,12 +476,15 @@ def _coerce_consolidation_plan(
             except json.JSONDecodeError as exc:
                 raise ValueError(f"Plan JSON could not be decoded: {exc}") from exc
             source = f"preview output {plan_input}"
+            plan_path = plan_input
+            input_type = "file"
         else:
             try:
                 payload = json.loads(plan_input)
             except json.JSONDecodeError as exc:
                 raise ValueError(f"Plan JSON could not be decoded: {exc}") from exc
             source = "json payload"
+            input_type = "json string"
     if isinstance(payload, Mapping):
         if "plan" in payload:
             inner = payload.get("plan")
@@ -479,7 +492,12 @@ def _coerce_consolidation_plan(
                 raise ValueError("Plan payload has a non-mapping 'plan' field.")
             payload = inner
             source = f"{source} (wrapped)"
-        return consolidation_plan_from_dict(payload), source
+        return PlanLoadResult(
+            plan=consolidation_plan_from_dict(payload),
+            source=source,
+            path=plan_path,
+            input_type=input_type,
+        )
     raise ValueError("Plan input must be a ConsolidationPlan, mapping, or JSON string.")
 
 
@@ -546,7 +564,11 @@ def execute_consolidation_plan(
 
     try:
         try:
-            plan, plan_source = _coerce_consolidation_plan(plan_input, log)
+            plan_result = _coerce_consolidation_plan(plan_input, log)
+            plan = plan_result.plan
+            plan_source = plan_result.source
+            plan_path = plan_result.path
+            plan_input_type = plan_result.input_type
             log(f"Execute plan input resolved from {plan_source}.")
         except ValueError as exc:
             success = False
@@ -567,14 +589,69 @@ def execute_consolidation_plan(
         _check_cancel("start")
 
         if plan.plan_signature and plan.plan_signature != computed_signature:
+            generated_at_iso = plan.generated_at.isoformat()
+            snapshot_count = len(plan.source_snapshot)
+            canonical_snapshot = {k: dict(v) for k, v in plan.source_snapshot.items()}
+            snapshot_id = hashlib.sha256(
+                json.dumps(canonical_snapshot, sort_keys=True).encode("utf-8")
+            ).hexdigest()
+            drift_examples: List[str] = []
+            for path, expected in plan.source_snapshot.items():
+                if len(drift_examples) >= 5:
+                    break
+                actual = _capture_library_state(path)
+                delta = _detect_state_drift(expected, actual)
+                if delta:
+                    drift_examples.append(f"{path}: {delta}")
+            plan_path_mtime = None
+            plan_path_size = None
+            if plan_path:
+                try:
+                    plan_path_mtime = datetime.datetime.fromtimestamp(
+                        os.path.getmtime(plan_path), datetime.timezone.utc
+                    ).isoformat()
+                    plan_path_size = os.path.getsize(plan_path)
+                except OSError:
+                    plan_path_mtime = None
+                    plan_path_size = None
+            log(
+                "Plan signature mismatch summary: "
+                + json.dumps(
+                    {
+                        "plan_path": plan_path,
+                        "plan_source": plan_source,
+                        "plan_input_type": plan_input_type,
+                        "plan_path_mtime": plan_path_mtime,
+                        "plan_path_size": plan_path_size,
+                        "plan_signature": plan.plan_signature,
+                        "computed_signature": computed_signature,
+                        "generated_at": generated_at_iso,
+                        "snapshot_id": snapshot_id,
+                        "snapshot_count": snapshot_count,
+                        "group_count": len(plan.groups),
+                        "drift_examples": drift_examples,
+                    },
+                    sort_keys=True,
+                )
+            )
             success = False
             _record(
                 "preflight",
                 "execution",
                 "blocked",
-                "Plan signature mismatch; rerun preview to regenerate the plan.",
+                "Plan signature mismatch — preview plan is stale or not the one being executed. Rerun Preview.",
                 expected_signature=plan.plan_signature,
                 computed_signature=computed_signature,
+                plan_path=plan_path or "unknown",
+                plan_source=plan_source,
+                plan_input_type=plan_input_type,
+                plan_path_mtime=plan_path_mtime,
+                plan_path_size=plan_path_size,
+                generated_at=generated_at_iso,
+                snapshot_id=snapshot_id,
+                snapshot_count=snapshot_count,
+                group_count=len(plan.groups),
+                drift_examples=drift_examples,
             )
             raise RuntimeError("Execution blocked: plan signature mismatch.")
 
