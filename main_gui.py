@@ -1919,11 +1919,15 @@ class DuplicateFinderShell(tk.Toplevel):
     def _handle_preview(self) -> None:
         self._log_action("Preview clicked")
         self._generate_plan(write_preview=True)
+        if self.preview_json_path:
+            self._open_preview()
 
     def _handle_execute(self) -> None:
         path = self._validate_library_root()
         if not path:
             return
+        self.execution_report_path = None
+        self.open_report_btn.config(state="disabled")
         preview_plan_path = self.preview_json_path or os.path.join(path, "Docs", "duplicate_preview.json")
         plan_input = self._plan
         plan_for_checks = self._plan
@@ -2015,7 +2019,9 @@ class DuplicateFinderShell(tk.Toplevel):
             self._log_action(f"Execution complete: {'success' if result.success else 'failed'}")
             report_path = result.report_paths.get("html_report")
             self._log_action(f"Execution report: {report_path}")
-            if report_path and os.path.exists(ensure_long_path(report_path)):
+            if report_path:
+                if not os.path.exists(ensure_long_path(report_path)):
+                    self._log_action("Execution report missing at expected path; enabling Open Report anyway.")
                 self.execution_report_path = report_path
                 self.open_report_btn.config(state="normal")
             else:
@@ -2091,6 +2097,14 @@ class DuplicateFinderShell(tk.Toplevel):
         if self.preview_json_path:
             self.preview_json_path = None
             self._log_action("Preview cleared; generate a new preview to reflect delete settings.")
+
+    def _open_preview(self) -> None:
+        self._open_local_html(
+            self.preview_json_path,
+            title="Preview Output",
+            missing_message="Preview output could not be found. Generate a new preview.",
+            empty_message="No preview output is available yet.",
+        )
 
     def _open_execution_report(self) -> None:
         self._open_local_html(
