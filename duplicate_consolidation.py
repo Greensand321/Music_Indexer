@@ -779,15 +779,20 @@ class ConsolidationPlan:
                     snapshot[path] = dict(state)
             self.source_snapshot = snapshot
         if self.plan_signature is None:
-            canonical = json.dumps(
-                {
-                    "generated_at": self.generated_at.isoformat(),
-                    "groups": [g.to_dict() for g in self.groups],
-                    "snapshot": {k: dict(v) for k, v in self.source_snapshot.items()},
-                },
-                sort_keys=True,
-            )
-            self.plan_signature = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+            self.refresh_plan_signature()
+
+    def refresh_plan_signature(self) -> str:
+        canonical = json.dumps(
+            {
+                "generated_at": self.generated_at.isoformat(),
+                "groups": [g.to_dict() for g in self.groups],
+                "snapshot": {k: dict(v) for k, v in self.source_snapshot.items()},
+            },
+            sort_keys=True,
+        )
+        signature = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+        self.plan_signature = signature
+        return signature
 
 
 def _expect_mapping(value: object, field: str) -> Mapping[str, object]:
@@ -1754,6 +1759,7 @@ def build_consolidation_plan(
 def export_consolidation_preview(plan: ConsolidationPlan, output_json_path: str) -> str:
     """Write a JSON audit of the consolidation plan."""
 
+    plan.refresh_plan_signature()
     summary = {
         "groups": len(plan.groups),
         "review_required": plan.review_required_count,
@@ -1773,6 +1779,7 @@ def export_consolidation_preview(plan: ConsolidationPlan, output_json_path: str)
 def export_consolidation_preview_html(plan: ConsolidationPlan, output_html_path: str) -> str:
     """Write an HTML preview of the consolidation plan."""
 
+    plan.refresh_plan_signature()
     def esc(value: object) -> str:
         return html.escape(str(value))
 
