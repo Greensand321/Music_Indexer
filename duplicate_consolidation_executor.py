@@ -76,6 +76,7 @@ class ExecutionConfig:
     confirm_deletion: bool = False
     dry_run_execute: bool = False
     retain_losers: bool = False
+    quarantine_flatten: bool = False
 
 
 @dataclass
@@ -423,7 +424,10 @@ def _close_mutagen_audio(audio: object | None) -> None:
                 pass
 
 
-def _quarantine_path(path: str, quarantine_root: str, library_root: str) -> str:
+def _quarantine_path(path: str, quarantine_root: str, library_root: str, *, flatten: bool) -> str:
+    if flatten:
+        os.makedirs(quarantine_root, exist_ok=True)
+        return os.path.join(quarantine_root, os.path.basename(path))
     try:
         rel = os.path.relpath(path, library_root)
         if rel.startswith(".."):
@@ -986,7 +990,12 @@ def execute_consolidation_plan(
                     )
                     raise
             else:
-                dest = _quarantine_path(loser, quarantine_dir, config.library_root)
+                dest = _quarantine_path(
+                    loser,
+                    quarantine_dir,
+                    config.library_root,
+                    flatten=config.quarantine_flatten,
+                )
                 try:
                     if os.path.exists(loser):
                         shutil.move(loser, dest)
