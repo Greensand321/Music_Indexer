@@ -259,12 +259,16 @@ def _extract_artwork_bytes(path: str) -> bytes | None:
     sidecars = [f"{path}.artwork", f"{path}.cover", f"{path}.jpg"]
     for candidate in sidecars:
         if os.path.exists(candidate):
-            with open(candidate, "rb") as handle:
-                return handle.read()
+            try:
+                with open(candidate, "rb") as handle:
+                    return handle.read()
+            except OSError:
+                continue
     if MutagenFile is None:
         return None
-    audio = MutagenFile(ensure_long_path(path))
+    audio = None
     try:
+        audio = MutagenFile(ensure_long_path(path))
         if audio is None:
             return None
         pictures = getattr(audio, "pictures", None)
@@ -278,6 +282,8 @@ def _extract_artwork_bytes(path: str) -> bytes | None:
                 data = getattr(frame, "data", None)
                 if data:
                     return bytes(data)
+    except Exception:
+        return None
     finally:
         _close_mutagen_audio(audio)
     return None
