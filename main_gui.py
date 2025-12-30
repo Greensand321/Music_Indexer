@@ -1759,6 +1759,7 @@ class DuplicateFinderShell(tk.Toplevel):
         for loser in group.losers:
             group.loser_disposition[loser] = disposition
 
+        self._plan.refresh_plan_signature()
         self._render_group_details(group)
         self._reset_preview_if_needed()
 
@@ -2104,6 +2105,7 @@ class DuplicateFinderShell(tk.Toplevel):
                 current = group.loser_disposition.get(loser, "quarantine")
                 if current in ("retain", "quarantine", "delete"):
                     group.loser_disposition[loser] = default_disposition
+        self._plan.refresh_plan_signature()
         self._update_groups_view(self._plan)
 
     def _reset_preview_if_needed(self) -> None:
