@@ -2002,6 +2002,7 @@ class DuplicateFinderShell(tk.Toplevel):
             reports_dir=reports_dir,
             playlists_dir=playlists_dir,
             quarantine_dir=os.path.join(path, "Quarantine"),
+            quarantine_flatten=True,
             log_callback=log_callback,
             allow_review_required=self.override_review_var.get(),
             retain_losers=not self.quarantine_var.get(),
