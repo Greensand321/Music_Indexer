@@ -133,6 +133,47 @@ def _parse_int(value: object) -> int | None:
         return None
 
 
+def _parse_track_total(value: object) -> int | None:
+    if isinstance(value, list):
+        return _parse_track_total(value[0]) if value else None
+    if isinstance(value, tuple):
+        return _parse_track_total(value[0]) if value else None
+    if value is None:
+        return None
+    text = str(value)
+    if "/" in text:
+        parts = text.split("/", 1)
+        if len(parts) == 2 and parts[1].strip():
+            return _parse_int(parts[1])
+    return None
+
+
+def _release_track_total(tags: Mapping[str, object]) -> int | None:
+    for key in ("track", "tracknumber"):
+        total = _parse_track_total(tags.get(key))
+        if total is not None:
+            return total
+    for key in ("tracktotal", "totaltracks", "track_total", "total_tracks"):
+        total = _parse_int(tags.get(key))
+        if total is not None:
+            return total
+    return None
+
+
+def _release_size_context(tags: Mapping[str, object]) -> tuple[str, str]:
+    album_type = str(tags.get("album_type") or tags.get("release_type") or "").lower()
+    track_total = _release_track_total(tags)
+    if track_total == 1:
+        return "single", "Track total indicates 1"
+    if track_total and track_total >= 2:
+        return "multi", f"Track total indicates {track_total}"
+    if album_type == "single":
+        return "single", "Album type tag indicates single"
+    if album_type in {"album", "lp", "ep"}:
+        return "multi", f"Album type tag indicates {album_type}"
+    return "unknown", "No track-total or album-type signal"
+
+
 def _normalized_tokens(text: str) -> List[str]:
     lowered = (text or "").lower()
     cleaned = re.sub(r"[\\[\\]{}()]+", " ", lowered)
@@ -1202,15 +1243,15 @@ def _best_artwork_blob(candidates: Sequence[ArtworkCandidate]) -> ArtworkCandida
     return sorted(usable, key=lambda c: (_artwork_blob_score(c), c.hash), reverse=True)[0]
 
 
-def _select_single_artwork_candidate(
-    candidates: Sequence[DuplicateTrack], contexts: Mapping[str, str]
+def _select_single_release_artwork_candidate(
+    candidates: Sequence[DuplicateTrack], release_sizes: Mapping[str, str]
 ) -> tuple[DuplicateTrack | None, ArtworkCandidate | None, bool]:
     best_track: DuplicateTrack | None = None
     best_blob: ArtworkCandidate | None = None
     best_score: tuple | None = None
     ambiguous = False
     for track in candidates:
-        if contexts.get(track.path) != "single" or not track.artwork:
+        if release_sizes.get(track.path) != "single" or not track.artwork:
             continue
         blob = _best_artwork_blob(track.artwork)
         if not blob:
@@ -1420,11 +1461,18 @@ def build_consolidation_plan(
         cluster_tracks = cluster.tracks
         contexts: Dict[str, str] = {}
         context_evidence: Dict[str, List[str]] = {}
+        release_sizes: Dict[str, str] = {}
+        release_size_evidence: Dict[str, str] = {}
         for t in cluster_tracks:
             ctx, evidence = _classify_context(t)
             contexts[t.path] = ctx
             t.context_evidence = evidence
             context_evidence[t.path] = evidence
+            tags = t.current_tags if isinstance(t.current_tags, Mapping) else t.tags
+            tags = tags or {}
+            release_size, release_reason = _release_size_context(tags)
+            release_sizes[t.path] = release_size
+            release_size_evidence[t.path] = release_reason
 
         album_label_by_key: Dict[tuple[str, str], str] = {}
         album_keys: set[tuple[str, str]] = set()
@@ -1498,8 +1546,8 @@ def build_consolidation_plan(
             for t in quality_sorted
         }
 
-        single_art_track, single_art_blob, ambiguous_single_art = _select_single_artwork_candidate(
-            group_tracks, group_contexts
+        single_art_track, single_art_blob, ambiguous_single_art = _select_single_release_artwork_candidate(
+            group_tracks, release_sizes
         )
         overall_art_track, overall_art_blob, ambiguous_overall_art = _select_overall_artwork_candidate(
             group_tracks
@@ -1508,6 +1556,12 @@ def build_consolidation_plan(
         chosen_artwork_source: Dict[str, object] = {"path": None, "reason": ""}
         artwork_status = "unchanged"
         artwork_evidence: List[str] = []
+        winner_release = release_sizes.get(winner.path, "unknown")
+        winner_multi_release = winner_release == "multi"
+        if winner_release != "unknown":
+            artwork_evidence.append(
+                f"Winner release size classified as {winner_release} ({release_size_evidence.get(winner.path)})."
+            )
 
         if single_art_blob:
             chosen_artwork_source = {
@@ -1516,13 +1570,17 @@ def build_consolidation_plan(
                 "size": single_art_blob.size,
                 "width": single_art_blob.width,
                 "height": single_art_blob.height,
-                "context": "single",
-                "reason": "Best single artwork by resolution/size",
+                "context": "single-release",
+                "reason": "Best single-release artwork by resolution/size",
             }
             artwork_evidence.append(
-                f"Single artwork selected from {single_art_track.path if single_art_track else 'unknown'} "
+                f"Single-release artwork selected from {single_art_track.path if single_art_track else 'unknown'} "
                 f"({single_art_blob.width}x{single_art_blob.height}, {single_art_blob.size} bytes)"
             )
+            if single_art_track:
+                artwork_evidence.append(
+                    f"Single-release classification: {release_size_evidence.get(single_art_track.path)}."
+                )
         elif overall_art_blob:
             chosen_artwork_source = {
                 "path": overall_art_track.path if overall_art_track else None,
@@ -1542,32 +1600,43 @@ def build_consolidation_plan(
             artwork_status = "none found"
             artwork_evidence.append("No readable artwork candidates were discovered.")
 
-        if winner_context == "album" and single_art_blob and single_art_track:
+        if winner_multi_release and single_art_blob and single_art_track:
             if not winner.cover_hash or winner.cover_hash != single_art_blob.hash:
                 artwork_status = "apply"
                 artwork_actions.append(
                     ArtworkDirective(
                         source=single_art_track.path,
                         target=winner.path,
-                        reason="Apply single artwork to album-context winner",
+                        reason="Migrate single-release artwork onto multi-track album winner",
                     )
                 )
-                artwork_evidence.append("Album-context winner will receive single artwork to preserve single cover.")
+                artwork_evidence.append(
+                    "Multi-track album winner will receive single-release artwork to preserve unique single cover."
+                )
             else:
                 artwork_status = "unchanged"
-                chosen_artwork_source["reason"] = "Winner already has selected single artwork"
-                artwork_evidence.append("Winner already matches selected single artwork hash; no copy needed.")
-        elif winner_context == "album" and not single_art_blob and overall_art_blob and overall_art_track:
-            if not winner.cover_hash or winner.cover_hash != overall_art_blob.hash:
+                chosen_artwork_source["reason"] = "Winner already has selected single-release artwork"
+                artwork_evidence.append("Winner already matches selected single-release artwork hash; no copy needed.")
+        elif winner_multi_release and not single_art_blob and overall_art_blob and overall_art_track:
+            source_release = release_sizes.get(overall_art_track.path, "unknown")
+            if source_release == "multi" and overall_art_track.path != winner.path:
+                artwork_status = "unchanged"
+                chosen_artwork_source["reason"] = "Skipped multi-track artwork migration to avoid cross-album contamination"
+                artwork_evidence.append(
+                    "Skipping artwork migration between multi-track releases to avoid cross-album contamination."
+                )
+            elif not winner.cover_hash or winner.cover_hash != overall_art_blob.hash:
                 artwork_status = "apply"
                 artwork_actions.append(
                     ArtworkDirective(
                         source=overall_art_track.path,
                         target=winner.path,
-                        reason="Fill missing album artwork from best available source",
+                        reason="Fill missing artwork from best available source",
                     )
                 )
-                artwork_evidence.append("No single artwork available; applying best available artwork to album winner.")
+                artwork_evidence.append(
+                    "No single-release artwork available; applying best available artwork to album winner."
+                )
             else:
                 artwork_evidence.append("Album winner artwork already matches best available source.")
         else:
@@ -1772,7 +1841,7 @@ def export_consolidation_preview_html(plan: ConsolidationPlan, output_html_path:
                     "step": "artwork",
                     "target": directive.target,
                     "status": "review",
-                    "detail": f"Copy artwork from {directive.source}.",
+                    "detail": f"Migrate artwork from {directive.source} to {directive.target}.",
                     "metadata": {"source": directive.source, "reason": directive.reason},
                 }
             )

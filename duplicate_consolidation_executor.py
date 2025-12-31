@@ -891,7 +891,7 @@ def execute_consolidation_plan(
                     "artwork",
                     art.target,
                     "skipped",
-                    "Dry-run execute enabled; artwork not applied.",
+                    f"Dry-run execute enabled; artwork not applied (source: {art.source}).",
                     source=art.source,
                     group_id=path_to_group.get(art.target),
                 )
@@ -906,7 +906,7 @@ def execute_consolidation_plan(
                     "artwork",
                     art.target,
                     status,
-                    detail or art.reason,
+                    f"{detail or art.reason} (source: {art.source})",
                     source=art.source,
                     group_id=path_to_group.get(art.target),
                 )
