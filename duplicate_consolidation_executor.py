@@ -1278,6 +1278,10 @@ def execute_consolidation_plan(
                 "padding: 12px;",
                 "background: var(--card);",
                 "}",
+                ".card-stack{",
+                "display:grid;",
+                "gap:10px;",
+                "}",
                 ".summary{",
                 "display:grid;",
                 "grid-template-columns: 1fr;",
@@ -1388,6 +1392,11 @@ def execute_consolidation_plan(
                 "position: relative;",
                 "overflow: hidden;",
                 "background: #f7f7f7;",
+                "}",
+                ".album-art.album-art-thumb{",
+                "width: 32px;",
+                "height: 32px;",
+                "border-radius: 6px;",
                 "}",
                 ".album-art::after{",
                 "content: \"\";",
@@ -1648,8 +1657,28 @@ def execute_consolidation_plan(
                 html_lines.append("<div class='group-body'>")
                 html_lines.append("<div class='section'>")
                 html_lines.append("<h3>Context</h3>")
+                loser_action = next(
+                    (act for act in group_actions if act.step == "loser_cleanup"), None
+                )
+                loser_path = loser_action.target if loser_action else ""
+                loser_disposition = ""
+                loser_reason = ""
+                if loser_action:
+                    raw_disposition = loser_action.metadata.get("disposition")
+                    loser_disposition = str(raw_disposition) if raw_disposition else ""
+                    loser_reason = loser_action.detail or ""
+                winner_art_src = _album_art_src(grp, winner_path)
+                loser_art_src = _album_art_src(grp, loser_path) if loser_path else winner_art_src
+                html_lines.append("<div class='card-stack'>")
                 html_lines.append("<div class='card' style='background:#fff;'>")
                 html_lines.append("<div class='kv'>")
+                html_lines.append("<div class='k'>Album art</div>")
+                html_lines.append("<div class='v'>")
+                html_lines.append("<span class='album-art album-art-thumb' title='Album Art'>")
+                if winner_art_src:
+                    html_lines.append(f"<img src='{winner_art_src}' alt='' />")
+                html_lines.append("</span>")
+                html_lines.append("</div>")
                 html_lines.append("<div class='k'>Kept file (winner)</div>")
                 html_lines.append(f"<div class='v path'>{html.escape(winner_path)}</div>")
                 html_lines.append("<div class='k'>Group ID</div>")
@@ -1658,6 +1687,33 @@ def execute_consolidation_plan(
                 html_lines.append(
                     "<div class='v tiny muted'>Shown for traceability; safe to ignore for normal review.</div>"
                 )
+                html_lines.append("</div>")
+                html_lines.append("</div>")
+                html_lines.append("<div class='card' style='background:#fff;'>")
+                html_lines.append("<div class='kv'>")
+                html_lines.append("<div class='k'>Album art</div>")
+                html_lines.append("<div class='v'>")
+                html_lines.append("<span class='album-art album-art-thumb' title='Album Art'>")
+                if loser_art_src:
+                    html_lines.append(f"<img src='{loser_art_src}' alt='' />")
+                html_lines.append("</span>")
+                html_lines.append("</div>")
+                html_lines.append("<div class='k'>Loser file</div>")
+                if loser_path:
+                    html_lines.append(f"<div class='v path'>{html.escape(loser_path)}</div>")
+                else:
+                    html_lines.append("<div class='v path'>—</div>")
+                html_lines.append("<div class='k'>Disposition</div>")
+                if loser_disposition:
+                    html_lines.append(f"<div class='v'>{html.escape(loser_disposition)}</div>")
+                else:
+                    html_lines.append("<div class='v'>—</div>")
+                if loser_reason:
+                    html_lines.append("<div class='k'>Reason</div>")
+                    html_lines.append(
+                        f"<div class='v tiny muted'>{html.escape(loser_reason)}</div>"
+                    )
+                html_lines.append("</div>")
                 html_lines.append("</div>")
                 html_lines.append("</div>")
                 html_lines.append("</div>")
