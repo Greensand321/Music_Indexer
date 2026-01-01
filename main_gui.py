@@ -47,6 +47,7 @@ from duplicate_consolidation import (
     consolidation_plan_from_dict,
     export_consolidation_preview,
     export_consolidation_preview_html,
+    LOSSLESS_EXTS,
 )
 from duplicate_consolidation_executor import ExecutionConfig, execute_consolidation_plan
 from controllers.library_index_controller import generate_index
@@ -54,6 +55,8 @@ from gui.audio_preview import PlaybackError, VlcPreviewPlayer
 from io import BytesIO
 from PIL import Image, ImageTk
 from mutagen import File as MutagenFile
+from near_duplicate_detector import fingerprint_distance
+import chromaprint_utils
 from config import (
     EXACT_DUPLICATE_THRESHOLD,
     FP_DURATION_MS,
@@ -2386,6 +2389,356 @@ class DuplicateFinderShell(tk.Toplevel):
             uri = display_path
         webbrowser.open(uri)
 
+class SimilarityInspectorDialog(tk.Toplevel):
+    """Inspect fingerprint similarity for two selected audio files."""
+
+    def __init__(self, parent: tk.Widget):
+        super().__init__(parent)
+        self.title("Similarity Inspector")
+        self.transient(parent)
+        self.resizable(True, True)
+        self.parent = parent
+
+        cfg = load_config()
+        self.song_a_var = tk.StringVar()
+        self.song_b_var = tk.StringVar()
+        self.trim_silence_var = tk.BooleanVar(value=bool(cfg.get("trim_silence", False)))
+        self.offset_var = tk.StringVar(value=str(cfg.get("fingerprint_offset_ms", FP_OFFSET_MS)))
+        self.duration_var = tk.StringVar(value=str(cfg.get("fingerprint_duration_ms", FP_DURATION_MS)))
+        self.silence_db_var = tk.StringVar(value=str(cfg.get("fingerprint_silence_threshold_db", FP_SILENCE_THRESHOLD_DB)))
+        self.silence_len_var = tk.StringVar(value=str(cfg.get("fingerprint_silence_min_len_ms", FP_SILENCE_MIN_LEN_MS)))
+        self.exact_var = tk.StringVar(value=str(cfg.get("exact_duplicate_threshold", EXACT_DUPLICATE_THRESHOLD)))
+        self.near_var = tk.StringVar(value=str(cfg.get("near_duplicate_threshold", NEAR_DUPLICATE_THRESHOLD)))
+        self.mixed_var = tk.StringVar(value=str(cfg.get("mixed_codec_threshold_boost", MIXED_CODEC_THRESHOLD_BOOST)))
+
+        container = ttk.Frame(self, padding=12)
+        container.pack(fill="both", expand=True)
+
+        ttk.Label(
+            container,
+            text="Compare two tracks using the Duplicate Finder fingerprint pipeline.",
+            foreground="#555",
+            wraplength=520,
+        ).pack(anchor="w")
+
+        file_frame = ttk.LabelFrame(container, text="Tracks")
+        file_frame.pack(fill="x", pady=(10, 8))
+
+        def _file_row(label: str, var: tk.StringVar, row: int, command: Callable[[], None]) -> None:
+            ttk.Label(file_frame, text=label).grid(row=row, column=0, sticky="w", padx=6, pady=6)
+            ttk.Entry(file_frame, textvariable=var, width=60).grid(row=row, column=1, sticky="ew", padx=6, pady=6)
+            ttk.Button(file_frame, text="Browse…", command=command).grid(row=row, column=2, sticky="e", padx=6, pady=6)
+
+        _file_row("Song A", self.song_a_var, 0, lambda: self._choose_file(self.song_a_var))
+        _file_row("Song B", self.song_b_var, 1, lambda: self._choose_file(self.song_b_var))
+        file_frame.columnconfigure(1, weight=1)
+
+        controls = ttk.Frame(container)
+        controls.pack(fill="x", pady=(0, 8))
+        ttk.Button(controls, text="Run", command=self._run_inspection).pack(side="left")
+        ttk.Button(controls, text="Close", command=self.destroy).pack(side="left", padx=(6, 0))
+
+        self.advanced_visible = False
+        self.advanced_btn = ttk.Button(
+            container, text="Advanced ▸", command=self._toggle_advanced
+        )
+        self.advanced_btn.pack(anchor="w", pady=(4, 0))
+
+        self.advanced_frame = ttk.LabelFrame(container, text="Advanced Overrides")
+        self._build_advanced_controls()
+
+        results_frame = ttk.LabelFrame(container, text="Results")
+        results_frame.pack(fill="both", expand=True, pady=(10, 0))
+        self.results_text = ScrolledText(results_frame, height=12, wrap="word", state="disabled")
+        self.results_text.pack(fill="both", expand=True, padx=6, pady=6)
+
+    def _build_advanced_controls(self) -> None:
+        frame = self.advanced_frame
+        settings_frame = ttk.Frame(frame)
+        settings_frame.pack(fill="x", padx=8, pady=8)
+
+        ttk.Checkbutton(
+            settings_frame,
+            text="Trim leading/trailing silence before fingerprinting",
+            variable=self.trim_silence_var,
+        ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 6))
+
+        def _row(label: str, var: tk.StringVar, row: int) -> None:
+            ttk.Label(settings_frame, text=label).grid(row=row, column=0, sticky="w", pady=2)
+            ttk.Entry(settings_frame, textvariable=var, width=16).grid(row=row, column=1, sticky="w", pady=2)
+
+        row_idx = 1
+        _row("Fingerprint offset (ms)", self.offset_var, row_idx)
+        row_idx += 1
+        _row("Fingerprint duration (ms)", self.duration_var, row_idx)
+        row_idx += 1
+        _row("Silence threshold (dB)", self.silence_db_var, row_idx)
+        row_idx += 1
+        _row("Silence min length (ms)", self.silence_len_var, row_idx)
+        row_idx += 1
+        _row("Exact duplicate threshold", self.exact_var, row_idx)
+        row_idx += 1
+        _row("Near duplicate threshold", self.near_var, row_idx)
+        row_idx += 1
+        _row("Mixed-codec boost", self.mixed_var, row_idx)
+
+    def _toggle_advanced(self) -> None:
+        if self.advanced_visible:
+            self.advanced_frame.pack_forget()
+            self.advanced_btn.configure(text="Advanced ▸")
+            self.advanced_visible = False
+        else:
+            self.advanced_frame.pack(fill="x", pady=(6, 0))
+            self.advanced_btn.configure(text="Advanced ▾")
+            self.advanced_visible = True
+
+    def _choose_file(self, var: tk.StringVar) -> None:
+        path = filedialog.askopenfilename(title="Select audio file")
+        if path:
+            var.set(path)
+
+    def _parse_float(self, raw: str, label: str, *, min_value: float | None = None) -> float | None:
+        try:
+            value = float(raw)
+        except ValueError:
+            messagebox.showwarning("Invalid Value", f"{label} must be a number.")
+            return None
+        if min_value is not None and value < min_value:
+            messagebox.showwarning("Invalid Value", f"{label} must be at least {min_value}.")
+            return None
+        return value
+
+    def _parse_int(self, raw: str, label: str, *, min_value: int | None = None) -> int | None:
+        try:
+            value = int(float(raw))
+        except ValueError:
+            messagebox.showwarning("Invalid Value", f"{label} must be a whole number.")
+            return None
+        if min_value is not None and value < min_value:
+            messagebox.showwarning("Invalid Value", f"{label} must be at least {min_value}.")
+            return None
+        return value
+
+    def _collect_settings(self) -> dict[str, float | int | bool] | None:
+        exact = self._parse_float(self.exact_var.get().strip(), "Exact duplicate threshold", min_value=0.0)
+        if exact is None:
+            return None
+        near = self._parse_float(self.near_var.get().strip(), "Near duplicate threshold", min_value=0.0)
+        if near is None:
+            return None
+        if near < exact:
+            messagebox.showwarning(
+                "Invalid Value",
+                "Near duplicate threshold must be greater than or equal to the exact threshold.",
+            )
+            return None
+        mixed = self._parse_float(self.mixed_var.get().strip(), "Mixed-codec boost", min_value=0.0)
+        if mixed is None:
+            return None
+        offset = self._parse_int(self.offset_var.get().strip(), "Fingerprint offset (ms)", min_value=0)
+        if offset is None:
+            return None
+        duration = self._parse_int(self.duration_var.get().strip(), "Fingerprint duration (ms)", min_value=0)
+        if duration is None:
+            return None
+        silence_db = self._parse_float(self.silence_db_var.get().strip(), "Silence threshold (dB)")
+        if silence_db is None:
+            return None
+        silence_len = self._parse_int(self.silence_len_var.get().strip(), "Silence min length (ms)", min_value=0)
+        if silence_len is None:
+            return None
+        return {
+            "exact_duplicate_threshold": exact,
+            "near_duplicate_threshold": near,
+            "mixed_codec_threshold_boost": mixed,
+            "fingerprint_offset_ms": offset,
+            "fingerprint_duration_ms": duration,
+            "fingerprint_silence_threshold_db": silence_db,
+            "fingerprint_silence_min_len_ms": silence_len,
+            "trim_silence": bool(self.trim_silence_var.get()),
+        }
+
+    def _is_lossless(self, path: str) -> bool:
+        ext = os.path.splitext(path)[1].lower()
+        return ext in LOSSLESS_EXTS
+
+    def _fingerprint_for_path(self, path: str, settings: dict[str, float | int | bool]) -> tuple[str | None, str | None]:
+        try:
+            start_sec = float(settings["fingerprint_offset_ms"]) / 1000.0
+            duration_ms = float(settings["fingerprint_duration_ms"])
+            duration_sec = duration_ms / 1000.0 if duration_ms > 0 else 120.0
+            silence_db = float(settings["fingerprint_silence_threshold_db"])
+            silence_len = float(settings["fingerprint_silence_min_len_ms"]) / 1000.0
+            fp = chromaprint_utils.fingerprint_fpcalc(
+                ensure_long_path(path),
+                trim=bool(settings["trim_silence"]),
+                start_sec=start_sec,
+                duration_sec=duration_sec,
+                threshold_db=silence_db,
+                min_silence_duration=silence_len,
+            )
+            return fp, None
+        except chromaprint_utils.FingerprintError as exc:
+            return None, str(exc)
+        except Exception as exc:  # pragma: no cover - guard against unexpected failures
+            return None, str(exc)
+
+    def _format_duration(self, seconds: float | None) -> str:
+        if not seconds:
+            return "n/a"
+        total = int(round(seconds))
+        hours, rem = divmod(total, 3600)
+        minutes, secs = divmod(rem, 60)
+        if hours:
+            return f"{hours}:{minutes:02d}:{secs:02d}"
+        return f"{minutes}:{secs:02d}"
+
+    def _audio_summary(self, path: str) -> dict[str, object]:
+        summary: dict[str, object] = {
+            "path": path,
+            "codec": os.path.splitext(path)[1].lstrip(".").upper() or "n/a",
+            "sample_rate": None,
+            "channels": None,
+            "duration": None,
+        }
+        try:
+            audio = MutagenFile(ensure_long_path(path))
+        except Exception:
+            audio = None
+        if audio and hasattr(audio, "info") and audio.info:
+            info = audio.info
+            codec = getattr(info, "codec", None)
+            if not codec and getattr(audio, "mime", None):
+                mime = audio.mime
+                if isinstance(mime, (list, tuple)) and mime:
+                    codec = mime[0]
+                elif isinstance(mime, str):
+                    codec = mime
+            summary["codec"] = codec or summary["codec"]
+            summary["sample_rate"] = getattr(info, "sample_rate", None) or getattr(info, "samplerate", None)
+            summary["channels"] = getattr(info, "channels", None)
+            summary["duration"] = getattr(info, "length", None)
+        return summary
+
+    def _format_summary_line(self, summary: dict[str, object]) -> str:
+        sample_rate = summary.get("sample_rate") or "n/a"
+        channels = summary.get("channels") or "n/a"
+        duration = self._format_duration(summary.get("duration") if isinstance(summary.get("duration"), (int, float)) else None)
+        codec = summary.get("codec") or "n/a"
+        return f"Codec: {codec} | Sample rate: {sample_rate} Hz | Channels: {channels} | Duration: {duration}"
+
+    def _set_results(self, text: str) -> None:
+        self.results_text.configure(state="normal")
+        self.results_text.delete("1.0", "end")
+        self.results_text.insert("end", text)
+        self.results_text.configure(state="disabled")
+        self.results_text.see("end")
+
+    def _run_inspection(self) -> None:
+        path_a = self.song_a_var.get().strip()
+        path_b = self.song_b_var.get().strip()
+        if not path_a or not path_b:
+            messagebox.showwarning("Missing Files", "Please select both Song A and Song B.")
+            return
+        for path in (path_a, path_b):
+            if not os.path.isfile(path):
+                messagebox.showwarning("Invalid File", f"File not found:\n{path}")
+                return
+            if os.path.splitext(path)[1].lower() not in SUPPORTED_EXTS:
+                messagebox.showwarning("Unsupported File", f"Unsupported audio file:\n{path}")
+                return
+
+        library_root = None
+        if hasattr(self.parent, "require_library"):
+            library_root = self.parent.require_library()
+        if not library_root:
+            return
+
+        settings = self._collect_settings()
+        if settings is None:
+            return
+
+        fp_a, err_a = self._fingerprint_for_path(path_a, settings)
+        fp_b, err_b = self._fingerprint_for_path(path_b, settings)
+        distance = fingerprint_distance(fp_a, fp_b)
+
+        exact_threshold = float(settings["exact_duplicate_threshold"])
+        near_threshold = max(float(settings["near_duplicate_threshold"]), exact_threshold)
+        mixed_boost = float(settings["mixed_codec_threshold_boost"])
+        mixed_codec = self._is_lossless(path_a) != self._is_lossless(path_b)
+        effective_near = near_threshold + mixed_boost if mixed_codec else near_threshold
+
+        if fp_a and fp_b:
+            if distance <= exact_threshold:
+                verdict = "Exact duplicate"
+            elif distance <= effective_near:
+                verdict = "Near duplicate"
+            else:
+                verdict = "Not a match"
+        else:
+            verdict = "Not a match (fingerprint unavailable)"
+
+        off_by = None
+        if distance > effective_near:
+            off_by = distance - effective_near
+
+        summary_a = self._audio_summary(path_a)
+        summary_b = self._audio_summary(path_b)
+
+        report_lines = [
+            "Similarity Inspector Report",
+            f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+            "",
+            "Song A:",
+            f"  Path: {path_a}",
+            f"  {self._format_summary_line(summary_a)}",
+            "Song B:",
+            f"  Path: {path_b}",
+            f"  {self._format_summary_line(summary_b)}",
+            "",
+            "Fingerprint Settings:",
+            f"  Trim silence: {settings['trim_silence']}",
+            f"  Fingerprint offset (ms): {settings['fingerprint_offset_ms']}",
+            f"  Fingerprint duration (ms): {settings['fingerprint_duration_ms']}",
+            f"  Silence threshold (dB): {settings['fingerprint_silence_threshold_db']}",
+            f"  Silence min length (ms): {settings['fingerprint_silence_min_len_ms']}",
+            "",
+            "Thresholds:",
+            f"  Exact threshold: {exact_threshold:.4f}",
+            f"  Near threshold: {near_threshold:.4f}",
+            f"  Mixed-codec boost: {mixed_boost:.4f}",
+            f"  Mixed-codec adjustment applied: {'Yes' if mixed_codec else 'No'}",
+            f"  Effective near threshold: {effective_near:.4f}",
+            "",
+            f"Raw fingerprint distance: {distance:.4f}",
+            f"Verdict: {verdict}",
+        ]
+        if off_by is not None:
+            report_lines.append(f"How far off: {off_by:.4f} above the effective near threshold")
+        if err_a or err_b:
+            report_lines.append("")
+            report_lines.append("Fingerprint Errors:")
+            if err_a:
+                report_lines.append(f"  Song A: {err_a}")
+            if err_b:
+                report_lines.append(f"  Song B: {err_b}")
+
+        report_text = "\n".join(report_lines)
+
+        docs_dir = os.path.join(library_root, "Docs")
+        os.makedirs(docs_dir, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        report_path = os.path.join(docs_dir, f"similarity_inspector_report_{timestamp}.txt")
+        try:
+            with open(report_path, "w", encoding="utf-8") as handle:
+                handle.write(report_text)
+        except OSError as exc:
+            messagebox.showwarning("Report Save Failed", f"Could not save report:\n{exc}")
+
+        report_text = f"{report_text}\n\nSaved report: {report_path}"
+        self._set_results(report_text)
+
+
 class SoundVaultImporterApp(tk.Tk):
     def __init__(self):
         super().__init__()
@@ -2546,6 +2899,9 @@ class SoundVaultImporterApp(tk.Tk):
         )
         tools_menu.add_command(
             label="Playlist Artwork", command=self.open_playlist_artwork_folder
+        )
+        tools_menu.add_command(
+            label="Similarity Inspector…", command=self._open_similarity_inspector_tool
         )
         tools_menu.add_separator()
         tools_menu.add_command(label="Reset Tag-Fix Log", command=self.reset_tagfix_log)
@@ -4689,6 +5045,9 @@ class SoundVaultImporterApp(tk.Tk):
                 subprocess.run(["xdg-open", path], check=False)
         except Exception as exc:
             messagebox.showerror("Open Folder", f"Could not open {path}: {exc}")
+
+    def _open_similarity_inspector_tool(self) -> None:
+        SimilarityInspectorDialog(self)
 
     def _create_player_library_table(self, parent: tk.Widget) -> ttk.Frame:
         table = ttk.Frame(parent)
