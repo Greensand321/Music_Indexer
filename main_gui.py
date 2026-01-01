@@ -66,6 +66,7 @@ from config import (
     FP_TRIM_LEAD_MAX_MS,
     FP_TRIM_PADDING_MS,
     FP_TRIM_TRAIL_MAX_MS,
+    FP_TRIM_SILENCE,
     MIXED_CODEC_THRESHOLD_BOOST,
     NEAR_DUPLICATE_THRESHOLD,
     load_config,
