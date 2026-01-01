@@ -353,7 +353,7 @@ def _artwork_tracks_similar(
     left_hash = hashes.get(left.path)
     right_hash = hashes.get(right.path)
     if left_hash is None or right_hash is None:
-        return True
+        return False
     return _hamming_distance(left_hash, right_hash) <= ARTWORK_SIMILARITY_THRESHOLD
 
 
@@ -1535,6 +1535,8 @@ def build_consolidation_plan(
     plan_placeholders = False
     for cluster in sorted(clusters, key=lambda c: _stable_group_id([t.path for t in c.tracks])):
         cluster_tracks = cluster.tracks
+        cluster_has_missing_artwork = any(not t.artwork for t in cluster_tracks)
+        cluster_has_unreadable_artwork = any(t.artwork_error for t in cluster_tracks)
         artwork_groups, artwork_hashes = _split_by_artwork_similarity(cluster_tracks)
         artwork_split = len(artwork_groups) > 1
         for group_tracks in sorted(artwork_groups, key=lambda g: _stable_group_id([t.path for t in g])):
@@ -1643,9 +1645,19 @@ def build_consolidation_plan(
                 )
             if artwork_split:
                 if len(group_tracks) == 1:
-                    artwork_evidence.append(
-                        "Artwork differs from other audio duplicates; preserving this track as an intentional variant."
-                    )
+                    group_track = group_tracks[0]
+                    if not group_track.artwork or group_track.artwork_error:
+                        artwork_evidence.append(
+                            "Missing or unreadable artwork treated as non-matching; preserving this track as an intentional variant."
+                        )
+                    elif cluster_has_missing_artwork or cluster_has_unreadable_artwork:
+                        artwork_evidence.append(
+                            "Another duplicate lacks readable artwork; missing artwork treated as non-matching and this track is preserved."
+                        )
+                    else:
+                        artwork_evidence.append(
+                            "Artwork differs from other audio duplicates; preserving this track as an intentional variant."
+                        )
                 else:
                     artwork_evidence.append(
                         "Artwork similarity gate grouped only tracks with matching covers for consolidation."
@@ -1959,6 +1971,13 @@ def export_consolidation_preview_html(plan: ConsolidationPlan, output_html_path:
                 }
             )
         return actions
+
+    def _missing_artwork_gate(group: GroupPlan) -> bool:
+        for note in group.artwork_evidence:
+            lowered = note.lower()
+            if "non-matching" in lowered and "artwork" in lowered and "missing" in lowered:
+                return True
+        return False
 
     def _action_badges(group: GroupPlan, actions: List[Dict[str, object]]) -> List[str]:
         badges = []
@@ -2569,10 +2588,18 @@ def export_consolidation_preview_html(plan: ConsolidationPlan, output_html_path:
                     "</tr>"
                 )
         else:
+            no_action_note = "No planned operations for this group."
+            no_action_status = "review"
+            if _missing_artwork_gate(group):
+                no_action_note = (
+                    "No planned operations; missing or unreadable artwork was treated as non-matching."
+                )
+                no_action_status = "ready"
+            status_class = _status_badge_class(no_action_status)
             html_lines.append(
                 "<tr><td class='op-key'>none</td><td class='path'>—</td>"
-                "<td><span class='badge warn'>review</span></td>"
-                "<td class='note'>No planned operations for this group.</td></tr>"
+                f"<td><span class='badge {status_class}'>{esc(no_action_status)}</span></td>"
+                f"<td class='note'>{esc(no_action_note)}</td></tr>"
             )
         html_lines.append("</tbody>")
         html_lines.append("</table>")
