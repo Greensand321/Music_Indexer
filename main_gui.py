@@ -1679,6 +1679,20 @@ class DuplicateFinderShell(tk.Toplevel):
             "mixed_codec_threshold_boost": float(cfg.get("mixed_codec_threshold_boost", MIXED_CODEC_THRESHOLD_BOOST)),
         }
 
+    def _current_fingerprint_settings(self) -> dict[str, float | int | bool]:
+        cfg = load_config()
+        return {
+            "trim_silence": bool(cfg.get("trim_silence", FP_TRIM_SILENCE)),
+            "fingerprint_offset_ms": int(cfg.get("fingerprint_offset_ms", FP_OFFSET_MS)),
+            "fingerprint_duration_ms": int(cfg.get("fingerprint_duration_ms", FP_DURATION_MS)),
+            "fingerprint_silence_threshold_db": float(cfg.get("fingerprint_silence_threshold_db", FP_SILENCE_THRESHOLD_DB)),
+            "fingerprint_silence_min_len_ms": int(cfg.get("fingerprint_silence_min_len_ms", FP_SILENCE_MIN_LEN_MS)),
+            "fingerprint_trim_lead_max_ms": int(cfg.get("fingerprint_trim_lead_max_ms", FP_TRIM_LEAD_MAX_MS)),
+            "fingerprint_trim_trail_max_ms": int(cfg.get("fingerprint_trim_trail_max_ms", FP_TRIM_TRAIL_MAX_MS)),
+            "fingerprint_trim_padding_ms": int(cfg.get("fingerprint_trim_padding_ms", FP_TRIM_PADDING_MS)),
+            "allow_mismatched_edits": bool(cfg.get("allow_mismatched_edits", ALLOW_MISMATCHED_EDITS)),
+        }
+
     def _thresholds_match(
         self,
         plan_settings: Mapping[str, float] | None,
@@ -1694,6 +1708,30 @@ class DuplicateFinderShell(tk.Toplevel):
             try:
                 if abs(float(plan_settings[key]) - float(value)) > tolerance:
                     return False
+            except (TypeError, ValueError):
+                return False
+        return True
+
+    def _fingerprint_settings_match(
+        self,
+        plan_settings: Mapping[str, float | int | bool] | None,
+        current_settings: Mapping[str, float | int | bool],
+        *,
+        tolerance: float = 1e-6,
+    ) -> bool:
+        if not plan_settings:
+            return False
+        for key, value in current_settings.items():
+            if key not in plan_settings:
+                return False
+            try:
+                plan_value = plan_settings[key]
+                if isinstance(value, bool) or isinstance(plan_value, bool):
+                    if bool(plan_value) != bool(value):
+                        return False
+                else:
+                    if abs(float(plan_value) - float(value)) > tolerance:
+                        return False
             except (TypeError, ValueError):
                 return False
         return True
@@ -2034,6 +2072,17 @@ class DuplicateFinderShell(tk.Toplevel):
             self.preview_html_path = None
             self.execution_report_path = None
             self.open_report_btn.config(state="disabled")
+            library_root = self.library_path_var.get().strip()
+            if library_root:
+                docs_dir = os.path.join(library_root, "Docs")
+                preview_json = os.path.join(docs_dir, "duplicate_preview.json")
+                preview_html = os.path.join(docs_dir, "duplicate_preview.html")
+                for preview_path in (preview_json, preview_html):
+                    try:
+                        if os.path.exists(preview_path):
+                            os.remove(preview_path)
+                    except OSError:
+                        pass
             self._clear_plan("Threshold settings updated; regenerate preview or scan to apply changes.")
             dlg.destroy()
 
@@ -2107,17 +2156,7 @@ class DuplicateFinderShell(tk.Toplevel):
         exact_threshold = threshold_settings["exact_duplicate_threshold"]
         near_threshold = threshold_settings["near_duplicate_threshold"]
         mixed_codec_boost = threshold_settings["mixed_codec_threshold_boost"]
-        fingerprint_settings = {
-            "trim_silence": bool(cfg.get("trim_silence", False)),
-            "fingerprint_offset_ms": int(cfg.get("fingerprint_offset_ms", 0)),
-            "fingerprint_duration_ms": int(cfg.get("fingerprint_duration_ms", 0)),
-            "fingerprint_silence_threshold_db": float(cfg.get("fingerprint_silence_threshold_db", -50.0)),
-            "fingerprint_silence_min_len_ms": int(cfg.get("fingerprint_silence_min_len_ms", 500)),
-            "fingerprint_trim_lead_max_ms": int(cfg.get("fingerprint_trim_lead_max_ms", 500)),
-            "fingerprint_trim_trail_max_ms": int(cfg.get("fingerprint_trim_trail_max_ms", 500)),
-            "fingerprint_trim_padding_ms": int(cfg.get("fingerprint_trim_padding_ms", 100)),
-            "allow_mismatched_edits": bool(cfg.get("allow_mismatched_edits", True)),
-        }
+        fingerprint_settings = self._current_fingerprint_settings()
         self._log_action(
             "Duplicate scan thresholds: "
             f"exact={exact_threshold:.3f}, near={near_threshold:.3f}, mixed_codec_boost={mixed_codec_boost:.3f}"
@@ -2197,6 +2236,7 @@ class DuplicateFinderShell(tk.Toplevel):
         plan_input = self._plan
         plan_for_checks = self._plan
         current_thresholds = self._current_threshold_settings()
+        current_fingerprint_settings = self._current_fingerprint_settings()
         if plan_input and not self._thresholds_match(
             getattr(plan_input, "threshold_settings", None),
             current_thresholds,
@@ -2206,6 +2246,16 @@ class DuplicateFinderShell(tk.Toplevel):
                 "Threshold settings changed since the last scan. Regenerate the preview or scan before executing.",
             )
             self._log_action("Execute blocked: threshold settings changed since last scan.")
+            return
+        if plan_input and not self._fingerprint_settings_match(
+            getattr(plan_input, "fingerprint_settings", None),
+            current_fingerprint_settings,
+        ):
+            messagebox.showwarning(
+                "Thresholds Changed",
+                "Fingerprint settings changed since the last scan. Regenerate the preview or scan before executing.",
+            )
+            self._log_action("Execute blocked: fingerprint settings changed since last scan.")
             return
         if preview_plan_path and os.path.exists(preview_plan_path):
             if not self.preview_json_path:
@@ -2230,6 +2280,17 @@ class DuplicateFinderShell(tk.Toplevel):
                     "Generate a new preview to execute with the latest thresholds.",
                 )
                 self._log_action("Execute blocked: preview thresholds do not match current settings.")
+                return
+            if plan_for_checks and not self._fingerprint_settings_match(
+                getattr(plan_for_checks, "fingerprint_settings", None),
+                current_fingerprint_settings,
+            ):
+                messagebox.showwarning(
+                    "Thresholds Changed",
+                    "Fingerprint settings changed since the preview was generated. "
+                    "Generate a new preview to execute with the latest settings.",
+                )
+                self._log_action("Execute blocked: preview fingerprint settings do not match current settings.")
                 return
             if plan_input:
                 self._log_action("Using in-memory plan for execution.")
