@@ -1020,12 +1020,21 @@ class LibrarySyncReviewPanel(ttk.Frame):
             overrides = self._parse_overrides() or {}
             global_thr = DEFAULT_FP_THRESHOLDS.get("default", 0.3)
         thresholds = {"default": global_thr, **overrides}
-        self._log_event("match_start", "Computing matches", {"thresholds": thresholds})
+        cfg = load_config()
+        mixed_codec_boost = float(
+            cfg.get("mixed_codec_threshold_boost", library_sync.MIXED_CODEC_THRESHOLD_BOOST)
+        )
+        self._log_event(
+            "match_start",
+            "Computing matches",
+            {"thresholds": thresholds, "mixed_codec_threshold_boost": mixed_codec_boost},
+        )
         results = library_sync._match_tracks(
             self.incoming_records,
             self.library_records,
             thresholds,
             FORMAT_PRIORITY,
+            mixed_codec_threshold_boost=mixed_codec_boost,
             log_callback=lambda msg: self._log_event("match_log", str(msg)),
         )
         self.match_results = results

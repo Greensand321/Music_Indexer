@@ -7,6 +7,7 @@ from typing import Callable, List, Tuple, Dict, Optional
 from fingerprint_cache import get_fingerprint
 from near_duplicate_detector import fingerprint_distance
 import chromaprint_utils
+from config import load_config, FP_DURATION_MS, FP_OFFSET_MS, FP_SILENCE_MIN_LEN_MS, FP_SILENCE_THRESHOLD_DB
 
 SUPPORTED_EXTS = {".flac", ".m4a", ".aac", ".mp3", ".wav", ".ogg"}
 EXT_PRIORITY = {".flac": 0, ".m4a": 1, ".aac": 1, ".mp3": 2, ".wav": 3, ".ogg": 4}
@@ -36,11 +37,22 @@ _log = print
 def _compute_fp(path: str) -> Tuple[Optional[int], Optional[str]]:
     """Compute fingerprint for ``path`` using Chromaprint."""
     try:
+        cfg = load_config()
+        start_sec = float(cfg.get("fingerprint_offset_ms", FP_OFFSET_MS)) / 1000.0
+        duration_sec = float(cfg.get("fingerprint_duration_ms", FP_DURATION_MS)) / 1000.0
+        duration_sec = duration_sec if duration_sec > 0 else 120.0
+        trim_silence = bool(cfg.get("trim_silence", False))
+        silence_threshold_db = float(
+            cfg.get("fingerprint_silence_threshold_db", FP_SILENCE_THRESHOLD_DB)
+        )
+        silence_min_len_ms = float(cfg.get("fingerprint_silence_min_len_ms", FP_SILENCE_MIN_LEN_MS))
         fp = chromaprint_utils.fingerprint_fpcalc(
             path,
-            trim=True,
-            start_sec=5.0,
-            duration_sec=60.0,
+            trim=trim_silence,
+            start_sec=start_sec,
+            duration_sec=duration_sec,
+            threshold_db=silence_threshold_db,
+            min_silence_duration=silence_min_len_ms / 1000.0,
         )
         _dlog("FP", f"computed fingerprint for {path}: {fp}")
         _dlog("FP", f"prefix={fp[:FP_PREFIX_LEN]}")
@@ -227,4 +239,3 @@ def find_duplicates(
     if progress_callback:
         progress_callback("complete", len(duplicates), 0, "")
     return duplicates, missing_fp
-

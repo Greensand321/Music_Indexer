@@ -25,7 +25,7 @@ def _setup_media_stubs(monkeypatch, fp_map, corrupt=None, missing=None, cancel_a
     missing = missing or set()
     fp_mod = _ensure_fp_module()
 
-    def fake_compute(paths, db_path, log_callback=None, progress_callback=None, cancel_event=None):
+    def fake_compute(paths, db_path, log_callback=None, progress_callback=None, cancel_event=None, **_kwargs):
         for idx, path in enumerate(paths):
             if cancel_after is not None and idx >= cancel_after:
                 if cancel_event:

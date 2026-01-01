@@ -28,6 +28,7 @@ fingerprint_distance = idx_near_duplicate_detector.fingerprint_distance
 _ensure_db = idx_fingerprint_cache._ensure_db
 FORMAT_PRIORITY = idx_config.FORMAT_PRIORITY
 DEFAULT_FP_THRESHOLDS = idx_config.DEFAULT_FP_THRESHOLDS
+MIXED_CODEC_THRESHOLD_BOOST = idx_config.MIXED_CODEC_THRESHOLD_BOOST
 
 from crash_watcher import record_event
 from crash_logger import watcher
@@ -43,6 +44,7 @@ NEAR_MISS_MARGIN_RATIO = 0.25
 NEAR_MISS_MARGIN_FLOOR = 0.02
 SIGNATURE_TOKEN_COUNT = 8
 SHORTLIST_FALLBACK = 50
+LOSSLESS_EXTS = {".flac", ".wav", ".alac", ".ape", ".aiff", ".aif"}
 
 
 def set_debug(enabled: bool, log_root: str | None = None) -> None:
@@ -255,6 +257,37 @@ def _select_threshold(ext: str, thresholds: Dict[str, float]) -> float:
     return float(thresholds.get(ext, thresholds.get("default", 0.3)))
 
 
+def _select_pair_threshold(
+    ext_a: str,
+    ext_b: str,
+    thresholds: Dict[str, float],
+    mixed_codec_boost: float,
+) -> float:
+    base = max(_select_threshold(ext_a, thresholds), _select_threshold(ext_b, thresholds))
+    if ext_a and ext_b and ext_a != ext_b:
+        lossless_a = ext_a in LOSSLESS_EXTS
+        lossless_b = ext_b in LOSSLESS_EXTS
+        if lossless_a != lossless_b:
+            base += mixed_codec_boost
+    return base
+
+
+def _fingerprint_settings_from_config(cfg: Dict[str, object]) -> Dict[str, object]:
+    return {
+        "trim_silence": bool(cfg.get("trim_silence", idx_config.FP_TRIM_SILENCE)),
+        "fingerprint_offset_ms": int(cfg.get("fingerprint_offset_ms", idx_config.FP_OFFSET_MS)),
+        "fingerprint_duration_ms": int(cfg.get("fingerprint_duration_ms", idx_config.FP_DURATION_MS)),
+        "allow_mismatched_edits": bool(cfg.get("allow_mismatched_edits", idx_config.ALLOW_MISMATCHED_EDITS)),
+        "silence_threshold_db": float(
+            cfg.get("fingerprint_silence_threshold_db", idx_config.FP_SILENCE_THRESHOLD_DB)
+        ),
+        "silence_min_len_ms": int(cfg.get("fingerprint_silence_min_len_ms", idx_config.FP_SILENCE_MIN_LEN_MS)),
+        "trim_lead_max_ms": int(cfg.get("fingerprint_trim_lead_max_ms", idx_config.FP_TRIM_LEAD_MAX_MS)),
+        "trim_trail_max_ms": int(cfg.get("fingerprint_trim_trail_max_ms", idx_config.FP_TRIM_TRAIL_MAX_MS)),
+        "trim_padding_ms": int(cfg.get("fingerprint_trim_padding_ms", idx_config.FP_TRIM_PADDING_MS)),
+    }
+
+
 def compute_quality_score(info: Dict[str, object], fmt_priority: Dict[str, int]) -> int:
     pr = fmt_priority.get(info.get("ext"), 0)
     bitrate_val = info.get("bitrate")
@@ -287,6 +320,7 @@ def _scan_folder(
     progress_callback: Callable[[int, int, str, str], None] | None = None,
     cancel_event: threading.Event | None = None,
     profiler: PerformanceProfile | None = None,
+    fingerprint_settings: Dict[str, object] | None = None,
 ) -> List[TrackRecord]:
     """Enumerate audio files, normalize paths, and attach cached fingerprints."""
     cancel_event = cancel_event or threading.Event()
@@ -391,10 +425,32 @@ def _scan_folder(
             )
 
     if to_compute:
+        if fingerprint_settings is None:
+            cfg = idx_config.load_config()
+            fingerprint_settings = _fingerprint_settings_from_config(cfg)
+        if log_callback:
+            log_callback(
+                json.dumps({"event": "fingerprint_settings", "settings": dict(fingerprint_settings)})
+            )
         if log_callback:
             log_callback(json.dumps({"event": "fingerprint_start", "pending": len(to_compute), "folder": folder}))
         for result in fingerprint_generator.compute_fingerprints_parallel(
-            to_compute, db_path, log_callback, fp_progress, cancel_event=cancel_event
+            to_compute,
+            db_path,
+            log_callback,
+            fp_progress,
+            cancel_event=cancel_event,
+            trim_silence=bool(fingerprint_settings.get("trim_silence", False)),
+            fingerprint_offset_ms=int(fingerprint_settings.get("fingerprint_offset_ms", 0)),
+            fingerprint_duration_ms=int(fingerprint_settings.get("fingerprint_duration_ms", 0)),
+            allow_mismatched_edits=bool(fingerprint_settings.get("allow_mismatched_edits", True)),
+            silence_threshold_db=float(
+                fingerprint_settings.get("silence_threshold_db", idx_config.FP_SILENCE_THRESHOLD_DB)
+            ),
+            silence_min_len_ms=int(fingerprint_settings.get("silence_min_len_ms", 500)),
+            trim_lead_max_ms=int(fingerprint_settings.get("trim_lead_max_ms", 500)),
+            trim_trail_max_ms=int(fingerprint_settings.get("trim_trail_max_ms", 500)),
+            trim_padding_ms=int(fingerprint_settings.get("trim_padding_ms", 100)),
         ):
             path = result[0]
             duration = result[1] if len(result) > 2 else None
@@ -483,6 +539,7 @@ def _match_tracks(
     library: List[TrackRecord],
     thresholds: Dict[str, float],
     fmt_priority: Dict[str, int],
+    mixed_codec_threshold_boost: float = MIXED_CODEC_THRESHOLD_BOOST,
     log_callback: Callable[[str], None] | None = None,
     profiler: PerformanceProfile | None = None,
 ) -> List[MatchResult]:
@@ -491,29 +548,50 @@ def _match_tracks(
     results: List[MatchResult] = []
     start_time = time.perf_counter()
     for inc in incoming:
-        threshold_used = _select_threshold(inc.ext, thresholds)
-        near_miss_margin = max(NEAR_MISS_MARGIN_FLOOR, threshold_used * NEAR_MISS_MARGIN_RATIO)
         candidates = _shortlist_candidates(
             inc, sig_index, ext_index, fallback_pool, log_callback=log_callback, profiler=profiler
         )
         cand_dist: List[CandidateDistance] = []
+        candidate_meta: List[Tuple[TrackRecord, float, float, float, MatchStatus]] = []
         for cand in candidates:
             dist = fingerprint_distance(inc.fingerprint, cand.fingerprint)
+            threshold_for_pair = _select_pair_threshold(
+                inc.ext, cand.ext, thresholds, mixed_codec_threshold_boost
+            )
+            near_miss_margin = max(NEAR_MISS_MARGIN_FLOOR, threshold_for_pair * NEAR_MISS_MARGIN_RATIO)
+            if dist == 0:
+                status = MatchStatus.EXACT_MATCH
+            elif dist <= threshold_for_pair:
+                status = MatchStatus.COLLISION
+            elif dist <= threshold_for_pair + near_miss_margin:
+                status = MatchStatus.LOW_CONFIDENCE
+            else:
+                status = MatchStatus.NEW
+            candidate_meta.append((cand, dist, threshold_for_pair, near_miss_margin, status))
             cand_dist.append(CandidateDistance(distance=dist, track=cand))
         cand_dist.sort()
-        best = cand_dist[0] if cand_dist else None
-        best_track = best.track if best else None
-        best_distance = best.distance if best else None
+        best_track = None
+        best_distance = None
+        threshold_used = _select_threshold(inc.ext, thresholds)
+        near_miss_margin = max(NEAR_MISS_MARGIN_FLOOR, threshold_used * NEAR_MISS_MARGIN_RATIO)
+        status = MatchStatus.NEW
+        best_rank = -1
+        for cand, dist, thr, margin, cand_status in candidate_meta:
+            rank = {
+                MatchStatus.EXACT_MATCH: 3,
+                MatchStatus.COLLISION: 2,
+                MatchStatus.LOW_CONFIDENCE: 1,
+                MatchStatus.NEW: 0,
+            }[cand_status]
+            if best_track is None or rank > best_rank or (rank == best_rank and dist < (best_distance or 1)):
+                best_track = cand
+                best_distance = dist
+                threshold_used = thr
+                near_miss_margin = margin
+                status = cand_status
+                best_rank = rank
 
         if best_distance is None or best_track is None:
-            status = MatchStatus.NEW
-        elif best_distance == 0:
-            status = MatchStatus.EXACT_MATCH
-        elif best_distance <= threshold_used:
-            status = MatchStatus.COLLISION
-        elif best_distance <= threshold_used + near_miss_margin:
-            status = MatchStatus.LOW_CONFIDENCE
-        else:
             status = MatchStatus.NEW
 
         inc_score = compute_quality_score(inc.__dict__, fmt_priority)
@@ -528,7 +606,8 @@ def _match_tracks(
         confidence = _compute_confidence(best_distance, threshold_used, near_miss_margin)
         _dlog(
             f"DEBUG: match incoming={inc.path} best={best_track.path if best_track else 'none'} "
-            f"dist={best_distance} thr={threshold_used} margin={near_miss_margin} status={status} confidence={confidence}",
+            f"dist={best_distance} thr={threshold_used} margin={near_miss_margin} "
+            f"mixed_boost={mixed_codec_threshold_boost} status={status} confidence={confidence}",
             log_callback,
         )
         results.append(
@@ -559,6 +638,8 @@ def compare_libraries(
     threshold: float | None = None,
     fmt_priority: Dict[str, int] | None = None,
     thresholds: Dict[str, float] | None = None,
+    mixed_codec_threshold_boost: float | None = None,
+    fingerprint_settings: Dict[str, object] | None = None,
     log_callback: Callable[[str], None] | None = None,
     progress_callback: Callable[[int, int, str, str], None] | None = None,
     cancel_event: threading.Event | None = None,
@@ -588,6 +669,11 @@ def compare_libraries(
         else:
             thresholds = DEFAULT_FP_THRESHOLDS
     fmt_priority = fmt_priority or FORMAT_PRIORITY
+    if mixed_codec_threshold_boost is None:
+        cfg = idx_config.load_config()
+        mixed_codec_threshold_boost = float(
+            cfg.get("mixed_codec_threshold_boost", MIXED_CODEC_THRESHOLD_BOOST)
+        )
 
     start = time.perf_counter()
     lib_records = _scan_folder(
@@ -597,6 +683,7 @@ def compare_libraries(
         progress_callback=progress_callback,
         cancel_event=cancel_event,
         profiler=profiler,
+        fingerprint_settings=fingerprint_settings,
     )
     if profiler:
         profiler.library_scan_duration = time.perf_counter() - start
@@ -608,12 +695,19 @@ def compare_libraries(
         progress_callback=progress_callback,
         cancel_event=cancel_event,
         profiler=profiler,
+        fingerprint_settings=fingerprint_settings,
     )
     if profiler:
         profiler.incoming_scan_duration = time.perf_counter() - start
 
     match_results = _match_tracks(
-        inc_records, lib_records, thresholds, fmt_priority, log_callback=log_callback, profiler=profiler
+        inc_records,
+        lib_records,
+        thresholds,
+        fmt_priority,
+        mixed_codec_threshold_boost=mixed_codec_threshold_boost,
+        log_callback=log_callback,
+        profiler=profiler,
     )
 
     new_paths: List[str] = []
