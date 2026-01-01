@@ -1898,20 +1898,29 @@ def export_consolidation_preview_html(plan: ConsolidationPlan, output_html_path:
             if group.loser_disposition.get(loser, "quarantine") != "retain"
         )
 
-    def _album_art_src(group: GroupPlan) -> str | None:
+    def _album_art_src(
+        group: GroupPlan,
+        track_path: str,
+        include_group_chosen: bool = True,
+    ) -> str | None:
         chosen_hash = ""
-        if isinstance(group.chosen_artwork_source, Mapping):
+        if include_group_chosen and isinstance(group.chosen_artwork_source, Mapping):
             raw_hash = group.chosen_artwork_source.get("hash")
             if raw_hash:
                 chosen_hash = str(raw_hash)
         fallback: ArtworkCandidate | None = None
+        path_fallback: ArtworkCandidate | None = None
         for candidate in group.artwork_candidates:
             if not candidate.bytes:
                 continue
             if chosen_hash and candidate.hash == chosen_hash:
                 return _image_data_uri(candidate.bytes)
+            if track_path and candidate.path == track_path and path_fallback is None:
+                path_fallback = candidate
             if fallback is None:
                 fallback = candidate
+        if path_fallback and path_fallback.bytes:
+            return _image_data_uri(path_fallback.bytes)
         if fallback and fallback.bytes:
             return _image_data_uri(fallback.bytes)
         return None
@@ -1992,6 +2001,17 @@ def export_consolidation_preview_html(plan: ConsolidationPlan, output_html_path:
         "border-radius: 10px;",
         "padding: 12px;",
         "background: var(--card);",
+        "}",
+        ".context-card{",
+        "display:flex;",
+        "gap:12px;",
+        "align-items:flex-start;",
+        "}",
+        ".context-card-art{",
+        "flex: 0 0 auto;",
+        "}",
+        ".context-card-details{",
+        "flex: 1;",
         "}",
         ".card-stack{",
         "display:grid;",
@@ -2341,7 +2361,7 @@ def export_consolidation_preview_html(plan: ConsolidationPlan, output_html_path:
             f"data-search='{esc(search_text.lower())}' "
             f"data-quarantine-count='{group_disposition_count}'>"
         )
-        album_art_src = _album_art_src(group)
+        album_art_src = _album_art_src(group, group.winner_path)
         html_lines.append("<summary class='group-summary'>")
         html_lines.append("<span class='album-art' title='Album Art'>")
         if album_art_src:
@@ -2379,17 +2399,21 @@ def export_consolidation_preview_html(plan: ConsolidationPlan, output_html_path:
                 if act["step"] == "loser_cleanup" and act["target"] == primary_loser:
                     primary_reason = str(act["detail"])
                     break
-        album_art_src = _album_art_src(group)
+        winner_art_src = _album_art_src(group, group.winner_path)
+        loser_art_src = (
+            _album_art_src(group, primary_loser, include_group_chosen=False)
+            if primary_loser
+            else None
+        )
         html_lines.append("<div class='card-stack'>")
-        html_lines.append("<div class='card' style='background:#fff;'>")
-        html_lines.append("<div class='kv'>")
-        html_lines.append("<div class='k'>Album art</div>")
-        html_lines.append("<div class='v'>")
+        html_lines.append("<div class='card context-card' style='background:#fff;'>")
+        html_lines.append("<div class='context-card-art'>")
         html_lines.append("<span class='album-art album-art-thumb' title='Album Art'>")
-        if album_art_src:
-            html_lines.append(f"<img src='{album_art_src}' alt='' />")
+        if winner_art_src:
+            html_lines.append(f"<img src='{winner_art_src}' alt='' />")
         html_lines.append("</span>")
         html_lines.append("</div>")
+        html_lines.append("<div class='kv context-card-details'>")
         html_lines.append("<div class='k'>Kept file (winner)</div>")
         html_lines.append(f"<div class='v path'>{esc(group.winner_path)}</div>")
         html_lines.append("<div class='k'>Group ID</div>")
@@ -2400,15 +2424,14 @@ def export_consolidation_preview_html(plan: ConsolidationPlan, output_html_path:
         )
         html_lines.append("</div>")
         html_lines.append("</div>")
-        html_lines.append("<div class='card' style='background:#fff;'>")
-        html_lines.append("<div class='kv'>")
-        html_lines.append("<div class='k'>Album art</div>")
-        html_lines.append("<div class='v'>")
+        html_lines.append("<div class='card context-card' style='background:#fff;'>")
+        html_lines.append("<div class='context-card-art'>")
         html_lines.append("<span class='album-art album-art-thumb' title='Album Art'>")
-        if album_art_src:
-            html_lines.append(f"<img src='{album_art_src}' alt='' />")
+        if loser_art_src:
+            html_lines.append(f"<img src='{loser_art_src}' alt='' />")
         html_lines.append("</span>")
         html_lines.append("</div>")
+        html_lines.append("<div class='kv context-card-details'>")
         html_lines.append("<div class='k'>Loser file</div>")
         if primary_loser:
             html_lines.append(f"<div class='v path'>{esc(primary_loser)}</div>")

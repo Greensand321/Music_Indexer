@@ -1126,16 +1126,20 @@ def execute_consolidation_plan(
                     badges.append(f"artwork copied ({art_success})")
                 return badges
 
-            def _album_art_src(group: object, winner_path: str) -> str | None:
+            def _album_art_src(
+                group: object,
+                track_path: str,
+                include_group_chosen: bool = True,
+            ) -> str | None:
                 candidates: List[str] = []
-                if group is not None:
+                if include_group_chosen and group is not None:
                     chosen = getattr(group, "chosen_artwork_source", None)
                     if isinstance(chosen, Mapping):
                         chosen_path = chosen.get("path")
                         if isinstance(chosen_path, str) and chosen_path:
                             candidates.append(chosen_path)
-                if winner_path:
-                    candidates.append(winner_path)
+                if track_path:
+                    candidates.append(track_path)
                 for path in candidates:
                     payload = _extract_artwork_bytes(path)
                     if payload:
@@ -1277,6 +1281,17 @@ def execute_consolidation_plan(
                 "border-radius: 10px;",
                 "padding: 12px;",
                 "background: var(--card);",
+                "}",
+                ".context-card{",
+                "display:flex;",
+                "gap:12px;",
+                "align-items:flex-start;",
+                "}",
+                ".context-card-art{",
+                "flex: 0 0 auto;",
+                "}",
+                ".context-card-details{",
+                "flex: 1;",
                 "}",
                 ".card-stack{",
                 "display:grid;",
@@ -1669,17 +1684,20 @@ def execute_consolidation_plan(
                     loser_disposition = str(raw_disposition) if raw_disposition else ""
                     loser_reason = loser_action.detail or ""
                 winner_art_src = _album_art_src(grp, winner_path)
-                loser_art_src = _album_art_src(grp, loser_path) if loser_path else winner_art_src
+                loser_art_src = (
+                    _album_art_src(grp, loser_path, include_group_chosen=False)
+                    if loser_path
+                    else None
+                )
                 html_lines.append("<div class='card-stack'>")
-                html_lines.append("<div class='card' style='background:#fff;'>")
-                html_lines.append("<div class='kv'>")
-                html_lines.append("<div class='k'>Album art</div>")
-                html_lines.append("<div class='v'>")
+                html_lines.append("<div class='card context-card' style='background:#fff;'>")
+                html_lines.append("<div class='context-card-art'>")
                 html_lines.append("<span class='album-art album-art-thumb' title='Album Art'>")
                 if winner_art_src:
                     html_lines.append(f"<img src='{winner_art_src}' alt='' />")
                 html_lines.append("</span>")
                 html_lines.append("</div>")
+                html_lines.append("<div class='kv context-card-details'>")
                 html_lines.append("<div class='k'>Kept file (winner)</div>")
                 html_lines.append(f"<div class='v path'>{html.escape(winner_path)}</div>")
                 html_lines.append("<div class='k'>Group ID</div>")
@@ -1690,15 +1708,14 @@ def execute_consolidation_plan(
                 )
                 html_lines.append("</div>")
                 html_lines.append("</div>")
-                html_lines.append("<div class='card' style='background:#fff;'>")
-                html_lines.append("<div class='kv'>")
-                html_lines.append("<div class='k'>Album art</div>")
-                html_lines.append("<div class='v'>")
+                html_lines.append("<div class='card context-card' style='background:#fff;'>")
+                html_lines.append("<div class='context-card-art'>")
                 html_lines.append("<span class='album-art album-art-thumb' title='Album Art'>")
                 if loser_art_src:
                     html_lines.append(f"<img src='{loser_art_src}' alt='' />")
                 html_lines.append("</span>")
                 html_lines.append("</div>")
+                html_lines.append("<div class='kv context-card-details'>")
                 html_lines.append("<div class='k'>Loser file</div>")
                 if loser_path:
                     html_lines.append(f"<div class='v path'>{html.escape(loser_path)}</div>")
