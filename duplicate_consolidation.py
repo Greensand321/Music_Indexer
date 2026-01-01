@@ -2389,22 +2389,13 @@ def export_consolidation_preview_html(plan: ConsolidationPlan, output_html_path:
         html_lines.append("<div class='group-body'>")
         html_lines.append("<div class='section'>")
         html_lines.append("<h3>Context</h3>")
-        primary_loser = group.losers[0] if group.losers else ""
-        primary_disposition = (
-            group.loser_disposition.get(primary_loser, "quarantine") if primary_loser else ""
-        )
-        primary_reason = ""
-        if primary_loser:
-            for act in actions:
-                if act["step"] == "loser_cleanup" and act["target"] == primary_loser:
-                    primary_reason = str(act["detail"])
-                    break
+        loser_reason_map = {
+            act["target"]: str(act["detail"])
+            for act in actions
+            if act["step"] == "loser_cleanup"
+        }
+        loser_paths = group.losers or [""]
         winner_art_src = _album_art_src(group, group.winner_path)
-        loser_art_src = (
-            _album_art_src(group, primary_loser, include_group_chosen=False)
-            if primary_loser
-            else None
-        )
         html_lines.append("<div class='card-stack'>")
         html_lines.append("<div class='card context-card' style='background:#fff;'>")
         html_lines.append("<div class='context-card-art'>")
@@ -2424,29 +2415,39 @@ def export_consolidation_preview_html(plan: ConsolidationPlan, output_html_path:
         )
         html_lines.append("</div>")
         html_lines.append("</div>")
-        html_lines.append("<div class='card context-card' style='background:#fff;'>")
-        html_lines.append("<div class='context-card-art'>")
-        html_lines.append("<span class='album-art album-art-thumb' title='Album Art'>")
-        if loser_art_src:
-            html_lines.append(f"<img src='{loser_art_src}' alt='' />")
-        html_lines.append("</span>")
-        html_lines.append("</div>")
-        html_lines.append("<div class='kv context-card-details'>")
-        html_lines.append("<div class='k'>Loser file</div>")
-        if primary_loser:
-            html_lines.append(f"<div class='v path'>{esc(primary_loser)}</div>")
-        else:
-            html_lines.append("<div class='v path'>—</div>")
-        html_lines.append("<div class='k'>Disposition</div>")
-        if primary_disposition:
-            html_lines.append(f"<div class='v'>{esc(primary_disposition)}</div>")
-        else:
-            html_lines.append("<div class='v'>—</div>")
-        if primary_reason:
-            html_lines.append("<div class='k'>Reason</div>")
-            html_lines.append(f"<div class='v tiny muted'>{esc(primary_reason)}</div>")
-        html_lines.append("</div>")
-        html_lines.append("</div>")
+        for loser_path in loser_paths:
+            loser_disposition = (
+                group.loser_disposition.get(loser_path, "quarantine") if loser_path else ""
+            )
+            loser_reason = loser_reason_map.get(loser_path, "")
+            loser_art_src = (
+                _album_art_src(group, loser_path, include_group_chosen=False)
+                if loser_path
+                else None
+            )
+            html_lines.append("<div class='card context-card' style='background:#fff;'>")
+            html_lines.append("<div class='context-card-art'>")
+            html_lines.append("<span class='album-art album-art-thumb' title='Album Art'>")
+            if loser_art_src:
+                html_lines.append(f"<img src='{loser_art_src}' alt='' />")
+            html_lines.append("</span>")
+            html_lines.append("</div>")
+            html_lines.append("<div class='kv context-card-details'>")
+            html_lines.append("<div class='k'>Loser file</div>")
+            if loser_path:
+                html_lines.append(f"<div class='v path'>{esc(loser_path)}</div>")
+            else:
+                html_lines.append("<div class='v path'>—</div>")
+            html_lines.append("<div class='k'>Disposition</div>")
+            if loser_disposition:
+                html_lines.append(f"<div class='v'>{esc(loser_disposition)}</div>")
+            else:
+                html_lines.append("<div class='v'>—</div>")
+            if loser_reason:
+                html_lines.append("<div class='k'>Reason</div>")
+                html_lines.append(f"<div class='v tiny muted'>{esc(loser_reason)}</div>")
+            html_lines.append("</div>")
+            html_lines.append("</div>")
         html_lines.append("</div>")
         html_lines.append("</div>")
         html_lines.append("<div class='section'>")
