@@ -2481,25 +2481,26 @@ def export_consolidation_preview_html(plan: ConsolidationPlan, output_html_path:
 
     html_lines.extend(
         [
-        "</section>",
-        "<section class='controls'>",
-        "<div class='left'>",
-        "<input id='search' type='search' placeholder='Search groups, winner filename, paths, notes…' />",
-        "<select id='filter'>",
-        "<option value='all'>All groups</option>",
-        "<option value='has-quarantine'>Has quarantine</option>",
-        "<option value='metadata-only'>Metadata only</option>",
-        "<option value='failed'>Any failures</option>",
-        "</select>",
-        "</div>",
-        "<div class='right'>",
-        "<span class='tiny muted' id='visibleCount'>0 visible</span>",
-        "<button class='copy' id='expandAll'>Expand all</button>",
-        "<button class='copy' id='collapseAll'>Collapse all</button>",
-        "</div>",
-        "</section>",
-        "<main id='groups'>",
-    ]
+            "</section>",
+            "<section class='controls'>",
+            "<div class='left'>",
+            "<input id='search' type='search' placeholder='Search groups, winner filename, paths, notes…' />",
+            "<select id='filter'>",
+            "<option value='all'>All groups</option>",
+            "<option value='has-quarantine'>Has quarantine</option>",
+            "<option value='metadata-only'>Metadata only</option>",
+            "<option value='failed'>Any failures</option>",
+            "</select>",
+            "</div>",
+            "<div class='right'>",
+            "<span class='tiny muted' id='visibleCount'>0 visible</span>",
+            "<button class='copy' id='expandAll'>Expand all</button>",
+            "<button class='copy' id='collapseAll'>Collapse all</button>",
+            "</div>",
+            "</section>",
+            "<main id='groups'>",
+        ]
+    )
 
     all_actions: List[Dict[str, object]] = []
     for group in plan.groups:
