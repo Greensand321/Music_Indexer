@@ -1278,6 +1278,17 @@ def execute_consolidation_plan(
                 "padding: 12px;",
                 "background: var(--card);",
                 "}",
+                ".context-card{",
+                "display:flex;",
+                "gap:12px;",
+                "align-items:flex-start;",
+                "}",
+                ".context-card-art{",
+                "flex: 0 0 auto;",
+                "}",
+                ".context-card-details{",
+                "flex: 1;",
+                "}",
                 ".card-stack{",
                 "display:grid;",
                 "gap:10px;",
@@ -1671,15 +1682,14 @@ def execute_consolidation_plan(
                 winner_art_src = _album_art_src(grp, winner_path)
                 loser_art_src = _album_art_src(grp, loser_path) if loser_path else winner_art_src
                 html_lines.append("<div class='card-stack'>")
-                html_lines.append("<div class='card' style='background:#fff;'>")
-                html_lines.append("<div class='kv'>")
-                html_lines.append("<div class='k'>Album art</div>")
-                html_lines.append("<div class='v'>")
+                html_lines.append("<div class='card context-card' style='background:#fff;'>")
+                html_lines.append("<div class='context-card-art'>")
                 html_lines.append("<span class='album-art album-art-thumb' title='Album Art'>")
                 if winner_art_src:
                     html_lines.append(f"<img src='{winner_art_src}' alt='' />")
                 html_lines.append("</span>")
                 html_lines.append("</div>")
+                html_lines.append("<div class='kv context-card-details'>")
                 html_lines.append("<div class='k'>Kept file (winner)</div>")
                 html_lines.append(f"<div class='v path'>{html.escape(winner_path)}</div>")
                 html_lines.append("<div class='k'>Group ID</div>")
@@ -1690,15 +1700,14 @@ def execute_consolidation_plan(
                 )
                 html_lines.append("</div>")
                 html_lines.append("</div>")
-                html_lines.append("<div class='card' style='background:#fff;'>")
-                html_lines.append("<div class='kv'>")
-                html_lines.append("<div class='k'>Album art</div>")
-                html_lines.append("<div class='v'>")
+                html_lines.append("<div class='card context-card' style='background:#fff;'>")
+                html_lines.append("<div class='context-card-art'>")
                 html_lines.append("<span class='album-art album-art-thumb' title='Album Art'>")
                 if loser_art_src:
                     html_lines.append(f"<img src='{loser_art_src}' alt='' />")
                 html_lines.append("</span>")
                 html_lines.append("</div>")
+                html_lines.append("<div class='kv context-card-details'>")
                 html_lines.append("<div class='k'>Loser file</div>")
                 if loser_path:
                     html_lines.append(f"<div class='v path'>{html.escape(loser_path)}</div>")
