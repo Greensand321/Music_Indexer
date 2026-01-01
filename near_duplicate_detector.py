@@ -21,6 +21,7 @@ EXCLUSION_KEYWORDS = ['remix', 'remastered', 'edit', 'version']
 COARSE_FP_BAND_SIZE = 8
 COARSE_FP_BANDS = 6
 COARSE_FP_QUANTIZATION = 4
+LOSSLESS_EXTS = {".flac", ".wav", ".alac", ".ape", ".aiff", ".aif"}
 
 
 @dataclass
@@ -131,6 +132,34 @@ def _metadata_gate(info_a: Mapping[str, str | None], info_b: Mapping[str, str | 
     return False
 
 
+def _path_ext(path: str, info: Mapping[str, str | None]) -> str:
+    ext = info.get("ext") if isinstance(info, Mapping) else None
+    if ext:
+        return str(ext).lower() if str(ext).startswith(".") else f".{str(ext).lower()}"
+    return os.path.splitext(path)[1].lower()
+
+
+def _is_lossless(ext: str) -> bool:
+    return ext in LOSSLESS_EXTS
+
+
+def _pair_threshold(
+    path_a: str,
+    path_b: str,
+    info_a: Mapping[str, str | None],
+    info_b: Mapping[str, str | None],
+    base_threshold: float,
+    mixed_codec_boost: float,
+) -> float:
+    ext_a = _path_ext(path_a, info_a)
+    ext_b = _path_ext(path_b, info_b)
+    if not ext_a or not ext_b:
+        return base_threshold
+    if _is_lossless(ext_a) != _is_lossless(ext_b):
+        return base_threshold + mixed_codec_boost
+    return base_threshold
+
+
 def _coarse_fingerprint_keys(fp: str | None) -> List[str]:
     parsed = _parse_fp(fp) if fp else None
     values: List[int] = []
@@ -177,6 +206,7 @@ def _scan_paths(
     paths: Iterable[str],
     file_infos: Dict[str, Dict[str, str | None]],
     threshold: float,
+    mixed_codec_boost: float,
     log_callback,
 ) -> Tuple[List[Tuple[Set[str], float]], int, int, int]:
     """Scan a list of paths for near duplicate clusters."""
@@ -196,12 +226,21 @@ def _scan_paths(
                 coarse_blocked += 1
                 continue
             dist = fingerprint_distance(file_infos[p]["fp"], file_infos[q]["fp"])
-            if dist <= threshold:
+            pair_threshold = _pair_threshold(
+                p,
+                q,
+                file_infos[p],
+                file_infos[q],
+                threshold,
+                mixed_codec_boost,
+            )
+            if dist <= pair_threshold:
                 adj[p].add(q)
                 adj[q].add(p)
                 pair_distances[frozenset({p, q})] = dist
                 log_callback(
-                    f"   → near-dup {os.path.basename(p)} vs {os.path.basename(q)} dist={dist:.3f}"
+                    f"   → near-dup {os.path.basename(p)} vs {os.path.basename(q)} "
+                    f"dist={dist:.3f} thr={pair_threshold:.3f}"
                 )
             comparisons += 1
 
@@ -233,10 +272,17 @@ def _scan_album(
     paths: Iterable[str],
     file_infos: Dict[str, Dict[str, str | None]],
     threshold: float,
+    mixed_codec_boost: float,
     log_callback,
 ) -> tuple[str, List[Tuple[Set[str], float]], int, int, int]:
     """Worker helper: scan a single album for near duplicates."""
-    clusters, comparisons, meta_blocked, coarse_blocked = _scan_paths(paths, file_infos, threshold, log_callback)
+    clusters, comparisons, meta_blocked, coarse_blocked = _scan_paths(
+        paths,
+        file_infos,
+        threshold,
+        mixed_codec_boost,
+        log_callback,
+    )
     return album, clusters, comparisons, meta_blocked, coarse_blocked
 
 
@@ -248,6 +294,7 @@ def find_near_duplicates(
     enable_cross_album: bool = False,
     coord=None,
     max_workers: int | None = None,
+    mixed_codec_boost: float = 0.0,
 ) -> NearDuplicateResult:
     """Return reviewable near-duplicate groups (auto-merging is gated by review)."""
     if log_callback is None:
@@ -278,7 +325,7 @@ def find_near_duplicates(
                 f"Phase B: [{idx}/{total_albums}] Scanning album '{album}' ({len(album_paths)} tracks)"
             )
             html_lines.append(f"Album: {album or '<no album>'} ({len(album_paths)} tracks)")
-            futures[ex.submit(_scan_album, album, album_paths, file_infos, threshold, log_callback)] = album
+            futures[ex.submit(_scan_album, album, album_paths, file_infos, threshold, mixed_codec_boost, log_callback)] = album
 
         for fut in as_completed(futures):
             album = futures[fut]
@@ -321,7 +368,7 @@ def find_near_duplicates(
                     f"Phase C: [{idx}/{total_songs}] Scanning '{title}' ({len(song_paths)} tracks)"
                 )
                 cross_lines.append(f"{title or '<no title>'} ({len(song_paths)} tracks)")
-                futures[ex.submit(_scan_paths, song_paths, file_infos, threshold, log_callback)] = (prim, title)
+                futures[ex.submit(_scan_paths, song_paths, file_infos, threshold, mixed_codec_boost, log_callback)] = (prim, title)
 
             for fut in as_completed(futures):
                 _key = futures[fut]

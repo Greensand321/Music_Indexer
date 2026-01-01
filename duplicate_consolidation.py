@@ -845,6 +845,8 @@ class ConsolidationPlan:
     generated_at: datetime.datetime = field(default_factory=lambda: datetime.datetime.now(datetime.timezone.utc))
     placeholders_present: bool = False
     source_snapshot: Dict[str, Dict[str, object]] = field(default_factory=dict)
+    fingerprint_settings: Dict[str, object] = field(default_factory=dict)
+    threshold_settings: Dict[str, float] = field(default_factory=dict)
     plan_signature: str | None = None
 
     def to_dict(self) -> Dict[str, object]:
@@ -854,6 +856,8 @@ class ConsolidationPlan:
             "generated_at": self.generated_at.isoformat(),
             "placeholders_present": self.placeholders_present,
             "source_snapshot": {k: dict(v) for k, v in self.source_snapshot.items()},
+            "fingerprint_settings": dict(self.fingerprint_settings),
+            "threshold_settings": dict(self.threshold_settings),
             "plan_signature": self.plan_signature,
         }
 
@@ -888,6 +892,8 @@ class ConsolidationPlan:
                 "generated_at": self.generated_at.isoformat(),
                 "groups": [g.to_dict() for g in self.groups],
                 "snapshot": {k: dict(v) for k, v in self.source_snapshot.items()},
+                "fingerprint_settings": dict(self.fingerprint_settings),
+                "threshold_settings": dict(self.threshold_settings),
             },
             sort_keys=True,
         )
@@ -1053,6 +1059,8 @@ def consolidation_plan_from_dict(raw: Mapping[str, object]) -> ConsolidationPlan
     generated_at = _expect_datetime(raw.get("generated_at"), "generated_at")
     placeholders_present = _expect_bool(raw.get("placeholders_present"), "placeholders_present")
     source_snapshot = _expect_mapping(raw.get("source_snapshot"), "source_snapshot")
+    fingerprint_settings = raw.get("fingerprint_settings") if isinstance(raw, Mapping) else None
+    threshold_settings = raw.get("threshold_settings") if isinstance(raw, Mapping) else None
     plan_signature = raw.get("plan_signature")
     if plan_signature is not None and not isinstance(plan_signature, str):
         raise ValueError("plan_signature must be a string or null.")
@@ -1064,6 +1072,8 @@ def consolidation_plan_from_dict(raw: Mapping[str, object]) -> ConsolidationPlan
         generated_at=generated_at,
         placeholders_present=placeholders_present,
         source_snapshot=source_snapshot,
+        fingerprint_settings=dict(fingerprint_settings or {}),
+        threshold_settings={str(k): float(v) for k, v in dict(threshold_settings or {}).items()},
         plan_signature=plan_signature,
     )
 
@@ -1370,6 +1380,7 @@ def _cluster_duplicates(
     *,
     exact_duplicate_threshold: float,
     near_duplicate_threshold: float,
+    mixed_codec_threshold_boost: float,
     cancel_event: threading.Event,
     max_comparisons: int,
     timeout_sec: float,
@@ -1439,7 +1450,10 @@ def _cluster_duplicates(
                 comparisons += 1
                 other = path_to_track[other_path]
                 dist = fingerprint_distance(track.fingerprint, other.fingerprint)
-                if dist > near_duplicate_threshold:
+                pair_threshold = near_duplicate_threshold
+                if track.is_lossless != other.is_lossless:
+                    pair_threshold += mixed_codec_threshold_boost
+                if dist > pair_threshold:
                     continue
                 compatible = True
                 max_candidate_distance = dist
@@ -1448,7 +1462,10 @@ def _cluster_duplicates(
                         continue
                     cmp_dist = fingerprint_distance(member.fingerprint, other.fingerprint)
                     max_candidate_distance = max(max_candidate_distance, cmp_dist)
-                    if cmp_dist > near_duplicate_threshold:
+                    member_threshold = near_duplicate_threshold
+                    if member.is_lossless != other.is_lossless:
+                        member_threshold += mixed_codec_threshold_boost
+                    if cmp_dist > member_threshold:
                         compatible = False
                         break
                 if compatible:
@@ -1467,7 +1484,7 @@ def _cluster_duplicates(
                             shared_coarse_keys=shared_keys,
                             distance_to_anchor=dist,
                             max_group_distance=max_candidate_distance,
-                            threshold=near_duplicate_threshold,
+                            threshold=pair_threshold,
                             match_type=match_type,
                             coarse_gate=coarse_gate,
                         )
@@ -1496,11 +1513,14 @@ def build_consolidation_plan(
     *,
     exact_duplicate_threshold: float = EXACT_DUPLICATE_THRESHOLD,
     near_duplicate_threshold: float = NEAR_DUPLICATE_THRESHOLD,
+    mixed_codec_threshold_boost: float = 0.0,
     max_candidates: int = DEFAULT_MAX_CANDIDATES,
     max_comparisons: int = DEFAULT_MAX_COMPARISONS,
     timeout_sec: float = DEFAULT_TIMEOUT_SEC,
     cancel_event: Optional[threading.Event] = None,
     progress_callback: Callable[[int, int, str], None] | None = None,
+    fingerprint_settings: Mapping[str, object] | None = None,
+    threshold_settings: Mapping[str, float] | None = None,
 ) -> ConsolidationPlan:
     """Generate a deterministic consolidation plan without modifying files."""
 
@@ -1523,6 +1543,7 @@ def build_consolidation_plan(
         normalized,
         exact_duplicate_threshold=exact_duplicate_threshold,
         near_duplicate_threshold=near_duplicate_threshold,
+        mixed_codec_threshold_boost=mixed_codec_threshold_boost,
         cancel_event=cancel_event,
         max_comparisons=max_comparisons,
         timeout_sec=timeout_sec,
@@ -1856,6 +1877,7 @@ def build_consolidation_plan(
                     grouping_thresholds={
                         "exact": cluster.exact_threshold,
                         "near": cluster.near_threshold,
+                        "mixed_codec_boost": mixed_codec_threshold_boost,
                     },
                     grouping_decisions=group_decisions,
                     artwork_evidence=artwork_evidence,
@@ -1867,7 +1889,13 @@ def build_consolidation_plan(
     if plan_placeholders and "Placeholder metadata detected; review required." not in review_flags:
         review_flags.append("Placeholder metadata detected; review required.")
 
-    return ConsolidationPlan(groups=plans, review_flags=review_flags, placeholders_present=plan_placeholders)
+    return ConsolidationPlan(
+        groups=plans,
+        review_flags=review_flags,
+        placeholders_present=plan_placeholders,
+        fingerprint_settings=dict(fingerprint_settings or {}),
+        threshold_settings=dict(threshold_settings or {}),
+    )
 
 
 def export_consolidation_preview(plan: ConsolidationPlan, output_json_path: str) -> str:
@@ -2058,6 +2086,17 @@ def export_consolidation_preview_html(plan: ConsolidationPlan, output_html_path:
     if plan.review_flags:
         joined_flags = "; ".join(plan.review_flags)
         global_notes = f"{global_notes} Review flags: {joined_flags}"
+
+    settings_entries: List[tuple[str, object]] = []
+    if plan.threshold_settings:
+        settings_entries.extend(sorted(plan.threshold_settings.items(), key=lambda item: str(item[0])))
+    if plan.fingerprint_settings:
+        settings_entries.extend(sorted(plan.fingerprint_settings.items(), key=lambda item: str(item[0])))
+
+    def _format_setting(value: object) -> str:
+        if isinstance(value, float):
+            return f"{value:.3f}"
+        return str(value)
 
     html_lines = [
         "<!doctype html>",
@@ -2424,6 +2463,24 @@ def export_consolidation_preview_html(plan: ConsolidationPlan, output_html_path:
         f"<div class='v tiny muted'>{esc(global_notes)}</div>",
         "</div>",
         "</div>",
+    ]
+
+    if settings_entries:
+        html_lines.extend(
+            [
+                "<div class='card'>",
+                "<div class='kv'>",
+                "<div class='k'>Fingerprint settings</div>",
+                "<div class='v tiny muted'>Thresholds + normalization inputs used for this plan.</div>",
+            ]
+        )
+        for key, value in settings_entries:
+            html_lines.append(f"<div class='k'>{esc(str(key))}</div>")
+            html_lines.append(f"<div class='v tiny'>{esc(_format_setting(value))}</div>")
+        html_lines.extend(["</div>", "</div>"])
+
+    html_lines.extend(
+        [
         "</section>",
         "<section class='controls'>",
         "<div class='left'>",

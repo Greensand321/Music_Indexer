@@ -118,7 +118,7 @@ def test_mtime_change_triggers_recompute(monkeypatch, tmp_path):
     conn.close()
 
     def fake_compute(args):
-        path, _db_path, _trim = args
+        path, _db_path, _settings = args
         return path, 9, "new-fp", None
 
     # ensure filesystem mtime advances

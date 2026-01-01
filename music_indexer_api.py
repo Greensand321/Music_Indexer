@@ -8,7 +8,7 @@ import base64
 from collections import defaultdict
 from typing import Dict, List
 from dry_run_coordinator import DryRunCoordinator
-from config import load_config
+from config import MIXED_CODEC_THRESHOLD_BOOST, load_config
 
 def _verify_dependencies() -> None:
     """Raise RuntimeError if the real mutagen library is missing."""
@@ -435,12 +435,14 @@ def compute_moves_and_tag_index(
                 fp = fp.decode("utf-8")
             except Exception:
                 fp = fp.decode("latin1", errors="ignore")
+        ext = os.path.splitext(fullpath)[1].lower()
         file_infos[fullpath] = {
             "primary": primary.lower(),
             "title": title.lower(),
             "album": album.lower(),
             "fp": fp,
             "meta_count": meta_count,
+            "ext": ext,
         }
 
     to_delete: Dict[str, str] = {}
@@ -490,6 +492,8 @@ def compute_moves_and_tag_index(
     # --- Near-duplicate detection -------------------------------------------------
     from near_duplicate_detector import find_near_duplicates
     log_callback("   • Detecting near-duplicates…")
+    cfg = load_config()
+    mixed_codec_boost = float(cfg.get("mixed_codec_threshold_boost", MIXED_CODEC_THRESHOLD_BOOST))
     near_dupes = find_near_duplicates(
         {p: file_infos[p] for p in kept_files},
         EXT_PRIORITY,
@@ -498,6 +502,7 @@ def compute_moves_and_tag_index(
         enable_phase_c,
         coord,
         max_workers,
+        mixed_codec_boost=mixed_codec_boost,
     )
     if near_dupes.review_required:
         log_callback(

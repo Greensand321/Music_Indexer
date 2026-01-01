@@ -9,24 +9,30 @@ from pydub import AudioSegment, silence
 SILENCE_THRESH = -50  # dBFS used for silence detection
 
 
-def _with_thresh(func, *args, **kwargs):
+def _with_thresh(func, *args, silence_threshold_db: float = SILENCE_THRESH, **kwargs):
     try:
-        return func(*args, silence_threshold=SILENCE_THRESH, **kwargs)
+        return func(*args, silence_threshold=silence_threshold_db, **kwargs)
     except TypeError:
-        return func(*args, silence_thresh=SILENCE_THRESH, **kwargs)
+        return func(*args, silence_thresh=silence_threshold_db, **kwargs)
 from concurrent.futures import ProcessPoolExecutor
 import acoustid
 from utils.path_helpers import ensure_long_path
+import audio_norm
 
 SUPPORTED_EXTS = {".flac", ".m4a", ".aac", ".mp3", ".wav", ".ogg"}
 
 
-def _trim_silence(path: str) -> str:
+def _trim_silence(path: str, *, silence_threshold_db: float, min_silence_len_ms: int) -> str:
     """Return path to temporary file with leading/trailing silence removed."""
     try:
         ext = os.path.splitext(path)[1].lower().lstrip(".") or "wav"
         audio = AudioSegment.from_file(path)
-        segs = _with_thresh(silence.detect_nonsilent, audio, min_silence_len=500)
+        segs = _with_thresh(
+            silence.detect_nonsilent,
+            audio,
+            min_silence_len=min_silence_len_ms,
+            silence_threshold_db=silence_threshold_db,
+        )
         if not segs:
             return path
         start = segs[0][0]
@@ -40,17 +46,48 @@ def _trim_silence(path: str) -> str:
         return path
 
 
-def compute_fingerprint_for_file(args: Tuple[str, str, bool]) -> Tuple[str, int | None, str | None, str | None]:
+def compute_fingerprint_for_file(
+    args: Tuple[str, str, dict],
+) -> Tuple[str, int | None, str | None, str | None]:
     """Compute fingerprint for a single file. Returns (path, duration, fp, error)."""
-    path, _db_path, trim = args
+    path, _db_path, settings = args
     path = ensure_long_path(path)
     tmp = None
     try:
-        target = path
-        if trim:
-            tmp = _trim_silence(path)
-            target = tmp
-        duration, fp_hash = acoustid.fingerprint_file(target)
+        trim = bool(settings.get("trim_silence", False))
+        silence_threshold_db = float(settings.get("silence_threshold_db", SILENCE_THRESH))
+        silence_min_len_ms = int(settings.get("silence_min_len_ms", 500))
+        fingerprint_offset_ms = int(settings.get("fingerprint_offset_ms", 0))
+        fingerprint_duration_ms = int(settings.get("fingerprint_duration_ms", 0))
+        allow_mismatched_edits = bool(settings.get("allow_mismatched_edits", True))
+        trim_lead_max_ms = int(settings.get("trim_lead_max_ms", 500))
+        trim_trail_max_ms = int(settings.get("trim_trail_max_ms", 500))
+        trim_padding_ms = int(settings.get("trim_padding_ms", 100))
+
+        if fingerprint_duration_ms > 0:
+            buf = audio_norm.normalize_for_fp(
+                path,
+                fingerprint_offset_ms=fingerprint_offset_ms,
+                fingerprint_duration_ms=fingerprint_duration_ms,
+                trim_silence=trim,
+                silence_threshold_db=silence_threshold_db,
+                silence_min_len_ms=silence_min_len_ms,
+                trim_padding_ms=trim_padding_ms,
+                trim_lead_max_ms=trim_lead_max_ms,
+                trim_trail_max_ms=trim_trail_max_ms,
+                allow_mismatched_edits=allow_mismatched_edits,
+            )
+            duration, fp_hash = acoustid.fingerprint_file(fileobj=buf)
+        else:
+            target = path
+            if trim:
+                tmp = _trim_silence(
+                    path,
+                    silence_threshold_db=silence_threshold_db,
+                    min_silence_len_ms=silence_min_len_ms,
+                )
+                target = tmp
+            duration, fp_hash = acoustid.fingerprint_file(target)
         if tmp and tmp != path:
             os.remove(tmp)
         return path, duration, fp_hash, None
@@ -99,6 +136,14 @@ def compute_fingerprints_parallel(
     trim_silence: bool = False,
     phase: str = "A",
     cancel_event: threading.Event | None = None,
+    fingerprint_offset_ms: int = 0,
+    fingerprint_duration_ms: int = 0,
+    allow_mismatched_edits: bool = True,
+    silence_threshold_db: float = SILENCE_THRESH,
+    silence_min_len_ms: int = 500,
+    trim_lead_max_ms: int = 500,
+    trim_trail_max_ms: int = 500,
+    trim_padding_ms: int = 100,
 ) -> list[tuple[str, int | None, str | None]]:
     """Compute fingerprints and return ``(path, duration, fingerprint)`` results.
 
@@ -139,6 +184,29 @@ def compute_fingerprints_parallel(
     total = len(audio_files)
     progress_callback(0, total, "Fingerprinting", phase)
 
+    fp_settings = {
+        "trim_silence": bool(trim_silence),
+        "silence_threshold_db": float(silence_threshold_db),
+        "silence_min_len_ms": int(silence_min_len_ms),
+        "fingerprint_offset_ms": int(fingerprint_offset_ms),
+        "fingerprint_duration_ms": int(fingerprint_duration_ms),
+        "allow_mismatched_edits": bool(allow_mismatched_edits),
+        "trim_lead_max_ms": int(trim_lead_max_ms),
+        "trim_trail_max_ms": int(trim_trail_max_ms),
+        "trim_padding_ms": int(trim_padding_ms),
+    }
+    if log_callback:
+        log_callback(
+            f"Fingerprint settings: trim_silence={fp_settings['trim_silence']} "
+            f"offset_ms={fp_settings['fingerprint_offset_ms']} duration_ms={fp_settings['fingerprint_duration_ms']} "
+            f"silence_threshold_db={fp_settings['silence_threshold_db']} "
+            f"silence_min_len_ms={fp_settings['silence_min_len_ms']} "
+            f"trim_lead_max_ms={fp_settings['trim_lead_max_ms']} "
+            f"trim_trail_max_ms={fp_settings['trim_trail_max_ms']} "
+            f"trim_padding_ms={fp_settings['trim_padding_ms']} "
+            f"allow_mismatched_edits={fp_settings['allow_mismatched_edits']}"
+        )
+
     cached = _load_cached_entries(conn)
     pending: list[str] = []
     completed = 0
@@ -157,7 +225,7 @@ def compute_fingerprints_parallel(
             continue
         pending.append(path)
 
-    work_items = [(p, db_path, trim_silence) for p in pending]
+    work_items = [(p, db_path, fp_settings) for p in pending]
 
     if pending:
         with ProcessPoolExecutor(max_workers=max_workers) as exe:
@@ -210,6 +278,14 @@ def compute_fingerprints(
     trim_silence: bool = False,
     phase: str = "A",
     cancel_event: threading.Event | None = None,
+    fingerprint_offset_ms: int = 0,
+    fingerprint_duration_ms: int = 0,
+    allow_mismatched_edits: bool = True,
+    silence_threshold_db: float = SILENCE_THRESH,
+    silence_min_len_ms: int = 500,
+    trim_lead_max_ms: int = 500,
+    trim_trail_max_ms: int = 500,
+    trim_padding_ms: int = 100,
 ) -> None:
     """Backward-compatible wrapper around :func:`compute_fingerprints_parallel`."""
     return compute_fingerprints_parallel(
@@ -221,4 +297,12 @@ def compute_fingerprints(
         trim_silence,
         phase,
         cancel_event,
+        fingerprint_offset_ms,
+        fingerprint_duration_ms,
+        allow_mismatched_edits,
+        silence_threshold_db,
+        silence_min_len_ms,
+        trim_lead_max_ms,
+        trim_trail_max_ms,
+        trim_padding_ms,
     )

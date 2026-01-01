@@ -54,6 +54,12 @@ from gui.audio_preview import PlaybackError, VlcPreviewPlayer
 from io import BytesIO
 from PIL import Image, ImageTk
 from mutagen import File as MutagenFile
+from config import (
+    EXACT_DUPLICATE_THRESHOLD,
+    MIXED_CODEC_THRESHOLD_BOOST,
+    NEAR_DUPLICATE_THRESHOLD,
+    load_config,
+)
 from fingerprint_cache import get_fingerprint
 from simple_duplicate_finder import SUPPORTED_EXTS, _compute_fp
 from tag_fixer import MIN_INTERACTIVE_SCORE, FileRecord
@@ -1873,7 +1879,39 @@ class DuplicateFinderShell(tk.Toplevel):
             self._set_status("Idle", progress=0)
             return
         self._set_status("Building plan…", progress=25)
-        plan = build_consolidation_plan(tracks)
+        cfg = load_config()
+        exact_threshold = float(cfg.get("exact_duplicate_threshold", EXACT_DUPLICATE_THRESHOLD))
+        near_threshold = float(cfg.get("near_duplicate_threshold", NEAR_DUPLICATE_THRESHOLD))
+        mixed_codec_boost = float(cfg.get("mixed_codec_threshold_boost", MIXED_CODEC_THRESHOLD_BOOST))
+        fingerprint_settings = {
+            "trim_silence": bool(cfg.get("trim_silence", False)),
+            "fingerprint_offset_ms": int(cfg.get("fingerprint_offset_ms", 0)),
+            "fingerprint_duration_ms": int(cfg.get("fingerprint_duration_ms", 0)),
+            "fingerprint_silence_threshold_db": float(cfg.get("fingerprint_silence_threshold_db", -50.0)),
+            "fingerprint_silence_min_len_ms": int(cfg.get("fingerprint_silence_min_len_ms", 500)),
+            "fingerprint_trim_lead_max_ms": int(cfg.get("fingerprint_trim_lead_max_ms", 500)),
+            "fingerprint_trim_trail_max_ms": int(cfg.get("fingerprint_trim_trail_max_ms", 500)),
+            "fingerprint_trim_padding_ms": int(cfg.get("fingerprint_trim_padding_ms", 100)),
+            "allow_mismatched_edits": bool(cfg.get("allow_mismatched_edits", True)),
+        }
+        threshold_settings = {
+            "exact_duplicate_threshold": exact_threshold,
+            "near_duplicate_threshold": near_threshold,
+            "mixed_codec_threshold_boost": mixed_codec_boost,
+        }
+        self._log_action(
+            "Duplicate scan thresholds: "
+            f"exact={exact_threshold:.3f}, near={near_threshold:.3f}, mixed_codec_boost={mixed_codec_boost:.3f}"
+        )
+        self._log_action(f"Fingerprint settings: {fingerprint_settings}")
+        plan = build_consolidation_plan(
+            tracks,
+            exact_duplicate_threshold=exact_threshold,
+            near_duplicate_threshold=near_threshold,
+            mixed_codec_threshold_boost=mixed_codec_boost,
+            fingerprint_settings=fingerprint_settings,
+            threshold_settings=threshold_settings,
+        )
         self._plan = plan
         self.group_disposition_overrides.clear()
         self._apply_deletion_mode()
