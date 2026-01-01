@@ -56,13 +56,6 @@ from PIL import Image, ImageTk
 from mutagen import File as MutagenFile
 from config import (
     EXACT_DUPLICATE_THRESHOLD,
-    FP_DURATION_MS,
-    FP_OFFSET_MS,
-    FP_SILENCE_MIN_LEN_MS,
-    FP_SILENCE_THRESHOLD_DB,
-    FP_TRIM_LEAD_MAX_MS,
-    FP_TRIM_PADDING_MS,
-    FP_TRIM_TRAIL_MAX_MS,
     MIXED_CODEC_THRESHOLD_BOOST,
     NEAR_DUPLICATE_THRESHOLD,
     load_config,
@@ -1552,9 +1545,6 @@ class DuplicateFinderShell(tk.Toplevel):
         ttk.Button(controls, text="Execute", command=self._handle_execute).pack(
             side="left", padx=(0, 12)
         )
-        ttk.Button(controls, text="⚙️ Thresholds", command=self._open_threshold_settings).pack(
-            side="left", padx=(0, 12)
-        )
         ttk.Checkbutton(
             controls,
             text="Update Playlists",
@@ -1639,18 +1629,6 @@ class DuplicateFinderShell(tk.Toplevel):
         self.group_details.pack(fill="both", expand=True, padx=8, pady=(0, 8))
 
         self._log_action("Duplicate Finder initialized")
-
-    def _clear_plan(self, note: str | None = None) -> None:
-        self._plan = None
-        self.group_disposition_overrides.clear()
-        self.groups_tree.delete(*self.groups_tree.get_children())
-        self.group_details.configure(state="normal")
-        self.group_details.delete("1.0", "end")
-        self.group_details.insert("end", "Generate a plan to view duplicate groups.")
-        self.group_details.configure(state="disabled")
-        self._reset_group_selection()
-        if note:
-            self._log_action(note)
 
     def _default_playlist_folder(self, library_path: str) -> str:
         if library_path:
@@ -1840,177 +1818,6 @@ class DuplicateFinderShell(tk.Toplevel):
             return
         self.playlist_path_var.set(chosen)
         self._log_action(f"Playlist folder updated to {chosen}")
-
-    def _open_threshold_settings(self) -> None:
-        dlg = tk.Toplevel(self)
-        dlg.title("Threshold Settings")
-        dlg.transient(self)
-        dlg.grab_set()
-        dlg.resizable(False, False)
-
-        cfg = load_config()
-
-        exact_var = tk.StringVar(value=str(cfg.get("exact_duplicate_threshold", EXACT_DUPLICATE_THRESHOLD)))
-        near_var = tk.StringVar(value=str(cfg.get("near_duplicate_threshold", NEAR_DUPLICATE_THRESHOLD)))
-        mixed_var = tk.StringVar(value=str(cfg.get("mixed_codec_threshold_boost", MIXED_CODEC_THRESHOLD_BOOST)))
-        offset_var = tk.StringVar(value=str(cfg.get("fingerprint_offset_ms", FP_OFFSET_MS)))
-        duration_var = tk.StringVar(value=str(cfg.get("fingerprint_duration_ms", FP_DURATION_MS)))
-        silence_db_var = tk.StringVar(value=str(cfg.get("fingerprint_silence_threshold_db", FP_SILENCE_THRESHOLD_DB)))
-        silence_len_var = tk.StringVar(value=str(cfg.get("fingerprint_silence_min_len_ms", FP_SILENCE_MIN_LEN_MS)))
-        trim_lead_var = tk.StringVar(value=str(cfg.get("fingerprint_trim_lead_max_ms", FP_TRIM_LEAD_MAX_MS)))
-        trim_trail_var = tk.StringVar(value=str(cfg.get("fingerprint_trim_trail_max_ms", FP_TRIM_TRAIL_MAX_MS)))
-        trim_padding_var = tk.StringVar(value=str(cfg.get("fingerprint_trim_padding_ms", FP_TRIM_PADDING_MS)))
-
-        frame = ttk.Frame(dlg, padding=12)
-        frame.pack(fill="both", expand=True)
-
-        ttk.Label(
-            frame,
-            text="Tune duplicate matching and fingerprint windowing thresholds.",
-            foreground="#555",
-        ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 8))
-
-        def _row(label: str, var: tk.StringVar, row: int) -> None:
-            ttk.Label(frame, text=label).grid(row=row, column=0, sticky="w", pady=2)
-            ttk.Entry(frame, textvariable=var, width=16).grid(row=row, column=1, sticky="ew", pady=2)
-
-        row_idx = 1
-        _row("Exact duplicate threshold", exact_var, row_idx)
-        row_idx += 1
-        _row("Near duplicate threshold", near_var, row_idx)
-        row_idx += 1
-        _row("Mixed-codec boost", mixed_var, row_idx)
-        row_idx += 1
-        _row("Fingerprint offset (ms)", offset_var, row_idx)
-        row_idx += 1
-        _row("Fingerprint duration (ms)", duration_var, row_idx)
-        row_idx += 1
-        _row("Silence threshold (dB)", silence_db_var, row_idx)
-        row_idx += 1
-        _row("Silence min length (ms)", silence_len_var, row_idx)
-        row_idx += 1
-        _row("Trim lead max (ms)", trim_lead_var, row_idx)
-        row_idx += 1
-        _row("Trim trail max (ms)", trim_trail_var, row_idx)
-        row_idx += 1
-        _row("Trim padding (ms)", trim_padding_var, row_idx)
-        row_idx += 1
-
-        frame.columnconfigure(1, weight=1)
-
-        def _parse_float(raw: str, label: str, *, min_value: float | None = None, max_value: float | None = None) -> float | None:
-            try:
-                value = float(raw)
-            except ValueError:
-                messagebox.showwarning("Invalid Value", f"{label} must be a number.")
-                return None
-            if min_value is not None and value < min_value:
-                messagebox.showwarning(
-                    "Invalid Value", f"{label} must be at least {min_value}."
-                )
-                return None
-            if max_value is not None and value > max_value:
-                messagebox.showwarning(
-                    "Invalid Value", f"{label} must be at most {max_value}."
-                )
-                return None
-            return value
-
-        def _parse_int(raw: str, label: str, *, min_value: int | None = None) -> int | None:
-            try:
-                value = int(float(raw))
-            except ValueError:
-                messagebox.showwarning("Invalid Value", f"{label} must be a whole number.")
-                return None
-            if min_value is not None and value < min_value:
-                messagebox.showwarning(
-                    "Invalid Value", f"{label} must be at least {min_value}."
-                )
-                return None
-            return value
-
-        def _save() -> None:
-            exact = _parse_float(exact_var.get().strip(), "Exact duplicate threshold", min_value=0.0)
-            if exact is None:
-                return
-            near = _parse_float(near_var.get().strip(), "Near duplicate threshold", min_value=0.0)
-            if near is None:
-                return
-            if near < exact:
-                messagebox.showwarning(
-                    "Invalid Value",
-                    "Near duplicate threshold must be greater than or equal to the exact threshold.",
-                )
-                return
-            mixed = _parse_float(mixed_var.get().strip(), "Mixed-codec boost", min_value=0.0)
-            if mixed is None:
-                return
-            offset = _parse_int(offset_var.get().strip(), "Fingerprint offset (ms)", min_value=0)
-            if offset is None:
-                return
-            duration = _parse_int(duration_var.get().strip(), "Fingerprint duration (ms)", min_value=0)
-            if duration is None:
-                return
-            silence_db = _parse_float(
-                silence_db_var.get().strip(),
-                "Silence threshold (dB)",
-                min_value=-120.0,
-                max_value=0.0,
-            )
-            if silence_db is None:
-                return
-            silence_len = _parse_int(
-                silence_len_var.get().strip(),
-                "Silence min length (ms)",
-                min_value=0,
-            )
-            if silence_len is None:
-                return
-            trim_lead = _parse_int(
-                trim_lead_var.get().strip(),
-                "Trim lead max (ms)",
-                min_value=0,
-            )
-            if trim_lead is None:
-                return
-            trim_trail = _parse_int(
-                trim_trail_var.get().strip(),
-                "Trim trail max (ms)",
-                min_value=0,
-            )
-            if trim_trail is None:
-                return
-            trim_padding = _parse_int(
-                trim_padding_var.get().strip(),
-                "Trim padding (ms)",
-                min_value=0,
-            )
-            if trim_padding is None:
-                return
-
-            cfg["exact_duplicate_threshold"] = exact
-            cfg["near_duplicate_threshold"] = near
-            cfg["mixed_codec_threshold_boost"] = mixed
-            cfg["fingerprint_offset_ms"] = offset
-            cfg["fingerprint_duration_ms"] = duration
-            cfg["fingerprint_silence_threshold_db"] = silence_db
-            cfg["fingerprint_silence_min_len_ms"] = silence_len
-            cfg["fingerprint_trim_lead_max_ms"] = trim_lead
-            cfg["fingerprint_trim_trail_max_ms"] = trim_trail
-            cfg["fingerprint_trim_padding_ms"] = trim_padding
-            save_config(cfg)
-
-            self.preview_json_path = None
-            self.preview_html_path = None
-            self.execution_report_path = None
-            self.open_report_btn.config(state="disabled")
-            self._clear_plan("Threshold settings updated; regenerate preview or scan to apply changes.")
-            dlg.destroy()
-
-        btn_frame = ttk.Frame(frame)
-        btn_frame.grid(row=row_idx, column=0, columnspan=2, pady=(10, 0))
-        ttk.Button(btn_frame, text="OK", command=_save).pack()
-        dlg.wait_window()
 
     def _gather_tracks(self, library_root: str) -> list[dict[str, object]]:
         if not library_root:

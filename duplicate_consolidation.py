@@ -2246,9 +2246,6 @@ def export_consolidation_preview_html(plan: ConsolidationPlan, output_html_path:
         "cursor:pointer;",
         "}",
         "button.copy:active{ transform: translateY(1px); }",
-        ".settings-panel{",
-        "margin-top: 10px;",
-        "}",
         "details.group{",
         "border:1px solid var(--border);",
         "border-radius: 10px;",
@@ -2469,15 +2466,11 @@ def export_consolidation_preview_html(plan: ConsolidationPlan, output_html_path:
     ]
 
     if settings_entries:
-        insert_at = html_lines.index(
-            "<button class='copy' data-copy='#reportsDir'>Copy reports dir</button>"
-        ) + 1
-        html_lines.insert(insert_at, "<button class='copy' id='toggleSettings'>⚙️ Thresholds</button>")
         html_lines.extend(
             [
-                "<div class='card hidden settings-panel' id='settingsPanel'>",
+                "<div class='card'>",
                 "<div class='kv'>",
-                "<div class='k'>Threshold settings</div>",
+                "<div class='k'>Fingerprint settings</div>",
                 "<div class='v tiny muted'>Thresholds + normalization inputs used for this plan.</div>",
             ]
         )
@@ -2748,8 +2741,6 @@ def export_consolidation_preview_html(plan: ConsolidationPlan, output_html_path:
         "const visibleCountEl = $('#visibleCount');"
         "const expandAllBtn = $('#expandAll');"
         "const collapseAllBtn = $('#collapseAll');"
-        "const settingsBtn = $('#toggleSettings');"
-        "const settingsPanel = $('#settingsPanel');"
         "function computeStats(){"
         "const g = groups();"
         "$('#statGroups').textContent = g.length.toString();"
@@ -2821,12 +2812,6 @@ def export_consolidation_preview_html(plan: ConsolidationPlan, output_html_path:
         "}"
         "expandAllBtn?.addEventListener('click', () => groups().forEach(d => d.open = true));"
         "collapseAllBtn?.addEventListener('click', () => groups().forEach(d => d.open = false));"
-        "if (settingsBtn && settingsPanel){"
-        "settingsBtn.addEventListener('click', () => {"
-        "const hidden = settingsPanel.classList.toggle('hidden');"
-        "settingsBtn.textContent = hidden ? '⚙️ Thresholds' : 'Hide thresholds';"
-        "});"
-        "}"
         "searchEl?.addEventListener('input', applyFilters);"
         "filterEl?.addEventListener('change', applyFilters);"
         "computeStats();"
