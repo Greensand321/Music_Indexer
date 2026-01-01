@@ -2097,7 +2097,6 @@ def export_consolidation_preview_html(plan: ConsolidationPlan, output_html_path:
         "}",
         "summary.group-summary::-webkit-details-marker{ display:none; }",
         ".album-art{",
-        "display: inline-block;",
         "width: 42px;",
         "height: 42px;",
         "grid-column: 1;",
