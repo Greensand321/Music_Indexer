@@ -73,7 +73,7 @@ from config import (
 from fingerprint_cache import get_fingerprint
 from simple_duplicate_finder import SUPPORTED_EXTS, _compute_fp
 from tag_fixer import MIN_INTERACTIVE_SCORE, FileRecord
-from typing import Any, Callable, List
+from typing import Any, Callable, List, Mapping
 from indexer_control import cancel_event, IndexCancelled
 import library_sync_review
 import playlist_generator
@@ -1671,6 +1671,33 @@ class DuplicateFinderShell(tk.Toplevel):
         self.log_text.see("end")
         self.log_text.configure(state="disabled")
 
+    def _current_threshold_settings(self) -> dict[str, float]:
+        cfg = load_config()
+        return {
+            "exact_duplicate_threshold": float(cfg.get("exact_duplicate_threshold", EXACT_DUPLICATE_THRESHOLD)),
+            "near_duplicate_threshold": float(cfg.get("near_duplicate_threshold", NEAR_DUPLICATE_THRESHOLD)),
+            "mixed_codec_threshold_boost": float(cfg.get("mixed_codec_threshold_boost", MIXED_CODEC_THRESHOLD_BOOST)),
+        }
+
+    def _thresholds_match(
+        self,
+        plan_settings: Mapping[str, float] | None,
+        current_settings: Mapping[str, float],
+        *,
+        tolerance: float = 1e-6,
+    ) -> bool:
+        if not plan_settings:
+            return False
+        for key, value in current_settings.items():
+            if key not in plan_settings:
+                return False
+            try:
+                if abs(float(plan_settings[key]) - float(value)) > tolerance:
+                    return False
+            except (TypeError, ValueError):
+                return False
+        return True
+
     def _default_group_disposition(self) -> str:
         if not self.quarantine_var.get():
             return "retain"
@@ -2076,9 +2103,10 @@ class DuplicateFinderShell(tk.Toplevel):
             return
         self._set_status("Building plan…", progress=25)
         cfg = load_config()
-        exact_threshold = float(cfg.get("exact_duplicate_threshold", EXACT_DUPLICATE_THRESHOLD))
-        near_threshold = float(cfg.get("near_duplicate_threshold", NEAR_DUPLICATE_THRESHOLD))
-        mixed_codec_boost = float(cfg.get("mixed_codec_threshold_boost", MIXED_CODEC_THRESHOLD_BOOST))
+        threshold_settings = self._current_threshold_settings()
+        exact_threshold = threshold_settings["exact_duplicate_threshold"]
+        near_threshold = threshold_settings["near_duplicate_threshold"]
+        mixed_codec_boost = threshold_settings["mixed_codec_threshold_boost"]
         fingerprint_settings = {
             "trim_silence": bool(cfg.get("trim_silence", False)),
             "fingerprint_offset_ms": int(cfg.get("fingerprint_offset_ms", 0)),
@@ -2089,11 +2117,6 @@ class DuplicateFinderShell(tk.Toplevel):
             "fingerprint_trim_trail_max_ms": int(cfg.get("fingerprint_trim_trail_max_ms", 500)),
             "fingerprint_trim_padding_ms": int(cfg.get("fingerprint_trim_padding_ms", 100)),
             "allow_mismatched_edits": bool(cfg.get("allow_mismatched_edits", True)),
-        }
-        threshold_settings = {
-            "exact_duplicate_threshold": exact_threshold,
-            "near_duplicate_threshold": near_threshold,
-            "mixed_codec_threshold_boost": mixed_codec_boost,
         }
         self._log_action(
             "Duplicate scan thresholds: "
@@ -2173,6 +2196,17 @@ class DuplicateFinderShell(tk.Toplevel):
         preview_plan_path = self.preview_json_path or os.path.join(path, "Docs", "duplicate_preview.json")
         plan_input = self._plan
         plan_for_checks = self._plan
+        current_thresholds = self._current_threshold_settings()
+        if plan_input and not self._thresholds_match(
+            getattr(plan_input, "threshold_settings", None),
+            current_thresholds,
+        ):
+            messagebox.showwarning(
+                "Thresholds Changed",
+                "Threshold settings changed since the last scan. Regenerate the preview or scan before executing.",
+            )
+            self._log_action("Execute blocked: threshold settings changed since last scan.")
+            return
         if preview_plan_path and os.path.exists(preview_plan_path):
             if not self.preview_json_path:
                 self.preview_json_path = preview_plan_path
@@ -2186,8 +2220,22 @@ class DuplicateFinderShell(tk.Toplevel):
                 plan_for_checks = self._load_preview_plan(preview_plan_path)
                 if plan_for_checks:
                     self._plan = plan_for_checks
-            plan_input = preview_plan_path
-            self._log_action(f"Using preview output for execution: {preview_plan_path}")
+            if plan_for_checks and not self._thresholds_match(
+                getattr(plan_for_checks, "threshold_settings", None),
+                current_thresholds,
+            ):
+                messagebox.showwarning(
+                    "Thresholds Changed",
+                    "Threshold settings changed since the preview was generated. "
+                    "Generate a new preview to execute with the latest thresholds.",
+                )
+                self._log_action("Execute blocked: preview thresholds do not match current settings.")
+                return
+            if plan_input:
+                self._log_action("Using in-memory plan for execution.")
+            else:
+                plan_input = preview_plan_path
+                self._log_action(f"Using preview output for execution: {preview_plan_path}")
 
         if not plan_input:
             messagebox.showwarning("Preview Required", "Generate a preview before executing.")
