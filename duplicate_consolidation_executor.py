@@ -1382,6 +1382,7 @@ def execute_consolidation_plan(
                 "}",
                 "summary.group-summary::-webkit-details-marker{ display:none; }",
                 ".album-art{",
+                "display: inline-block;",
                 "width: 42px;",
                 "height: 42px;",
                 "grid-column: 1;",
