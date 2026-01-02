@@ -4,6 +4,7 @@ import sys
 import logging
 import webbrowser
 import re
+import html
 from pathlib import Path
 
 if sys.platform == "win32":
@@ -44,9 +45,11 @@ from music_indexer_api import (
 )
 from duplicate_consolidation import (
     build_consolidation_plan,
+    build_duplicate_pair_report,
     consolidation_plan_from_dict,
     export_consolidation_preview,
     export_consolidation_preview_html,
+    export_duplicate_pair_report_html,
     LOSSLESS_EXTS,
 )
 from duplicate_consolidation_executor import ExecutionConfig, execute_consolidation_plan
@@ -2547,6 +2550,11 @@ class SimilarityInspectorDialog(tk.Toplevel):
         controls = ttk.Frame(container)
         controls.pack(fill="x", pady=(0, 8))
         ttk.Button(controls, text="Run", command=self._run_inspection).pack(side="left")
+        ttk.Button(
+            controls,
+            text="Duplicate Finder Report",
+            command=self._run_duplicate_finder_report,
+        ).pack(side="left", padx=(6, 0))
         ttk.Button(controls, text="Close", command=self.destroy).pack(side="left", padx=(6, 0))
 
         self.advanced_visible = False
@@ -2669,6 +2677,22 @@ class SimilarityInspectorDialog(tk.Toplevel):
             "trim_silence": bool(self.trim_silence_var.get()),
         }
 
+    def _threshold_settings_snapshot(self, settings: dict[str, float | int | bool]) -> dict[str, float]:
+        return {
+            "exact_duplicate_threshold": float(settings["exact_duplicate_threshold"]),
+            "near_duplicate_threshold": float(settings["near_duplicate_threshold"]),
+            "mixed_codec_threshold_boost": float(settings["mixed_codec_threshold_boost"]),
+        }
+
+    def _fingerprint_settings_snapshot(self, settings: dict[str, float | int | bool]) -> dict[str, object]:
+        return {
+            "trim_silence": bool(settings["trim_silence"]),
+            "fingerprint_offset_ms": int(settings["fingerprint_offset_ms"]),
+            "fingerprint_duration_ms": int(settings["fingerprint_duration_ms"]),
+            "fingerprint_silence_threshold_db": float(settings["fingerprint_silence_threshold_db"]),
+            "fingerprint_silence_min_len_ms": int(settings["fingerprint_silence_min_len_ms"]),
+        }
+
     def _is_lossless(self, path: str) -> bool:
         ext = os.path.splitext(path)[1].lower()
         return ext in LOSSLESS_EXTS
@@ -2738,6 +2762,102 @@ class SimilarityInspectorDialog(tk.Toplevel):
         codec = summary.get("codec") or "n/a"
         return f"Codec: {codec} | Sample rate: {sample_rate} Hz | Channels: {channels} | Duration: {duration}"
 
+    def _export_similarity_inspector_html(
+        self,
+        *,
+        report_path: str,
+        summary_a: dict[str, object],
+        summary_b: dict[str, object],
+        settings: dict[str, float | int | bool],
+        exact_threshold: float,
+        near_threshold: float,
+        mixed_boost: float,
+        mixed_codec: bool,
+        effective_near: float,
+        distance: float,
+        verdict: str,
+        off_by: float | None,
+        err_a: str | None,
+        err_b: str | None,
+    ) -> None:
+        def esc(value: object) -> str:
+            return html.escape(str(value))
+
+        html_lines = [
+            "<!doctype html>",
+            "<html lang='en'>",
+            "<head>",
+            "<meta charset='utf-8' />",
+            "<title>Similarity Inspector Report</title>",
+            "<style>",
+            "body{font-family:Arial, sans-serif; margin:24px; color:#222;}",
+            "h1{font-size:20px; margin-bottom:6px;}",
+            "h2{font-size:16px; margin-top:24px;}",
+            "table{border-collapse:collapse; width:100%; margin-top:8px;}",
+            "th,td{border:1px solid #ddd; padding:8px; text-align:left; vertical-align:top;}",
+            "th{background:#f4f4f4; width:200px;}",
+            ".path{font-family:monospace; word-break:break-all;}",
+            ".meta{color:#555; font-size:12px; margin-top:4px;}",
+            ".muted{color:#666; font-size:12px;}",
+            "</style>",
+            "</head>",
+            "<body>",
+            "<h1>Similarity Inspector Report</h1>",
+            f"<div class='muted'>Generated: {esc(datetime.now().strftime('%Y-%m-%d %H:%M:%S'))}</div>",
+            "<h2>Verdict</h2>",
+            "<table>",
+            f"<tr><th>Verdict</th><td>{esc(verdict)}</td></tr>",
+            f"<tr><th>Raw fingerprint distance</th><td>{esc(f'{distance:.4f}')}</td></tr>",
+            f"<tr><th>Effective near threshold</th><td>{esc(f'{effective_near:.4f}')}</td></tr>",
+            "</table>",
+            "<h2>Tracks</h2>",
+            "<table>",
+            "<tr><th>Song A</th><td>",
+            f"<div class='path'>{esc(summary_a.get('path'))}</div>",
+            f"<div class='meta'>{esc(self._format_summary_line(summary_a))}</div>",
+            "</td></tr>",
+            "<tr><th>Song B</th><td>",
+            f"<div class='path'>{esc(summary_b.get('path'))}</div>",
+            f"<div class='meta'>{esc(self._format_summary_line(summary_b))}</div>",
+            "</td></tr>",
+            "</table>",
+            "<h2>Fingerprint Settings</h2>",
+            "<table>",
+            f"<tr><th>Trim silence</th><td>{esc(settings['trim_silence'])}</td></tr>",
+            f"<tr><th>Fingerprint offset (ms)</th><td>{esc(settings['fingerprint_offset_ms'])}</td></tr>",
+            f"<tr><th>Fingerprint duration (ms)</th><td>{esc(settings['fingerprint_duration_ms'])}</td></tr>",
+            f"<tr><th>Silence threshold (dB)</th><td>{esc(settings['fingerprint_silence_threshold_db'])}</td></tr>",
+            f"<tr><th>Silence min length (ms)</th><td>{esc(settings['fingerprint_silence_min_len_ms'])}</td></tr>",
+            "</table>",
+            "<h2>Thresholds</h2>",
+            "<table>",
+            f"<tr><th>Exact threshold</th><td>{esc(f'{exact_threshold:.4f}')}</td></tr>",
+            f"<tr><th>Near threshold</th><td>{esc(f'{near_threshold:.4f}')}</td></tr>",
+            f"<tr><th>Mixed-codec boost</th><td>{esc(f'{mixed_boost:.4f}')}</td></tr>",
+            f"<tr><th>Mixed-codec applied</th><td>{esc('Yes' if mixed_codec else 'No')}</td></tr>",
+            "</table>",
+        ]
+        if off_by is not None:
+            html_lines.extend(
+                [
+                    "<h2>Distance Gap</h2>",
+                    "<table>",
+                    f"<tr><th>How far off</th><td>{esc(f'{off_by:.4f}')}</td></tr>",
+                    "</table>",
+                ]
+            )
+        if err_a or err_b:
+            html_lines.extend(["<h2>Fingerprint Errors</h2>", "<table>"])
+            if err_a:
+                html_lines.append(f"<tr><th>Song A</th><td>{esc(err_a)}</td></tr>")
+            if err_b:
+                html_lines.append(f"<tr><th>Song B</th><td>{esc(err_b)}</td></tr>")
+            html_lines.append("</table>")
+        html_lines.extend(["</body>", "</html>"])
+
+        with open(report_path, "w", encoding="utf-8") as handle:
+            handle.write("\n".join(html_lines))
+
     def _set_results(self, text: str) -> None:
         self.results_text.configure(state="normal")
         self.results_text.delete("1.0", "end")
@@ -2796,33 +2916,36 @@ class SimilarityInspectorDialog(tk.Toplevel):
         summary_a = self._audio_summary(path_a)
         summary_b = self._audio_summary(path_b)
 
+        docs_dir = os.path.join(library_root, "Docs")
+        os.makedirs(docs_dir, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        report_path = os.path.join(docs_dir, f"similarity_inspector_report_{timestamp}.html")
+        try:
+            self._export_similarity_inspector_html(
+                report_path=report_path,
+                summary_a=summary_a,
+                summary_b=summary_b,
+                settings=settings,
+                exact_threshold=exact_threshold,
+                near_threshold=near_threshold,
+                mixed_boost=mixed_boost,
+                mixed_codec=mixed_codec,
+                effective_near=effective_near,
+                distance=distance,
+                verdict=verdict,
+                off_by=off_by,
+                err_a=err_a,
+                err_b=err_b,
+            )
+        except OSError as exc:
+            messagebox.showwarning("Report Save Failed", f"Could not save report:\n{exc}")
+
         report_lines = [
             "Similarity Inspector Report",
             f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
             "",
-            "Song A:",
-            f"  Path: {path_a}",
-            f"  {self._format_summary_line(summary_a)}",
-            "Song B:",
-            f"  Path: {path_b}",
-            f"  {self._format_summary_line(summary_b)}",
-            "",
-            "Fingerprint Settings:",
-            f"  Trim silence: {settings['trim_silence']}",
-            f"  Fingerprint offset (ms): {settings['fingerprint_offset_ms']}",
-            f"  Fingerprint duration (ms): {settings['fingerprint_duration_ms']}",
-            f"  Silence threshold (dB): {settings['fingerprint_silence_threshold_db']}",
-            f"  Silence min length (ms): {settings['fingerprint_silence_min_len_ms']}",
-            "",
-            "Thresholds:",
-            f"  Exact threshold: {exact_threshold:.4f}",
-            f"  Near threshold: {near_threshold:.4f}",
-            f"  Mixed-codec boost: {mixed_boost:.4f}",
-            f"  Mixed-codec adjustment applied: {'Yes' if mixed_codec else 'No'}",
-            f"  Effective near threshold: {effective_near:.4f}",
-            "",
-            f"Raw fingerprint distance: {distance:.4f}",
             f"Verdict: {verdict}",
+            f"Raw fingerprint distance: {distance:.4f}",
         ]
         if off_by is not None:
             report_lines.append(f"How far off: {off_by:.4f} above the effective near threshold")
@@ -2833,21 +2956,82 @@ class SimilarityInspectorDialog(tk.Toplevel):
                 report_lines.append(f"  Song A: {err_a}")
             if err_b:
                 report_lines.append(f"  Song B: {err_b}")
+        report_lines.append("")
+        report_lines.append(f"Saved HTML report: {report_path}")
+        self._set_results("\n".join(report_lines))
 
-        report_text = "\n".join(report_lines)
+    def _run_duplicate_finder_report(self) -> None:
+        path_a = self.song_a_var.get().strip()
+        path_b = self.song_b_var.get().strip()
+        if not path_a or not path_b:
+            messagebox.showwarning("Missing Files", "Please select both Song A and Song B.")
+            return
+        for path in (path_a, path_b):
+            if not os.path.isfile(path):
+                messagebox.showwarning("Invalid File", f"File not found:\n{path}")
+                return
+            if os.path.splitext(path)[1].lower() not in SUPPORTED_EXTS:
+                messagebox.showwarning("Unsupported File", f"Unsupported audio file:\n{path}")
+                return
+
+        library_root = None
+        if hasattr(self.parent, "require_library"):
+            library_root = self.parent.require_library()
+        if not library_root:
+            return
+
+        settings = self._collect_settings()
+        if settings is None:
+            return
+
+        fp_a, err_a = self._fingerprint_for_path(path_a, settings)
+        fp_b, err_b = self._fingerprint_for_path(path_b, settings)
+
+        report = build_duplicate_pair_report(
+            {"path": path_a, "fingerprint": fp_a, "ext": os.path.splitext(path_a)[1].lower()},
+            {"path": path_b, "fingerprint": fp_b, "ext": os.path.splitext(path_b)[1].lower()},
+            exact_duplicate_threshold=float(settings["exact_duplicate_threshold"]),
+            near_duplicate_threshold=float(settings["near_duplicate_threshold"]),
+            mixed_codec_threshold_boost=float(settings["mixed_codec_threshold_boost"]),
+            fingerprint_settings=self._fingerprint_settings_snapshot(settings),
+            threshold_settings=self._threshold_settings_snapshot(settings),
+        )
 
         docs_dir = os.path.join(library_root, "Docs")
         os.makedirs(docs_dir, exist_ok=True)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        report_path = os.path.join(docs_dir, f"similarity_inspector_report_{timestamp}.txt")
+        report_path = os.path.join(docs_dir, f"duplicate_pair_report_{timestamp}.html")
         try:
-            with open(report_path, "w", encoding="utf-8") as handle:
-                handle.write(report_text)
+            export_duplicate_pair_report_html(report, report_path)
         except OSError as exc:
             messagebox.showwarning("Report Save Failed", f"Could not save report:\n{exc}")
+            report_path = None
 
-        report_text = f"{report_text}\n\nSaved report: {report_path}"
-        self._set_results(report_text)
+        report_lines = [
+            "Duplicate Finder Pair Report",
+            f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+            "",
+            f"Verdict: {report.verdict}",
+            f"Match type: {report.match_type}",
+        ]
+        if report.fingerprint_distance is not None:
+            report_lines.append(f"Fingerprint distance: {report.fingerprint_distance:.4f}")
+        report_lines.append("")
+        report_lines.append("Gate Checks:")
+        for step in report.steps:
+            report_lines.append(f"  - {step.name}: {step.status} ({step.detail})")
+        if err_a or err_b:
+            report_lines.append("")
+            report_lines.append("Fingerprint Errors:")
+            if err_a:
+                report_lines.append(f"  Song A: {err_a}")
+            if err_b:
+                report_lines.append(f"  Song B: {err_b}")
+        if report_path:
+            report_lines.append("")
+            report_lines.append(f"Saved HTML report: {report_path}")
+
+        self._set_results("\n".join(report_lines))
 
 
 class SoundVaultImporterApp(tk.Tk):
