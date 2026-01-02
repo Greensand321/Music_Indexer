@@ -67,6 +67,7 @@ python main_gui.py
 10. **Cross-Album Scan** optionally finds duplicates appearing on multiple albums
 11. Use the **Theme** dropdown and **Help** tab for assistance
 12. Launch the **Duplicate Finder** tab to open the updated shell for spotting duplicates
+13. Use **Tools → Similarity Inspector** to compare two files and see fingerprint distance details
 
 ### Playlist generator feedback
 
@@ -137,6 +138,37 @@ Testing the connection or saving will persist your selections for future runs.
 
 MusicBrainz requests require a valid User-Agent string containing your
 application name, version and contact email.
+
+## Duplicate Finder (Redesigned)
+
+The Duplicate Finder has been rebuilt into a review-first workflow that makes it
+easy to preview and execute deduplication safely.
+
+- **Scan Library** builds a fingerprint plan and summarizes duplicate groups.
+- **Preview** writes `Docs/duplicate_preview.json` and
+  `Docs/duplicate_preview.html` so you can review every group before changes.
+- **Execute** applies the plan, writes a detailed HTML report under
+  `Docs/duplicate_execution_reports/`, and updates playlists when enabled.
+- **Group dispositions** let you retain, quarantine, or delete losers per group
+  while keeping global defaults for everything else.
+- **Review-required groups** block execution until resolved or overridden.
+- **Thresholds** controls let you tune exact/near matching as well as
+  fingerprint windowing and silence trimming for tough cases.
+
+Duplicates are quarantined into `Quarantine/` by default; you can switch to
+retain-in-place or delete (with confirmation) from the main controls.
+
+## Similarity Inspector
+
+The Similarity Inspector is a targeted tool for understanding why two tracks
+match (or do not match) during duplicate detection.
+
+- Launch from **Tools → Similarity Inspector…**.
+- Select two files, optionally override fingerprint offsets, trimming, and
+  thresholds, then run the inspection.
+- The report shows codec, duration, raw fingerprint distance, the effective
+  near-duplicate threshold (including mixed-codec adjustments), and the verdict.
+- Every run writes a timestamped report to `Docs/` inside the selected library.
 
 ## File Overview
 

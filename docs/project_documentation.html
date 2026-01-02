@@ -122,6 +122,28 @@ def run_full_indexer(root_path, output_html_path, dry_run_only=False, log_callba
 
 <hr>
 
+<h3>2.2 Duplicate Finder (Redesigned)</h3>
+<p>A review-first duplicate consolidation workflow launched from the <strong>Duplicate Finder</strong> tab:</p>
+<ul>
+  <li>Scans the library, fingerprints tracks, and groups exact/near duplicates using configurable thresholds.</li>
+  <li>Generates preview artifacts (<code>Docs/duplicate_preview.json</code> and <code>Docs/duplicate_preview.html</code>) so users can inspect every group before execution.</li>
+  <li>Allows per-group dispositions (retain, quarantine, delete) while keeping a global default for most groups.</li>
+  <li>Supports playlist rewrites during execution, with all changes logged in <code>Docs/duplicate_execution_reports/</code>.</li>
+  <li>Blocks execution when review-required groups are present unless the override is explicitly enabled.</li>
+  <li>Exposes threshold tuning for fingerprint offsets, durations, silence trimming, and mixed-codec matching.</li>
+</ul>
+
+<h3>2.3 Similarity Inspector</h3>
+<p>Diagnostic tool under <strong>Tools → Similarity Inspector…</strong> for analyzing two audio files with the Duplicate Finder fingerprint pipeline:</p>
+<ul>
+  <li>Compares two selected tracks and reports codec metadata, raw fingerprint distance, and match verdicts.</li>
+  <li>Allows advanced overrides for fingerprint windows, silence trimming, and duplicate thresholds.</li>
+  <li>Applies mixed-codec threshold boosts to explain borderline comparisons.</li>
+  <li>Writes timestamped text reports to <code>Docs/</code> in the selected library.</li>
+</ul>
+
+<hr>
+
 <h3>2.5 Library Sync Review Tool (<code>library_sync.py</code>)</h3>
 <p>Comparison-first workflow that aligns to the redesign in <code>docs/library_sync_redesign.md</code>:</p>
 <ul>
