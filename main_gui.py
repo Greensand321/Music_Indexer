@@ -112,6 +112,7 @@ from playlist_engine import bucket_by_tempo_energy, autodj_playlist
 from controllers.cluster_controller import gather_tracks
 from playlist_generator import write_playlist
 from utils.path_helpers import ensure_long_path, strip_ext_prefix
+from utils.audio_metadata_reader import read_metadata
 
 FilterFn = Callable[[FileRecord], bool]
 _cached_filters = None
@@ -5098,19 +5099,9 @@ class SoundVaultImporterApp(tk.Tk):
         img = None
         if path:
             try:
-                audio = MutagenFile(path)
-                img_data = None
-                if hasattr(audio, "tags") and audio.tags is not None:
-                    for key in audio.tags.keys():
-                        if str(key).startswith("APIC"):
-                            img_data = audio.tags[key].data
-                            break
-                if img_data is None and getattr(audio, "pictures", None):
-                    pics = getattr(audio, "pictures", [])
-                    if pics:
-                        img_data = pics[0].data
-                if img_data:
-                    img = Image.open(BytesIO(img_data))
+                _tags, cover_payloads, _error, _reader = read_metadata(path, include_cover=True)
+                if cover_payloads:
+                    img = Image.open(BytesIO(cover_payloads[0]))
             except Exception:
                 img = None
             if img is None:

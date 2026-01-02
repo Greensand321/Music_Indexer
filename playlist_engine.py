@@ -48,6 +48,7 @@ else:  # pragma: no cover - optional dependency
 
 from playlist_generator import write_playlist, DEFAULT_EXTS
 from indexer_control import IndexCancelled
+from utils.audio_metadata_reader import read_tags
 
 
 def categorize_tempo(bpm: float) -> str:
@@ -230,19 +231,14 @@ def _split_genres(genres: Iterable[str]) -> list[str]:
 
 
 def extract_genres(path: str) -> list[str]:
-    ext = os.path.splitext(path)[1].lower()
-    tags: list[str] = []
-    if ext == ".mp3":
-        audio = EasyID3(path)
-        tags = [t for t in audio.get("genre", []) if isinstance(t, str)]
-    elif ext == ".flac":
-        audio = FLAC(path)
-        tags = [t for t in audio.get("genre", []) if isinstance(t, str)]
+    raw = read_tags(path).get("genre")
+    if raw in (None, ""):
+        return []
+    if isinstance(raw, (list, tuple)):
+        values = [str(v) for v in raw if isinstance(v, str)]
     else:
-        audio = MutagenFile(path, easy=True)
-        if audio and audio.tags:
-            tags = [t for t in audio.tags.get("genre", []) if isinstance(t, str)]
-    return _split_genres(tags)
+        values = [str(raw)]
+    return _split_genres(values)
 
 
 def _sanitize_genre(genre: str, used: set[str]) -> str:

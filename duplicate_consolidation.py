@@ -25,6 +25,7 @@ from typing import Callable, Dict, Iterable, List, Mapping, MutableMapping, Opti
 from collections import defaultdict
 
 from utils.path_helpers import ensure_long_path
+from utils.audio_metadata_reader import read_metadata
 try:
     _MUTAGEN_AVAILABLE = importlib.util.find_spec("mutagen") is not None
 except ValueError:  # pragma: no cover - defensive: broken mutagen installs
@@ -561,17 +562,35 @@ def _extract_audio_properties(audio, path: str, provided_tags: Mapping[str, obje
 
 def _read_tags_and_artwork(path: str, provided_tags: Mapping[str, object] | None) -> tuple[Dict[str, object], List[ArtworkCandidate], Optional[str], Optional[str], Dict[str, object]]:
     audio, error = _read_audio_file(path)
-    file_tags = _normalize_tags_from_audio(audio)
-    base = dict(file_tags)
+    file_tags, cover_payloads, read_error, _reader = read_metadata(path, include_cover=True)
+    base = _merge_tags(_blank_tags(), file_tags)
     fallback = provided_tags or {}
     for key, val in (fallback or {}).items():
         if key in base and base[key] not in (None, "", []):
             continue
         base[key] = val
-    artwork, art_error = _extract_artwork_from_audio(audio, path)
-    if artwork:
+    if read_error and error is None:
+        error = read_error
+    artwork: List[ArtworkCandidate] = []
+    art_error: Optional[str] = None
+    if cover_payloads:
+        for payload in cover_payloads:
+            width, height = _extract_image_dimensions(payload)
+            artwork.append(
+                ArtworkCandidate(
+                    path=path,
+                    hash=hashlib.sha256(payload).hexdigest(),
+                    size=len(payload),
+                    width=width,
+                    height=height,
+                    status="ok",
+                    bytes=payload,
+                )
+            )
         base["cover_hash"] = artwork[0].hash
         base["artwork_hash"] = artwork[0].hash
+    else:
+        art_error = "no artwork found"
     audio_props = _extract_audio_properties(audio, path, provided_tags or {}, os.path.splitext(path)[1])
     return base, artwork, error, art_error, audio_props
 
