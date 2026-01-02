@@ -22,14 +22,10 @@ def _verify_dependencies() -> None:
         )
 try:
     from mutagen import File as MutagenFile
-    from mutagen.id3 import ID3NoHeaderError
 except Exception:  # pragma: no cover - optional dependency
     def MutagenFile(*_a, **_k):
         return None
-
-    class ID3NoHeaderError(Exception):
-        """Fallback error when Mutagen is unavailable."""
-        pass
+from utils.audio_metadata_reader import read_metadata, read_tags
 from indexer_control import check_cancelled
 
 # ─── CONFIGURATION ─────────────────────────────────────────────────────
@@ -158,41 +154,24 @@ def get_tags(path: str):
     Read basic tags using Mutagen (artist, title, album, year, track, genre, part_of_set).
     Return a dict with those fields (or None if missing).
     """
-    try:
-        audio = MutagenFile(path, easy=True)
-        if not audio or not audio.tags:
-            return {"artist": None, "title": None, "album": None,
-                    "year": None, "track": None, "genre": None,
-                    "part_of_set": None}
-        tags = audio.tags
-        artist = tags.get("artist", [None])[0]
-        title  = tags.get("title",  [None])[0]
-        album  = tags.get("album",  [None])[0]
-        raw_date = tags.get("date", [None])[0] or tags.get("year", [None])[0]
-        year = raw_date[:4] if raw_date else None
-        raw_track = tags.get("tracknumber", [None])[0] or tags.get("track", [None])[0]
-        track = None
-        if raw_track:
-            try:
-                track = int(raw_track.split("/")[0])
-            except Exception:
-                track = None
-        genre = tags.get("genre", [None])[0]
-        raw_part_of_set = (
-            tags.get("partofset", [None])[0]
-            or tags.get("part_of_set", [None])[0]
-            or tags.get("part of set", [None])[0]
-            or tags.get("discnumber", [None])[0]
-            or tags.get("disc", [None])[0]
-        )
-        part_of_set = _normalize_part_of_set(raw_part_of_set)
-        return {"artist": artist, "title": title, "album": album,
-                "year": year, "track": track, "genre": genre,
-                "part_of_set": part_of_set}
-    except Exception:
-        return {"artist": None, "title": None, "album": None,
-                "year": None, "track": None, "genre": None,
-                "part_of_set": None}
+    tags = read_tags(path)
+    artist = tags.get("artist")
+    title = tags.get("title")
+    album = tags.get("album")
+    year = tags.get("year")
+    track = tags.get("track")
+    genre = tags.get("genre")
+    raw_part_of_set = tags.get("discnumber") or tags.get("disc")
+    part_of_set = _normalize_part_of_set(raw_part_of_set)
+    return {
+        "artist": artist,
+        "title": title,
+        "album": album,
+        "year": year,
+        "track": track,
+        "genre": genre,
+        "part_of_set": part_of_set,
+    }
 
 def extract_primary_and_collabs(raw_artist: str):
     """
@@ -580,26 +559,15 @@ def compute_moves_and_tag_index(
 
         # 4) EXTRACT EMBEDDED COVER DATA → compute SHA-1 and store first 10 hex digits
         cover_hash = None
+        cover_payloads = []
         try:
-            audio_file = MutagenFile(fullpath)
-            img_data = None
-            if hasattr(audio_file, "tags") and audio_file.tags is not None:
-                for key in audio_file.tags.keys():
-                    if key.startswith("APIC"):
-                        img_data = audio_file.tags[key].data
-                        break
-            if img_data is None and audio_file.__class__.__name__ == "FLAC":
-                pics = audio_file.pictures
-                if pics:
-                    img_data = pics[0].data
-            if img_data:
-                sha1 = hashlib.sha1(img_data).hexdigest()
-                cover_hash = sha1[:10]
-                cover_counts[cover_hash] += 1
-        except ID3NoHeaderError:
-            pass
+            _tags, cover_payloads, _error, _reader = read_metadata(fullpath, include_cover=True)
         except Exception:
-            pass
+            cover_payloads = []
+        if cover_payloads:
+            sha1 = hashlib.sha1(cover_payloads[0]).hexdigest()
+            cover_hash = sha1[:10]
+            cover_counts[cover_hash] += 1
 
         folder_tags = derive_tags_from_path(fullpath, MUSIC_ROOT)
 
