@@ -44,9 +44,11 @@ from music_indexer_api import (
 )
 from duplicate_consolidation import (
     build_consolidation_plan,
+    build_duplicate_pair_report,
     consolidation_plan_from_dict,
     export_consolidation_preview,
     export_consolidation_preview_html,
+    export_duplicate_pair_report_html,
     LOSSLESS_EXTS,
 )
 from duplicate_consolidation_executor import ExecutionConfig, execute_consolidation_plan
@@ -2547,6 +2549,11 @@ class SimilarityInspectorDialog(tk.Toplevel):
         controls = ttk.Frame(container)
         controls.pack(fill="x", pady=(0, 8))
         ttk.Button(controls, text="Run", command=self._run_inspection).pack(side="left")
+        ttk.Button(
+            controls,
+            text="Duplicate Finder Report",
+            command=self._run_duplicate_finder_report,
+        ).pack(side="left", padx=(6, 0))
         ttk.Button(controls, text="Close", command=self.destroy).pack(side="left", padx=(6, 0))
 
         self.advanced_visible = False
@@ -2667,6 +2674,22 @@ class SimilarityInspectorDialog(tk.Toplevel):
             "fingerprint_silence_threshold_db": silence_db,
             "fingerprint_silence_min_len_ms": silence_len,
             "trim_silence": bool(self.trim_silence_var.get()),
+        }
+
+    def _threshold_settings_snapshot(self, settings: dict[str, float | int | bool]) -> dict[str, float]:
+        return {
+            "exact_duplicate_threshold": float(settings["exact_duplicate_threshold"]),
+            "near_duplicate_threshold": float(settings["near_duplicate_threshold"]),
+            "mixed_codec_threshold_boost": float(settings["mixed_codec_threshold_boost"]),
+        }
+
+    def _fingerprint_settings_snapshot(self, settings: dict[str, float | int | bool]) -> dict[str, object]:
+        return {
+            "trim_silence": bool(settings["trim_silence"]),
+            "fingerprint_offset_ms": int(settings["fingerprint_offset_ms"]),
+            "fingerprint_duration_ms": int(settings["fingerprint_duration_ms"]),
+            "fingerprint_silence_threshold_db": float(settings["fingerprint_silence_threshold_db"]),
+            "fingerprint_silence_min_len_ms": int(settings["fingerprint_silence_min_len_ms"]),
         }
 
     def _is_lossless(self, path: str) -> bool:
@@ -2848,6 +2871,79 @@ class SimilarityInspectorDialog(tk.Toplevel):
 
         report_text = f"{report_text}\n\nSaved report: {report_path}"
         self._set_results(report_text)
+
+    def _run_duplicate_finder_report(self) -> None:
+        path_a = self.song_a_var.get().strip()
+        path_b = self.song_b_var.get().strip()
+        if not path_a or not path_b:
+            messagebox.showwarning("Missing Files", "Please select both Song A and Song B.")
+            return
+        for path in (path_a, path_b):
+            if not os.path.isfile(path):
+                messagebox.showwarning("Invalid File", f"File not found:\n{path}")
+                return
+            if os.path.splitext(path)[1].lower() not in SUPPORTED_EXTS:
+                messagebox.showwarning("Unsupported File", f"Unsupported audio file:\n{path}")
+                return
+
+        library_root = None
+        if hasattr(self.parent, "require_library"):
+            library_root = self.parent.require_library()
+        if not library_root:
+            return
+
+        settings = self._collect_settings()
+        if settings is None:
+            return
+
+        fp_a, err_a = self._fingerprint_for_path(path_a, settings)
+        fp_b, err_b = self._fingerprint_for_path(path_b, settings)
+
+        report = build_duplicate_pair_report(
+            {"path": path_a, "fingerprint": fp_a, "ext": os.path.splitext(path_a)[1].lower()},
+            {"path": path_b, "fingerprint": fp_b, "ext": os.path.splitext(path_b)[1].lower()},
+            exact_duplicate_threshold=float(settings["exact_duplicate_threshold"]),
+            near_duplicate_threshold=float(settings["near_duplicate_threshold"]),
+            mixed_codec_threshold_boost=float(settings["mixed_codec_threshold_boost"]),
+            fingerprint_settings=self._fingerprint_settings_snapshot(settings),
+            threshold_settings=self._threshold_settings_snapshot(settings),
+        )
+
+        docs_dir = os.path.join(library_root, "Docs")
+        os.makedirs(docs_dir, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        report_path = os.path.join(docs_dir, f"duplicate_pair_report_{timestamp}.html")
+        try:
+            export_duplicate_pair_report_html(report, report_path)
+        except OSError as exc:
+            messagebox.showwarning("Report Save Failed", f"Could not save report:\n{exc}")
+            report_path = None
+
+        report_lines = [
+            "Duplicate Finder Pair Report",
+            f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+            "",
+            f"Verdict: {report.verdict}",
+            f"Match type: {report.match_type}",
+        ]
+        if report.fingerprint_distance is not None:
+            report_lines.append(f"Fingerprint distance: {report.fingerprint_distance:.4f}")
+        report_lines.append("")
+        report_lines.append("Gate Checks:")
+        for step in report.steps:
+            report_lines.append(f"  - {step.name}: {step.status} ({step.detail})")
+        if err_a or err_b:
+            report_lines.append("")
+            report_lines.append("Fingerprint Errors:")
+            if err_a:
+                report_lines.append(f"  Song A: {err_a}")
+            if err_b:
+                report_lines.append(f"  Song B: {err_b}")
+        if report_path:
+            report_lines.append("")
+            report_lines.append(f"Saved HTML report: {report_path}")
+
+        self._set_results("\n".join(report_lines))
 
 
 class SoundVaultImporterApp(tk.Tk):
