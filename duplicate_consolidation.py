@@ -2271,7 +2271,7 @@ def export_duplicate_pair_report_html(report: DuplicatePairReport, output_html_p
             [
                 "<tr>",
                 f"<td>{esc(step.name)}</td>",
-                f\"<td><span class='badge {css}'>{esc(step.status)}</span></td>\",
+                f"<td><span class='badge {css}'>{esc(step.status)}</span></td>",
                 f"<td>{esc(step.detail)}</td>",
                 "</tr>",
             ]
@@ -2282,10 +2282,10 @@ def export_duplicate_pair_report_html(report: DuplicatePairReport, output_html_p
             "</table>",
             "<h2>Thresholds</h2>",
             "<table>",
-            f\"<tr><th>Exact threshold</th><td>{esc(f'{report.exact_threshold:.4f}')}</td></tr>\",
-            f\"<tr><th>Near threshold</th><td>{esc(f'{report.near_threshold:.4f}')}</td></tr>\",
-            f\"<tr><th>Mixed-codec boost</th><td>{esc(f'{report.mixed_codec_boost:.4f}')}</td></tr>\",
-            f\"<tr><th>Mixed-codec applied</th><td>{esc('Yes' if report.mixed_codec else 'No')}</td></tr>\",
+            f"<tr><th>Exact threshold</th><td>{esc(f'{report.exact_threshold:.4f}')}</td></tr>",
+            f"<tr><th>Near threshold</th><td>{esc(f'{report.near_threshold:.4f}')}</td></tr>",
+            f"<tr><th>Mixed-codec boost</th><td>{esc(f'{report.mixed_codec_boost:.4f}')}</td></tr>",
+            f"<tr><th>Mixed-codec applied</th><td>{esc('Yes' if report.mixed_codec else 'No')}</td></tr>",
             "</table>",
         ]
     )
