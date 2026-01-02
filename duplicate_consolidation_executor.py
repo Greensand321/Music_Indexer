@@ -444,6 +444,8 @@ def _compute_plan_signature(plan: ConsolidationPlan) -> str:
         "generated_at": plan.generated_at.isoformat(),
         "groups": [g.to_dict() for g in plan.groups],
         "snapshot": {k: dict(v) for k, v in plan.source_snapshot.items()},
+        "fingerprint_settings": dict(plan.fingerprint_settings),
+        "threshold_settings": dict(plan.threshold_settings),
     }
     text = json.dumps(canonical, sort_keys=True)
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
