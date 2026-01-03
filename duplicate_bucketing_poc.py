@@ -82,7 +82,7 @@ def _cover_mime(payload: bytes) -> str:
     return "image/jpeg"
 
 
-def _cover_data_uri(payload: bytes, max_bytes: int = 150_000) -> str | None:
+def _cover_data_uri(payload: bytes, max_bytes: int = 500_000) -> str | None:
     if not payload or len(payload) > max_bytes:
         return None
     mime = _cover_mime(payload)
@@ -102,7 +102,12 @@ def _extract_track_info(paths: Iterable[str], log_callback: Callable[[str], None
         artwork_hash = None
         if cover_payloads:
             artwork_hash = _artwork_perceptual_hash(cover_payloads[0])
-        artwork_data_uri = _cover_data_uri(cover_payloads[0]) if cover_payloads else None
+        artwork_data_uri = None
+        if cover_payloads:
+            for payload in cover_payloads:
+                artwork_data_uri = _cover_data_uri(payload)
+                if artwork_data_uri:
+                    break
         try:
             size_bytes = os.path.getsize(path)
         except OSError:
