@@ -27,8 +27,10 @@ from dataclasses import dataclass, field
 from typing import Callable, Dict, Iterable, List, Mapping, MutableMapping, Sequence
 
 from duplicate_consolidation import (
+    ARTWORK_VASTLY_DIFFERENT_THRESHOLD,
     ArtworkDirective,
     ConsolidationPlan,
+    _hamming_distance,
     _capture_library_state,
     consolidation_plan_from_dict,
 )
@@ -1201,6 +1203,78 @@ def execute_consolidation_plan(
                     return f"{detail_html}<div class='tiny muted'>{meta_html}</div>"
                 return detail_html
 
+            path_counter = 0
+
+            def _path_row(path_value: str) -> str:
+                nonlocal path_counter
+                path_counter += 1
+                el_id = f"path-{path_counter}"
+                safe = html.escape(path_value)
+                return (
+                    "<div class='path-row'>"
+                    f"<span class='path path-truncate' id='{el_id}'>{safe}</span>"
+                    f"<button class='copy tiny' data-copy-text='{safe}'>Copy</button>"
+                    f"<button class='copy tiny' data-expand='{el_id}'>Expand</button>"
+                    "</div>"
+                )
+
+            def _pairwise_stats(group) -> Dict[str, object]:
+                thresholds = getattr(group, "grouping_thresholds", {}) or {}
+                exact = float(thresholds.get("exact", 0.0))
+                near = float(thresholds.get("near", exact))
+                boost = float(thresholds.get("mixed_codec_boost", 0.0))
+                distances = getattr(group, "fingerprint_distances", {}) or {}
+                track_quality = getattr(group, "track_quality", {}) or {}
+                exact_count = 0
+                near_count = 0
+                no_match_count = 0
+                best_distance = None
+                edges: List[Dict[str, object]] = []
+                no_match_edges: List[Dict[str, object]] = []
+                seen: set[tuple[str, str]] = set()
+                for left, neighbors in distances.items():
+                    for right, dist in neighbors.items():
+                        key = tuple(sorted((left, right)))
+                        if left == right or key in seen:
+                            continue
+                        seen.add(key)
+                        left_lossless = bool(track_quality.get(left, {}).get("is_lossless"))
+                        right_lossless = bool(track_quality.get(right, {}).get("is_lossless"))
+                        effective_near = near + boost if left_lossless != right_lossless else near
+                        verdict = "no match"
+                        if dist <= exact:
+                            verdict = "exact"
+                            exact_count += 1
+                        elif dist <= effective_near:
+                            verdict = "near"
+                            near_count += 1
+                        else:
+                            no_match_count += 1
+                        if best_distance is None or dist < best_distance:
+                            best_distance = dist
+                        payload = {
+                            "left": left,
+                            "right": right,
+                            "distance": dist,
+                            "threshold": effective_near,
+                            "verdict": verdict,
+                        }
+                        if verdict == "no match":
+                            no_match_edges.append(payload)
+                        else:
+                            edges.append(payload)
+                return {
+                    "exact": exact_count,
+                    "near": near_count,
+                    "no_match": no_match_count,
+                    "best": best_distance,
+                    "edges": edges,
+                    "no_match_edges": no_match_edges,
+                    "exact_threshold": exact,
+                    "near_threshold": near,
+                    "mixed_boost": boost,
+                }
+
             def _group_type_hint(group_actions: List[ExecutionAction]) -> str:
                 if not group_actions:
                     return "unknown"
@@ -1229,6 +1303,32 @@ def execute_consolidation_plan(
                 status_class = "ok" if success else "fail"
                 emoji = "✅" if success else "❌"
                 return status, status_class, f"{emoji} {status}"
+
+            settings_entries: List[tuple[str, object]] = []
+            if plan and plan.threshold_settings:
+                settings_entries.extend(
+                    sorted(plan.threshold_settings.items(), key=lambda item: str(item[0]))
+                )
+            if plan and plan.fingerprint_settings:
+                settings_entries.extend(
+                    sorted(plan.fingerprint_settings.items(), key=lambda item: str(item[0]))
+                )
+
+            def _format_setting(value: object) -> str:
+                if isinstance(value, float):
+                    return f"{value:.3f}"
+                return str(value)
+
+            group_pair_stats = {
+                group.group_id: _pairwise_stats(group) for group in (plan.groups if plan else [])
+            }
+            total_exact = sum(stats["exact"] for stats in group_pair_stats.values())
+            total_near = sum(stats["near"] for stats in group_pair_stats.values())
+            art_threshold = float(
+                (plan.threshold_settings if plan else {}).get(
+                    "artwork_vastly_different_threshold", ARTWORK_VASTLY_DIFFERENT_THRESHOLD
+                )
+            )
 
             html_lines = [
                 "<!doctype html>",
@@ -1322,6 +1422,23 @@ def execute_consolidation_plan(
                 "font-size: 12px;",
                 "word-break: break-all;",
                 "}",
+                ".path-row{",
+                "display:flex;",
+                "flex-wrap:wrap;",
+                "gap:8px;",
+                "align-items:center;",
+                "}",
+                ".path-truncate{",
+                "overflow:hidden;",
+                "text-overflow: ellipsis;",
+                "white-space: nowrap;",
+                "max-width: 60ch;",
+                "}",
+                ".path-expanded{",
+                "white-space: normal;",
+                "word-break: break-all;",
+                "max-width: none;",
+                "}",
                 ".status{",
                 "font-weight: 600;",
                 "display:inline-flex;",
@@ -1377,7 +1494,15 @@ def execute_consolidation_plan(
                 "font-size: 12px;",
                 "cursor:pointer;",
                 "}",
+                "button.copy.tiny{",
+                "padding: 3px 7px;",
+                "font-size: 11px;",
+                "border-radius: 8px;",
+                "}",
                 "button.copy:active{ transform: translateY(1px); }",
+                ".settings-panel{",
+                "margin-top: 10px;",
+                "}",
                 "details.group{",
                 "border:1px solid var(--border);",
                 "border-radius: 10px;",
@@ -1528,6 +1653,33 @@ def execute_consolidation_plan(
                 "}",
                 ".badge.ok{ border-color: rgba(27,122,27,.25); }",
                 ".badge.fail{ border-color: rgba(163,0,0,.25); }",
+                ".badge.keep{ border-color: rgba(27,122,27,.35); background:#f2fff2; }",
+                "details.bucket{",
+                "border:1px dashed var(--border);",
+                "border-radius: 10px;",
+                "background:#fff;",
+                "padding: 10px;",
+                "}",
+                "summary.bucket-summary{",
+                "cursor:pointer;",
+                "list-style:none;",
+                "font-weight: 650;",
+                "font-size: 12px;",
+                "}",
+                "summary.bucket-summary::-webkit-details-marker{ display:none; }",
+                ".bucket-grid{",
+                "display:grid;",
+                "grid-template-columns: 150px 1fr;",
+                "gap:6px 10px;",
+                "font-size: 12px;",
+                "margin-top: 8px;",
+                "}",
+                ".edge-list{",
+                "margin: 6px 0 0 18px;",
+                "padding: 0;",
+                "font-size: 12px;",
+                "}",
+                ".edge-list li{ margin: 4px 0; }",
                 "details.quarantine{",
                 "border:1px solid var(--border);",
                 "border-radius: 10px;",
@@ -1577,6 +1729,10 @@ def execute_consolidation_plan(
                 "<button class='copy' data-copy='#reportsDir'>Copy reports dir</button>",
                 "</div>",
                 "</div>",
+                "<div class='row' style='gap:8px; margin-top:6px;'>",
+                f"<span class='pill'><strong>Exact</strong> <span id='statExact'>{total_exact}</span></span>",
+                f"<span class='pill'><strong>Near</strong> <span id='statNear'>{total_near}</span></span>",
+                "</div>",
                 "<div style='height:10px'></div>",
                 "<div class='kv'>",
                 "<div class='k'>Plan signature</div>",
@@ -1617,6 +1773,24 @@ def execute_consolidation_plan(
                 "<main id='groups'>",
             ]
 
+            if settings_entries:
+                insert_at = html_lines.index(
+                    "<button class='copy' data-copy='#reportsDir'>Copy reports dir</button>"
+                ) + 1
+                html_lines.insert(insert_at, "<button class='copy' id='toggleSettings'>Show settings</button>")
+                panel = [
+                    "<div class='card hidden settings-panel' id='settingsPanel'>",
+                    "<div class='kv'>",
+                    "<div class='k'>Active settings</div>",
+                    "<div class='v tiny muted'>Thresholds + fingerprint inputs used for this plan.</div>",
+                ]
+                for key, value in settings_entries:
+                    panel.append(f"<div class='k'>{html.escape(str(key))}</div>")
+                    panel.append(f"<div class='v tiny'>{html.escape(_format_setting(value))}</div>")
+                panel.extend(["</div>", "</div>"])
+                section_end = html_lines.index("</section>")
+                html_lines[section_end:section_end] = panel
+
             for gid in sorted([g for g in actions_by_group.keys() if g != "__general__"]):
                 grp = group_lookup.get(gid)
                 winner_path = getattr(grp, "winner_path", "Unknown winner")
@@ -1638,6 +1812,7 @@ def execute_consolidation_plan(
                 summary_line = (
                     f"Status: {state}. " + "; ".join(badges) if badges else f"Status: {state}."
                 )
+                group_paths = {winner_path, *getattr(grp, "losers", [])}
                 html_lines.append(
                     "<details class='group' "
                     f"data-group-id='{html.escape(gid)}' "
@@ -1677,6 +1852,7 @@ def execute_consolidation_plan(
                 html_lines.append("<h3>Context</h3>")
                 cleanup_actions = [act for act in group_actions if act.step == "loser_cleanup"]
                 winner_art_src = _album_art_src(grp, winner_path)
+                winner_art_hash = getattr(grp, "artwork_hashes", {}).get(winner_path)
                 html_lines.append("<div class='card-stack'>")
                 html_lines.append("<div class='card context-card' style='background:#fff;'>")
                 html_lines.append("<div class='context-card-art'>")
@@ -1687,7 +1863,7 @@ def execute_consolidation_plan(
                 html_lines.append("</div>")
                 html_lines.append("<div class='kv context-card-details'>")
                 html_lines.append("<div class='k'>Kept file (winner)</div>")
-                html_lines.append(f"<div class='v path'>{html.escape(winner_path)}</div>")
+                html_lines.append(f"<div class='v'>{_path_row(winner_path)}</div>")
                 html_lines.append("<div class='k'>Group ID</div>")
                 html_lines.append(f"<div class='v mono'>{html.escape(gid)}</div>")
                 html_lines.append("<div class='k'>Debug</div>")
@@ -1708,6 +1884,13 @@ def execute_consolidation_plan(
                         raw_disposition = loser_action.metadata.get("disposition")
                         loser_disposition = str(raw_disposition) if raw_disposition else ""
                         loser_reason = loser_action.detail or ""
+                    art_distance = None
+                    is_art_variant = False
+                    if loser_path:
+                        loser_hash = getattr(grp, "artwork_hashes", {}).get(loser_path)
+                        if winner_art_hash is not None and loser_hash is not None:
+                            art_distance = _hamming_distance(winner_art_hash, loser_hash)
+                            is_art_variant = art_distance > art_threshold
                     loser_art_src = (
                         _album_art_src(grp, loser_path, include_group_chosen=False)
                         if loser_path
@@ -1723,16 +1906,20 @@ def execute_consolidation_plan(
                     html_lines.append("<div class='kv context-card-details'>")
                     html_lines.append("<div class='k'>Loser file</div>")
                     if loser_path:
-                        html_lines.append(
-                            f"<div class='v path'>{html.escape(loser_path)}</div>"
-                        )
+                        html_lines.append(f"<div class='v'>{_path_row(loser_path)}</div>")
                     else:
                         html_lines.append("<div class='v path'>—</div>")
                     html_lines.append("<div class='k'>Disposition</div>")
                     if loser_disposition:
-                        html_lines.append(
-                            f"<div class='v'>{html.escape(loser_disposition)}</div>"
-                        )
+                        if is_art_variant:
+                            html_lines.append(
+                                "<div class='v'>Preserve (different art) "
+                                "<span class='badge keep'>different art → keep</span></div>"
+                            )
+                        else:
+                            html_lines.append(
+                                f"<div class='v'>{html.escape(loser_disposition)}</div>"
+                            )
                     else:
                         html_lines.append("<div class='v'>—</div>")
                     if loser_reason:
@@ -1740,9 +1927,112 @@ def execute_consolidation_plan(
                         html_lines.append(
                             f"<div class='v tiny muted'>{html.escape(loser_reason)}</div>"
                         )
+                    if art_distance is not None:
+                        html_lines.append("<div class='k'>Artwork distance</div>")
+                        html_lines.append(
+                            "<div class='v tiny'>"
+                            "<details class='tiny'><summary>details</summary>"
+                            f"<div class='muted'>Winner ↔ loser distance: {art_distance} "
+                            f"(threshold {art_threshold:.0f})</div>"
+                            "</details></div>"
+                        )
                     html_lines.append("</div>")
                     html_lines.append("</div>")
                 html_lines.append("</div>")
+                bucket_stats = group_pair_stats.get(gid, {})
+                bucket_diag = getattr(grp, "bucket_diagnostics", {}) or {}
+                bucket_sources = (
+                    bucket_diag.get("sources")
+                    if isinstance(bucket_diag.get("sources"), Mapping)
+                    else {}
+                )
+                bucket_size = len(bucket_sources) if bucket_sources else len(group_paths)
+                bucket_id = bucket_diag.get("bucket_id", "n/a")
+                has_metadata = bool(bucket_diag.get("metadata_seeded")) or (
+                    isinstance(bucket_sources, Mapping)
+                    and any(source == "metadata" for source in bucket_sources.values())
+                )
+                has_artwork = (
+                    isinstance(bucket_sources, Mapping)
+                    and any(source == "artwork" for source in bucket_sources.values())
+                ) or bool(bucket_diag.get("artwork_merges"))
+                if has_metadata and has_artwork:
+                    formation = "metadata + artwork"
+                elif has_metadata:
+                    formation = "metadata-seeded"
+                elif has_artwork:
+                    formation = "artwork pull-in"
+                else:
+                    formation = "fallback"
+                best_distance = bucket_stats.get("best")
+                best_distance_label = (
+                    f"{best_distance:.4f}" if isinstance(best_distance, float) else "n/a"
+                )
+                exact_count = int(bucket_stats.get("exact", 0) or 0)
+                near_count = int(bucket_stats.get("near", 0) or 0)
+                no_match_count = int(bucket_stats.get("no_match", 0) or 0)
+                edges = bucket_stats.get("edges", []) if isinstance(bucket_stats.get("edges"), list) else []
+                no_match_edges = (
+                    bucket_stats.get("no_match_edges", [])
+                    if isinstance(bucket_stats.get("no_match_edges"), list)
+                    else []
+                )
+                html_lines.append("<details class='bucket'>")
+                html_lines.append("<summary class='bucket-summary'>Bucket diagnostics</summary>")
+                html_lines.append("<div class='bucket-grid'>")
+                html_lines.append("<div class='k'>Bucket ID</div>")
+                html_lines.append(f"<div class='v mono'>{html.escape(str(bucket_id))}</div>")
+                html_lines.append("<div class='k'>Bucket size</div>")
+                html_lines.append(f"<div class='v'>{bucket_size}</div>")
+                html_lines.append("<div class='k'>Formation</div>")
+                html_lines.append(f"<div class='v'>{html.escape(formation)}</div>")
+                html_lines.append("<div class='k'>Exact / near / no-match</div>")
+                html_lines.append(f"<div class='v'>{exact_count} / {near_count} / {no_match_count}</div>")
+                html_lines.append("<div class='k'>Best distance</div>")
+                html_lines.append(f"<div class='v'>{best_distance_label}</div>")
+                html_lines.append("<div class='k'>Thresholds</div>")
+                html_lines.append(
+                    f"<div class='v tiny'>exact {bucket_stats.get('exact_threshold', 0.0):.4f} · "
+                    f"near {bucket_stats.get('near_threshold', 0.0):.4f} · "
+                    f"mixed boost +{bucket_stats.get('mixed_boost', 0.0):.4f}</div>"
+                )
+                html_lines.append("</div>")
+                html_lines.append("<div class='tiny muted' style='margin-top:6px;'>Match edges</div>")
+                if edges:
+                    html_lines.append("<ul class='edge-list'>")
+                    for edge in sorted(edges, key=lambda e: float(e.get("distance", 0.0))):
+                        left = str(edge.get("left"))
+                        right = str(edge.get("right"))
+                        distance = float(edge.get("distance", 0.0))
+                        verdict = str(edge.get("verdict"))
+                        html_lines.append(
+                            "<li>"
+                            f"{html.escape(_basename(left))} ↔ {html.escape(_basename(right))} "
+                            f"({distance:.4f}, {html.escape(verdict)})"
+                            "</li>"
+                        )
+                    html_lines.append("</ul>")
+                else:
+                    html_lines.append("<div class='tiny muted'>No exact/near edges in this group.</div>")
+                html_lines.append("<details class='tiny' style='margin-top:6px;'>")
+                html_lines.append(f"<summary>No-match edges ({len(no_match_edges)})</summary>")
+                if no_match_edges:
+                    html_lines.append("<ul class='edge-list'>")
+                    for edge in sorted(no_match_edges, key=lambda e: float(e.get("distance", 0.0))):
+                        left = str(edge.get("left"))
+                        right = str(edge.get("right"))
+                        distance = float(edge.get("distance", 0.0))
+                        html_lines.append(
+                            "<li>"
+                            f"{html.escape(_basename(left))} ↔ {html.escape(_basename(right))} "
+                            f"({distance:.4f})"
+                            "</li>"
+                        )
+                    html_lines.append("</ul>")
+                else:
+                    html_lines.append("<div class='tiny muted'>No no-match edges.</div>")
+                html_lines.append("</details>")
+                html_lines.append("</details>")
                 html_lines.append("</div>")
                 html_lines.append("<div class='section'>")
                 html_lines.append("<h3>Operations</h3>")
@@ -1918,11 +2208,12 @@ def execute_consolidation_plan(
                 "}"
                 "visibleCountEl.textContent = `${visible} visible`;"
                 "}"
-                "for (const btn of $$('button.copy[data-copy]')){"
+                "for (const btn of $$('button.copy[data-copy], button.copy[data-copy-text]')){"
                 "btn.addEventListener('click', async () => {"
+                "const explicit = btn.getAttribute('data-copy-text');"
                 "const sel = btn.getAttribute('data-copy');"
                 "const el = sel ? $(sel) : null;"
-                "const text = el ? el.textContent.trim() : '';"
+                "const text = explicit || (el ? el.textContent.trim() : '');"
                 "if (!text) return;"
                 "try{"
                 "await navigator.clipboard.writeText(text);"
@@ -1939,8 +2230,25 @@ def execute_consolidation_plan(
                 "}"
                 "});"
                 "}"
+                "for (const btn of $$('button.copy[data-expand]')){"
+                "btn.addEventListener('click', () => {"
+                "const id = btn.getAttribute('data-expand');"
+                "const el = id ? document.getElementById(id) : null;"
+                "if (!el) return;"
+                "const expanded = el.classList.toggle('path-expanded');"
+                "btn.textContent = expanded ? 'Collapse' : 'Expand';"
+                "});"
+                "}"
                 "expandAllBtn?.addEventListener('click', () => groups().forEach(d => d.open = true));"
                 "collapseAllBtn?.addEventListener('click', () => groups().forEach(d => d.open = false));"
+                "const settingsBtn = $('#toggleSettings');"
+                "const settingsPanel = $('#settingsPanel');"
+                "if (settingsBtn && settingsPanel){"
+                "settingsBtn.addEventListener('click', () => {"
+                "const hidden = settingsPanel.classList.toggle('hidden');"
+                "settingsBtn.textContent = hidden ? 'Show settings' : 'Hide settings';"
+                "});"
+                "}"
                 "searchEl?.addEventListener('input', applyFilters);"
                 "filterEl?.addEventListener('change', applyFilters);"
                 "computeStats();"
