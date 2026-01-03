@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import html
 import os
 import re
@@ -39,6 +40,9 @@ class TrackInfo:
     artist_norm: str
     album_norm: str
     artwork_hash: int | None
+    artwork_data_uri: str | None
+    size_bytes: int
+    codec: str
 
     @property
     def has_metadata(self) -> bool:
@@ -61,12 +65,29 @@ class Bucket:
     missing_album: bool = False
     sources: Dict[str, str] = field(default_factory=dict)
     artwork_merges: List[ArtworkMerge] = field(default_factory=list)
+    metadata_keys: set[tuple[str, str]] = field(default_factory=set)
 
 
 def _normalize(text: object) -> str:
     if not text:
         return ""
     return " ".join(re.findall(r"[a-z0-9]+", str(text).lower()))
+
+
+def _cover_mime(payload: bytes) -> str:
+    if payload.startswith(b"\x89PNG"):
+        return "image/png"
+    if payload.startswith(b"\xff\xd8"):
+        return "image/jpeg"
+    return "image/jpeg"
+
+
+def _cover_data_uri(payload: bytes, max_bytes: int = 150_000) -> str | None:
+    if not payload or len(payload) > max_bytes:
+        return None
+    mime = _cover_mime(payload)
+    encoded = base64.b64encode(payload).decode("ascii")
+    return f"data:{mime};base64,{encoded}"
 
 
 def _extract_track_info(paths: Iterable[str], log_callback: Callable[[str], None]) -> Dict[str, TrackInfo]:
@@ -81,12 +102,21 @@ def _extract_track_info(paths: Iterable[str], log_callback: Callable[[str], None
         artwork_hash = None
         if cover_payloads:
             artwork_hash = _artwork_perceptual_hash(cover_payloads[0])
+        artwork_data_uri = _cover_data_uri(cover_payloads[0]) if cover_payloads else None
+        try:
+            size_bytes = os.path.getsize(path)
+        except OSError:
+            size_bytes = 0
+        codec = os.path.splitext(path)[1].lstrip(".").upper() or "UNKNOWN"
         info[path] = TrackInfo(
             path=path,
             title_norm=title_norm,
             artist_norm=artist_norm,
             album_norm=album_norm,
             artwork_hash=artwork_hash,
+            artwork_data_uri=artwork_data_uri,
+            size_bytes=size_bytes,
+            codec=codec,
         )
     return info
 
@@ -124,6 +154,7 @@ def _build_metadata_buckets(track_infos: Dict[str, TrackInfo]) -> List[Bucket]:
         bucket = buckets[target_id]
         bucket.tracks.append(path)
         bucket.sources[path] = "metadata"
+        bucket.metadata_keys.add(key)
         if info.album_norm:
             bucket.albums.add(info.album_norm)
         else:
@@ -200,6 +231,7 @@ def _merge_buckets_by_artwork(
         target.metadata_seeded = root_metadata_seeded[root]
         target.albums.update(bucket.albums)
         target.missing_album = target.missing_album or bucket.missing_album
+        target.metadata_keys.update(bucket.metadata_keys)
         for path in bucket.tracks:
             target.tracks.append(path)
             source = bucket.sources.get(path, "solo")
@@ -274,27 +306,44 @@ def _is_lossless(path: str) -> bool:
     return os.path.splitext(path)[1].lower() in LOSSLESS_EXTS
 
 
-def _bucket_report(
+def _truncate_path(path: str, max_len: int = 60) -> str:
+    if len(path) <= max_len:
+        return path
+    tail = path[-(max_len - 1) :]
+    return f"…{tail}"
+
+
+def _format_size(size_bytes: int) -> str:
+    if size_bytes <= 0:
+        return "unknown"
+    for unit in ("B", "KB", "MB", "GB"):
+        if size_bytes < 1024 or unit == "GB":
+            return f"{size_bytes:.1f} {unit}" if unit != "B" else f"{size_bytes} {unit}"
+        size_bytes /= 1024
+    return f"{size_bytes:.1f} GB"
+
+
+def _bucket_comparisons(
     bucket: Bucket,
     fingerprints: Dict[str, str | None],
     exact_threshold: float,
     near_threshold: float,
     mixed_boost: float,
-) -> tuple[List[str], List[str]]:
-    track_lines = []
-    for path in bucket.tracks:
-        reason = bucket.sources.get(path, "unknown")
-        track_lines.append(f"<li><code>{html.escape(path)}</code> <em>({html.escape(reason)})</em></li>")
-
-    match_lines: List[str] = []
+) -> List[dict]:
+    comparisons: List[dict] = []
     for left, right in combinations(bucket.tracks, 2):
         fp_left = fingerprints.get(left)
         fp_right = fingerprints.get(right)
         if not fp_left or not fp_right:
-            match_lines.append(
-                "<li>"
-                f"<code>{html.escape(left)}</code> vs <code>{html.escape(right)}</code>: "
-                "missing fingerprint</li>"
+            comparisons.append(
+                {
+                    "left": left,
+                    "right": right,
+                    "distance": None,
+                    "verdict": "missing",
+                    "effective_near": None,
+                    "mixed_codec": None,
+                }
             )
             continue
         distance = fingerprint_distance(fp_left, fp_right)
@@ -306,14 +355,17 @@ def _bucket_report(
             verdict = "near"
         else:
             verdict = "no match"
-        match_lines.append(
-            "<li>"
-            f"<code>{html.escape(left)}</code> vs <code>{html.escape(right)}</code>: "
-            f"distance={distance:.4f}, verdict={verdict}, "
-            f"near_threshold={effective_near:.4f}"
-            "</li>"
+        comparisons.append(
+            {
+                "left": left,
+                "right": right,
+                "distance": distance,
+                "verdict": verdict,
+                "effective_near": effective_near,
+                "mixed_codec": mixed_codec,
+            }
         )
-    return track_lines, match_lines
+    return comparisons
 
 
 def run_duplicate_bucketing_poc(
@@ -354,6 +406,37 @@ def run_duplicate_bucketing_poc(
     def esc(value: object) -> str:
         return html.escape(str(value))
 
+    def bucket_actionability(exact_count: int, near_count: int) -> int:
+        return exact_count * 3 + near_count * 2
+
+    bucket_payloads: List[dict] = []
+    for bucket in buckets:
+        comparisons = _bucket_comparisons(bucket, fingerprints, exact_threshold, near_threshold, mixed_boost)
+        exact_count = sum(1 for comp in comparisons if comp["verdict"] == "exact")
+        near_count = sum(1 for comp in comparisons if comp["verdict"] == "near")
+        no_match_count = sum(1 for comp in comparisons if comp["verdict"] == "no match")
+        missing_count = sum(1 for comp in comparisons if comp["verdict"] == "missing")
+        best_distance = min(
+            (comp["distance"] for comp in comparisons if comp["distance"] is not None),
+            default=None,
+        )
+        metadata_grouped = sum(1 for path in bucket.tracks if bucket.sources.get(path) == "metadata")
+        artwork_merged = sum(1 for path in bucket.tracks if bucket.sources.get(path) == "artwork")
+        bucket_payloads.append(
+            {
+                "bucket": bucket,
+                "comparisons": comparisons,
+                "exact_count": exact_count,
+                "near_count": near_count,
+                "no_match_count": no_match_count,
+                "missing_count": missing_count,
+                "best_distance": best_distance,
+                "metadata_grouped": metadata_grouped,
+                "artwork_merged": artwork_merged,
+                "actionability": bucket_actionability(exact_count, near_count),
+            }
+        )
+
     html_lines = [
         "<!doctype html>",
         "<html lang='en'>",
@@ -364,11 +447,62 @@ def run_duplicate_bucketing_poc(
         "body{font-family:Arial, sans-serif; margin:24px; color:#222;}",
         "h1{font-size:20px; margin-bottom:6px;}",
         "h2{font-size:16px; margin-top:24px;}",
+        "h3{font-size:14px; margin-top:18px;}",
         "table{border-collapse:collapse; width:100%; margin-top:8px;}",
-        "th,td{border:1px solid #ddd; padding:8px; text-align:left; vertical-align:top;}",
-        "th{background:#f4f4f4; width:200px;}",
+        "th,td{border:1px solid #ddd; padding:6px 8px; text-align:left; vertical-align:top;}",
+        "th{background:#f4f4f4; font-weight:600;}",
         "code{font-size:12px;}",
+        ".muted{color:#666; font-size:12px;}",
+        ".dashboard-controls{display:flex; gap:12px; align-items:center; margin:12px 0;}",
+        ".dashboard-table th{cursor:pointer; white-space:nowrap;}",
+        ".dashboard-table td{font-size:12px;}",
+        ".bucket-card{border:1px solid #ddd; border-radius:6px; padding:12px; margin:12px 0; background:#fafafa;}",
+        ".compare-grid{display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-top:10px;}",
+        ".track-card{display:flex; gap:10px; border:1px solid #ddd; background:#fff; padding:8px; border-radius:6px;}",
+        ".thumb{width:48px; height:48px; flex-shrink:0; border-radius:4px; background:#e6e6e6; object-fit:cover;}",
+        ".thumb.placeholder{display:flex; align-items:center; justify-content:center; font-size:10px; color:#555;}",
+        ".track-meta{font-size:12px;}",
+        ".badge{display:inline-block; padding:2px 6px; border-radius:12px; font-size:11px; background:#e9eef5;}",
+        ".verdict-exact{background:#dff3e7;}",
+        ".verdict-near{background:#fff3cd;}",
+        "details summary{cursor:pointer; font-weight:600;}",
+        ".subsection{margin-top:10px;}",
+        ".compare-header{display:flex; align-items:center; justify-content:space-between; gap:12px;}",
+        ".comparison-row{border-bottom:1px solid #eee; padding:6px 0; font-size:12px;}",
+        ".comparison-row:last-child{border-bottom:none;}",
         "</style>",
+        "<script>",
+        "function sortTable(tableId, colIndex, numeric){",
+        "  const table = document.getElementById(tableId);",
+        "  const tbody = table.tBodies[0];",
+        "  const rows = Array.from(tbody.rows);",
+        "  const dir = table.getAttribute('data-sort-dir') === 'asc' ? 'desc' : 'asc';",
+        "  rows.sort((a,b)=>{",
+        "    const av = a.cells[colIndex].getAttribute('data-sort') || a.cells[colIndex].innerText;",
+        "    const bv = b.cells[colIndex].getAttribute('data-sort') || b.cells[colIndex].innerText;",
+        "    const left = numeric ? parseFloat(av) || 0 : av.toString();",
+        "    const right = numeric ? parseFloat(bv) || 0 : bv.toString();",
+        "    if(left < right) return dir === 'asc' ? -1 : 1;",
+        "    if(left > right) return dir === 'asc' ? 1 : -1;",
+        "    return 0;",
+        "  });",
+        "  rows.forEach(row => tbody.appendChild(row));",
+        "  table.setAttribute('data-sort-dir', dir);",
+        "}",
+        "function applyDashboardFilter(){",
+        "  const toggle = document.getElementById('show-all-buckets');",
+        "  const showAll = toggle && toggle.checked;",
+        "  document.querySelectorAll('[data-has-match]').forEach(row => {",
+        "    const hasMatch = row.getAttribute('data-has-match') === '1';",
+        "    row.style.display = showAll || hasMatch ? '' : 'none';",
+        "  });",
+        "  document.querySelectorAll('[data-bucket-details]').forEach(panel => {",
+        "    const hasMatch = panel.getAttribute('data-has-match') === '1';",
+        "    panel.style.display = showAll || hasMatch ? '' : 'none';",
+        "  });",
+        "}",
+        "window.addEventListener('load', applyDashboardFilter);",
+        "</script>",
         "</head>",
         "<body>",
         "<h1>Duplicate Bucketing POC Report</h1>",
@@ -384,20 +518,166 @@ def run_duplicate_bucketing_poc(
         f"<tr><th>Near threshold</th><td>{near_threshold:.4f}</td></tr>",
         f"<tr><th>Mixed-codec boost</th><td>{mixed_boost:.4f}</td></tr>",
         "</table>",
+        "<h2>Dashboard</h2>",
+        "<div class='dashboard-controls'>",
+        "<label><input type='checkbox' id='show-all-buckets' onchange='applyDashboardFilter()' /> Show buckets with no matches</label>",
+        "<span class='muted'>Default view shows buckets with at least one exact or near match.</span>",
+        "</div>",
+        "<table class='dashboard-table' id='bucket-dashboard' data-sort-dir='desc'>",
+        "<thead>",
+        "<tr>",
+        "<th onclick=\"sortTable('bucket-dashboard',0,false)\">Bucket</th>",
+        "<th onclick=\"sortTable('bucket-dashboard',1,true)\">Size</th>",
+        "<th onclick=\"sortTable('bucket-dashboard',2,true)\">Exact</th>",
+        "<th onclick=\"sortTable('bucket-dashboard',3,true)\">Near</th>",
+        "<th onclick=\"sortTable('bucket-dashboard',4,true)\">No match</th>",
+        "<th onclick=\"sortTable('bucket-dashboard',5,true)\">Metadata grouped</th>",
+        "<th onclick=\"sortTable('bucket-dashboard',6,true)\">Artwork merged</th>",
+        "<th onclick=\"sortTable('bucket-dashboard',7,true)\">Best distance</th>",
+        "</tr>",
+        "</thead>",
+        "<tbody>",
     ]
 
-    for idx, bucket in enumerate(sorted(buckets, key=lambda b: (-len(b.tracks), b.id)), start=1):
+    for payload in sorted(
+        bucket_payloads,
+        key=lambda p: (-p["actionability"], -len(p["bucket"].tracks), p["bucket"].id),
+    ):
+        bucket = payload["bucket"]
+        has_matches = payload["exact_count"] + payload["near_count"] > 0
+        best_distance = payload["best_distance"]
+        html_lines.append(
+            "<tr data-has-match='{}'>".format("1" if has_matches else "0")
+            + f"<td data-sort='{bucket.id}'><a href='#bucket-{bucket.id}'>Bucket {bucket.id}</a></td>"
+            + f"<td data-sort='{len(bucket.tracks)}'>{len(bucket.tracks)}</td>"
+            + f"<td data-sort='{payload['exact_count']}'>{payload['exact_count']}</td>"
+            + f"<td data-sort='{payload['near_count']}'>{payload['near_count']}</td>"
+            + f"<td data-sort='{payload['no_match_count']}'>{payload['no_match_count']}</td>"
+            + f"<td data-sort='{payload['metadata_grouped']}'>{payload['metadata_grouped']}</td>"
+            + f"<td data-sort='{payload['artwork_merged']}'>{payload['artwork_merged']}</td>"
+            + (
+                f"<td data-sort='{best_distance:.4f}'>{best_distance:.4f}</td>"
+                if best_distance is not None
+                else "<td data-sort=''>-</td>"
+            )
+            + "</tr>"
+        )
+
+    html_lines.extend(["</tbody>", "</table>", "<h2>Drilldown</h2>"])
+
+    for payload in sorted(
+        bucket_payloads,
+        key=lambda p: (-p["actionability"], -len(p["bucket"].tracks), p["bucket"].id),
+    ):
+        bucket = payload["bucket"]
         metadata_tracks = [p for p in bucket.tracks if bucket.sources.get(p) == "metadata"]
         artwork_tracks = [p for p in bucket.tracks if bucket.sources.get(p) == "artwork"]
         solo_tracks = [p for p in bucket.tracks if bucket.sources.get(p) == "solo"]
-        html_lines.append(f"<h2>Bucket {idx} (size {len(bucket.tracks)})</h2>")
-        html_lines.append("<table>")
-        html_lines.append(f"<tr><th>Metadata-grouped tracks</th><td>{len(metadata_tracks)}</td></tr>")
-        html_lines.append(f"<tr><th>Artwork-merged tracks</th><td>{len(artwork_tracks)}</td></tr>")
-        html_lines.append(f"<tr><th>Solo/ungrouped tracks</th><td>{len(solo_tracks)}</td></tr>")
-        html_lines.append("</table>")
+        has_matches = payload["exact_count"] + payload["near_count"] > 0
+        html_lines.append(
+            f"<details id='bucket-{bucket.id}' class='bucket-card' data-bucket-details data-has-match='{'1' if has_matches else '0'}'>"
+        )
+        html_lines.append(
+            "<summary>"
+            f"Bucket {bucket.id} • size {len(bucket.tracks)} • "
+            f"{payload['exact_count']} exact / {payload['near_count']} near"
+            "</summary>"
+        )
+        html_lines.append("<div class='subsection'>")
+        html_lines.append(
+            "<div class='compare-header'>"
+            "<h3>Matches</h3>"
+            f"<span class='muted'>Showing {payload['exact_count'] + payload['near_count']} near/exact pairs</span>"
+            "</div>"
+        )
+        match_pairs = [
+            comp for comp in payload["comparisons"] if comp["verdict"] in {"exact", "near"}
+        ]
+        if match_pairs:
+            for comp in match_pairs:
+                left_info = track_infos.get(comp["left"])
+                right_info = track_infos.get(comp["right"])
+                verdict_class = "verdict-exact" if comp["verdict"] == "exact" else "verdict-near"
+                html_lines.append("<div class='compare-grid'>")
+                for label, info in (("Track A", left_info), ("Track B", right_info)):
+                    if info and info.artwork_data_uri:
+                        thumb = f"<img class='thumb' src='{info.artwork_data_uri}' alt='artwork' />"
+                    else:
+                        thumb = "<div class='thumb placeholder'>no art</div>"
+                    path_display = _truncate_path(info.path) if info else "unknown"
+                    full_path = info.path if info else ""
+                    html_lines.append(
+                        "<div class='track-card'>"
+                        f"{thumb}"
+                        "<div class='track-meta'>"
+                        f"<div><strong>{label}</strong></div>"
+                        f"<div>{esc(os.path.basename(info.path) if info else 'unknown')}</div>"
+                        f"<div class='muted' title='{esc(full_path)}'>{esc(path_display)}</div>"
+                        f"<div class='muted'>{esc(info.codec if info else 'UNKNOWN')} • "
+                        f"{esc(_format_size(info.size_bytes) if info else 'unknown')}</div>"
+                        "</div>"
+                        "</div>"
+                    )
+                distance = comp["distance"]
+                effective = comp["effective_near"]
+                html_lines.append(
+                    "<div class='track-card'>"
+                    "<div class='track-meta'>"
+                    f"<div class='badge {verdict_class}'>{comp['verdict'].upper()}</div>"
+                    f"<div class='muted'>distance {distance:.4f}</div>"
+                    f"<div class='muted'>effective near {effective:.4f}</div>"
+                    "</div>"
+                    "</div>"
+                )
+                html_lines.append("</div>")
+        else:
+            html_lines.append("<div class='muted'>No near/exact matches in this bucket.</div>")
+        html_lines.append("</div>")
+
+        html_lines.append("<details class='subsection'>")
+        html_lines.append("<summary>All comparisons</summary>")
+        html_lines.append("<div class='muted'>Includes no-match and missing fingerprint rows.</div>")
+        if payload["comparisons"]:
+            for comp in payload["comparisons"]:
+                left = esc(_truncate_path(comp["left"]))
+                right = esc(_truncate_path(comp["right"]))
+                if comp["distance"] is None:
+                    detail = "missing fingerprint"
+                else:
+                    detail = (
+                        f"distance {comp['distance']:.4f} • "
+                        f"effective near {comp['effective_near']:.4f}"
+                    )
+                html_lines.append(
+                    "<div class='comparison-row'>"
+                    f"<strong>{esc(comp['verdict'])}</strong>: "
+                    f"{left} vs {right} • {detail}"
+                    "</div>"
+                )
+        else:
+            html_lines.append("<div class='comparison-row'>No comparisons (bucket size &lt; 2).</div>")
+        html_lines.append("</details>")
+
+        html_lines.append("<details class='subsection'>")
+        html_lines.append("<summary>Why bucketed</summary>")
+        if bucket.metadata_keys:
+            html_lines.append("<div><strong>Metadata keys:</strong></div><ul>")
+            for title_norm, artist_norm in sorted(bucket.metadata_keys):
+                html_lines.append(
+                    f"<li><code>{esc(title_norm)}</code> • <code>{esc(artist_norm)}</code></li>"
+                )
+            html_lines.append("</ul>")
+        else:
+            html_lines.append("<div class='muted'>No metadata keys (solo bucket).</div>")
+        html_lines.append(
+            "<div class='muted'>"
+            f"Metadata-grouped tracks: {len(metadata_tracks)} • "
+            f"Artwork-merged tracks: {len(artwork_tracks)} • "
+            f"Solo/ungrouped tracks: {len(solo_tracks)}"
+            "</div>"
+        )
         if bucket.artwork_merges:
-            html_lines.append("<h3>Artwork merges</h3><ul>")
+            html_lines.append("<div><strong>Artwork merge events:</strong></div><ul>")
             for event in bucket.artwork_merges:
                 html_lines.append(
                     "<li>"
@@ -406,15 +686,10 @@ def run_duplicate_bucketing_poc(
                     "</li>"
                 )
             html_lines.append("</ul>")
-        track_lines, match_lines = _bucket_report(
-            bucket, fingerprints, exact_threshold, near_threshold, mixed_boost
-        )
-        html_lines.append("<h3>Tracks</h3><ul>")
-        html_lines.extend(track_lines)
-        html_lines.append("</ul>")
-        html_lines.append("<h3>Fingerprint comparisons</h3><ul>")
-        html_lines.extend(match_lines or ["<li>No comparisons (bucket size < 2).</li>"])
-        html_lines.append("</ul>")
+        else:
+            html_lines.append("<div class='muted'>No artwork merge events.</div>")
+        html_lines.append("</details>")
+        html_lines.append("</details>")
 
     elapsed = time.time() - start
     html_lines.append(f"<div>Elapsed: {elapsed:.2f}s</div>")
