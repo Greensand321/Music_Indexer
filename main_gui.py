@@ -5,6 +5,7 @@ import logging
 import webbrowser
 import re
 import html
+import math
 from pathlib import Path
 
 if sys.platform == "win32":
@@ -1936,6 +1937,81 @@ class DuplicateFinderShell(tk.Toplevel):
         trim_trail_var = tk.StringVar(value=str(cfg.get("fingerprint_trim_trail_max_ms", FP_TRIM_TRAIL_MAX_MS)))
         trim_padding_var = tk.StringVar(value=str(cfg.get("fingerprint_trim_padding_ms", FP_TRIM_PADDING_MS)))
 
+        preset_values: dict[str, dict[str, float | int]] = {
+            "Tight": {
+                "exact_duplicate_threshold": 0.015,
+                "near_duplicate_threshold": 0.08,
+                "mixed_codec_threshold_boost": 0.02,
+                "fingerprint_offset_ms": FP_OFFSET_MS,
+                "fingerprint_duration_ms": FP_DURATION_MS,
+                "fingerprint_silence_threshold_db": FP_SILENCE_THRESHOLD_DB,
+                "fingerprint_silence_min_len_ms": FP_SILENCE_MIN_LEN_MS,
+                "fingerprint_trim_lead_max_ms": FP_TRIM_LEAD_MAX_MS,
+                "fingerprint_trim_trail_max_ms": FP_TRIM_TRAIL_MAX_MS,
+                "fingerprint_trim_padding_ms": FP_TRIM_PADDING_MS,
+            },
+            "Default": {
+                "exact_duplicate_threshold": EXACT_DUPLICATE_THRESHOLD,
+                "near_duplicate_threshold": NEAR_DUPLICATE_THRESHOLD,
+                "mixed_codec_threshold_boost": MIXED_CODEC_THRESHOLD_BOOST,
+                "fingerprint_offset_ms": FP_OFFSET_MS,
+                "fingerprint_duration_ms": FP_DURATION_MS,
+                "fingerprint_silence_threshold_db": FP_SILENCE_THRESHOLD_DB,
+                "fingerprint_silence_min_len_ms": FP_SILENCE_MIN_LEN_MS,
+                "fingerprint_trim_lead_max_ms": FP_TRIM_LEAD_MAX_MS,
+                "fingerprint_trim_trail_max_ms": FP_TRIM_TRAIL_MAX_MS,
+                "fingerprint_trim_padding_ms": FP_TRIM_PADDING_MS,
+            },
+            "Loose": {
+                "exact_duplicate_threshold": 0.03,
+                "near_duplicate_threshold": 0.14,
+                "mixed_codec_threshold_boost": 0.05,
+                "fingerprint_offset_ms": FP_OFFSET_MS,
+                "fingerprint_duration_ms": FP_DURATION_MS,
+                "fingerprint_silence_threshold_db": FP_SILENCE_THRESHOLD_DB,
+                "fingerprint_silence_min_len_ms": FP_SILENCE_MIN_LEN_MS,
+                "fingerprint_trim_lead_max_ms": FP_TRIM_LEAD_MAX_MS,
+                "fingerprint_trim_trail_max_ms": FP_TRIM_TRAIL_MAX_MS,
+                "fingerprint_trim_padding_ms": FP_TRIM_PADDING_MS,
+            },
+        }
+
+        def _matches_preset(current: dict[str, float | int], preset: dict[str, float | int]) -> bool:
+            for key, value in preset.items():
+                current_value = current.get(key)
+                if isinstance(value, float):
+                    if not math.isclose(float(current_value), float(value), rel_tol=0.0, abs_tol=1e-6):
+                        return False
+                else:
+                    if int(current_value) != int(value):
+                        return False
+            return True
+
+        current_settings = {
+            "exact_duplicate_threshold": float(cfg.get("exact_duplicate_threshold", EXACT_DUPLICATE_THRESHOLD)),
+            "near_duplicate_threshold": float(cfg.get("near_duplicate_threshold", NEAR_DUPLICATE_THRESHOLD)),
+            "mixed_codec_threshold_boost": float(cfg.get("mixed_codec_threshold_boost", MIXED_CODEC_THRESHOLD_BOOST)),
+            "fingerprint_offset_ms": int(cfg.get("fingerprint_offset_ms", FP_OFFSET_MS)),
+            "fingerprint_duration_ms": int(cfg.get("fingerprint_duration_ms", FP_DURATION_MS)),
+            "fingerprint_silence_threshold_db": float(
+                cfg.get("fingerprint_silence_threshold_db", FP_SILENCE_THRESHOLD_DB)
+            ),
+            "fingerprint_silence_min_len_ms": int(
+                cfg.get("fingerprint_silence_min_len_ms", FP_SILENCE_MIN_LEN_MS)
+            ),
+            "fingerprint_trim_lead_max_ms": int(cfg.get("fingerprint_trim_lead_max_ms", FP_TRIM_LEAD_MAX_MS)),
+            "fingerprint_trim_trail_max_ms": int(cfg.get("fingerprint_trim_trail_max_ms", FP_TRIM_TRAIL_MAX_MS)),
+            "fingerprint_trim_padding_ms": int(cfg.get("fingerprint_trim_padding_ms", FP_TRIM_PADDING_MS)),
+        }
+
+        preset_name = "Custom"
+        for name, values in preset_values.items():
+            if _matches_preset(current_settings, values):
+                preset_name = name
+                break
+        preset_var = tk.StringVar(value=preset_name)
+        suppress_preset_updates = {"active": False}
+
         frame = ttk.Frame(dlg, padding=12)
         frame.pack(fill="both", expand=True)
 
@@ -1949,7 +2025,57 @@ class DuplicateFinderShell(tk.Toplevel):
             ttk.Label(frame, text=label).grid(row=row, column=0, sticky="w", pady=2)
             ttk.Entry(frame, textvariable=var, width=16).grid(row=row, column=1, sticky="ew", pady=2)
 
-        row_idx = 1
+        def _apply_preset(selected: str) -> None:
+            if selected not in preset_values:
+                return
+            suppress_preset_updates["active"] = True
+            values = preset_values[selected]
+            exact_var.set(str(values["exact_duplicate_threshold"]))
+            near_var.set(str(values["near_duplicate_threshold"]))
+            mixed_var.set(str(values["mixed_codec_threshold_boost"]))
+            offset_var.set(str(values["fingerprint_offset_ms"]))
+            duration_var.set(str(values["fingerprint_duration_ms"]))
+            silence_db_var.set(str(values["fingerprint_silence_threshold_db"]))
+            silence_len_var.set(str(values["fingerprint_silence_min_len_ms"]))
+            trim_lead_var.set(str(values["fingerprint_trim_lead_max_ms"]))
+            trim_trail_var.set(str(values["fingerprint_trim_trail_max_ms"]))
+            trim_padding_var.set(str(values["fingerprint_trim_padding_ms"]))
+            suppress_preset_updates["active"] = False
+
+        def _mark_custom(*_: str) -> None:
+            if suppress_preset_updates["active"]:
+                return
+            if preset_var.get() != "Custom":
+                preset_var.set("Custom")
+
+        for var in (
+            exact_var,
+            near_var,
+            mixed_var,
+            offset_var,
+            duration_var,
+            silence_db_var,
+            silence_len_var,
+            trim_lead_var,
+            trim_trail_var,
+            trim_padding_var,
+        ):
+            var.trace_add("write", _mark_custom)
+
+        preset_frame = ttk.Frame(frame)
+        preset_frame.grid(row=1, column=0, columnspan=2, sticky="w", pady=(0, 8))
+        ttk.Label(preset_frame, text="Preset").pack(side="left")
+        preset_selector = ttk.Combobox(
+            preset_frame,
+            textvariable=preset_var,
+            values=["Tight", "Default", "Loose", "Custom"],
+            state="readonly",
+            width=12,
+        )
+        preset_selector.pack(side="left", padx=(6, 0))
+        preset_selector.bind("<<ComboboxSelected>>", lambda _event: _apply_preset(preset_var.get()))
+
+        row_idx = 2
         _row("Exact duplicate threshold", exact_var, row_idx)
         row_idx += 1
         _row("Near duplicate threshold", near_var, row_idx)
