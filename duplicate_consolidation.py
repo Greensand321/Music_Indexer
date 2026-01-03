@@ -239,22 +239,61 @@ def _metadata_bucket_key(track: DuplicateTrack) -> tuple[str, str]:
     return _normalize_primary_artist(tags, track.path), _normalize_title(tags, track.path)
 
 
-def _build_metadata_buckets(tracks: Sequence[DuplicateTrack]) -> Dict[tuple[str, str], List[DuplicateTrack]]:
-    title_to_artists: Dict[str, set[str]] = defaultdict(set)
-    normalized: List[tuple[DuplicateTrack, tuple[str, str]]] = []
-    for track in tracks:
+def _track_tags(track: DuplicateTrack) -> Mapping[str, object]:
+    tags = track.current_tags if isinstance(track.current_tags, Mapping) else track.tags
+    return tags if isinstance(tags, Mapping) else {}
+
+
+def _has_metadata_seed(track: DuplicateTrack) -> bool:
+    tags = _track_tags(track)
+    title = tags.get("title")
+    artist = tags.get("albumartist") or tags.get("artist")
+    return bool(title and artist)
+
+
+def _album_key_for_track(track: DuplicateTrack) -> tuple[str, str] | None:
+    tags = _track_tags(track)
+    return _normalize_album_key(tags, track.path)
+
+
+def _album_compatible(bucket: "BucketingBucket", album_key: tuple[str, str] | None) -> bool:
+    if not album_key:
+        return True
+    if bucket.missing_album:
+        return True
+    if not bucket.album_keys:
+        return True
+    return album_key in bucket.album_keys
+
+
+def _build_metadata_buckets(tracks: Sequence[DuplicateTrack]) -> List["BucketingBucket"]:
+    buckets: List[BucketingBucket] = []
+    by_key: Dict[tuple[str, str], List[int]] = defaultdict(list)
+
+    for track in sorted(tracks, key=lambda t: t.path.lower()):
         key = _metadata_bucket_key(track)
-        normalized.append((track, key))
-        artist, title = key
-        if artist and artist != "unknown":
-            title_to_artists[title].add(artist)
-    buckets: Dict[tuple[str, str], List[DuplicateTrack]] = defaultdict(list)
-    for track, (artist, title) in normalized:
-        artist_key = artist
-        known_artists = title_to_artists.get(title, set())
-        if artist_key == "unknown" and len(known_artists) == 1:
-            artist_key = next(iter(known_artists))
-        buckets[(artist_key, title)].append(track)
+        album_key = _album_key_for_track(track)
+        seeded = _has_metadata_seed(track)
+        target_id = None
+        for bucket_id in by_key.get(key, []):
+            bucket = buckets[bucket_id]
+            if _album_compatible(bucket, album_key):
+                target_id = bucket_id
+                break
+        if target_id is None:
+            target_id = len(buckets)
+            buckets.append(BucketingBucket(id=target_id, metadata_seeded=seeded))
+            by_key[key].append(target_id)
+        bucket = buckets[target_id]
+        bucket.tracks.append(track)
+        bucket.metadata_keys.add(key)
+        bucket.metadata_seeded = bucket.metadata_seeded or seeded
+        if album_key:
+            bucket.album_keys.add(album_key)
+        else:
+            bucket.missing_album = True
+        bucket.sources[track.path] = "metadata" if seeded else "fallback"
+
     return buckets
 
 
@@ -719,6 +758,20 @@ class DuplicateTrack:
 
 
 @dataclass
+class BucketingBucket:
+    """Bucket of candidate tracks for duplicate matching."""
+
+    id: int
+    tracks: List[DuplicateTrack] = field(default_factory=list)
+    metadata_seeded: bool = False
+    album_keys: set[tuple[str, str]] = field(default_factory=set)
+    missing_album: bool = False
+    sources: Dict[str, str] = field(default_factory=dict)
+    metadata_keys: set[tuple[str, str]] = field(default_factory=set)
+    artwork_merges: List[Dict[str, object]] = field(default_factory=list)
+
+
+@dataclass
 class ArtworkDirective:
     """Instruction to copy artwork from a source to a target."""
 
@@ -782,6 +835,7 @@ class ClusterResult:
     decisions: List[GroupingDecision]
     exact_threshold: float
     near_threshold: float
+    bucket_diagnostics: Dict[str, object] = field(default_factory=dict)
 
 @dataclass
 class GroupPlan:
@@ -816,6 +870,7 @@ class GroupPlan:
     grouping_thresholds: Dict[str, float]
     grouping_decisions: List[GroupingDecision]
     artwork_evidence: List[str]
+    bucket_diagnostics: Dict[str, object] = field(default_factory=dict)
     fingerprint_distances: Dict[str, Dict[str, float]] = field(default_factory=dict)
     library_state: Dict[str, Dict[str, object]] = field(default_factory=dict)
 
@@ -850,6 +905,7 @@ class GroupPlan:
             "grouping_thresholds": dict(self.grouping_thresholds),
             "grouping_decisions": [d.to_dict() for d in self.grouping_decisions],
             "artwork_evidence": list(self.artwork_evidence),
+            "bucket_diagnostics": dict(self.bucket_diagnostics),
             "fingerprint_distances": {k: dict(v) for k, v in self.fingerprint_distances.items()},
             "library_state": {k: dict(v) for k, v in self.library_state.items()},
         }
@@ -1280,6 +1336,13 @@ def _group_plan_from_dict(raw: Mapping[str, object]) -> GroupPlan:
     artwork_candidates_raw = _expect_list(raw.get("artwork_candidates"), "artwork_candidates")
     decisions_raw = _expect_list(raw.get("grouping_decisions"), "grouping_decisions")
     playlist_impact_raw = _expect_mapping(raw.get("playlist_impact"), "playlist_impact")
+    bucket_diagnostics_raw = raw.get("bucket_diagnostics")
+    if bucket_diagnostics_raw is None:
+        bucket_diagnostics = {}
+    elif isinstance(bucket_diagnostics_raw, Mapping):
+        bucket_diagnostics = dict(bucket_diagnostics_raw)
+    else:
+        raise ValueError("bucket_diagnostics must be a mapping.")
 
     return GroupPlan(
         group_id=_expect_str(raw.get("group_id"), "group_id"),
@@ -1315,6 +1378,7 @@ def _group_plan_from_dict(raw: Mapping[str, object]) -> GroupPlan:
             _grouping_decision_from_dict(_expect_mapping(item, "grouping_decisions[]")) for item in decisions_raw
         ],
         artwork_evidence=_expect_str_list(raw.get("artwork_evidence"), "artwork_evidence"),
+        bucket_diagnostics=bucket_diagnostics,
         fingerprint_distances=_expect_mapping(raw.get("fingerprint_distances"), "fingerprint_distances"),
         library_state=_expect_mapping(raw.get("library_state"), "library_state"),
     )
@@ -1643,6 +1707,108 @@ def _select_overall_artwork_candidate(candidates: Sequence[DuplicateTrack]) -> t
     return best_track, best_blob, ambiguous
 
 
+def _bucket_primary_key(bucket: BucketingBucket) -> tuple[str, str]:
+    if bucket.metadata_keys:
+        return sorted(bucket.metadata_keys)[0]
+    return ("unknown", "unknown")
+
+
+def _bucket_diagnostics(bucket: BucketingBucket) -> Dict[str, object]:
+    return {
+        "bucket_id": bucket.id,
+        "metadata_seeded": bucket.metadata_seeded,
+        "metadata_keys": [list(key) for key in sorted(bucket.metadata_keys)],
+        "album_keys": [list(key) for key in sorted(bucket.album_keys)],
+        "missing_album": bucket.missing_album,
+        "sources": dict(bucket.sources),
+        "artwork_merges": list(bucket.artwork_merges),
+    }
+
+
+def _merge_buckets_by_artwork(
+    buckets: List[BucketingBucket],
+    similarity_threshold: int,
+) -> List[BucketingBucket]:
+    if not buckets:
+        return []
+
+    parent = list(range(len(buckets)))
+    root_seeded = [bucket.metadata_seeded for bucket in buckets]
+
+    def find(idx: int) -> int:
+        while parent[idx] != idx:
+            parent[idx] = parent[parent[idx]]
+            idx = parent[idx]
+        return idx
+
+    def union(a: int, b: int) -> None:
+        root_a = find(a)
+        root_b = find(b)
+        if root_a != root_b:
+            parent[root_b] = root_a
+            root_seeded[root_a] = root_seeded[root_a] or root_seeded[root_b]
+
+    entries: List[tuple[int, str, int]] = []
+    path_to_bucket: Dict[str, int] = {}
+    for bucket in buckets:
+        for track in bucket.tracks:
+            path_to_bucket[track.path] = bucket.id
+            art_hash = _artwork_hash_for_track(track)
+            if art_hash is not None:
+                entries.append((bucket.id, track.path, art_hash))
+
+    merge_events: List[Dict[str, object]] = []
+    for i, (bucket_id, left_path, left_hash) in enumerate(entries):
+        for right_bucket_id, right_path, right_hash in entries[i + 1 :]:
+            if bucket_id == right_bucket_id:
+                continue
+            left_root = find(bucket_id)
+            right_root = find(right_bucket_id)
+            if not (root_seeded[left_root] or root_seeded[right_root]):
+                continue
+            distance = _hamming_distance(left_hash, right_hash)
+            if distance <= similarity_threshold:
+                union(bucket_id, right_bucket_id)
+                merge_events.append(
+                    {"left": left_path, "right": right_path, "distance": distance}
+                )
+
+    root_metadata_seeded: Dict[int, bool] = {}
+    for bucket in buckets:
+        root = find(bucket.id)
+        root_metadata_seeded[root] = root_metadata_seeded.get(root, False) or bucket.metadata_seeded
+
+    merged: Dict[int, BucketingBucket] = {}
+    for bucket in buckets:
+        root = find(bucket.id)
+        if root not in merged:
+            merged[root] = BucketingBucket(id=root)
+        target = merged[root]
+        target.metadata_seeded = root_metadata_seeded[root]
+        target.album_keys.update(bucket.album_keys)
+        target.missing_album = target.missing_album or bucket.missing_album
+        target.metadata_keys.update(bucket.metadata_keys)
+        for track in bucket.tracks:
+            target.tracks.append(track)
+            source = bucket.sources.get(track.path, "fallback")
+            if source != "metadata" and not bucket.metadata_seeded and root_metadata_seeded[root]:
+                source = "artwork"
+            target.sources[track.path] = source
+
+    for event in merge_events:
+        bucket_id = path_to_bucket.get(str(event.get("left")))
+        if bucket_id is None:
+            continue
+        root = find(bucket_id)
+        merged[root].artwork_merges.append(event)
+
+    merged_buckets = sorted(merged.values(), key=lambda b: b.id)
+    for new_id, bucket in enumerate(merged_buckets):
+        bucket.id = new_id
+        bucket.tracks = sorted({t.path: t for t in bucket.tracks}.values(), key=lambda t: t.path.lower())
+    return merged_buckets
+
+
 def _cluster_duplicates(
     tracks: Sequence[DuplicateTrack],
     *,
@@ -1658,103 +1824,107 @@ def _cluster_duplicates(
 ) -> List[ClusterResult]:
     near_duplicate_threshold = max(near_duplicate_threshold, exact_duplicate_threshold)
     buckets = _build_metadata_buckets(tracks)
-    bucket_items = sorted(buckets.items(), key=lambda x: x[0])
+    buckets = _merge_buckets_by_artwork(buckets, ARTWORK_SIMILARITY_THRESHOLD)
     clusters: List[ClusterResult] = []
     comparisons = 0
     processed = 0
-    for bucket_key, bucket_tracks in bucket_items:
+    total_tracks = sum(len(bucket.tracks) for bucket in buckets)
+    stop_requested = False
+    for bucket in buckets:
         if cancel_event.is_set() or (timeout_sec and (_now() - start_time) > timeout_sec):
             review_flags.append("Consolidation planning cancelled or timed out during grouping.")
             break
-        bucket_tracks = [t for t in bucket_tracks if t.fingerprint]
-        if not bucket_tracks:
+        bucket_tracks = [t for t in bucket.tracks if t.fingerprint]
+        if len(bucket_tracks) < 2:
+            processed += len(bucket_tracks)
             continue
         bucket_tracks = sorted(bucket_tracks, key=lambda t: t.path.lower())
         path_to_track = {t.path: t for t in bucket_tracks}
-        path_order = {t.path: idx for idx, t in enumerate(bucket_tracks)}
+        pair_info: Dict[tuple[str, str], tuple[float, float, str]] = {}
 
-        track_keys: Dict[str, List[str]] = {t.path: _coarse_fingerprint_keys(t.fingerprint) for t in bucket_tracks}
-        coarse_index: Dict[str, set[str]] = defaultdict(set)
-        for path, keys in track_keys.items():
-            for key in keys:
-                coarse_index[key].add(path)
+        for idx, left in enumerate(bucket_tracks):
+            for right in bucket_tracks[idx + 1 :]:
+                if cancel_event.is_set() or comparisons >= max_comparisons:
+                    review_flags.append("Comparison budget reached; grouping may be incomplete.")
+                    stop_requested = True
+                    break
+                if timeout_sec and (_now() - start_time) > timeout_sec:
+                    review_flags.append("Consolidation planning timed out while grouping.")
+                    stop_requested = True
+                    break
+                comparisons += 1
+                dist = fingerprint_distance(left.fingerprint, right.fingerprint)
+                pair_threshold = near_duplicate_threshold
+                if left.is_lossless != right.is_lossless:
+                    pair_threshold += mixed_codec_threshold_boost
+                if dist <= exact_duplicate_threshold:
+                    verdict = "exact"
+                elif dist <= pair_threshold:
+                    verdict = "near"
+                else:
+                    verdict = "no match"
+                pair_info[(left.path, right.path)] = (dist, pair_threshold, verdict)
+            if stop_requested:
+                break
+
+        if stop_requested:
+            break
 
         used: set[str] = set()
+        bucket_key = _bucket_primary_key(bucket)
+        bucket_diag = _bucket_diagnostics(bucket)
         for idx, track in enumerate(bucket_tracks):
-            if (
-                cancel_event.is_set()
-                or comparisons >= max_comparisons
-                or (timeout_sec and (_now() - start_time) > timeout_sec)
-            ):
-                if cancel_event.is_set() and "Consolidation planning cancelled or timed out during grouping." not in review_flags:
-                    review_flags.append("Consolidation planning cancelled or timed out during grouping.")
-                elif comparisons >= max_comparisons and "Comparison budget reached; grouping may be incomplete." not in review_flags:
-                    review_flags.append("Comparison budget reached; grouping may be incomplete.")
-                elif timeout_sec and (_now() - start_time) > timeout_sec and "Consolidation planning timed out while grouping." not in review_flags:
-                    review_flags.append("Consolidation planning timed out while grouping.")
+            if cancel_event.is_set():
+                review_flags.append("Consolidation planning cancelled or timed out during grouping.")
+                stop_requested = True
                 break
             if track.path in used:
                 continue
             group = [track]
             decisions: List[GroupingDecision] = []
             used.add(track.path)
-            candidate_paths: set[str] = set()
-            for key in track_keys.get(track.path, []):
-                candidate_paths.update(coarse_index.get(key, set()))
-            if not candidate_paths:
-                fallback_candidates = True
-                candidate_paths.update(t.path for t in bucket_tracks[idx + 1 :])
-            else:
-                fallback_candidates = False
-            for other_path in sorted(candidate_paths, key=lambda p: path_order.get(p, len(bucket_tracks))):
-                if cancel_event.is_set() or comparisons >= max_comparisons:
-                    review_flags.append("Comparison budget reached; grouping may be incomplete.")
-                    break
-                if timeout_sec and (_now() - start_time) > timeout_sec:
-                    review_flags.append("Consolidation planning timed out while grouping.")
-                    break
-                if other_path in used or path_order.get(other_path, 0) <= idx:
+            for other in bucket_tracks[idx + 1 :]:
+                if other.path in used:
                     continue
-                comparisons += 1
-                other = path_to_track[other_path]
-                dist = fingerprint_distance(track.fingerprint, other.fingerprint)
-                pair_threshold = near_duplicate_threshold
-                if track.is_lossless != other.is_lossless:
-                    pair_threshold += mixed_codec_threshold_boost
-                if dist > pair_threshold:
+                left_key = (track.path, other.path)
+                right_key = (other.path, track.path)
+                pair = pair_info.get(left_key) or pair_info.get(right_key)
+                if not pair:
+                    continue
+                dist, pair_threshold, verdict = pair
+                if verdict not in {"exact", "near"}:
                     continue
                 compatible = True
                 max_candidate_distance = dist
                 for member in group:
                     if member.path == other.path:
                         continue
-                    cmp_dist = fingerprint_distance(member.fingerprint, other.fingerprint)
-                    max_candidate_distance = max(max_candidate_distance, cmp_dist)
-                    member_threshold = near_duplicate_threshold
-                    if member.is_lossless != other.is_lossless:
-                        member_threshold += mixed_codec_threshold_boost
-                    if cmp_dist > member_threshold:
+                    cmp_pair = pair_info.get((member.path, other.path)) or pair_info.get(
+                        (other.path, member.path)
+                    )
+                    if not cmp_pair:
                         compatible = False
                         break
+                    cmp_dist, member_threshold, cmp_verdict = cmp_pair
+                    if cmp_verdict not in {"exact", "near"} or cmp_dist > member_threshold:
+                        compatible = False
+                        break
+                    max_candidate_distance = max(max_candidate_distance, cmp_dist)
                 if compatible:
-                    anchor_keys = track_keys.get(track.path, [])
-                    candidate_keys = track_keys.get(other.path, [])
-                    shared_keys = sorted(set(anchor_keys) & set(candidate_keys))
-                    coarse_gate = "match" if shared_keys else "fallback (no shared coarse keys)" if fallback_candidates else "none"
                     match_type = "exact" if max_candidate_distance <= exact_duplicate_threshold else "near"
                     decisions.append(
                         GroupingDecision(
                             anchor_path=track.path,
                             candidate_path=other.path,
                             metadata_key=bucket_key,
-                            coarse_keys_anchor=anchor_keys,
-                            coarse_keys_candidate=candidate_keys,
-                            shared_coarse_keys=shared_keys,
+                            coarse_keys_anchor=[],
+                            coarse_keys_candidate=[],
+                            shared_coarse_keys=[],
                             distance_to_anchor=dist,
                             max_group_distance=max_candidate_distance,
                             threshold=pair_threshold,
                             match_type=match_type,
-                            coarse_gate=coarse_gate,
+                            coarse_gate="bucket",
                         )
                     )
                     group.append(other)
@@ -1767,11 +1937,12 @@ def _cluster_duplicates(
                         decisions=decisions,
                         exact_threshold=exact_duplicate_threshold,
                         near_threshold=near_duplicate_threshold,
+                        bucket_diagnostics=bucket_diag,
                     )
                 )
             processed += 1
-            progress_callback(processed, len(bucket_tracks), track.path)
-        if cancel_event.is_set() or comparisons >= max_comparisons or (timeout_sec and (_now() - start_time) > timeout_sec):
+            progress_callback(processed, total_tracks, track.path)
+        if stop_requested:
             break
     return clusters
 
@@ -2149,6 +2320,7 @@ def build_consolidation_plan(
                     },
                     grouping_decisions=group_decisions,
                     artwork_evidence=artwork_evidence,
+                    bucket_diagnostics=cluster.bucket_diagnostics,
                     fingerprint_distances=pair_distances,
                     library_state=track_states,
                 )
