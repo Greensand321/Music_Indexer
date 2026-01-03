@@ -35,6 +35,7 @@ import tkinter as tk
 from tkinter import filedialog
 
 import musicbrainzngs
+from utils.audio_metadata_reader import read_tags
 try:
     from mutagen import File as MutagenFile
     from mutagen.easyid3 import EasyID3
@@ -92,24 +93,12 @@ def extract_artist_title(filepath):
     """
     Return (artist, title) from file’s metadata, or (None, None).
     """
-    ext = os.path.splitext(filepath)[1].lower()
     try:
-        if ext == ".mp3":
-            audio = EasyID3(filepath)
-            artist = audio.get("artist", [None])[0]
-            title = audio.get("title", [None])[0]
-        elif ext == ".flac":
-            audio = FLAC(filepath)
-            artist = audio.get("artist", [None])[0]
-            title = audio.get("title", [None])[0]
-        else:
-            audio = MutagenFile(filepath, easy=True)
-            if not audio or not audio.tags:
-                return None, None
-            artist = audio.tags.get("artist", [None])[0]
-            title = audio.tags.get("title", [None])[0]
-        return (artist.strip() if artist else None,
-                title.strip() if title else None)
+        tags = read_tags(filepath)
+        artist = tags.get("artist")
+        title = tags.get("title")
+        return (artist.strip() if isinstance(artist, str) and artist else None,
+                title.strip() if isinstance(title, str) and title else None)
     except Exception:
         return None, None
 
@@ -118,19 +107,13 @@ def extract_genre_list(filepath):
     """
     Return a list of existing genres from the file, or [] if none.
     """
-    ext = os.path.splitext(filepath)[1].lower()
     try:
-        if ext == ".mp3":
-            audio = EasyID3(filepath)
-            return audio.get("genre", [])
-        elif ext == ".flac":
-            audio = FLAC(filepath)
-            return audio.get("genre", [])
-        else:
-            audio = MutagenFile(filepath, easy=True)
-            if not audio or not audio.tags:
-                return []
-            return audio.tags.get("genre", [])
+        raw = read_tags(filepath).get("genre")
+        if raw in (None, ""):
+            return []
+        if isinstance(raw, (list, tuple)):
+            return [str(v) for v in raw if isinstance(v, str)]
+        return [str(raw)]
     except Exception:
         return []
 

@@ -1,6 +1,7 @@
 """Dispatch metadata queries to supported services."""
 
 from typing import Dict
+from utils.audio_metadata_reader import read_tags
 from utils.path_helpers import ensure_long_path
 
 
@@ -55,11 +56,9 @@ def query_acoustid(api_key: str, audio_file: str) -> Dict:
 def query_lastfm(api_key: str, audio_file: str) -> Dict:
     """Query Last.fm for ``audio_file`` using ``api_key``."""
     import requests
-    from mutagen import File as MutagenFile
-
-    audio = MutagenFile(ensure_long_path(audio_file), easy=True)
-    artist = (audio.tags.get("artist") or [None])[0] if audio and audio.tags else None
-    title = (audio.tags.get("title") or [None])[0] if audio and audio.tags else None
+    tags = read_tags(ensure_long_path(audio_file))
+    artist = tags.get("artist")
+    title = tags.get("title")
     if not artist or not title:
         return {}
 
@@ -101,8 +100,6 @@ def query_musicbrainz(api_key: str, audio_file: str) -> Dict:
     function simply performs a trivial request to verify connectivity.
     """
     import musicbrainzngs
-    from mutagen import File as MutagenFile
-
     contact = api_key or ""
     musicbrainzngs.set_useragent(
         "SoundVaultTagFixer",
@@ -116,9 +113,9 @@ def query_musicbrainz(api_key: str, audio_file: str) -> Dict:
         musicbrainzngs.search_recordings(recording="test", limit=1)
         return {}
 
-    audio = MutagenFile(ensure_long_path(audio_file), easy=True)
-    artist = (audio.tags.get("artist") or [None])[0] if audio and audio.tags else None
-    title = (audio.tags.get("title") or [None])[0] if audio and audio.tags else None
+    tags = read_tags(ensure_long_path(audio_file))
+    artist = tags.get("artist")
+    title = tags.get("title")
     if not artist or not title:
         return {}
 

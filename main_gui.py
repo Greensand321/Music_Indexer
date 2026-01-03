@@ -112,7 +112,7 @@ from playlist_engine import bucket_by_tempo_energy, autodj_playlist
 from controllers.cluster_controller import gather_tracks
 from playlist_generator import write_playlist
 from utils.path_helpers import ensure_long_path, strip_ext_prefix
-from utils.audio_metadata_reader import read_metadata
+from utils.audio_metadata_reader import read_metadata, read_tags
 
 FilterFn = Callable[[FileRecord], bool]
 _cached_filters = None
@@ -4869,14 +4869,14 @@ class SoundVaultImporterApp(tk.Tk):
         for idx, path in enumerate(files, start=1):
             if progress_callback:
                 progress_callback(idx, total)
-            try:
-                audio = MutagenFile(path, easy=True)
-            except Exception:
+            tags = read_tags(path)
+            raw = tags.get("genre")
+            if raw in (None, ""):
                 continue
-            if not audio:
-                continue
-
-            existing_genres = audio.get("genre", []) or []
+            if isinstance(raw, (list, tuple)):
+                existing_genres = [str(v) for v in raw if isinstance(v, str)]
+            else:
+                existing_genres = [str(raw)]
             rewritten: list[str] = []
             seen: set[str] = set()
             for entry in existing_genres:

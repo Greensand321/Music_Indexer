@@ -19,8 +19,8 @@ from clustered_playlists import log_cluster_summary
 
 from io import BytesIO
 from PIL import Image, ImageTk
-from mutagen import File as MutagenFile
 from music_indexer_api import get_tags
+from utils.audio_metadata_reader import read_metadata
 
 logger = logging.getLogger(__name__)
 
@@ -181,19 +181,9 @@ class ClusterGraphPanel(ttk.Frame):
         """Return a 64x64 thumbnail for ``path`` or a gray placeholder."""
         img = None
         try:
-            audio = MutagenFile(path)
-            img_data = None
-            if hasattr(audio, "tags") and audio.tags is not None:
-                for key in audio.tags.keys():
-                    if key.startswith("APIC"):
-                        img_data = audio.tags[key].data
-                        break
-            if img_data is None and getattr(audio, "pictures", None):
-                pics = getattr(audio, "pictures", [])
-                if pics:
-                    img_data = pics[0].data
-            if img_data:
-                img = Image.open(BytesIO(img_data))
+            _tags, cover_payloads, _error, _reader = read_metadata(path, include_cover=True)
+            if cover_payloads:
+                img = Image.open(BytesIO(cover_payloads[0]))
         except Exception:
             img = None
 
