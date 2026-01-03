@@ -53,6 +53,7 @@ from duplicate_consolidation import (
     LOSSLESS_EXTS,
 )
 from duplicate_consolidation_executor import ExecutionConfig, execute_consolidation_plan
+from duplicate_bucketing_poc import run_duplicate_bucketing_poc
 from controllers.library_index_controller import generate_index
 from gui.audio_preview import PlaybackError, VlcPreviewPlayer
 from io import BytesIO
@@ -3035,6 +3036,100 @@ class SimilarityInspectorDialog(tk.Toplevel):
         self._set_results("\n".join(report_lines))
 
 
+class DuplicateBucketingPocDialog(tk.Toplevel):
+    """Minimal UI for the Duplicate Bucketing proof-of-concept tool."""
+
+    def __init__(self, parent: tk.Widget):
+        super().__init__(parent)
+        self.title("Duplicate Bucketing POC")
+        self.transient(parent)
+        self.resizable(False, False)
+        self.parent = parent
+
+        default_path = ""
+        if hasattr(parent, "library_path_var"):
+            default_path = parent.library_path_var.get()
+
+        self.folder_var = tk.StringVar(value=default_path)
+        self.status_var = tk.StringVar(value="Idle")
+        self.run_btn: ttk.Button | None = None
+
+        container = ttk.Frame(self, padding=12)
+        container.pack(fill="both", expand=True)
+
+        ttk.Label(
+            container,
+            text="Select a folder to scan for duplicate bucketing.",
+            foreground="#555",
+            wraplength=420,
+        ).pack(anchor="w")
+
+        row = ttk.Frame(container)
+        row.pack(fill="x", pady=(10, 6))
+        ttk.Entry(row, textvariable=self.folder_var, width=50).pack(side="left", fill="x", expand=True)
+        ttk.Button(row, text="Browse…", command=self._browse_folder).pack(side="left", padx=(6, 0))
+
+        controls = ttk.Frame(container)
+        controls.pack(fill="x", pady=(4, 0))
+        self.run_btn = ttk.Button(controls, text="Run", command=self._run)
+        self.run_btn.pack(side="left")
+        ttk.Button(controls, text="Close", command=self.destroy).pack(side="left", padx=(6, 0))
+
+        ttk.Label(container, textvariable=self.status_var).pack(anchor="w", pady=(8, 0))
+
+    def _browse_folder(self) -> None:
+        chosen = filedialog.askdirectory(title="Select Folder for Duplicate Bucketing")
+        if chosen:
+            self.folder_var.set(chosen)
+
+    def _set_running(self, running: bool, status: str) -> None:
+        self.status_var.set(status)
+        if self.run_btn:
+            self.run_btn.configure(state=("disabled" if running else "normal"))
+
+    def _log(self, message: str) -> None:
+        if hasattr(self.parent, "_log"):
+            self.parent._log(message)
+            if hasattr(self.parent, "show_log_tab"):
+                self.parent.show_log_tab()
+        else:
+            print(message)
+
+    def _run(self) -> None:
+        folder = self.folder_var.get().strip()
+        if not folder or not os.path.isdir(folder):
+            messagebox.showwarning("Folder Required", "Please select a valid folder.")
+            return
+
+        self._set_running(True, "Running…")
+
+        def worker() -> None:
+            try:
+                report_path = run_duplicate_bucketing_poc(folder, log_callback=self._log)
+                self.after(0, lambda: self._on_complete(report_path))
+            except Exception as exc:  # pragma: no cover - safety net
+                self.after(0, lambda: self._on_error(str(exc)))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_complete(self, report_path: str) -> None:
+        self._set_running(False, "Completed")
+        open_report = messagebox.askyesno(
+            "Duplicate Bucketing POC",
+            f"Report saved to:\n{report_path}\n\nOpen it now?",
+        )
+        if open_report:
+            try:
+                uri = Path(report_path).resolve().as_uri()
+            except Exception:
+                uri = report_path
+            webbrowser.open(uri)
+
+    def _on_error(self, error: str) -> None:
+        self._set_running(False, "Failed")
+        messagebox.showerror("Duplicate Bucketing POC", f"Run failed:\n{error}")
+
+
 class SoundVaultImporterApp(tk.Tk):
     def __init__(self):
         super().__init__()
@@ -3198,6 +3293,10 @@ class SoundVaultImporterApp(tk.Tk):
         )
         tools_menu.add_command(
             label="Similarity Inspector…", command=self._open_similarity_inspector_tool
+        )
+        tools_menu.add_command(
+            label="Duplicate Bucketing POC…",
+            command=self._open_duplicate_bucketing_poc_tool,
         )
         tools_menu.add_separator()
         tools_menu.add_command(label="Reset Tag-Fix Log", command=self.reset_tagfix_log)
@@ -5334,6 +5433,9 @@ class SoundVaultImporterApp(tk.Tk):
 
     def _open_similarity_inspector_tool(self) -> None:
         SimilarityInspectorDialog(self)
+
+    def _open_duplicate_bucketing_poc_tool(self) -> None:
+        DuplicateBucketingPocDialog(self)
 
     def _create_player_library_table(self, parent: tk.Widget) -> ttk.Frame:
         table = ttk.Frame(parent)
