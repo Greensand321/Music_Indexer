@@ -140,7 +140,7 @@ def scan_raw_genres(folder: str, progress_callback):
     """
     # discover_files comes from your tagfix controller
     from controllers.tagfix_controller import discover_files
-    from mutagen import File as MutagenFile
+    from utils.audio_metadata_reader import read_tags
 
     files = discover_files(folder)
     total = len(files)
@@ -148,8 +148,13 @@ def scan_raw_genres(folder: str, progress_callback):
     progress_callback(0, total)
     for idx, path in enumerate(files, start=1):
         progress_callback(idx, total)
-        audio = MutagenFile(path, easy=True)
-        genres = audio.get("genre", []) or []
+        raw = read_tags(path).get("genre")
+        if raw in (None, ""):
+            continue
+        if isinstance(raw, (list, tuple)):
+            genres = [str(v) for v in raw if isinstance(v, str)]
+        else:
+            genres = [str(raw)]
         for entry in genres:
             # split on semicolon, comma or slash
             parts = re.split(r'[;,/]', entry)
