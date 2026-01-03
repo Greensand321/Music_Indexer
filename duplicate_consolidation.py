@@ -2198,6 +2198,16 @@ def export_duplicate_pair_report_html(report: DuplicatePairReport, output_html_p
         return str(value)
 
     def _track_row(track: DuplicateTrack, label: str) -> List[str]:
+        tags = track.current_tags if isinstance(track.current_tags, Mapping) else track.tags
+        tags = tags if isinstance(tags, Mapping) else {}
+        title = tags.get("title") or "n/a"
+        artist = tags.get("albumartist") or tags.get("artist") or "n/a"
+        album = tags.get("album") or "n/a"
+        track_no = tags.get("track") or tags.get("tracknumber") or "n/a"
+        disc_no = tags.get("disc") or tags.get("discnumber") or "n/a"
+        year = tags.get("year") or tags.get("date") or "n/a"
+        artwork_count = len(track.artwork) if track.artwork else 0
+        cover_hash = track.cover_hash or "n/a"
         return [
             "<tr>",
             f"<th>{esc(label)}</th>",
@@ -2208,7 +2218,16 @@ def export_duplicate_pair_report_html(report: DuplicatePairReport, output_html_p
             f"Bitrate: {esc(track.bitrate or 'n/a')} | "
             f"Sample rate: {esc(track.sample_rate or 'n/a')} | "
             f"Channels: {esc(track.channels or 'n/a')} | "
-            f"Bit depth: {esc(track.bit_depth or 'n/a')}",
+            f"Bit depth: {esc(track.bit_depth or 'n/a')}"
+            "</div>",
+            "<div class='meta'>"
+            f"Title: {esc(title)} | Artist: {esc(artist)} | Album: {esc(album)}"
+            "</div>",
+            "<div class='meta'>"
+            f"Track: {esc(track_no)} | Disc: {esc(disc_no)} | Year: {esc(year)}"
+            "</div>",
+            "<div class='meta'>"
+            f"Artwork entries: {esc(artwork_count)} | Cover hash: {esc(cover_hash)}"
             "</div>",
             "</td>",
             "</tr>",
