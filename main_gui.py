@@ -62,6 +62,7 @@ from mutagen import File as MutagenFile
 from near_duplicate_detector import fingerprint_distance
 import chromaprint_utils
 from config import (
+    ARTWORK_VASTLY_DIFFERENT_THRESHOLD,
     EXACT_DUPLICATE_THRESHOLD,
     FP_DURATION_MS,
     FP_OFFSET_MS,
@@ -1684,6 +1685,9 @@ class DuplicateFinderShell(tk.Toplevel):
             "exact_duplicate_threshold": float(cfg.get("exact_duplicate_threshold", EXACT_DUPLICATE_THRESHOLD)),
             "near_duplicate_threshold": float(cfg.get("near_duplicate_threshold", NEAR_DUPLICATE_THRESHOLD)),
             "mixed_codec_threshold_boost": float(cfg.get("mixed_codec_threshold_boost", MIXED_CODEC_THRESHOLD_BOOST)),
+            "artwork_vastly_different_threshold": float(
+                cfg.get("artwork_vastly_different_threshold", ARTWORK_VASTLY_DIFFERENT_THRESHOLD)
+            ),
         }
 
     def _current_fingerprint_settings(self) -> dict[str, float | int | bool]:
