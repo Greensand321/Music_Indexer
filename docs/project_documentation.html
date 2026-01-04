@@ -144,15 +144,17 @@ def run_full_indexer(root_path, output_html_path, dry_run_only=False, log_callba
 
 <hr>
 
-<h3>2.5 Library Sync Review Tool (<code>library_sync.py</code>)</h3>
-<p>Comparison-first workflow that aligns to the redesign in <code>docs/library_sync_redesign.md</code>:</p>
+<h3>2.5 Library Sync Review Tool (<code>library_sync_review.py</code> / <code>library_sync.py</code>)</h3>
+<p>Review-first workflow with a two-list UI plus optional plan/preview/execute actions:</p>
 <ul>
   <li>Runs independent scans for Library and Incoming folders, reusing cached fingerprints when size/mtime match and computing new prints in parallel when needed.</li>
   <li>Builds normalized <code>TrackRecord</code> entries (path, ext, bitrate, size, mtime, duration, fingerprint, tags) and matches via indexed shortlists: fingerprint signature → extension cohort → fallback pool.</li>
   <li>Classifies each incoming track as <em>New</em>, <em>Collision</em>, <em>Exact Match</em>, or <em>Low Confidence</em>, and attaches quality labels (<em>Potential Upgrade</em> / <em>Keep Existing</em>) using format priority and bitrate.</li>
   <li>Exposes full <code>MatchResult</code> payloads with shortlist distances, thresholds used, near-miss margins, and confidence scores so the UI can render detailed inspectors without extra computation.</li>
+  <li>The UI provides Incoming/Existing lists, a text inspector, log export, and plan controls (Build Plan, Preview, Execute) with a transfer-mode toggle and optional playlist output.</li>
   <li>Optional profiling (<code>PerformanceProfile</code>) tracks cache hits, fingerprints computed, shortlist sizes, and scan/match timings for troubleshooting.</li>
-  <li>Opt-in execution path: <code>compute_library_sync_plan()</code> remaps indexer-derived destinations under the chosen library root and emits deterministic plan items (<em>COPY</em> / <em>REPLACE</em> / <em>SKIP</em> with reasons). <code>execute_plan()</code> writes JSON audits + executed HTML reports, creates a playlist of transferred files, and backs up any replaced destination before writing.</li>
+  <li>Opt-in execution path: <code>compute_library_sync_plan()</code> remaps indexer-derived destinations under the chosen library root and emits deterministic plan items (<em>COPY</em> / <em>REPLACE</em> / <em>SKIP</em> with reasons). <code>build_library_sync_preview()</code> renders the HTML preview, and <code>execute_library_sync_plan()</code> writes JSON audits + executed HTML reports, creates a playlist of transferred files, and backs up any replaced destination before writing.</li>
+  <li><strong>Current gaps:</strong> per-item copy/replace flags and report-export helpers exist in code, but the UI does not expose them yet.</li>
 </ul>
 
 <hr>
