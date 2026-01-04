@@ -16,6 +16,7 @@ SUPPORTED_SERVICES = [
 NEAR_DUPLICATE_THRESHOLD = 0.1
 EXACT_DUPLICATE_THRESHOLD = 0.02
 MIXED_CODEC_THRESHOLD_BOOST = 0.03
+ARTWORK_VASTLY_DIFFERENT_THRESHOLD = 24
 
 # File format quality priority used during Library Sync
 FORMAT_PRIORITY = {".flac": 3, ".wav": 2, ".mp3": 1}
@@ -77,6 +78,11 @@ def load_config():
         cfg.setdefault("fingerprint_trim_padding_ms", FP_TRIM_PADDING_MS)
         cfg.setdefault("allow_mismatched_edits", ALLOW_MISMATCHED_EDITS)
         cfg.setdefault("mixed_codec_threshold_boost", MIXED_CODEC_THRESHOLD_BOOST)
+        cfg.setdefault(
+            "artwork_vastly_different_threshold",
+            ARTWORK_VASTLY_DIFFERENT_THRESHOLD,
+        )
+        cfg.setdefault("duplicate_finder_show_artwork_variants", True)
         cfg.setdefault("library_root", "")
         cfg.setdefault("use_library_sync_review", False)
         cfg.setdefault("library_sync_review", {})
@@ -100,6 +106,8 @@ def load_config():
             "use_library_sync_review": False,
             "library_sync_review": {},
             "mixed_codec_threshold_boost": MIXED_CODEC_THRESHOLD_BOOST,
+            "artwork_vastly_different_threshold": ARTWORK_VASTLY_DIFFERENT_THRESHOLD,
+            "duplicate_finder_show_artwork_variants": True,
         }
 
 
