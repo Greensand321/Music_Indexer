@@ -5,6 +5,7 @@ import logging
 import webbrowser
 import re
 import html
+import shutil
 from pathlib import Path
 
 if sys.platform == "win32":
@@ -114,7 +115,11 @@ from playlist_engine import bucket_by_tempo_energy, autodj_playlist
 from controllers.cluster_controller import gather_tracks
 from playlist_generator import write_playlist
 from utils.path_helpers import ensure_long_path, strip_ext_prefix
-from utils.audio_metadata_reader import read_metadata, read_tags
+from utils.audio_metadata_reader import (
+    read_metadata,
+    read_tags,
+    read_sidecar_artwork_bytes,
+)
 
 FilterFn = Callable[[FileRecord], bool]
 _cached_filters = None
@@ -877,9 +882,11 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
                 messagebox.showerror("Open File", f"Could not open {path}: {exc}")
 
         def browse():
-            f = filedialog.askopenfilename()
+            initial_dir = load_last_path() or os.getcwd()
+            f = filedialog.askopenfilename(initialdir=initial_dir)
             if f:
                 sel.set(f)
+                save_last_path(os.path.dirname(f))
 
         def append_log(msg: str) -> None:
             def _append() -> None:
@@ -1906,19 +1913,29 @@ class DuplicateFinderShell(tk.Toplevel):
         return path
 
     def _browse_library(self) -> None:
-        chosen = filedialog.askdirectory(title="Select Library Root")
+        initial_dir = self.library_path_var.get().strip() or load_last_path() or os.getcwd()
+        chosen = filedialog.askdirectory(
+            title="Select Library Root",
+            initialdir=initial_dir,
+        )
         if not chosen:
             return
         self.library_path_var.set(chosen)
         self.playlist_path_var.set(self._default_playlist_folder(chosen))
         self._log_action(f"Library path updated to {chosen}")
+        save_last_path(chosen)
 
     def _browse_playlist(self) -> None:
-        chosen = filedialog.askdirectory(title="Select Playlist Folder")
+        initial_dir = self.playlist_path_var.get().strip() or load_last_path() or os.getcwd()
+        chosen = filedialog.askdirectory(
+            title="Select Playlist Folder",
+            initialdir=initial_dir,
+        )
         if not chosen:
             return
         self.playlist_path_var.set(chosen)
         self._log_action(f"Playlist folder updated to {chosen}")
+        save_last_path(chosen)
 
     def _open_threshold_settings(self) -> None:
         dlg = tk.Toplevel(self)
@@ -2632,9 +2649,14 @@ class SimilarityInspectorDialog(tk.Toplevel):
             self.advanced_visible = True
 
     def _choose_file(self, var: tk.StringVar) -> None:
-        path = filedialog.askopenfilename(title="Select audio file")
+        initial_dir = load_last_path() or os.getcwd()
+        path = filedialog.askopenfilename(
+            title="Select audio file",
+            initialdir=initial_dir,
+        )
         if path:
             var.set(path)
+            save_last_path(os.path.dirname(path))
 
     def _parse_float(self, raw: str, label: str, *, min_value: float | None = None) -> float | None:
         try:
@@ -3117,10 +3139,11 @@ class M4ATesterDialog(tk.Toplevel):
         ttk.Button(controls, text="Close", command=self.destroy).pack(side="left")
 
     def _choose_file(self) -> None:
+        initial_dir = load_last_path() or os.getcwd()
         chosen = filedialog.askopenfilename(
             parent=self,
             title="Select M4A File",
-            initialdir=os.getcwd(),
+            initialdir=initial_dir,
             filetypes=[("M4A files", "*.m4a")],
         )
         if not chosen:
@@ -3129,13 +3152,14 @@ class M4ATesterDialog(tk.Toplevel):
             messagebox.showerror("M4A Tester", "Please select a .m4a file.")
             return
         self.file_path_var.set(chosen)
+        save_last_path(os.path.dirname(chosen))
         self._load_metadata(chosen)
 
     def _load_metadata(self, path: str) -> None:
         self._set_metadata_text("")
         self._set_cover_image(None)
 
-        tags, cover_payloads, error, _reader = read_metadata(path, include_cover=True)
+        tags, _cover_payloads, error, _reader = read_metadata(path, include_cover=False)
 
         def _format_value(value: object) -> str | None:
             if value in (None, "", []):
@@ -3167,7 +3191,7 @@ class M4ATesterDialog(tk.Toplevel):
             lines.append(f"Metadata error: {error}")
         self._set_metadata_text("\n".join(lines) if lines else "No metadata found.")
 
-        cover_bytes = cover_payloads[0] if cover_payloads else None
+        cover_bytes = self._extract_cover_art_bytes(path)
         if cover_bytes:
             try:
                 image = Image.open(BytesIO(cover_bytes))
@@ -3177,6 +3201,38 @@ class M4ATesterDialog(tk.Toplevel):
                 self.cover_label.config(text="Failed to load album art")
         else:
             self.cover_label.config(text="No album art found")
+
+    def _extract_cover_art_bytes(self, path: str) -> bytes | None:
+        if shutil.which("ffmpeg"):
+            cmd = [
+                "ffmpeg",
+                "-v",
+                "error",
+                "-i",
+                ensure_long_path(path),
+                "-map",
+                "0:v",
+                "-frames:v",
+                "1",
+                "-f",
+                "image2pipe",
+                "-vcodec",
+                "png",
+                "-",
+            ]
+            try:
+                result = subprocess.run(
+                    cmd,
+                    check=False,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+            except Exception:
+                result = None
+            if result and result.returncode == 0 and result.stdout:
+                return result.stdout
+
+        return read_sidecar_artwork_bytes(path)
 
     def _set_metadata_text(self, content: str) -> None:
         self.metadata_text.configure(state="normal")
@@ -3235,9 +3291,14 @@ class DuplicateBucketingPocDialog(tk.Toplevel):
         ttk.Label(container, textvariable=self.status_var).pack(anchor="w", pady=(8, 0))
 
     def _browse_folder(self) -> None:
-        chosen = filedialog.askdirectory(title="Select Folder for Duplicate Bucketing")
+        initial_dir = load_last_path() or os.getcwd()
+        chosen = filedialog.askdirectory(
+            title="Select Folder for Duplicate Bucketing",
+            initialdir=initial_dir,
+        )
         if chosen:
             self.folder_var.set(chosen)
+            save_last_path(chosen)
 
     def _set_running(self, running: bool, status: str) -> None:
         self.status_var.set(status)
