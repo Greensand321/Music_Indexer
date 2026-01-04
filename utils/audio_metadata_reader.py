@@ -37,6 +37,37 @@ TAG_KEYS = (
 SIDECAR_ARTWORK_SUFFIXES = (".artwork", ".cover", ".jpg")
 
 
+def _normalize_text_value(value: object, key: str) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, bytes):
+        for encoding in ("utf-8", "utf-16", "latin-1"):
+            try:
+                return value.decode(encoding)
+            except UnicodeDecodeError:
+                continue
+        return value.decode("utf-8", errors="replace")
+    if isinstance(value, (int, float)):
+        return str(value)
+    if isinstance(value, str):
+        cleaned = value.strip()
+        return cleaned or None
+    if not isinstance(value, (int, float)):
+        logger.warning("Unexpected tag type for %s: %s", key, type(value).__name__)
+    try:
+        return str(value).strip() or None
+    except Exception:
+        logger.warning("Unsupported tag type for %s: %s", key, type(value).__name__)
+        return None
+
+
+def _normalize_text_tags(tags: Dict[str, object]) -> Dict[str, object]:
+    normalized = dict(tags)
+    for key in ("artist", "albumartist", "title", "album", "genre", "year", "date"):
+        normalized[key] = _normalize_text_value(tags.get(key), key)
+    return normalized
+
+
 def read_sidecar_artwork_bytes(path: str) -> bytes | None:
     for suffix in SIDECAR_ARTWORK_SUFFIXES:
         candidate = f"{path}{suffix}"
@@ -277,4 +308,4 @@ def read_metadata(
 def read_tags(path: str) -> Dict[str, object]:
     """Return just the tag dictionary for ``path``."""
     tags, _covers, _error, _reader = read_metadata(path, include_cover=False)
-    return tags
+    return _normalize_text_tags(tags)
