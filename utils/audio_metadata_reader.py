@@ -33,6 +33,20 @@ TAG_KEYS = (
     "compilation",
 )
 
+SIDECAR_ARTWORK_SUFFIXES = (".artwork", ".cover", ".jpg")
+
+
+def read_sidecar_artwork_bytes(path: str) -> bytes | None:
+    for suffix in SIDECAR_ARTWORK_SUFFIXES:
+        candidate = f"{path}{suffix}"
+        if os.path.exists(candidate):
+            try:
+                with open(candidate, "rb") as handle:
+                    return handle.read()
+            except OSError:
+                continue
+    return None
+
 
 def _blank_tags() -> Dict[str, object]:
     return {key: None for key in TAG_KEYS}

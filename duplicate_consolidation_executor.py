@@ -36,7 +36,7 @@ from duplicate_consolidation import (
     consolidation_plan_from_dict,
 )
 from indexer_control import IndexCancelled, cancel_event as global_cancel_event
-from utils.audio_metadata_reader import _extract_cover_payloads
+from utils.audio_metadata_reader import _extract_cover_payloads, read_sidecar_artwork_bytes
 from utils.path_helpers import ensure_long_path
 
 try:
@@ -262,14 +262,9 @@ def _backup_playlist(path: str, backup_root: str) -> str:
 
 
 def _extract_artwork_bytes(path: str) -> bytes | None:
-    sidecars = [f"{path}.artwork", f"{path}.cover", f"{path}.jpg"]
-    for candidate in sidecars:
-        if os.path.exists(candidate):
-            try:
-                with open(candidate, "rb") as handle:
-                    return handle.read()
-            except OSError:
-                continue
+    payload = read_sidecar_artwork_bytes(path)
+    if payload is not None:
+        return payload
     if MutagenFile is None:
         return None
     audio = None
