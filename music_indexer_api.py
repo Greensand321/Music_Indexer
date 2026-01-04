@@ -3,13 +3,10 @@
 import os
 import re
 import shutil  # used for relocating special folders
-import hashlib
-import base64
 import unicodedata
 from collections import defaultdict
-from typing import Dict, List
+from typing import List
 from dry_run_coordinator import DryRunCoordinator
-from config import MIXED_CODEC_THRESHOLD_BOOST, load_config
 
 def _verify_dependencies() -> None:
     """Raise RuntimeError if the real mutagen library is missing."""
@@ -26,16 +23,13 @@ try:
 except Exception:  # pragma: no cover - optional dependency
     def MutagenFile(*_a, **_k):
         return None
-from utils.audio_metadata_reader import read_metadata, read_tags
+from utils.audio_metadata_reader import read_tags
 from indexer_control import check_cancelled, cancel_event
 
 # ─── CONFIGURATION ─────────────────────────────────────────────────────
 COMMON_ARTIST_THRESHOLD = 10
 REMIX_FOLDER_THRESHOLD  = 3
 SUPPORTED_EXTS          = {".flac", ".m4a", ".aac", ".mp3", ".wav", ".ogg"}
-DEFAULT_FUZZY_FP_THRESHOLD = 0.1  # allowed fingerprint difference ratio
-DEDUP_KEEP_DELTA_THRESHOLD = 50  # score difference to auto-delete duplicates
-FINGERPRINT_TIMEOUT = 30          # seconds before fingerprint worker is timed out
 
 # ─── Helper: build primary_counts for the entire vault ─────────────────────
 def build_primary_counts(root_path, progress_callback=None, phase="A", log_callback=None):
@@ -149,7 +143,15 @@ def _sanitize_tag_value(value: object, field: str, log_callback=None) -> str:
     return sanitized
 
 
-def _ensure_unique_destination(path: str, moves: dict, log_callback=None) -> str:
+def _ensure_unique_destination(
+    path: str,
+    moves: dict,
+    log_callback=None,
+    *,
+    source_path: str | None = None,
+    decision_log: list[str] | None = None,
+) -> str:
+    """Resolve destination collisions deterministically by suffixing names."""
     if path not in moves.values() and not os.path.exists(path):
         return path
     base, ext = os.path.splitext(path)
@@ -159,8 +161,14 @@ def _ensure_unique_destination(path: str, moves: dict, log_callback=None) -> str
         counter += 1
         candidate = f"{base} ({counter}){ext}"
     if log_callback:
+        source_label = f" for '{os.path.basename(source_path)}'" if source_path else ""
         log_callback(
-            f"  ! Destination collision detected; renamed to '{os.path.basename(candidate)}'"
+            f"  ! Destination collision{source_label}; renamed to '{os.path.basename(candidate)}'"
+        )
+    if decision_log is not None:
+        source_label = f" for '{os.path.basename(source_path)}'" if source_path else ""
+        decision_log.append(
+            f"  ! Destination collision{source_label}; renamed to '{os.path.basename(candidate)}'"
         )
     return candidate
 
@@ -292,73 +300,6 @@ def derive_tags_from_path(filepath: str, music_root: str):
     return set(parts)
 
 
-def _parse_fp(fp: str) -> tuple[str, list[int] | bytes] | None:
-    """Parse fingerprint string into integer list or decoded bytes."""
-    text = fp.strip()
-    if not text:
-        return None
-    try:
-        arr = [int(x) for x in text.replace(',', ' ').split()]
-        if arr:
-            return ("ints", arr)
-    except Exception:
-        pass
-    try:
-        data = base64.urlsafe_b64decode(text + '=' * (-len(text) % 4))
-        if data:
-            return ("bytes", data)
-    except Exception:
-        pass
-    return None
-
-
-def _hamming_ints(a: list[int], b: list[int]) -> float:
-    n = min(len(a), len(b))
-    if n == 0:
-        return 1.0
-    diff = sum(x != y for x, y in zip(a[:n], b[:n]))
-    return diff / n
-
-
-def _hamming_bytes(a: bytes, b: bytes) -> float:
-    n = min(len(a), len(b))
-    if n == 0:
-        return 1.0
-    diff = 0
-    for i in range(n):
-        diff += (a[i] ^ b[i]).bit_count()
-    return diff / (n * 8)
-
-
-def fingerprint_distance(fp1: str | None, fp2: str | None) -> float:
-    """Return normalized Hamming distance between two fingerprint strings."""
-    if not fp1 or not fp2:
-        return 1.0
-    if fp1 == fp2:
-        return 0.0
-    p1 = _parse_fp(fp1)
-    p2 = _parse_fp(fp2)
-    if not p1 or not p2 or p1[0] != p2[0]:
-        return 1.0
-    kind, a = p1
-    _, b = p2
-    if kind == "ints":
-        return _hamming_ints(a, b)  # type: ignore[arg-type]
-    else:
-        return _hamming_bytes(a, b)  # type: ignore[arg-type]
-
-
-def _keep_score(path: str, info: dict, ext_priority: dict) -> float:
-    """Compute keep score for a file based on extension, metadata and filename."""
-    ext = os.path.splitext(path)[1].lower()
-    pri = ext_priority.get(ext, 99)
-    ext_score = 1000.0 / (pri + 1)
-    meta_score = info.get("meta_count", 0) * 10
-    fname_score = len(os.path.splitext(os.path.basename(path))[0])
-    return ext_score + meta_score + fname_score
-
-
-
 
 # ─── A. HELPER: COMPUTE MOVES & TAG INDEX ───────────────────────────────
 
@@ -375,22 +316,18 @@ def compute_moves_and_tag_index(
     """
     1) Determine MUSIC_ROOT: if root_path/Music exists, use that; otherwise root_path itself.
     2) Scan for all audio files under MUSIC_ROOT.
-    3) Deduplicate tracks by fingerprint only and delete lower-priority duplicates.
-       If ``dry_run`` is True, deduplication actions are simulated only and no
-       files are modified.
-    4) Read metadata into `songs` dict, build:
+    3) Read metadata into `songs` dict, build:
        - album_counts: how many genuine (non-remix) tracks per (artist, album)
        - remix_counts: how many remix‐tagged tracks per (artist, album)
-       - cover_counts: how many files share each embedded cover
-    5) Phase 4: For each entry in `songs`, decide new folder & filename,
+    4) Phase 4: For each entry in `songs`, decide new folder & filename,
        with special‐case for small “(Remixes)” albums.
     Returns:
       - moves: { old_path: new_path, ... }
       - tag_index: { new_path: { "leftover_tags": [...], "old_paths": [...] }, ... }
       - decision_log: list of strings explaining each track’s decision
 
-    ``coord`` can be provided to collect additional diagnostic data during
-    near-duplicate detection.
+    ``enable_phase_c``, ``flush_cache``, ``max_workers``, and ``coord`` are
+    retained for backward compatibility but are ignored.
     """
     _verify_dependencies()
     if log_callback is None:
@@ -400,8 +337,6 @@ def compute_moves_and_tag_index(
         def progress_callback(current, total, message, phase):
             pass
 
-    cfg = load_config()
-    fuzzy_fp_threshold = float(cfg.get("fuzzy_fp_threshold", DEFAULT_FUZZY_FP_THRESHOLD))
     check_cancelled()
 
     # ─── 1) Determine MUSIC_ROOT ──────────────────────────────────────────────
@@ -411,13 +346,6 @@ def compute_moves_and_tag_index(
 
     SUPPORTED_EXTS = {".flac", ".m4a", ".aac", ".mp3", ".wav", ".ogg"}
 
-    docs_dir = os.path.join(root_path, "Docs")
-    os.makedirs(docs_dir, exist_ok=True)
-    db_path = os.path.join(docs_dir, ".soundvault.db")
-    if flush_cache:
-        from fingerprint_cache import flush_cache as _flush
-        _flush(db_path)
-
     # --- Phase 0: Pre-scan entire vault (under MUSIC_ROOT) ---
     global_counts = build_primary_counts(MUSIC_ROOT, progress_callback, phase="A", log_callback=log_callback)
     log_callback(f"   → Pre-scan: found {len(global_counts)} unique artists")
@@ -425,7 +353,7 @@ def compute_moves_and_tag_index(
     log_callback(f"   → DEBUG: droeloe count = {global_counts.get('droeloe', 0)}")
 
     # --- Phase 1: Scan for audio files ---
-    log_callback("1/6: Discovering audio files…")
+    log_callback("1/4: Discovering audio files…")
     all_audio = []
     idx = 0
     for dirpath, _, files in os.walk(MUSIC_ROOT):
@@ -444,175 +372,21 @@ def compute_moves_and_tag_index(
     total_audio = idx
     log_callback(f"   → Found {total_audio} audio files.")
 
-    # ─── Phase 2: Deduplicate using fingerprints ─────────────────────────────
-    log_callback("2/6: Deduplicating by fingerprint…")
-    EXT_PRIORITY = {".flac": 0, ".m4a": 1, ".aac": 1, ".mp3": 2, ".wav": 3, ".ogg": 4}
-
-    path_fps: Dict[str, str | None] = {}
-    from fingerprint_cache import get_fingerprint
-
-    def _compute(path: str) -> tuple[int | None, str | None]:
-        try:
-            import acoustid
-            return acoustid.fingerprint_file(path)
-        except Exception:
-            return None, None
-
-    progress_callback(0, len(all_audio), "Fingerprinting", "A")
-    for idx, p in enumerate(all_audio, start=1):
-        fp_val = get_fingerprint(p, db_path, _compute)
-        path_fps[p] = fp_val
-        progress_callback(idx, len(all_audio), os.path.relpath(p, root_path), "A")
-        if idx % 50 == 0 or idx == len(all_audio):
-            log_callback(f"   • Fingerprinting {idx}/{len(all_audio)}")
-
-    file_infos: Dict[str, Dict[str, str | None]] = {}
-    for idx, fullpath in enumerate(all_audio, start=1):
-        if idx % 50 == 0 or idx == total_audio:
-            log_callback(f"   • Processing file {idx}/{total_audio} for dedupe")
-        data = get_tags(fullpath)
-        raw_artist = _normalize_tag_value(data.get("artist"), "artist", log_callback)
-        if not raw_artist:
-            raw_artist = os.path.splitext(os.path.basename(fullpath))[0]
-        raw_artist = collapse_repeats(raw_artist)
-        title = _normalize_tag_value(data.get("title"), "title", log_callback)
-        if not title:
-            title = os.path.splitext(os.path.basename(fullpath))[0]
-        album = _normalize_tag_value(data.get("album"), "album", log_callback)
-        year = _normalize_tag_value(data.get("year"), "year", log_callback)
-        genre = _normalize_tag_value(data.get("genre"), "genre", log_callback)
-        meta_count = sum(
-            1
-            for t in [raw_artist, title, album, data.get("track"), year, genre]
-            if t
-        )
-        primary, _ = extract_primary_and_collabs(raw_artist)
-        fp = path_fps.get(fullpath)
-        if isinstance(fp, (bytes, bytearray)):
-            try:
-                fp = fp.decode("utf-8")
-            except Exception:
-                fp = fp.decode("latin1", errors="ignore")
-        ext = os.path.splitext(fullpath)[1].lower()
-        file_infos[fullpath] = {
-            "primary": primary.lower(),
-            "title": title.lower(),
-            "album": album.lower(),
-            "fp": fp,
-            "meta_count": meta_count,
-            "ext": ext,
-        }
-
-    to_delete: Dict[str, str] = {}
-    fp_groups: Dict[str, List[str]] = defaultdict(list)
-    for path, info in file_infos.items():
-        if info["fp"]:
-            fp_groups[info["fp"]].append(path)
-
-    kept_files = set(file_infos.keys())
     review_root = os.path.join(root_path, "Manual Review")
     os.makedirs(review_root, exist_ok=True)
 
-    for fp, paths in fp_groups.items():
-        if len(paths) <= 1:
-            continue
-        scored = sorted(paths, key=lambda p: _keep_score(p, file_infos[p], EXT_PRIORITY), reverse=True)
-        if len(scored) < 2:
-            continue
-        delta = _keep_score(scored[0], file_infos[scored[0]], EXT_PRIORITY) - _keep_score(scored[1], file_infos[scored[1]], EXT_PRIORITY)
-        if delta >= DEDUP_KEEP_DELTA_THRESHOLD:
-            for loser in scored[1:]:
-                if loser not in to_delete:
-                    to_delete[loser] = "Exact FP match"
-                    kept_files.discard(loser)
-        else:
-            meta_counts = {p: file_infos[p].get("meta_count", 0) for p in scored}
-            max_meta = max(meta_counts.values())
-            winner = None
-            for p in scored:
-                if meta_counts[p] == max_meta:
-                    winner = p
-                    break
-            for p in scored:
-                if p == winner:
-                    continue
-                if p not in to_delete:
-                    to_delete[p] = "Exact FP match"
-                    kept_files.discard(p)
-            log_callback(
-                f"Ambiguous duplicates for fingerprint {fp} auto-resolved—kept {os.path.basename(winner)}."
-            )
-
-    if coord is not None:
-        coord.add_exact_dupes([p for p, r in to_delete.items() if r == "Exact FP match"])
-
-
-    # --- Near-duplicate detection -------------------------------------------------
-    from near_duplicate_detector import find_near_duplicates
-    log_callback("   • Detecting near-duplicates…")
-    cfg = load_config()
-    mixed_codec_boost = float(cfg.get("mixed_codec_threshold_boost", MIXED_CODEC_THRESHOLD_BOOST))
-    near_dupes = find_near_duplicates(
-        {p: file_infos[p] for p in kept_files},
-        EXT_PRIORITY,
-        fuzzy_fp_threshold,
-        log_callback,
-        enable_phase_c,
-        coord,
-        max_workers,
-        mixed_codec_boost=mixed_codec_boost,
-    )
-    if near_dupes.review_required:
-        log_callback(
-            f"   ! Near-duplicate candidates require review ({len(near_dupes.review_groups)} group(s)); "
-            "no automatic merges will be applied."
-        )
-        for group in near_dupes.review_groups:
-            log_callback(
-                f"     - Review {os.path.basename(group.winner)} vs {len(group.losers)} candidates "
-                f"(max fp distance {group.max_distance:.3f})"
-            )
-    for loser, reason in near_dupes.items():
-        if loser not in to_delete:
-            to_delete[loser] = reason
-            kept_files.discard(loser)
-
-
-    trash_dir = os.path.join(root_path, "Trash")
-    os.makedirs(trash_dir, exist_ok=True)
-    for loser, reason in to_delete.items():
-        if dry_run:
-            log_callback(
-                f"   ? (dry-run) Would move duplicate {loser} to Trash ({reason})"
-            )
-        else:
-            try:
-                dest = os.path.join(trash_dir, os.path.basename(loser))
-                base, ext = os.path.splitext(os.path.basename(loser))
-                counter = 1
-                while os.path.exists(dest):
-                    dest = os.path.join(trash_dir, f"{base}_{counter}{ext}")
-                    counter += 1
-                shutil.move(loser, dest)
-                log_callback(
-                    f"   - Moved duplicate to Trash ({reason}): {loser}"
-                )
-            except Exception as e:
-                log_callback(f"   ! Failed to move {loser} to Trash: {e}")
-
-    # ─── Phase 3: Read metadata & build counters ─────────────────────────────────
-    log_callback("3/6: Reading metadata and building counters…")
+    # ─── Phase 2: Read metadata & build counters ─────────────────────────────────
+    log_callback("2/4: Reading metadata and building counters…")
     songs = {}
     album_counts   = defaultdict(int)
     remix_counts   = defaultdict(int)
-    cover_counts   = defaultdict(int)
-    total_kept = len(kept_files)
-    progress_callback(0, total_kept, "Reading metadata", "B")
+    total_files = len(all_audio)
+    progress_callback(0, total_files, "Reading metadata", "B")
 
-    for idx, fullpath in enumerate(kept_files, start=1):
-        if idx % 50 == 0 or idx == total_kept:
-            log_callback(f"   • Reading metadata {idx}/{total_kept}")
-        progress_callback(idx, total_kept, f"Metadata {os.path.relpath(fullpath, root_path)}", "B")
+    for idx, fullpath in enumerate(all_audio, start=1):
+        if idx % 50 == 0 or idx == total_files:
+            log_callback(f"   • Reading metadata {idx}/{total_files}")
+        progress_callback(idx, total_files, f"Metadata {os.path.relpath(fullpath, root_path)}", "B")
 
         data = get_tags(fullpath)
         raw_artist = _normalize_tag_value(data.get("artist"), "artist", log_callback)
@@ -640,18 +414,6 @@ def compute_moves_and_tag_index(
         if album and "remix" in album.lower():
             remix_counts[(p_lower, album.lower())] += 1
 
-        # 4) EXTRACT EMBEDDED COVER DATA → compute SHA-1 and store first 10 hex digits
-        cover_hash = None
-        cover_payloads = []
-        try:
-            _tags, cover_payloads, _error, _reader = read_metadata(fullpath, include_cover=True)
-        except Exception:
-            cover_payloads = []
-        if cover_payloads:
-            sha1 = hashlib.sha1(cover_payloads[0]).hexdigest()
-            cover_hash = sha1[:10]
-            cover_counts[cover_hash] += 1
-
         folder_tags = derive_tags_from_path(fullpath, MUSIC_ROOT)
 
         songs[fullpath] = {
@@ -664,15 +426,14 @@ def compute_moves_and_tag_index(
             "genre":      genre,
             "track":      track,
             "part_of_set": part_of_set,
-            "cover_hash": cover_hash,
             "folder_tags": folder_tags,
             "missing_core": not raw_artist or not title,
         }
 
-    log_callback(f"   → Collected metadata for {total_kept} files.")
+    log_callback(f"   → Collected metadata for {total_files} files.")
 
     # ─── Phase 4: Determine destination for each file (with logging) ─────────────
-    log_callback("4/6: Determining destination paths for each file…")
+    log_callback("3/4: Determining destination paths for each file…")
     tag_index = {}
     moves = {}
     decision_log = []
@@ -738,7 +499,13 @@ def compute_moves_and_tag_index(
                 decision_log.append(f"  Renaming to '{new_filename}' (using raw artist)")
 
             new_path = os.path.join(base_folder, new_filename)
-            new_path = _ensure_unique_destination(new_path, moves, log_callback)
+            new_path = _ensure_unique_destination(
+                new_path,
+                moves,
+                log_callback,
+                source_path=old_path,
+                decision_log=decision_log,
+            )
             moves[old_path] = new_path
             decision_log.append(
                 f"  → Final: '{os.path.relpath(new_path, MUSIC_ROOT)}'"
@@ -783,7 +550,13 @@ def compute_moves_and_tag_index(
                     decision_log.append(f"  Renaming to '{new_filename}' (using raw artist)")
 
                 new_path = os.path.join(base_folder, new_filename)
-                new_path = _ensure_unique_destination(new_path, moves, log_callback)
+                new_path = _ensure_unique_destination(
+                    new_path,
+                    moves,
+                    log_callback,
+                    source_path=old_path,
+                    decision_log=decision_log,
+                )
                 moves[old_path] = new_path
                 decision_log.append(
                     f"  → (Remixes folder) placed under By Artist/{main_artist}/{album} "
@@ -857,7 +630,13 @@ def compute_moves_and_tag_index(
             decision_log.append(f"  Renaming to '{new_filename}' (using raw artist)")
 
         new_path = os.path.join(base_folder, new_filename)
-        new_path = _ensure_unique_destination(new_path, moves, log_callback)
+        new_path = _ensure_unique_destination(
+            new_path,
+            moves,
+            log_callback,
+            source_path=old_path,
+            decision_log=decision_log,
+        )
         moves[old_path] = new_path
         decision_log.append(
             f"  → Final: '{os.path.relpath(new_path, MUSIC_ROOT)}'"
@@ -1052,7 +831,7 @@ def build_dry_run_html(
         coord=coord,
     )
 
-    log_callback("5/6: Writing dry-run HTML…")
+    log_callback("4/4: Writing dry-run HTML…")
 
     render_dry_run_html_from_plan(root_path, output_html_path, moves, tag_index, coord=coord)
     log_callback(f"✓ Dry-run HTML written to: {output_html_path}")
@@ -1073,7 +852,7 @@ def apply_indexer_moves(
     """
     1) Call compute_moves_and_tag_index() to get (moves, tag_index, decision_log).
     2) Move/rename each file in `moves`.
-    3) Move any leftover non-audio or album cover images into Trash or into the correct folder.
+    3) Move any leftover non-audio files into Trash or Docs.
     4) Remove empty directories in two passes: first those that held moved
        files, then a library-wide sweep for any remaining empty folders.
     Returns summary: {"moved": <count>, "errors": [<error strings>]}.
@@ -1087,8 +866,6 @@ def apply_indexer_moves(
             pass
 
     check_cancelled()
-    cfg = load_config()
-    trim_silence = bool(cfg.get("trim_silence", False))
 
     # Ensure Not Sorted directory exists for user exclusions
     not_sorted_dir = os.path.join(root_path, "Not Sorted")
@@ -1098,23 +875,6 @@ def apply_indexer_moves(
     music_root = os.path.join(root_path, "Music")
     if not os.path.isdir(music_root):
         music_root = root_path
-
-
-    # ─── Phase 0.5: Compute and cache fingerprints ─────────────────
-    docs_dir = os.path.join(root_path, "Docs")
-    os.makedirs(docs_dir, exist_ok=True)
-    db_path = os.path.join(docs_dir, ".soundvault.db")
-    from fingerprint_generator import compute_fingerprints_parallel
-    compute_fingerprints_parallel(
-        root_path,
-        db_path,
-        log_callback,
-        progress_callback,
-        max_workers,
-        trim_silence,
-        phase="A",
-        cancel_event=cancel_event,
-    )
 
     moves, _, _ = compute_moves_and_tag_index(
         root_path,
@@ -1239,7 +999,7 @@ def apply_indexer_moves(
         # ─── Phase 7: Generate Playlists with edge-case handling ────────────
         try:
             from playlist_generator import generate_playlists
-            log_callback("7/7: Generating safe playlists…")
+            log_callback("4/4: Generating playlists…")
 
             def plog(msg):
                 log_callback(msg)
@@ -1320,7 +1080,7 @@ def run_full_indexer(
     log_callback(f"✓ Detailed log written to: {log_path}")
 
     # Build dry-run HTML
-    log_callback("5/6: Writing dry-run HTML…")
+    log_callback("4/4: Writing dry-run HTML…")
     build_dry_run_html(
         root_path,
         output_html_path,
@@ -1331,7 +1091,7 @@ def run_full_indexer(
     )
 
     if not dry_run_only:
-        # Phase 5–6: Actually move audio files and cover images
+        # Phase 5–6: Actually move audio files
         actual_summary = apply_indexer_moves(
             root_path,
             log_callback,
@@ -1351,24 +1111,13 @@ def run_full_indexer(
 
 def find_duplicates(root_path, log_callback=None):
     """Return list of (original_path, duplicate_path) that would be marked as
-    duplicates by the indexer."""
+    duplicates by the indexer.
 
-    moves, _, _ = compute_moves_and_tag_index(
-        root_path,
-        log_callback,
-        None,
-        dry_run=True,
-        enable_phase_c=False,
-        flush_cache=False,
-        max_workers=None,
-        coord=None,
-    )
-    dup_indicator = os.path.join("Duplicates", "")
-    return [
-        (old, new)
-        for old, new in moves.items()
-        if dup_indicator in new
-    ]
+    Duplicate detection is disabled in the indexer.
+    """
+    if log_callback:
+        log_callback("Duplicate detection is disabled in the indexer.")
+    return []
 
 
 def main(argv: List[str] | None = None) -> None:
@@ -1377,9 +1126,9 @@ def main(argv: List[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="SoundVault Music Indexer")
     parser.add_argument("root", help="Library root path")
     parser.add_argument("--dry-run", action="store_true", help="Preview only")
-    parser.add_argument("--enable-phase-c", action="store_true", help="Enable cross-album scan")
-    parser.add_argument("--flush-cache", action="store_true", help="Flush fingerprint cache")
-    parser.add_argument("--max-workers", type=int, default=None, help="Fingerprint worker count")
+    parser.add_argument("--enable-phase-c", action="store_true", help="(Ignored) kept for backward compatibility")
+    parser.add_argument("--flush-cache", action="store_true", help="(Ignored) kept for backward compatibility")
+    parser.add_argument("--max-workers", type=int, default=None, help="(Ignored) kept for backward compatibility")
     parser.add_argument("--no-playlists", action="store_true", help="Skip playlist creation")
     args = parser.parse_args(argv)
 
