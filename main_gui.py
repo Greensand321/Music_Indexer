@@ -4444,8 +4444,15 @@ class SoundVaultImporterApp(tk.Tk):
                 if dry_run:
                     self.after(
                         0,
+                        lambda: webbrowser.open(
+                            Path(output_html).resolve().as_uri()
+                        ),
+                    )
+                    self.after(
+                        0,
                         lambda: messagebox.showinfo(
-                            "Dry Run Complete", f"Preview written to:\n{output_html}"
+                            "Dry Run Complete",
+                            f"Preview opened in your browser:\n{output_html}",
                         ),
                     )
                 else:
