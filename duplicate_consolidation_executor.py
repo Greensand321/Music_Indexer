@@ -18,7 +18,6 @@ import hashlib
 import html
 import importlib.util
 import json
-import logging
 import platform
 import os
 import shutil
@@ -44,11 +43,9 @@ except ValueError:  # pragma: no cover - defensive: broken mutagen installs
     _MUTAGEN_AVAILABLE = False
 if _MUTAGEN_AVAILABLE:
     from mutagen import File as MutagenFile  # type: ignore
-    from mutagen.mp4 import MP4  # type: ignore
 else:  # pragma: no cover - optional dependency
     MutagenFile = None  # type: ignore
 
-logger = logging.getLogger(__name__)
 
 def _default_log(msg: str) -> None:
     return None
@@ -282,16 +279,6 @@ def _extract_artwork_bytes(path: str) -> bytes | None:
             pic = pictures[0]
             return bytes(pic.data) if hasattr(pic, "data") else bytes(pic)
         tags = getattr(audio, "tags", {}) or {}
-        if isinstance(audio, MP4):
-            covr_payloads = tags.get("covr") if isinstance(tags, Mapping) else None
-            if covr_payloads:
-                payload = covr_payloads[0]
-                if payload:
-                    logger.debug("Found M4A cover art in covr atom for %s", path)
-                    return bytes(payload)
-                logger.debug("M4A covr atom present but empty for %s", path)
-            else:
-                logger.debug("M4A covr atom missing for %s", path)
         for key in list(tags.keys()):
             if key.startswith("APIC"):
                 frame = tags[key]
