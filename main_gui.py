@@ -3135,29 +3135,39 @@ class M4ATesterDialog(tk.Toplevel):
         self._set_metadata_text("")
         self._set_cover_image(None)
 
-        audio = MutagenFile(path)
-        if audio is None or audio.tags is None:
-            messagebox.showerror(
-                "M4A Tester", "Unable to read metadata from this file."
-            )
-            return
+        tags, cover_payloads, error, _reader = read_metadata(path, include_cover=True)
 
-        tags = audio.tags
+        def _format_value(value: object) -> str | None:
+            if value in (None, "", []):
+                return None
+            if isinstance(value, (list, tuple)):
+                return ", ".join(str(item) for item in value if item not in (None, ""))
+            return str(value)
+
         lines = []
-        for key in sorted(tags.keys()):
-            value = tags.get(key)
-            if isinstance(value, list):
-                formatted = ", ".join(str(v) for v in value)
-            else:
-                formatted = str(value)
-            lines.append(f"{key}: {formatted}")
+        track_value = _format_value(tags.get("tracknumber") or tags.get("track"))
+        disc_value = _format_value(tags.get("discnumber") or tags.get("disc"))
+        display_fields = [
+            ("Title", "title"),
+            ("Artist", "artist"),
+            ("Album", "album"),
+            ("Album Artist", "albumartist"),
+            ("Track", track_value),
+            ("Disc", disc_value),
+            ("Year", "year"),
+            ("Date", "date"),
+            ("Genre", "genre"),
+            ("Compilation", "compilation"),
+        ]
+        for label, key in display_fields:
+            value = _format_value(tags.get(key)) if isinstance(key, str) else key
+            if value:
+                lines.append(f"{label}: {value}")
+        if error and not lines:
+            lines.append(f"Metadata error: {error}")
         self._set_metadata_text("\n".join(lines) if lines else "No metadata found.")
 
-        cover_bytes = None
-        if "covr" in tags:
-            covr = tags["covr"]
-            if isinstance(covr, list) and covr:
-                cover_bytes = bytes(covr[0])
+        cover_bytes = cover_payloads[0] if cover_payloads else None
         if cover_bytes:
             try:
                 image = Image.open(BytesIO(cover_bytes))
