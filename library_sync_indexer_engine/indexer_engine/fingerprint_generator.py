@@ -2,16 +2,9 @@ import os
 import sqlite3
 import tempfile
 import threading
-from concurrent.futures import ProcessPoolExecutor
-from concurrent.futures.process import BrokenProcessPool
 from typing import Callable, Iterable, List, Tuple
-
 from pydub import AudioSegment, silence
-import acoustid
-from utils.path_helpers import ensure_long_path
-import audio_norm
 
-SUPPORTED_EXTS = {".flac", ".m4a", ".aac", ".mp3", ".wav", ".ogg"}
 
 SILENCE_THRESH = -50  # dBFS used for silence detection
 
@@ -21,6 +14,13 @@ def _with_thresh(func, *args, silence_threshold_db: float = SILENCE_THRESH, **kw
         return func(*args, silence_threshold=silence_threshold_db, **kwargs)
     except TypeError:
         return func(*args, silence_thresh=silence_threshold_db, **kwargs)
+from concurrent.futures import BrokenProcessPool, ProcessPoolExecutor
+import acoustid
+from utils.path_helpers import ensure_long_path
+import audio_norm
+
+SUPPORTED_EXTS = {".flac", ".m4a", ".aac", ".mp3", ".wav", ".ogg"}
+
 
 def _trim_silence(path: str, *, silence_threshold_db: float, min_silence_len_ms: int) -> str:
     """Return path to temporary file with leading/trailing silence removed."""
