@@ -88,10 +88,9 @@ def build_primary_counts(root_path, progress_callback=None, phase="A"):
     return counts
 
 # ─── Shared Utility Functions ─────────────────────────────────────────
-def sanitize(name: object) -> str:
+def sanitize(name: str) -> str:
     invalid = r'<>:"/\\|?*'
-    text = "Unknown" if name is None else str(name)
-    return "".join(c for c in text if c not in invalid).strip() or "Unknown"
+    return "".join(c for c in (name or "Unknown") if c not in invalid).strip() or "Unknown"
 
 def collapse_repeats(name: str) -> str:
     """
