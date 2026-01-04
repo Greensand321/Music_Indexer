@@ -10,7 +10,7 @@ SoundVault organizes large music libraries. It deduplicates tracks, fixes tags v
   git clone --recurse-submodules https://example.com/yourrepo.git
   ```
 - **FFmpeg** installed and on your `PATH`
-- **llama.exe** command line for LLM features
+- **Optional LLM helper**: `third_party/llama/llama-run.exe` (Windows binaries included) plus a GGUF model (place it at `models/your-model.gguf` or update `plugins/assistant_plugin.py`).
 
 ## Installation
 
@@ -62,12 +62,11 @@ python main_gui.py
 5. **Clustered Playlists** (interactive K-Means/HDBSCAN) via the Tools ▸ Clustered Playlists menu
 6. **Smart Playlist Engine** with tempo/energy buckets
 7. **Auto‑DJ** mode builds seamless playlists starting from any song
-8. **Tidal-dl Sync** can upgrade low-quality files to FLAC
-9. **Library Duplicate Scan** finds duplicate tracks after you drop new songs directly into your library
-10. **Cross-Album Scan** optionally finds duplicates appearing on multiple albums
-11. Use the **Theme** dropdown and **Help** tab for assistance
-12. Launch the **Duplicate Finder** tab to open the updated shell for spotting duplicates
-13. Use **Tools → Similarity Inspector** to compare two files and see fingerprint distance details
+8. Use the **Library Sync** tab to compare an incoming folder against your existing library, then build/preview/execute an optional copy/move plan.
+9. Launch the **Duplicate Finder** tab to open the updated shell for spotting duplicates.
+10. **Cross-Album Scan** optionally finds duplicates appearing on multiple albums (Indexer tab → Phase 3).
+11. Use the **Theme** dropdown and **Help** tab for assistance.
+12. Use **Tools → Similarity Inspector** to compare two files and see fingerprint distance details.
 
 ### Playlist generator feedback
 
@@ -187,6 +186,8 @@ tag_fixer.py              - Tag fixing engine using plugin metadata
 update_genres.py          - Batch genre tag updater via MusicBrainz
 validator.py              - Verify SoundVault folder layout
 config.py                 - Read/write persistent configuration
+library_sync_review.py    - Library Sync review UI with plan/preview/execute controls
+library_sync.py           - Library Sync scan/compare logic and plan execution helpers
 mutagen_stub/             - Minimal fallback used by the tests
 
 controllers/
@@ -220,3 +221,8 @@ These items are currently under development and not yet part of the stable relea
 - Metadata Plugins (Discogs, Spotify)
 
 See [`docs/project_documentation.html`](docs/project_documentation.html) for technical details.
+
+## Known gaps
+
+- **Tidal-dl sync**: `tidal-dl` is listed in `requirements.txt`, but there is no UI or workflow wired up yet.
+- **LLM assistant models**: no GGUF model ships with the repo; you must provide one and update `plugins/assistant_plugin.py` if you want to use the helper.
