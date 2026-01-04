@@ -14,7 +14,7 @@ def _with_thresh(func, *args, silence_threshold_db: float = SILENCE_THRESH, **kw
         return func(*args, silence_threshold=silence_threshold_db, **kwargs)
     except TypeError:
         return func(*args, silence_thresh=silence_threshold_db, **kwargs)
-from concurrent.futures import BrokenProcessPool, ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor
 import acoustid
 from utils.path_helpers import ensure_long_path
 import audio_norm
@@ -230,46 +230,16 @@ def compute_fingerprints_parallel(
     if pending:
         with ProcessPoolExecutor(max_workers=max_workers) as exe:
             futures = [exe.submit(compute_fingerprint_for_file, item) for item in work_items]
-            for index, (fut, item) in enumerate(zip(futures, work_items)):
+            for fut in futures:
                 if cancel_event.is_set():
                     cancelled = 0
                     for remaining in futures:
                         if not remaining.done() and remaining.cancel():
                             cancelled += 1
-                    log_callback(
-                        f"Cancellation requested; attempting to stop after current file ({cancelled} cancelled)"
-                    )
+                    log_callback(f"Cancellation requested; attempting to stop after current file ({cancelled} cancelled)")
                     break
 
-                try:
-                    path, duration, fp_hash, err = fut.result()
-                except BrokenProcessPool as exc:
-                    log_callback(f"   ! Fingerprinting workers stopped unexpectedly: {exc}")
-                    log_callback("   • Falling back to sequential fingerprinting for remaining files.")
-                    remaining_items = work_items[index:]
-                    for remaining_item in remaining_items:
-                        if cancel_event.is_set():
-                            log_callback("Cancellation requested; stopping after current fingerprint")
-                            break
-                        path, duration, fp_hash, err = compute_fingerprint_for_file(remaining_item)
-                        completed += 1
-                        if err:
-                            log_callback(f"   ! Failed fingerprint {path}: {err}")
-                            progress_callback(completed, total, path, phase)
-                            if cancel_event.is_set():
-                                break
-                            continue
-                        mtime = os.path.getmtime(ensure_long_path(path))
-                        conn.execute(
-                            "INSERT OR REPLACE INTO fingerprints (path, mtime, duration, fingerprint) VALUES (?, ?, ?, ?)",
-                            (path, mtime, duration, fp_hash),
-                        )
-                        results.append((path, duration, fp_hash))
-                        log_callback(f"Fingerprinted {path}")
-                        progress_callback(completed, total, path, phase)
-                        if completed % 50 == 0 or completed == total:
-                            log_callback(f"   • Fingerprinting {completed}/{total}")
-                    break
+                path, duration, fp_hash, err = fut.result()
                 completed += 1
                 if err:
                     log_callback(f"   ! Failed fingerprint {path}: {err}")
