@@ -1221,9 +1221,13 @@ def execute_consolidation_plan(
                 lines.append(
                     f"<div class='v'>{html.escape(_format_trace_value(summary.get('missing_album')))}</div>"
                 )
-                lines.append("<div class='k'>Artwork merges</div>")
+                lines.append("<div class='k'>Artwork variants</div>")
                 lines.append(
-                    f"<div class='v tiny'>{html.escape(_format_trace_value(summary.get('artwork_merges')))}</div>"
+                    f"<div class='v tiny'>{html.escape(_format_trace_value(summary.get('artwork_variants')))}</div>"
+                )
+                lines.append("<div class='k'>Artwork unknown</div>")
+                lines.append(
+                    f"<div class='v tiny'>{html.escape(_format_trace_value(summary.get('artwork_unknown')))}</div>"
                 )
                 lines.append("<div class='k'>Thresholds</div>")
                 lines.append(
@@ -1332,6 +1336,15 @@ def execute_consolidation_plan(
                     lines.append("<div class='k'>Artwork hashing</div>")
                     lines.append(
                         f"<div class='v tiny'>{html.escape(_format_trace_value(artwork_hashing))}</div>"
+                    )
+                    artwork_status = (
+                        trace_payload.get("artwork_status")
+                        if isinstance(trace_payload.get("artwork_status"), Mapping)
+                        else {}
+                    )
+                    lines.append("<div class='k'>Artwork status</div>")
+                    lines.append(
+                        f"<div class='v tiny'>{html.escape(_format_trace_value(artwork_status))}</div>"
                     )
                     artwork_comp = (
                         trace_payload.get("artwork_comparison")
@@ -2053,6 +2066,14 @@ def execute_consolidation_plan(
                     f"Status: {state}. " + "; ".join(badges) if badges else f"Status: {state}."
                 )
                 group_paths = {winner_path, *getattr(grp, "losers", [])}
+                bucket_stats = group_pair_stats.get(gid, {})
+                best_distance = bucket_stats.get("best")
+                best_distance_label = (
+                    f"{best_distance:.4f}" if isinstance(best_distance, float) else "n/a"
+                )
+                exact_count = int(bucket_stats.get("exact", 0) or 0)
+                near_count = int(bucket_stats.get("near", 0) or 0)
+                no_match_count = int(bucket_stats.get("no_match", 0) or 0)
                 html_lines.append(
                     "<details class='group' "
                     f"data-group-id='{html.escape(gid)}' "
@@ -2110,6 +2131,34 @@ def execute_consolidation_plan(
                 html_lines.append(f"<div class='v'>{_path_row(winner_path)}</div>")
                 html_lines.append("<div class='k'>Group ID</div>")
                 html_lines.append(f"<div class='v mono'>{html.escape(gid)}</div>")
+                html_lines.append("<div class='k'>Metadata bucket key</div>")
+                html_lines.append(
+                    f"<div class='v mono'>{html.escape(str(getattr(grp, 'grouping_metadata_key', '—')))}</div>"
+                )
+                html_lines.append("<div class='k'>Audio identity</div>")
+                html_lines.append(
+                    "<div class='v tiny'>"
+                    f"{html.escape(str(getattr(grp, 'group_match_type', '')))} · best {html.escape(best_distance_label)} "
+                    f"(exact {exact_count} · near {near_count} · no-match {no_match_count})"
+                    "</div>"
+                )
+                html_lines.append("<div class='k'>Artwork variant</div>")
+                html_lines.append(
+                    f"<div class='v tiny'>{html.escape(str(getattr(grp, 'artwork_variant_label', '')))}</div>"
+                )
+                if getattr(grp, "artwork_variant_total", 1) > 1:
+                    html_lines.append("<div class='k'>Artwork variants</div>")
+                    html_lines.append(
+                        "<div class='v tiny muted'>Audio-identical but different artwork variants preserved.</div>"
+                    )
+                unknown_reasons = getattr(grp, "artwork_unknown_reasons", {}) or {}
+                if isinstance(unknown_reasons, Mapping) and unknown_reasons:
+                    missing_notes = ", ".join(
+                        f"{_basename(path)} ({reason})"
+                        for path, reason in sorted(unknown_reasons.items(), key=lambda item: str(item[0]).lower())
+                    )
+                    html_lines.append("<div class='k'>Artwork missing/unreadable</div>")
+                    html_lines.append(f"<div class='v tiny'>{html.escape(missing_notes)}</div>")
                 html_lines.append("<div class='k'>Debug</div>")
                 html_lines.append(
                     "<div class='v tiny muted'>Shown for traceability; safe to ignore for normal review.</div>"
@@ -2183,7 +2232,6 @@ def execute_consolidation_plan(
                     html_lines.append("</div>")
                     html_lines.append("</div>")
                 html_lines.append("</div>")
-                bucket_stats = group_pair_stats.get(gid, {})
                 bucket_diag = getattr(grp, "bucket_diagnostics", {}) or {}
                 bucket_sources = (
                     bucket_diag.get("sources")
@@ -2196,25 +2244,10 @@ def execute_consolidation_plan(
                     isinstance(bucket_sources, Mapping)
                     and any(source == "metadata" for source in bucket_sources.values())
                 )
-                has_artwork = (
-                    isinstance(bucket_sources, Mapping)
-                    and any(source == "artwork" for source in bucket_sources.values())
-                ) or bool(bucket_diag.get("artwork_merges"))
-                if has_metadata and has_artwork:
-                    formation = "metadata + artwork"
-                elif has_metadata:
+                if has_metadata:
                     formation = "metadata-seeded"
-                elif has_artwork:
-                    formation = "artwork pull-in"
                 else:
                     formation = "fallback"
-                best_distance = bucket_stats.get("best")
-                best_distance_label = (
-                    f"{best_distance:.4f}" if isinstance(best_distance, float) else "n/a"
-                )
-                exact_count = int(bucket_stats.get("exact", 0) or 0)
-                near_count = int(bucket_stats.get("near", 0) or 0)
-                no_match_count = int(bucket_stats.get("no_match", 0) or 0)
                 edges = bucket_stats.get("edges", []) if isinstance(bucket_stats.get("edges"), list) else []
                 no_match_edges = (
                     bucket_stats.get("no_match_edges", [])

@@ -252,35 +252,14 @@ def _has_metadata_seed(track: DuplicateTrack) -> bool:
     return bool(title and artist)
 
 
-def _album_key_for_track(track: DuplicateTrack) -> tuple[str, str] | None:
-    tags = _track_tags(track)
-    return _normalize_album_key(tags, track.path)
-
-
-def _album_compatible(bucket: "BucketingBucket", album_key: tuple[str, str] | None) -> bool:
-    if not album_key:
-        return True
-    if bucket.missing_album:
-        return True
-    if not bucket.album_keys:
-        return True
-    return album_key in bucket.album_keys
-
-
 def _build_metadata_buckets(tracks: Sequence[DuplicateTrack]) -> List["BucketingBucket"]:
     buckets: List[BucketingBucket] = []
     by_key: Dict[tuple[str, str], List[int]] = defaultdict(list)
 
     for track in sorted(tracks, key=lambda t: t.path.lower()):
         key = _metadata_bucket_key(track)
-        album_key = _album_key_for_track(track)
         seeded = _has_metadata_seed(track)
-        target_id = None
-        for bucket_id in by_key.get(key, []):
-            bucket = buckets[bucket_id]
-            if _album_compatible(bucket, album_key):
-                target_id = bucket_id
-                break
+        target_id = by_key.get(key, [None])[0]
         if target_id is None:
             target_id = len(buckets)
             buckets.append(BucketingBucket(id=target_id, metadata_seeded=seeded))
@@ -289,6 +268,7 @@ def _build_metadata_buckets(tracks: Sequence[DuplicateTrack]) -> List["Bucketing
         bucket.tracks.append(track)
         bucket.metadata_keys.add(key)
         bucket.metadata_seeded = bucket.metadata_seeded or seeded
+        album_key = _normalize_album_key(_track_tags(track), track.path)
         if album_key:
             bucket.album_keys.add(album_key)
         else:
@@ -400,10 +380,11 @@ def _artwork_tracks_similar(
 
 def _split_by_artwork_similarity(
     tracks: Sequence["DuplicateTrack"],
+    hashes: Mapping[str, int | None] | None = None,
 ) -> tuple[List[List["DuplicateTrack"]], Dict[str, int | None]]:
     if len(tracks) <= 1:
-        return [list(tracks)], {}
-    hashes: Dict[str, int | None] = {t.path: _artwork_hash_for_track(t) for t in tracks}
+        return [list(tracks)], {t.path: hashes.get(t.path) if hashes else _artwork_hash_for_track(t) for t in tracks}
+    hashes = dict(hashes or {t.path: _artwork_hash_for_track(t) for t in tracks})
     pending = sorted(tracks, key=lambda t: t.path)
     groups: List[List[DuplicateTrack]] = []
     while pending:
@@ -418,6 +399,18 @@ def _split_by_artwork_similarity(
         pending = remaining
         groups.append(group)
     return groups, hashes
+
+
+def _artwork_status(track: "DuplicateTrack", art_hash: int | None) -> Dict[str, str]:
+    if art_hash is not None:
+        return {"status": "known", "reason": "embedded artwork"}
+    reason = track.artwork_error or "no artwork found"
+    ext = track.ext.lower()
+    if ext in {".m4a", ".mp4"} and reason == "no artwork found":
+        return {"status": "unknown", "reason": "art missing/unreadable (m4a cover not extracted)"}
+    if track.artwork_error:
+        return {"status": "unknown", "reason": f"art missing/unreadable ({track.artwork_error})"}
+    return {"status": "unknown", "reason": "art missing/unreadable (no artwork found)"}
 
 
 def _read_audio_file(path: str):
@@ -870,6 +863,11 @@ class GroupPlan:
     artwork_candidates: List[ArtworkCandidate]
     chosen_artwork_source: Dict[str, object]
     artwork_status: str
+    artwork_variant_id: int
+    artwork_variant_total: int
+    artwork_variant_label: str
+    artwork_unknown_tracks: List[str]
+    artwork_unknown_reasons: Dict[str, str]
     loser_disposition: Dict[str, str]
     playlist_rewrites: Dict[str, str]
     playlist_impact: PlaylistImpact
@@ -907,6 +905,11 @@ class GroupPlan:
             "artwork_candidates": [a.to_dict() for a in self.artwork_candidates],
             "chosen_artwork_source": dict(self.chosen_artwork_source),
             "artwork_status": self.artwork_status,
+            "artwork_variant_id": self.artwork_variant_id,
+            "artwork_variant_total": self.artwork_variant_total,
+            "artwork_variant_label": self.artwork_variant_label,
+            "artwork_unknown_tracks": list(self.artwork_unknown_tracks),
+            "artwork_unknown_reasons": dict(self.artwork_unknown_reasons),
             "loser_disposition": dict(self.loser_disposition),
             "playlist_rewrites": dict(self.playlist_rewrites),
             "playlist_impact": self.playlist_impact.to_dict(),
@@ -1401,6 +1404,17 @@ def _group_plan_from_dict(raw: Mapping[str, object]) -> GroupPlan:
         ],
         chosen_artwork_source=_expect_mapping(raw.get("chosen_artwork_source"), "chosen_artwork_source"),
         artwork_status=_expect_str(raw.get("artwork_status"), "artwork_status"),
+        artwork_variant_id=int(raw.get("artwork_variant_id") or 1),
+        artwork_variant_total=int(raw.get("artwork_variant_total") or 1),
+        artwork_variant_label=_expect_str(
+            raw.get("artwork_variant_label") or "Single artwork variant",
+            "artwork_variant_label",
+        ),
+        artwork_unknown_tracks=_expect_str_list(raw.get("artwork_unknown_tracks") or [], "artwork_unknown_tracks"),
+        artwork_unknown_reasons=_expect_str_mapping(
+            raw.get("artwork_unknown_reasons") or {},
+            "artwork_unknown_reasons",
+        ),
         loser_disposition=_expect_str_mapping(raw.get("loser_disposition"), "loser_disposition"),
         playlist_rewrites=_expect_str_mapping(raw.get("playlist_rewrites"), "playlist_rewrites"),
         playlist_impact=_playlist_impact_from_dict(playlist_impact_raw),
@@ -1903,7 +1917,6 @@ def _cluster_duplicates(
 ) -> List[ClusterResult]:
     near_duplicate_threshold = max(near_duplicate_threshold, exact_duplicate_threshold)
     buckets = _build_metadata_buckets(tracks)
-    buckets = _merge_buckets_by_artwork(buckets, ARTWORK_SIMILARITY_THRESHOLD)
     for bucket in buckets:
         bucket_key = _bucket_primary_key(bucket)
         for track in bucket.tracks:
@@ -1916,8 +1929,6 @@ def _cluster_duplicates(
                 "bucket_source": bucket.sources.get(track.path, "fallback"),
                 "album_keys": [list(key) for key in sorted(bucket.album_keys)],
                 "missing_album": bucket.missing_album,
-                "artwork_merges": list(bucket.artwork_merges),
-                "artwork_pull_in": bucket.sources.get(track.path) == "artwork",
             }
     clusters: List[ClusterResult] = []
     comparisons = 0
@@ -2090,11 +2101,46 @@ def build_consolidation_plan(
     plan_placeholders = False
     for cluster in sorted(clusters, key=lambda c: _stable_group_id([t.path for t in c.tracks])):
         cluster_tracks = cluster.tracks
-        cluster_has_missing_artwork = any(not t.artwork for t in cluster_tracks)
-        cluster_has_unreadable_artwork = any(t.artwork_error for t in cluster_tracks)
-        artwork_groups, artwork_hashes = _split_by_artwork_similarity(cluster_tracks)
-        artwork_split = len(artwork_groups) > 1
-        for group_tracks in sorted(artwork_groups, key=lambda g: _stable_group_id([t.path for t in g])):
+        artwork_hashes = {t.path: _artwork_hash_for_track(t) for t in cluster_tracks}
+        artwork_statuses = {t.path: _artwork_status(t, artwork_hashes.get(t.path)) for t in cluster_tracks}
+        known_art_tracks = [t for t in cluster_tracks if artwork_hashes.get(t.path) is not None]
+        unknown_art_tracks = [t for t in cluster_tracks if artwork_hashes.get(t.path) is None]
+        unknown_art_reasons = {
+            t.path: artwork_statuses[t.path]["reason"]
+            for t in unknown_art_tracks
+            if t.path in artwork_statuses
+        }
+        if known_art_tracks:
+            artwork_groups, _ = _split_by_artwork_similarity(
+                known_art_tracks,
+                hashes=artwork_hashes,
+            )
+            artwork_groups = sorted(artwork_groups, key=lambda g: _stable_group_id([t.path for t in g]))
+            best_known = sorted(
+                known_art_tracks,
+                key=lambda t: _quality_tuple(t, "unknown"),
+                reverse=True,
+            )[0]
+            primary_variant_index = 0
+            for idx, group in enumerate(artwork_groups):
+                if best_known in group:
+                    primary_variant_index = idx
+                    break
+            groups_to_plan: List[tuple[List[DuplicateTrack], int, bool]] = []
+            for idx, group in enumerate(artwork_groups):
+                group_tracks = list(group)
+                if idx == primary_variant_index and unknown_art_tracks:
+                    existing_paths = {t.path for t in group_tracks}
+                    for t in unknown_art_tracks:
+                        if t.path not in existing_paths:
+                            group_tracks.append(t)
+                groups_to_plan.append((group_tracks, idx, idx == primary_variant_index))
+            artwork_variant_total = len(artwork_groups)
+        else:
+            groups_to_plan = [(list(cluster_tracks), 0, True)]
+            artwork_variant_total = 1
+        artwork_split = artwork_variant_total > 1
+        for group_tracks, artwork_variant_id, is_primary_variant in groups_to_plan:
             contexts: Dict[str, str] = {}
             context_evidence: Dict[str, List[str]] = {}
             release_sizes: Dict[str, str] = {}
@@ -2132,16 +2178,33 @@ def build_consolidation_plan(
                 release_notes.append(cross_album_note)
             if len({contexts[path] for path in contexts}) > 1 and not suppress_review_flags:
                 release_notes.append("Cluster spans multiple release contexts; using one canonical winner across variants.")
+            if artwork_split and not suppress_review_flags:
+                release_notes.append(
+                    "Audio-identical cluster contains multiple artwork variants; consolidation limited to each variant."
+                )
 
             group_paths = {t.path for t in group_tracks}
             group_contexts = {path: contexts[path] for path in group_paths}
             group_context_evidence = {path: context_evidence[path] for path in group_paths}
+            group_unknown_reasons = {
+                path: reason
+                for path, reason in unknown_art_reasons.items()
+                if path in group_paths
+            }
             group_decisions = [
                 d for d in cluster.decisions if d.anchor_path in group_paths and d.candidate_path in group_paths
             ]
             group_artwork_hashes = {path: artwork_hashes.get(path) for path in group_paths}
 
-            quality_sorted = sorted(group_tracks, key=lambda t: _quality_tuple(t, group_contexts[t.path]), reverse=True)
+            known_group_paths = {p for p in group_paths if artwork_hashes.get(p) is not None}
+            quality_sorted = sorted(
+                group_tracks,
+                key=lambda t: (
+                    1 if t.path in known_group_paths else 0,
+                    _quality_tuple(t, group_contexts[t.path]),
+                ),
+                reverse=True,
+            )
             winner = quality_sorted[0]
             losers = [t.path for t in quality_sorted[1:]]
             runner_up = quality_sorted[1] if len(quality_sorted) > 1 else None
@@ -2202,13 +2265,10 @@ def build_consolidation_plan(
             if artwork_split:
                 if len(group_tracks) == 1:
                     group_track = group_tracks[0]
-                    if not group_track.artwork or group_track.artwork_error:
+                    status = artwork_statuses.get(group_track.path, {})
+                    if status.get("status") == "unknown":
                         artwork_evidence.append(
-                            "Missing or unreadable artwork treated as non-matching; preserving this track as an intentional variant."
-                        )
-                    elif cluster_has_missing_artwork or cluster_has_unreadable_artwork:
-                        artwork_evidence.append(
-                            "Another duplicate lacks readable artwork; missing artwork treated as non-matching and this track is preserved."
+                            "Artwork missing/unreadable; track kept in its artwork variant but missing art does not block consolidation."
                         )
                     else:
                         artwork_evidence.append(
@@ -2218,6 +2278,12 @@ def build_consolidation_plan(
                     artwork_evidence.append(
                         "Artwork similarity gate grouped only tracks with matching covers for consolidation."
                     )
+            if group_unknown_reasons:
+                missing_paths = ", ".join(sorted(os.path.basename(p) or p for p in group_unknown_reasons))
+                missing_notes = ", ".join(sorted(set(group_unknown_reasons.values())))
+                artwork_evidence.append(
+                    f"Artwork missing/unreadable for: {missing_paths or 'unknown'} ({missing_notes})."
+                )
 
             if single_art_blob:
                 chosen_artwork_source = {
@@ -2387,16 +2453,8 @@ def build_consolidation_plan(
                 isinstance(bucket_sources, Mapping)
                 and any(source == "metadata" for source in bucket_sources.values())
             )
-            has_artwork = (
-                isinstance(bucket_sources, Mapping)
-                and any(source == "artwork" for source in bucket_sources.values())
-            ) or bool(bucket_diag.get("artwork_merges"))
-            if has_metadata and has_artwork:
-                formation = "metadata + artwork"
-            elif has_metadata:
+            if has_metadata:
                 formation = "metadata-seeded"
-            elif has_artwork:
-                formation = "artwork pull-in"
             else:
                 formation = "fallback"
             art_threshold = float(
@@ -2450,6 +2508,7 @@ def build_consolidation_plan(
                     "hash": group_artwork_hashes.get(t.path),
                     "hash_present": group_artwork_hashes.get(t.path) is not None,
                 }
+                track_trace["artwork_status"] = artwork_statuses.get(t.path, {})
                 if winner_hash is not None and t.path != winner.path:
                     candidate_hash = group_artwork_hashes.get(t.path)
                     if candidate_hash is not None:
@@ -2469,7 +2528,6 @@ def build_consolidation_plan(
                     "bucket_sources": dict(bucket_sources),
                     "album_keys": bucket_diag.get("album_keys", []),
                     "missing_album": bucket_diag.get("missing_album"),
-                    "artwork_merges": bucket_diag.get("artwork_merges", []),
                     "thresholds": {
                         "exact": exact_duplicate_threshold,
                         "near": near_duplicate_threshold,
@@ -2483,6 +2541,12 @@ def build_consolidation_plan(
                         "dispositions": dict(dispositions),
                         "preserve_different_art": preserve_overrides,
                     },
+                    "artwork_variants": {
+                        "variant_id": artwork_variant_id + 1,
+                        "variant_total": artwork_variant_total,
+                        "primary_variant": is_primary_variant,
+                    },
+                    "artwork_unknown": dict(group_unknown_reasons),
                 },
                 "tracks": track_traces,
             }
@@ -2531,6 +2595,15 @@ def build_consolidation_plan(
                     fingerprint_distances=pair_distances,
                     library_state=track_states,
                     pipeline_trace=pipeline_trace,
+                    artwork_variant_id=artwork_variant_id + 1,
+                    artwork_variant_total=artwork_variant_total,
+                    artwork_variant_label=(
+                        f"Variant {artwork_variant_id + 1} of {artwork_variant_total}"
+                        if artwork_variant_total > 1
+                        else "Single artwork variant"
+                    ),
+                    artwork_unknown_tracks=sorted(group_unknown_reasons.keys()),
+                    artwork_unknown_reasons=dict(group_unknown_reasons),
                 )
             )
 
@@ -2982,8 +3055,10 @@ def export_consolidation_preview_html(plan: ConsolidationPlan, output_html_path:
         lines.append(f"<div class='v'>{esc(_format_trace_value(summary.get('album_keys')))}</div>")
         lines.append("<div class='k'>Missing album</div>")
         lines.append(f"<div class='v'>{esc(_format_trace_value(summary.get('missing_album')))}</div>")
-        lines.append("<div class='k'>Artwork merges</div>")
-        lines.append(f"<div class='v tiny'>{esc(_format_trace_value(summary.get('artwork_merges')))}</div>")
+        lines.append("<div class='k'>Artwork variants</div>")
+        lines.append(f"<div class='v tiny'>{esc(_format_trace_value(summary.get('artwork_variants')))}</div>")
+        lines.append("<div class='k'>Artwork unknown</div>")
+        lines.append(f"<div class='v tiny'>{esc(_format_trace_value(summary.get('artwork_unknown')))}</div>")
         lines.append("<div class='k'>Thresholds</div>")
         lines.append(f"<div class='v tiny'>{esc(_format_trace_value(summary.get('thresholds')))}</div>")
         lines.append("</div>")
@@ -3050,6 +3125,9 @@ def export_consolidation_preview_html(plan: ConsolidationPlan, output_html_path:
             artwork_hashing = trace_payload.get("artwork_hashing") if isinstance(trace_payload.get("artwork_hashing"), Mapping) else {}
             lines.append("<div class='k'>Artwork hashing</div>")
             lines.append(f"<div class='v tiny'>{esc(_format_trace_value(artwork_hashing))}</div>")
+            artwork_status = trace_payload.get("artwork_status") if isinstance(trace_payload.get("artwork_status"), Mapping) else {}
+            lines.append("<div class='k'>Artwork status</div>")
+            lines.append(f"<div class='v tiny'>{esc(_format_trace_value(artwork_status))}</div>")
             artwork_comp = trace_payload.get("artwork_comparison") if isinstance(trace_payload.get("artwork_comparison"), Mapping) else {}
             if artwork_comp:
                 lines.append("<div class='k'>Artwork compare</div>")
@@ -3626,6 +3704,12 @@ def export_consolidation_preview_html(plan: ConsolidationPlan, output_html_path:
             f"Status: {state}. " + "; ".join(badges) if badges else f"Status: {state}."
         )
         group_paths = {group.winner_path, *group.losers}
+        bucket_stats = group_pair_stats.get(group.group_id, {})
+        best_distance = bucket_stats.get("best")
+        best_distance_label = f"{best_distance:.4f}" if isinstance(best_distance, float) else "n/a"
+        exact_count = int(bucket_stats.get("exact", 0) or 0)
+        near_count = int(bucket_stats.get("near", 0) or 0)
+        no_match_count = int(bucket_stats.get("no_match", 0) or 0)
         html_lines.append(
             "<details class='group' "
             f"data-group-id='{esc(group.group_id)}' "
@@ -3688,6 +3772,34 @@ def export_consolidation_preview_html(plan: ConsolidationPlan, output_html_path:
         html_lines.append(f"<div class='v'>{_path_row(group.winner_path)}</div>")
         html_lines.append("<div class='k'>Group ID</div>")
         html_lines.append(f"<div class='v mono'>{esc(group.group_id)}</div>")
+        html_lines.append("<div class='k'>Metadata bucket key</div>")
+        html_lines.append(f"<div class='v mono'>{esc(group.grouping_metadata_key)}</div>")
+        html_lines.append("<div class='k'>Audio identity</div>")
+        html_lines.append(
+            f"<div class='v tiny'>"
+            f"{esc(group.group_match_type)} · best {esc(best_distance_label)} "
+            f"(exact {exact_count} · near {near_count} · no-match {no_match_count})"
+            "</div>"
+        )
+        html_lines.append("<div class='k'>Artwork variant</div>")
+        html_lines.append(
+            f"<div class='v tiny'>{esc(getattr(group, 'artwork_variant_label', ''))}</div>"
+        )
+        if getattr(group, "artwork_variant_total", 1) > 1:
+            html_lines.append("<div class='k'>Artwork variants</div>")
+            html_lines.append(
+                "<div class='v tiny muted'>Audio-identical but different artwork variants preserved.</div>"
+            )
+        if getattr(group, "artwork_unknown_reasons", {}):
+            missing_notes = ", ".join(
+                f"{_basename(path)} ({reason})"
+                for path, reason in sorted(
+                    getattr(group, "artwork_unknown_reasons", {}).items(),
+                    key=lambda item: item[0].lower(),
+                )
+            )
+            html_lines.append("<div class='k'>Artwork missing/unreadable</div>")
+            html_lines.append(f"<div class='v tiny'>{esc(missing_notes)}</div>")
         html_lines.append("<div class='k'>Debug</div>")
         html_lines.append(
             "<div class='v tiny muted'>Shown for traceability; safe to ignore for normal review.</div>"
@@ -3750,7 +3862,6 @@ def export_consolidation_preview_html(plan: ConsolidationPlan, output_html_path:
             html_lines.append("</div>")
             html_lines.append("</div>")
         html_lines.append("</div>")
-        bucket_stats = group_pair_stats.get(group.group_id, {})
         bucket_diag = group.bucket_diagnostics or {}
         bucket_sources = bucket_diag.get("sources") if isinstance(bucket_diag.get("sources"), Mapping) else {}
         bucket_size = len(bucket_sources) if bucket_sources else len(group_paths)
@@ -3759,23 +3870,10 @@ def export_consolidation_preview_html(plan: ConsolidationPlan, output_html_path:
             isinstance(bucket_sources, Mapping)
             and any(source == "metadata" for source in bucket_sources.values())
         )
-        has_artwork = (
-            isinstance(bucket_sources, Mapping)
-            and any(source == "artwork" for source in bucket_sources.values())
-        ) or bool(bucket_diag.get("artwork_merges"))
-        if has_metadata and has_artwork:
-            formation = "metadata + artwork"
-        elif has_metadata:
+        if has_metadata:
             formation = "metadata-seeded"
-        elif has_artwork:
-            formation = "artwork pull-in"
         else:
             formation = "fallback"
-        best_distance = bucket_stats.get("best")
-        best_distance_label = f"{best_distance:.4f}" if isinstance(best_distance, float) else "n/a"
-        exact_count = int(bucket_stats.get("exact", 0) or 0)
-        near_count = int(bucket_stats.get("near", 0) or 0)
-        no_match_count = int(bucket_stats.get("no_match", 0) or 0)
         edges = bucket_stats.get("edges", []) if isinstance(bucket_stats.get("edges"), list) else []
         no_match_edges = (
             bucket_stats.get("no_match_edges", [])
