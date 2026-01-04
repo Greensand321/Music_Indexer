@@ -8,6 +8,7 @@ import os
 from typing import Dict, List, Optional, Tuple
 
 from utils.path_helpers import ensure_long_path
+from utils.year_normalizer import normalize_year
 
 logger = logging.getLogger(__name__)
 
@@ -62,18 +63,6 @@ def _parse_int(value: object) -> int | None:
         return int(str(value).split("/")[0])
     except Exception:
         return None
-
-
-def _parse_year(value: object) -> int | None:
-    if value in (None, ""):
-        return None
-    text = str(value)
-    if len(text) >= 4 and text[:4].isdigit():
-        return int(text[:4])
-    digits = "".join(ch for ch in text if ch.isdigit())
-    if len(digits) >= 4:
-        return int(digits[:4])
-    return None
 
 
 def _read_sidecar_artwork_bytes(path: str) -> bytes | None:
@@ -169,7 +158,7 @@ def read_opus_metadata(
     tags["track"] = _parse_int(track_raw) if track_raw not in (None, "") else None
     tags["disc"] = _parse_int(disc_raw) if disc_raw not in (None, "") else None
 
-    tags["year"] = _parse_year(tags.get("date"))
+    tags["year"] = normalize_year(tags.get("date"))
 
     cover_payloads = _extract_cover_payloads(raw_tags)
     if not cover_payloads:
