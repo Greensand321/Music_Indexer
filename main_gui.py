@@ -120,6 +120,7 @@ from utils.audio_metadata_reader import (
     read_tags,
     read_sidecar_artwork_bytes,
 )
+from utils.opus_metadata_reader import read_opus_metadata
 
 FilterFn = Callable[[FileRecord], bool]
 _cached_filters = None
@@ -3249,6 +3250,147 @@ class M4ATesterDialog(tk.Toplevel):
         self.cover_label.configure(image=self._cover_photo, text="")
 
 
+class OpusTesterDialog(tk.Toplevel):
+    """Standalone UI for validating Opus metadata/album art parsing."""
+
+    def __init__(self, parent: tk.Widget):
+        super().__init__(parent)
+        self.title("Opus Tester")
+        self.transient(parent)
+        self.resizable(True, True)
+        self.parent = parent
+
+        self.file_path_var = tk.StringVar()
+        self._cover_photo: ImageTk.PhotoImage | None = None
+
+        container = ttk.Frame(self, padding=12)
+        container.pack(fill="both", expand=True)
+
+        ttk.Label(
+            container,
+            text="Select an Opus file to validate album art and metadata parsing.",
+            foreground="#555",
+            wraplength=540,
+        ).pack(anchor="w")
+
+        file_frame = ttk.LabelFrame(container, text="Opus File")
+        file_frame.pack(fill="x", pady=(10, 8))
+        ttk.Label(file_frame, text="File").grid(
+            row=0, column=0, sticky="w", padx=6, pady=6
+        )
+        entry = ttk.Entry(
+            file_frame, textvariable=self.file_path_var, width=60, state="readonly"
+        )
+        entry.grid(row=0, column=1, sticky="ew", padx=6, pady=6)
+        ttk.Button(file_frame, text="Browse…", command=self._choose_file).grid(
+            row=0, column=2, sticky="e", padx=6, pady=6
+        )
+        file_frame.columnconfigure(1, weight=1)
+
+        content = ttk.Frame(container)
+        content.pack(fill="both", expand=True)
+
+        art_frame = ttk.LabelFrame(content, text="Album Art")
+        art_frame.pack(side="left", fill="both", expand=False, padx=(0, 8))
+        self.cover_label = ttk.Label(
+            art_frame,
+            text="No album art loaded",
+            anchor="center",
+            width=28,
+            padding=8,
+        )
+        self.cover_label.pack(fill="both", expand=True)
+
+        metadata_frame = ttk.LabelFrame(content, text="Metadata")
+        metadata_frame.pack(side="left", fill="both", expand=True)
+        self.metadata_text = ScrolledText(
+            metadata_frame, height=16, wrap="word", state="disabled"
+        )
+        self.metadata_text.pack(fill="both", expand=True, padx=6, pady=6)
+
+        controls = ttk.Frame(container)
+        controls.pack(fill="x", pady=(8, 0))
+        ttk.Button(controls, text="Close", command=self.destroy).pack(side="left")
+
+    def _choose_file(self) -> None:
+        initial_dir = load_last_path() or os.getcwd()
+        chosen = filedialog.askopenfilename(
+            parent=self,
+            title="Select Opus File",
+            initialdir=initial_dir,
+            filetypes=[("Opus files", "*.opus")],
+        )
+        if not chosen:
+            return
+        if not chosen.lower().endswith(".opus"):
+            messagebox.showerror("Opus Tester", "Please select a .opus file.")
+            return
+        self.file_path_var.set(chosen)
+        save_last_path(os.path.dirname(chosen))
+        self._load_metadata(chosen)
+
+    def _load_metadata(self, path: str) -> None:
+        self._set_metadata_text("")
+        self._set_cover_image(None)
+
+        tags, cover_payloads, error = read_opus_metadata(path)
+
+        def _format_value(value: object) -> str | None:
+            if value in (None, "", []):
+                return None
+            if isinstance(value, (list, tuple)):
+                return ", ".join(str(item) for item in value if item not in (None, ""))
+            return str(value)
+
+        lines = []
+        track_value = _format_value(tags.get("tracknumber") or tags.get("track"))
+        disc_value = _format_value(tags.get("discnumber") or tags.get("disc"))
+        display_fields = [
+            ("Title", "title"),
+            ("Artist", "artist"),
+            ("Album", "album"),
+            ("Album Artist", "albumartist"),
+            ("Track", track_value),
+            ("Disc", disc_value),
+            ("Year", "year"),
+            ("Date", "date"),
+            ("Genre", "genre"),
+            ("Compilation", "compilation"),
+        ]
+        for label, key in display_fields:
+            value = _format_value(tags.get(key)) if isinstance(key, str) else key
+            if value:
+                lines.append(f"{label}: {value}")
+        if error and not lines:
+            lines.append(f"Metadata error: {error}")
+        self._set_metadata_text("\n".join(lines) if lines else "No metadata found.")
+
+        cover_bytes = cover_payloads[0] if cover_payloads else None
+        if cover_bytes:
+            try:
+                image = Image.open(BytesIO(cover_bytes))
+                image.thumbnail((240, 240))
+                self._set_cover_image(image)
+            except Exception:
+                self.cover_label.config(text="Failed to load album art")
+        else:
+            self.cover_label.config(text="No album art found")
+
+    def _set_metadata_text(self, content: str) -> None:
+        self.metadata_text.configure(state="normal")
+        self.metadata_text.delete("1.0", tk.END)
+        self.metadata_text.insert("1.0", content)
+        self.metadata_text.configure(state="disabled")
+
+    def _set_cover_image(self, image: Image.Image | None) -> None:
+        if image is None:
+            self._cover_photo = None
+            self.cover_label.configure(image="", text="No album art loaded")
+            return
+        self._cover_photo = ImageTk.PhotoImage(image)
+        self.cover_label.configure(image=self._cover_photo, text="")
+
+
 class DuplicateBucketingPocDialog(tk.Toplevel):
     """Minimal UI for the Duplicate Bucketing proof-of-concept tool."""
 
@@ -3517,6 +3659,7 @@ class SoundVaultImporterApp(tk.Tk):
             command=self._open_duplicate_bucketing_poc_tool,
         )
         tools_menu.add_command(label="M4A Tester…", command=self._open_m4a_tester_tool)
+        tools_menu.add_command(label="Opus Tester…", command=self._open_opus_tester_tool)
         tools_menu.add_separator()
         tools_menu.add_command(label="Reset Tag-Fix Log", command=self.reset_tagfix_log)
         menubar.add_cascade(label="Tools", menu=tools_menu)
@@ -5658,6 +5801,9 @@ class SoundVaultImporterApp(tk.Tk):
 
     def _open_m4a_tester_tool(self) -> None:
         M4ATesterDialog(self)
+
+    def _open_opus_tester_tool(self) -> None:
+        OpusTesterDialog(self)
 
     def _create_player_library_table(self, parent: tk.Widget) -> ttk.Frame:
         table = ttk.Frame(parent)
