@@ -15,13 +15,21 @@ from itertools import combinations
 
 logger = logging.getLogger(__name__)
 
-from music_indexer_api import _keep_score
-
 EXCLUSION_KEYWORDS = ['remix', 'remastered', 'edit', 'version']
 COARSE_FP_BAND_SIZE = 8
 COARSE_FP_BANDS = 6
 COARSE_FP_QUANTIZATION = 4
 LOSSLESS_EXTS = {".flac", ".wav", ".alac", ".ape", ".aiff", ".aif"}
+
+
+def _keep_score(path: str, info: Mapping[str, object], ext_priority: Mapping[str, int]) -> float:
+    """Compute keep score for a file based on extension, metadata and filename."""
+    ext = os.path.splitext(path)[1].lower()
+    pri = ext_priority.get(ext, 99)
+    ext_score = 1000.0 / (pri + 1)
+    meta_score = int(info.get("meta_count", 0) or 0) * 10
+    fname_score = len(os.path.splitext(os.path.basename(path))[0])
+    return ext_score + meta_score + fname_score
 
 
 @dataclass
