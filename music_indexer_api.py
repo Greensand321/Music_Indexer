@@ -124,6 +124,16 @@ def sanitize(name: object) -> str:
     cleaned = "".join(c for c in normalized if c not in invalid).strip()
     return cleaned or "Unknown"
 
+
+def _keep_score(path: str, info: dict, ext_priority: dict) -> float:
+    """Compute keep score for a file based on extension, metadata and filename."""
+    ext = os.path.splitext(path)[1].lower()
+    pri = ext_priority.get(ext, 99)
+    ext_score = 1000.0 / (pri + 1)
+    meta_score = info.get("meta_count", 0) * 10
+    fname_score = len(os.path.splitext(os.path.basename(path))[0])
+    return ext_score + meta_score + fname_score
+
 def _normalize_tag_value(value: object, field: str, log_callback=None) -> str:
     text = _coerce_to_string(value).strip()
     if not text:
