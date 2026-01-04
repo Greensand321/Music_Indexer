@@ -27,7 +27,8 @@ _SKIP = object()
 
 def load_mapping(folder: str) -> tuple[Dict[str, str], str]:
     """Return genre mapping dict and path."""
-    path = os.path.join(folder, ".genre_mapping.json")
+    docs_dir = os.path.join(folder, "Docs")
+    path = os.path.join(docs_dir, ".genre_mapping.json")
     mapping: Dict[str, str] = {}
     if os.path.isfile(path):
         try:
@@ -40,8 +41,9 @@ def load_mapping(folder: str) -> tuple[Dict[str, str], str]:
 
 def save_mapping(folder: str, mapping: Dict[str, str]) -> str:
     """Save mapping JSON and return path."""
-    path = os.path.join(folder, ".genre_mapping.json")
-    os.makedirs(folder, exist_ok=True)
+    docs_dir = os.path.join(folder, "Docs")
+    path = os.path.join(docs_dir, ".genre_mapping.json")
+    os.makedirs(docs_dir, exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(mapping, f, indent=2)
     return path

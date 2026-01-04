@@ -213,7 +213,9 @@ def main():
         print("No folder selected; exiting.")
         sys.exit(0)
 
-    logpath = os.path.join(folder, "genre_update_log.txt")
+    docs_dir = os.path.join(folder, "Docs")
+    os.makedirs(docs_dir, exist_ok=True)
+    logpath = os.path.join(docs_dir, "genre_update_log.txt")
     try:
         logfile = open(logpath, "w", encoding="utf-8")
     except Exception as e:

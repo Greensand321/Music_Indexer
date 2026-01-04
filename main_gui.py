@@ -268,7 +268,7 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
         def update_controls():
             lib_var.set(app.library_path or "No library selected")
             norm_status.set(
-                os.path.join(app.library_path, ".genre_mapping.json")
+                os.path.join(app.library_path, "Docs", ".genre_mapping.json")
                 if app.library_path
                 else "Select a library to enable normalization."
             )
@@ -283,7 +283,7 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
             intro,
             text=(
                 "Normalize genre labels across your library by generating or "
-                "updating the .genre_mapping.json file."
+                "updating the Docs/.genre_mapping.json file."
             ),
             wraplength=480,
             justify="left",
@@ -405,7 +405,7 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
             scan_status.set(f"Found {len(getattr(app, 'raw_genre_list', []))} genres.")
             populate_raw_genres(getattr(app, "raw_genre_list", []))
             prog["value"] = prog["maximum"]
-            app.mapping_path = os.path.join(folder, ".genre_mapping.json")
+            app.mapping_path = os.path.join(folder, "Docs", ".genre_mapping.json")
 
         def start_scan():
             folder = app.require_library()
@@ -4217,7 +4217,7 @@ class SoundVaultImporterApp(tk.Tk):
         self.library_path = info["path"]
         self.library_name_var.set(info["name"])
         self.library_path_var.set(info["path"])
-        self.mapping_path = os.path.join(self.library_path, ".genre_mapping.json")
+        self.mapping_path = os.path.join(self.library_path, "Docs", ".genre_mapping.json")
         self._load_genre_mapping()
         if hasattr(self, "player_search_var"):
             self.player_search_var.set("")
@@ -4954,7 +4954,7 @@ class SoundVaultImporterApp(tk.Tk):
             self.tagfix_folder_var.set(folder)
 
         self.tagfix_db_path, _ = prepare_library(folder)
-        self.mapping_path = os.path.join(folder, ".genre_mapping.json")
+        self.mapping_path = os.path.join(folder, "Docs", ".genre_mapping.json")
         self._load_genre_mapping()
 
         files = discover_files(folder)
