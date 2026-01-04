@@ -600,7 +600,9 @@ def _extract_audio_properties(audio, path: str, provided_tags: Mapping[str, obje
     }
 
 
-def _read_tags_and_artwork(path: str, provided_tags: Mapping[str, object] | None) -> tuple[Dict[str, object], List[ArtworkCandidate], Optional[str], Optional[str], Dict[str, object]]:
+def _read_tags_and_artwork(
+    path: str, provided_tags: Mapping[str, object] | None
+) -> tuple[Dict[str, object], List[ArtworkCandidate], Optional[str], Optional[str], Dict[str, object], Dict[str, object]]:
     audio, error = _read_audio_file(path)
     file_tags, cover_payloads, read_error, _reader = read_metadata(path, include_cover=True)
     base = _merge_tags(_blank_tags(), file_tags)
@@ -632,7 +634,13 @@ def _read_tags_and_artwork(path: str, provided_tags: Mapping[str, object] | None
     else:
         art_error = "no artwork found"
     audio_props = _extract_audio_properties(audio, path, provided_tags or {}, os.path.splitext(path)[1])
-    return base, artwork, error, art_error, audio_props
+    ext = os.path.splitext(path)[1].lower()
+    metadata_trace = {
+        "reader_hint": _reader,
+        "cover_count": len(cover_payloads),
+        "mp4_covr_missing": ext in {".m4a", ".mp4"} and not cover_payloads,
+    }
+    return base, artwork, error, art_error, audio_props, metadata_trace
 
 
 def _placeholder_present(tags: Mapping[str, object]) -> bool:
@@ -718,6 +726,7 @@ class DuplicateTrack:
     metadata_error: Optional[str] = None
     artwork_error: Optional[str] = None
     library_state: Dict[str, object] = field(default_factory=dict)
+    trace: Dict[str, object] = field(default_factory=dict)
 
     @property
     def cover_hash(self) -> str | None:
@@ -875,6 +884,7 @@ class GroupPlan:
     artwork_hashes: Dict[str, int | None] = field(default_factory=dict)
     fingerprint_distances: Dict[str, Dict[str, float]] = field(default_factory=dict)
     library_state: Dict[str, Dict[str, object]] = field(default_factory=dict)
+    pipeline_trace: Dict[str, object] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, object]:
         return {
@@ -913,6 +923,7 @@ class GroupPlan:
             },
             "fingerprint_distances": {k: dict(v) for k, v in self.fingerprint_distances.items()},
             "library_state": {k: dict(v) for k, v in self.library_state.items()},
+            "pipeline_trace": dict(self.pipeline_trace),
         }
 
 
@@ -1360,6 +1371,13 @@ def _group_plan_from_dict(raw: Mapping[str, object]) -> GroupPlan:
                 artwork_hashes[str(key)] = int(value)
     else:
         raise ValueError("artwork_hashes must be a mapping.")
+    pipeline_trace_raw = raw.get("pipeline_trace")
+    if pipeline_trace_raw is None:
+        pipeline_trace: Dict[str, object] = {}
+    elif isinstance(pipeline_trace_raw, Mapping):
+        pipeline_trace = dict(pipeline_trace_raw)
+    else:
+        raise ValueError("pipeline_trace must be a mapping.")
 
     return GroupPlan(
         group_id=_expect_str(raw.get("group_id"), "group_id"),
@@ -1399,6 +1417,7 @@ def _group_plan_from_dict(raw: Mapping[str, object]) -> GroupPlan:
         artwork_hashes=artwork_hashes,
         fingerprint_distances=_expect_mapping(raw.get("fingerprint_distances"), "fingerprint_distances"),
         library_state=_expect_mapping(raw.get("library_state"), "library_state"),
+        pipeline_trace=pipeline_trace,
     )
 
 
@@ -1432,7 +1451,7 @@ def _normalize_track(raw: Mapping[str, object]) -> DuplicateTrack:
     path = str(raw.get("path"))
     ext = os.path.splitext(path)[1].lower() or str(raw.get("ext", "")).lower()
     provided_tags = raw.get("tags") if isinstance(raw.get("tags"), Mapping) else {}
-    current_tags, artwork, meta_err, art_err, audio_props = _read_tags_and_artwork(path, provided_tags)
+    current_tags, artwork, meta_err, art_err, audio_props, meta_trace = _read_tags_and_artwork(path, provided_tags)
     library_state = _capture_library_state(path)
     provided_artwork: List[ArtworkCandidate] = []
     for art in raw.get("artwork", []) if isinstance(raw.get("artwork"), list) else []:
@@ -1456,6 +1475,40 @@ def _normalize_track(raw: Mapping[str, object]) -> DuplicateTrack:
             current_tags["cover_hash"] = provided_artwork[0].hash
             current_tags["artwork_hash"] = provided_artwork[0].hash
     tags = dict(current_tags)
+    discovery = raw.get("discovery") if isinstance(raw.get("discovery"), Mapping) else {}
+    fingerprint_trace = (
+        raw.get("fingerprint_trace") if isinstance(raw.get("fingerprint_trace"), Mapping) else {}
+    )
+    normalized_fields = {
+        "artist": tags.get("artist"),
+        "albumartist": tags.get("albumartist"),
+        "title": tags.get("title"),
+        "album": tags.get("album"),
+        "track": tags.get("track") or tags.get("tracknumber"),
+        "disc": tags.get("disc") or tags.get("discnumber"),
+        "date": tags.get("date"),
+        "year": tags.get("year"),
+    }
+    trace = {
+        "discovery": dict(discovery),
+        "metadata_read": {
+            "success": meta_err is None,
+            "error": meta_err or "",
+            "reader_hint": meta_trace.get("reader_hint"),
+            "normalized_fields": normalized_fields,
+        },
+        "album_art": {
+            "success": art_err is None,
+            "error": art_err or "",
+            "cover_count": meta_trace.get("cover_count"),
+            "mp4_covr_missing": meta_trace.get("mp4_covr_missing"),
+        },
+        "fingerprint": {
+            "success": bool(raw.get("fingerprint")),
+            "source": fingerprint_trace.get("source"),
+            "error": fingerprint_trace.get("error"),
+        },
+    }
     return DuplicateTrack(
         path=path,
         fingerprint=raw.get("fingerprint"),
@@ -1472,6 +1525,7 @@ def _normalize_track(raw: Mapping[str, object]) -> DuplicateTrack:
         metadata_error=meta_err,
         artwork_error=art_err,
         library_state=library_state,
+        trace=trace,
     )
 
 
@@ -1843,6 +1897,21 @@ def _cluster_duplicates(
     near_duplicate_threshold = max(near_duplicate_threshold, exact_duplicate_threshold)
     buckets = _build_metadata_buckets(tracks)
     buckets = _merge_buckets_by_artwork(buckets, ARTWORK_SIMILARITY_THRESHOLD)
+    for bucket in buckets:
+        bucket_key = _bucket_primary_key(bucket)
+        for track in bucket.tracks:
+            track.trace.setdefault("bucketing", {})
+            track.trace["bucketing"] = {
+                "bucket_id": bucket.id,
+                "bucket_primary_key": list(bucket_key),
+                "metadata_key": list(_metadata_bucket_key(track)),
+                "metadata_seeded": bucket.metadata_seeded,
+                "bucket_source": bucket.sources.get(track.path, "fallback"),
+                "album_keys": [list(key) for key in sorted(bucket.album_keys)],
+                "missing_album": bucket.missing_album,
+                "artwork_merges": list(bucket.artwork_merges),
+                "artwork_pull_in": bucket.sources.get(track.path) == "artwork",
+            }
     clusters: List[ClusterResult] = []
     comparisons = 0
     processed = 0
@@ -1985,6 +2054,7 @@ def build_consolidation_plan(
     progress_callback = progress_callback or _default_progress
     review_flags: List[str] = []
     start_time = _now()
+    threshold_settings = dict(threshold_settings or {})
 
     normalized: List[DuplicateTrack] = []
     for raw in tracks:
@@ -2300,6 +2370,116 @@ def build_consolidation_plan(
 
             current_tags = {t.path: _merge_tags(_blank_tags(), t.current_tags) for t in group_tracks}
 
+            bucket_diag = cluster.bucket_diagnostics or {}
+            bucket_sources = (
+                bucket_diag.get("sources")
+                if isinstance(bucket_diag.get("sources"), Mapping)
+                else {}
+            )
+            has_metadata = bool(bucket_diag.get("metadata_seeded")) or (
+                isinstance(bucket_sources, Mapping)
+                and any(source == "metadata" for source in bucket_sources.values())
+            )
+            has_artwork = (
+                isinstance(bucket_sources, Mapping)
+                and any(source == "artwork" for source in bucket_sources.values())
+            ) or bool(bucket_diag.get("artwork_merges"))
+            if has_metadata and has_artwork:
+                formation = "metadata + artwork"
+            elif has_metadata:
+                formation = "metadata-seeded"
+            elif has_artwork:
+                formation = "artwork pull-in"
+            else:
+                formation = "fallback"
+            art_threshold = float(
+                threshold_settings.get("artwork_vastly_different_threshold", ARTWORK_VASTLY_DIFFERENT_THRESHOLD)
+            )
+            comparisons: List[Dict[str, object]] = []
+            seen_pairs: set[tuple[str, str]] = set()
+            for left, neighbors in pair_distances.items():
+                for right, dist in neighbors.items():
+                    pair = tuple(sorted((left, right)))
+                    if left == right or pair in seen_pairs:
+                        continue
+                    seen_pairs.add(pair)
+                    left_lossless = bool(track_quality.get(left, {}).get("is_lossless"))
+                    right_lossless = bool(track_quality.get(right, {}).get("is_lossless"))
+                    effective_near = near_duplicate_threshold
+                    mixed_codec = left_lossless != right_lossless
+                    if mixed_codec:
+                        effective_near += mixed_codec_threshold_boost
+                    verdict = "no match"
+                    if dist <= exact_duplicate_threshold:
+                        verdict = "exact"
+                    elif dist <= effective_near:
+                        verdict = "near"
+                    comparisons.append(
+                        {
+                            "left": left,
+                            "right": right,
+                            "distance": dist,
+                            "threshold": effective_near,
+                            "verdict": verdict,
+                            "mixed_codec": mixed_codec,
+                        }
+                    )
+            preserve_overrides: Dict[str, Dict[str, object]] = {}
+            winner_hash = group_artwork_hashes.get(winner.path)
+            for loser in losers:
+                loser_hash = group_artwork_hashes.get(loser)
+                if winner_hash is None or loser_hash is None:
+                    continue
+                distance = _hamming_distance(winner_hash, loser_hash)
+                if distance > art_threshold:
+                    preserve_overrides[loser] = {
+                        "distance": distance,
+                        "threshold": art_threshold,
+                    }
+            track_traces: Dict[str, Dict[str, object]] = {}
+            for t in group_tracks:
+                track_trace = dict(t.trace)
+                track_trace["artwork_hashing"] = {
+                    "hash": group_artwork_hashes.get(t.path),
+                    "hash_present": group_artwork_hashes.get(t.path) is not None,
+                }
+                if winner_hash is not None and t.path != winner.path:
+                    candidate_hash = group_artwork_hashes.get(t.path)
+                    if candidate_hash is not None:
+                        distance = _hamming_distance(winner_hash, candidate_hash)
+                        track_trace["artwork_comparison"] = {
+                            "winner_distance": distance,
+                            "threshold": art_threshold,
+                            "vastly_different": distance > art_threshold,
+                        }
+                track_traces[t.path] = track_trace
+            pipeline_trace = {
+                "summary": {
+                    "group_id": group_id,
+                    "bucket_id": bucket_diag.get("bucket_id", "n/a"),
+                    "formation": formation,
+                    "metadata_key": list(cluster.metadata_key),
+                    "bucket_sources": dict(bucket_sources),
+                    "album_keys": bucket_diag.get("album_keys", []),
+                    "missing_album": bucket_diag.get("missing_album"),
+                    "artwork_merges": bucket_diag.get("artwork_merges", []),
+                    "thresholds": {
+                        "exact": exact_duplicate_threshold,
+                        "near": near_duplicate_threshold,
+                        "mixed_codec_boost": mixed_codec_threshold_boost,
+                        "artwork_vastly_different_threshold": art_threshold,
+                    },
+                    "comparisons": comparisons,
+                    "outcome": {
+                        "winner": winner.path,
+                        "losers": list(losers),
+                        "dispositions": dict(dispositions),
+                        "preserve_different_art": preserve_overrides,
+                    },
+                },
+                "tracks": track_traces,
+            }
+
             plans.append(
                 GroupPlan(
                     group_id=group_id,
@@ -2343,6 +2523,7 @@ def build_consolidation_plan(
                     artwork_hashes=group_artwork_hashes,
                     fingerprint_distances=pair_distances,
                     library_state=track_states,
+                    pipeline_trace=pipeline_trace,
                 )
             )
 
@@ -2764,6 +2945,122 @@ def export_consolidation_preview_html(plan: ConsolidationPlan, output_html_path:
             "mixed_boost": boost,
         }
 
+    def _format_trace_value(value: object) -> str:
+        if isinstance(value, (list, tuple, set)):
+            return ", ".join(str(v) for v in value) if value else "—"
+        if isinstance(value, dict):
+            return json.dumps(value, sort_keys=True)
+        if value in (None, ""):
+            return "—"
+        return str(value)
+
+    def _trace_panel(group: GroupPlan) -> List[str]:
+        trace = group.pipeline_trace if isinstance(group.pipeline_trace, Mapping) else {}
+        summary = trace.get("summary") if isinstance(trace.get("summary"), Mapping) else {}
+        tracks = trace.get("tracks") if isinstance(trace.get("tracks"), Mapping) else {}
+        trace_id = f"trace-{group.group_id}"
+        lines: List[str] = []
+        lines.append(f"<details class='trace' id='{esc(trace_id)}'>")
+        lines.append("<summary class='trace-summary'>Pipeline Trace</summary>")
+        lines.append("<div class='trace-grid'>")
+        lines.append("<div class='k'>Bucket ID</div>")
+        lines.append(f"<div class='v mono'>{esc(_format_trace_value(summary.get('bucket_id')))}</div>")
+        lines.append("<div class='k'>Formation</div>")
+        lines.append(f"<div class='v'>{esc(_format_trace_value(summary.get('formation')))}</div>")
+        lines.append("<div class='k'>Metadata key</div>")
+        lines.append(f"<div class='v'>{esc(_format_trace_value(summary.get('metadata_key')))}</div>")
+        lines.append("<div class='k'>Bucket sources</div>")
+        lines.append(f"<div class='v tiny'>{esc(_format_trace_value(summary.get('bucket_sources')))}</div>")
+        lines.append("<div class='k'>Album keys</div>")
+        lines.append(f"<div class='v'>{esc(_format_trace_value(summary.get('album_keys')))}</div>")
+        lines.append("<div class='k'>Missing album</div>")
+        lines.append(f"<div class='v'>{esc(_format_trace_value(summary.get('missing_album')))}</div>")
+        lines.append("<div class='k'>Artwork merges</div>")
+        lines.append(f"<div class='v tiny'>{esc(_format_trace_value(summary.get('artwork_merges')))}</div>")
+        lines.append("<div class='k'>Thresholds</div>")
+        lines.append(f"<div class='v tiny'>{esc(_format_trace_value(summary.get('thresholds')))}</div>")
+        lines.append("</div>")
+
+        comparisons = summary.get("comparisons") if isinstance(summary.get("comparisons"), list) else []
+        lines.append("<div class='trace-block'>")
+        lines.append(f"<div class='tiny muted'>Comparisons attempted ({len(comparisons)})</div>")
+        if comparisons:
+            lines.append("<ul class='edge-list'>")
+            for item in sorted(comparisons, key=lambda e: float(e.get("distance", 0.0))):
+                left = str(item.get("left"))
+                right = str(item.get("right"))
+                distance = float(item.get("distance", 0.0))
+                threshold = float(item.get("threshold", 0.0))
+                verdict = str(item.get("verdict", ""))
+                mixed_codec = " mixed-codec" if item.get("mixed_codec") else ""
+                lines.append(
+                    "<li>"
+                    f"{esc(_basename(left))} ↔ {esc(_basename(right))} "
+                    f"({distance:.4f} ≤ {threshold:.4f}, {esc(verdict)}{mixed_codec})"
+                    "</li>"
+                )
+            lines.append("</ul>")
+        else:
+            lines.append("<div class='tiny muted'>No comparisons recorded.</div>")
+        lines.append("</div>")
+
+        outcome = summary.get("outcome") if isinstance(summary.get("outcome"), Mapping) else {}
+        preserve = outcome.get("preserve_different_art") if isinstance(outcome.get("preserve_different_art"), Mapping) else {}
+        lines.append("<div class='trace-block'>")
+        lines.append("<div class='tiny muted'>Final outcome</div>")
+        lines.append("<div class='trace-grid'>")
+        lines.append("<div class='k'>Winner</div>")
+        lines.append(f"<div class='v'>{esc(_format_trace_value(outcome.get('winner')))}</div>")
+        lines.append("<div class='k'>Losers</div>")
+        lines.append(f"<div class='v'>{esc(_format_trace_value(outcome.get('losers')))}</div>")
+        lines.append("<div class='k'>Dispositions</div>")
+        lines.append(f"<div class='v tiny'>{esc(_format_trace_value(outcome.get('dispositions')))}</div>")
+        lines.append("<div class='k'>Preserve (different art)</div>")
+        lines.append(f"<div class='v tiny'>{esc(_format_trace_value(preserve))}</div>")
+        lines.append("</div>")
+        lines.append("</div>")
+
+        lines.append("<div class='trace-block'>")
+        lines.append("<div class='tiny muted'>Per-file trace</div>")
+        for path, payload in sorted(tracks.items(), key=lambda item: str(item[0]).lower()):
+            trace_payload = payload if isinstance(payload, Mapping) else {}
+            lines.append("<details class='trace-track'>")
+            lines.append(
+                "<summary class='trace-track-summary'>"
+                f"{esc(_basename(str(path)))}"
+                "</summary>"
+            )
+            lines.append("<div class='trace-grid'>")
+            discovery = trace_payload.get("discovery") if isinstance(trace_payload.get("discovery"), Mapping) else {}
+            lines.append("<div class='k'>Discovery</div>")
+            lines.append(f"<div class='v tiny'>{esc(_format_trace_value(discovery))}</div>")
+            metadata_read = trace_payload.get("metadata_read") if isinstance(trace_payload.get("metadata_read"), Mapping) else {}
+            lines.append("<div class='k'>Metadata read</div>")
+            lines.append(f"<div class='v tiny'>{esc(_format_trace_value(metadata_read))}</div>")
+            album_art = trace_payload.get("album_art") if isinstance(trace_payload.get("album_art"), Mapping) else {}
+            lines.append("<div class='k'>Album art</div>")
+            lines.append(f"<div class='v tiny'>{esc(_format_trace_value(album_art))}</div>")
+            artwork_hashing = trace_payload.get("artwork_hashing") if isinstance(trace_payload.get("artwork_hashing"), Mapping) else {}
+            lines.append("<div class='k'>Artwork hashing</div>")
+            lines.append(f"<div class='v tiny'>{esc(_format_trace_value(artwork_hashing))}</div>")
+            artwork_comp = trace_payload.get("artwork_comparison") if isinstance(trace_payload.get("artwork_comparison"), Mapping) else {}
+            if artwork_comp:
+                lines.append("<div class='k'>Artwork compare</div>")
+                lines.append(f"<div class='v tiny'>{esc(_format_trace_value(artwork_comp))}</div>")
+            fingerprint = trace_payload.get("fingerprint") if isinstance(trace_payload.get("fingerprint"), Mapping) else {}
+            lines.append("<div class='k'>Fingerprint</div>")
+            lines.append(f"<div class='v tiny'>{esc(_format_trace_value(fingerprint))}</div>")
+            bucketing = trace_payload.get("bucketing") if isinstance(trace_payload.get("bucketing"), Mapping) else {}
+            lines.append("<div class='k'>Bucketing</div>")
+            lines.append(f"<div class='v tiny'>{esc(_format_trace_value(bucketing))}</div>")
+            lines.append("</div>")
+            lines.append("</details>")
+        if not tracks:
+            lines.append("<div class='tiny muted'>No per-file trace data recorded.</div>")
+        lines.append("</div>")
+        lines.append("</details>")
+        return lines
+
     generated_at_iso = plan.generated_at.isoformat()
     host_name = platform.node() or "unknown-host"
     reports_dir = os.path.dirname(output_html_path)
@@ -3053,6 +3350,17 @@ def export_consolidation_preview_html(plan: ConsolidationPlan, output_html_path:
         "gap:8px;",
         "justify-content:flex-end;",
         "}",
+        "button.trace-btn{",
+        "border:1px solid var(--border);",
+        "background:#fff;",
+        "border-radius: 999px;",
+        "padding: 3px 10px;",
+        "font-size: 12px;",
+        "font-weight: 650;",
+        "cursor:pointer;",
+        "white-space: nowrap;",
+        "}",
+        "button.trace-btn:hover{ background:#f7f7f7; }",
         ".group-body{",
         "border-top: 1px solid var(--border);",
         "background: var(--card);",
@@ -3122,6 +3430,42 @@ def export_consolidation_preview_html(plan: ConsolidationPlan, output_html_path:
         "background:#fff;",
         "padding: 10px;",
         "}",
+        "details.trace{",
+        "border:1px dashed var(--border);",
+        "border-radius: 10px;",
+        "background:#fff;",
+        "padding: 10px;",
+        "margin-top: 8px;",
+        "}",
+        "summary.trace-summary{",
+        "cursor:pointer;",
+        "list-style:none;",
+        "font-weight: 650;",
+        "font-size: 12px;",
+        "}",
+        "summary.trace-summary::-webkit-details-marker{ display:none; }",
+        ".trace-grid{",
+        "display:grid;",
+        "grid-template-columns: 180px 1fr;",
+        "gap:6px 10px;",
+        "font-size: 12px;",
+        "margin-top: 8px;",
+        "}",
+        ".trace-block{ margin-top: 8px; }",
+        "details.trace-track{",
+        "border:1px solid var(--border);",
+        "border-radius: 8px;",
+        "padding: 8px;",
+        "background:#fafafa;",
+        "margin-top: 6px;",
+        "}",
+        "summary.trace-track-summary{",
+        "cursor:pointer;",
+        "list-style:none;",
+        "font-weight: 600;",
+        "font-size: 12px;",
+        "}",
+        "summary.trace-track-summary::-webkit-details-marker{ display:none; }",
         "summary.bucket-summary{",
         "cursor:pointer;",
         "list-style:none;",
@@ -3305,6 +3649,10 @@ def export_consolidation_preview_html(plan: ConsolidationPlan, output_html_path:
         )
         for badge in badges:
             html_lines.append(f"<span class='pill'>{esc(badge)}</span>")
+        trace_target = f"trace-{group.group_id}"
+        html_lines.append(
+            f"<button class='trace-btn' type='button' data-trace-target='{esc(trace_target)}'>Trace</button>"
+        )
         html_lines.append("</div>")
         html_lines.append("</div>")
         html_lines.append(f"<div class='tiny muted'>{esc(summary_line)}</div>")
@@ -3483,6 +3831,7 @@ def export_consolidation_preview_html(plan: ConsolidationPlan, output_html_path:
             html_lines.append("<div class='tiny muted'>No no-match edges.</div>")
         html_lines.append("</details>")
         html_lines.append("</details>")
+        html_lines.extend(_trace_panel(group))
         html_lines.append("</div>")
         html_lines.append("<div class='section'>")
         html_lines.append("<h3>Operations</h3>")
@@ -3685,6 +4034,16 @@ def export_consolidation_preview_html(plan: ConsolidationPlan, output_html_path:
         "if (!el) return;"
         "const expanded = el.classList.toggle('path-expanded');"
         "btn.textContent = expanded ? 'Collapse' : 'Expand';"
+        "});"
+        "}"
+        "for (const btn of $$('button.trace-btn[data-trace-target]')){"
+        "btn.addEventListener('click', (event) => {"
+        "event.preventDefault();"
+        "const id = btn.getAttribute('data-trace-target');"
+        "const panel = id ? document.getElementById(id) : null;"
+        "if (!panel) return;"
+        "panel.open = !panel.open;"
+        "panel.scrollIntoView({behavior: 'smooth', block: 'start'});"
         "});"
         "}"
         "expandAllBtn?.addEventListener('click', () => groups().forEach(d => d.open = true));"
