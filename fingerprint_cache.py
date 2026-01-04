@@ -2,7 +2,6 @@ import os
 import sqlite3
 import time
 from typing import Callable, Dict, Optional
-from functools import lru_cache
 from utils.path_helpers import ensure_long_path
 
 verbose: bool = True
@@ -51,7 +50,6 @@ def _ensure_db(db_path: str) -> sqlite3.Connection:
     return conn
 
 
-@lru_cache(maxsize=128)
 def get_fingerprint(
     path: str,
     db_path: str,
@@ -123,7 +121,6 @@ def get_fingerprint(
 
 
 def flush_cache(db_path: str) -> None:
-    get_fingerprint.cache_clear()
     if not os.path.exists(db_path):
         return
     try:
