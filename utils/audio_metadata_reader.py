@@ -57,6 +57,13 @@ def _first_value(value: object) -> object:
         return _first_value(value[0]) if value else None
     if isinstance(value, tuple):
         return _first_value(value[0]) if value else None
+    if isinstance(value, bytes):
+        for encoding in ("utf-8", "utf-16", "latin-1"):
+            try:
+                return value.decode(encoding)
+            except UnicodeDecodeError:
+                continue
+        return value.decode("utf-8", errors="replace")
     if hasattr(value, "text"):
         try:
             text_value = value.text
@@ -236,12 +243,8 @@ def read_metadata(
             if error is None:
                 error = f"mp4 read failed: {exc}"
             mp4_tags = {}
-        needs_atoms = any(
-            not tags.get(key) and mp4_tags.get(key)
-            for key in ("artist", "title", "album", "albumartist", "date", "tracknumber", "discnumber", "genre")
-        )
-        if needs_atoms:
-            tags = _merge_missing(tags, mp4_tags)
+        if mp4_tags:
+            tags = _merge_missing(mp4_tags, tags)
             reader_hint = "mp4 atoms"
         else:
             reader_hint = "easy tags"
