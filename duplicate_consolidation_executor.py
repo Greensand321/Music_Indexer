@@ -1176,6 +1176,198 @@ def execute_consolidation_plan(
                     notes.append(f"{key}: {rendered}")
                 return " | ".join(notes)
 
+            def _format_trace_value(value: object) -> str:
+                if isinstance(value, (list, tuple, set)):
+                    return ", ".join(str(v) for v in value) if value else "—"
+                if isinstance(value, dict):
+                    return json.dumps(value, sort_keys=True)
+                if value in (None, ""):
+                    return "—"
+                return str(value)
+
+            def _trace_panel(group: object) -> List[str]:
+                trace = getattr(group, "pipeline_trace", {})
+                if not isinstance(trace, Mapping):
+                    trace = {}
+                summary = trace.get("summary") if isinstance(trace.get("summary"), Mapping) else {}
+                tracks = trace.get("tracks") if isinstance(trace.get("tracks"), Mapping) else {}
+                trace_id = f"trace-{getattr(group, 'group_id', '')}"
+                lines: List[str] = []
+                lines.append(f"<details class='trace' id='{html.escape(trace_id)}'>")
+                lines.append("<summary class='trace-summary'>Pipeline Trace</summary>")
+                lines.append("<div class='trace-grid'>")
+                lines.append("<div class='k'>Bucket ID</div>")
+                lines.append(
+                    f"<div class='v mono'>{html.escape(_format_trace_value(summary.get('bucket_id')))}</div>"
+                )
+                lines.append("<div class='k'>Formation</div>")
+                lines.append(
+                    f"<div class='v'>{html.escape(_format_trace_value(summary.get('formation')))}</div>"
+                )
+                lines.append("<div class='k'>Metadata key</div>")
+                lines.append(
+                    f"<div class='v'>{html.escape(_format_trace_value(summary.get('metadata_key')))}</div>"
+                )
+                lines.append("<div class='k'>Bucket sources</div>")
+                lines.append(
+                    f"<div class='v tiny'>{html.escape(_format_trace_value(summary.get('bucket_sources')))}</div>"
+                )
+                lines.append("<div class='k'>Album keys</div>")
+                lines.append(
+                    f"<div class='v'>{html.escape(_format_trace_value(summary.get('album_keys')))}</div>"
+                )
+                lines.append("<div class='k'>Missing album</div>")
+                lines.append(
+                    f"<div class='v'>{html.escape(_format_trace_value(summary.get('missing_album')))}</div>"
+                )
+                lines.append("<div class='k'>Artwork merges</div>")
+                lines.append(
+                    f"<div class='v tiny'>{html.escape(_format_trace_value(summary.get('artwork_merges')))}</div>"
+                )
+                lines.append("<div class='k'>Thresholds</div>")
+                lines.append(
+                    f"<div class='v tiny'>{html.escape(_format_trace_value(summary.get('thresholds')))}</div>"
+                )
+                lines.append("</div>")
+
+                comparisons = (
+                    summary.get("comparisons") if isinstance(summary.get("comparisons"), list) else []
+                )
+                lines.append("<div class='trace-block'>")
+                lines.append(
+                    f"<div class='tiny muted'>Comparisons attempted ({len(comparisons)})</div>"
+                )
+                if comparisons:
+                    lines.append("<ul class='edge-list'>")
+                    for item in sorted(comparisons, key=lambda e: float(e.get("distance", 0.0))):
+                        left = str(item.get("left"))
+                        right = str(item.get("right"))
+                        distance = float(item.get("distance", 0.0))
+                        threshold = float(item.get("threshold", 0.0))
+                        verdict = str(item.get("verdict", ""))
+                        mixed_codec = " mixed-codec" if item.get("mixed_codec") else ""
+                        lines.append(
+                            "<li>"
+                            f"{html.escape(_basename(left))} ↔ {html.escape(_basename(right))} "
+                            f"({distance:.4f} ≤ {threshold:.4f}, {html.escape(verdict)}{mixed_codec})"
+                            "</li>"
+                        )
+                    lines.append("</ul>")
+                else:
+                    lines.append("<div class='tiny muted'>No comparisons recorded.</div>")
+                lines.append("</div>")
+
+                outcome = summary.get("outcome") if isinstance(summary.get("outcome"), Mapping) else {}
+                preserve = (
+                    outcome.get("preserve_different_art")
+                    if isinstance(outcome.get("preserve_different_art"), Mapping)
+                    else {}
+                )
+                lines.append("<div class='trace-block'>")
+                lines.append("<div class='tiny muted'>Final outcome</div>")
+                lines.append("<div class='trace-grid'>")
+                lines.append("<div class='k'>Winner</div>")
+                lines.append(
+                    f"<div class='v'>{html.escape(_format_trace_value(outcome.get('winner')))}</div>"
+                )
+                lines.append("<div class='k'>Losers</div>")
+                lines.append(
+                    f"<div class='v'>{html.escape(_format_trace_value(outcome.get('losers')))}</div>"
+                )
+                lines.append("<div class='k'>Dispositions</div>")
+                lines.append(
+                    f"<div class='v tiny'>{html.escape(_format_trace_value(outcome.get('dispositions')))}</div>"
+                )
+                lines.append("<div class='k'>Preserve (different art)</div>")
+                lines.append(
+                    f"<div class='v tiny'>{html.escape(_format_trace_value(preserve))}</div>"
+                )
+                lines.append("</div>")
+                lines.append("</div>")
+
+                lines.append("<div class='trace-block'>")
+                lines.append("<div class='tiny muted'>Per-file trace</div>")
+                for path, payload in sorted(tracks.items(), key=lambda item: str(item[0]).lower()):
+                    trace_payload = payload if isinstance(payload, Mapping) else {}
+                    lines.append("<details class='trace-track'>")
+                    lines.append(
+                        "<summary class='trace-track-summary'>"
+                        f"{html.escape(_basename(str(path)))}"
+                        "</summary>"
+                    )
+                    lines.append("<div class='trace-grid'>")
+                    discovery = (
+                        trace_payload.get("discovery")
+                        if isinstance(trace_payload.get("discovery"), Mapping)
+                        else {}
+                    )
+                    lines.append("<div class='k'>Discovery</div>")
+                    lines.append(
+                        f"<div class='v tiny'>{html.escape(_format_trace_value(discovery))}</div>"
+                    )
+                    metadata_read = (
+                        trace_payload.get("metadata_read")
+                        if isinstance(trace_payload.get("metadata_read"), Mapping)
+                        else {}
+                    )
+                    lines.append("<div class='k'>Metadata read</div>")
+                    lines.append(
+                        f"<div class='v tiny'>{html.escape(_format_trace_value(metadata_read))}</div>"
+                    )
+                    album_art = (
+                        trace_payload.get("album_art")
+                        if isinstance(trace_payload.get("album_art"), Mapping)
+                        else {}
+                    )
+                    lines.append("<div class='k'>Album art</div>")
+                    lines.append(
+                        f"<div class='v tiny'>{html.escape(_format_trace_value(album_art))}</div>"
+                    )
+                    artwork_hashing = (
+                        trace_payload.get("artwork_hashing")
+                        if isinstance(trace_payload.get("artwork_hashing"), Mapping)
+                        else {}
+                    )
+                    lines.append("<div class='k'>Artwork hashing</div>")
+                    lines.append(
+                        f"<div class='v tiny'>{html.escape(_format_trace_value(artwork_hashing))}</div>"
+                    )
+                    artwork_comp = (
+                        trace_payload.get("artwork_comparison")
+                        if isinstance(trace_payload.get("artwork_comparison"), Mapping)
+                        else {}
+                    )
+                    if artwork_comp:
+                        lines.append("<div class='k'>Artwork compare</div>")
+                        lines.append(
+                            f"<div class='v tiny'>{html.escape(_format_trace_value(artwork_comp))}</div>"
+                        )
+                    fingerprint = (
+                        trace_payload.get("fingerprint")
+                        if isinstance(trace_payload.get("fingerprint"), Mapping)
+                        else {}
+                    )
+                    lines.append("<div class='k'>Fingerprint</div>")
+                    lines.append(
+                        f"<div class='v tiny'>{html.escape(_format_trace_value(fingerprint))}</div>"
+                    )
+                    bucketing = (
+                        trace_payload.get("bucketing")
+                        if isinstance(trace_payload.get("bucketing"), Mapping)
+                        else {}
+                    )
+                    lines.append("<div class='k'>Bucketing</div>")
+                    lines.append(
+                        f"<div class='v tiny'>{html.escape(_format_trace_value(bucketing))}</div>"
+                    )
+                    lines.append("</div>")
+                    lines.append("</details>")
+                if not tracks:
+                    lines.append("<div class='tiny muted'>No per-file trace data recorded.</div>")
+                lines.append("</div>")
+                lines.append("</details>")
+                return lines
+
             metadata_actions = [act for act in actions if act.step == "metadata"]
             metadata_success = sum(1 for act in metadata_actions if act.status == "success")
             metadata_failed = sum(1 for act in metadata_actions if act.status == "failed")
@@ -1592,6 +1784,17 @@ def execute_consolidation_plan(
                 "gap:8px;",
                 "justify-content:flex-end;",
                 "}",
+                "button.trace-btn{",
+                "border:1px solid var(--border);",
+                "background:#fff;",
+                "border-radius: 999px;",
+                "padding: 3px 10px;",
+                "font-size: 12px;",
+                "font-weight: 650;",
+                "cursor:pointer;",
+                "white-space: nowrap;",
+                "}",
+                "button.trace-btn:hover{ background:#f7f7f7; }",
                 ".group-body{",
                 "border-top: 1px solid var(--border);",
                 "background: var(--card);",
@@ -1660,6 +1863,42 @@ def execute_consolidation_plan(
                 "background:#fff;",
                 "padding: 10px;",
                 "}",
+                "details.trace{",
+                "border:1px dashed var(--border);",
+                "border-radius: 10px;",
+                "background:#fff;",
+                "padding: 10px;",
+                "margin-top: 8px;",
+                "}",
+                "summary.trace-summary{",
+                "cursor:pointer;",
+                "list-style:none;",
+                "font-weight: 650;",
+                "font-size: 12px;",
+                "}",
+                "summary.trace-summary::-webkit-details-marker{ display:none; }",
+                ".trace-grid{",
+                "display:grid;",
+                "grid-template-columns: 180px 1fr;",
+                "gap:6px 10px;",
+                "font-size: 12px;",
+                "margin-top: 8px;",
+                "}",
+                ".trace-block{ margin-top: 8px; }",
+                "details.trace-track{",
+                "border:1px solid var(--border);",
+                "border-radius: 8px;",
+                "padding: 8px;",
+                "background:#fafafa;",
+                "margin-top: 6px;",
+                "}",
+                "summary.trace-track-summary{",
+                "cursor:pointer;",
+                "list-style:none;",
+                "font-weight: 600;",
+                "font-size: 12px;",
+                "}",
+                "summary.trace-track-summary::-webkit-details-marker{ display:none; }",
                 "summary.bucket-summary{",
                 "cursor:pointer;",
                 "list-style:none;",
@@ -1843,6 +2082,10 @@ def execute_consolidation_plan(
                 )
                 for badge in badges:
                     html_lines.append(f"<span class='pill'>{html.escape(badge)}</span>")
+                trace_target = f"trace-{gid}"
+                html_lines.append(
+                    f"<button class='trace-btn' type='button' data-trace-target='{html.escape(trace_target)}'>Trace</button>"
+                )
                 html_lines.append("</div>")
                 html_lines.append("</div>")
                 html_lines.append(f"<div class='tiny muted'>{html.escape(summary_line)}</div>")
@@ -2033,6 +2276,7 @@ def execute_consolidation_plan(
                     html_lines.append("<div class='tiny muted'>No no-match edges.</div>")
                 html_lines.append("</details>")
                 html_lines.append("</details>")
+                html_lines.extend(_trace_panel(grp))
                 html_lines.append("</div>")
                 html_lines.append("<div class='section'>")
                 html_lines.append("<h3>Operations</h3>")
@@ -2237,6 +2481,16 @@ def execute_consolidation_plan(
                 "if (!el) return;"
                 "const expanded = el.classList.toggle('path-expanded');"
                 "btn.textContent = expanded ? 'Collapse' : 'Expand';"
+                "});"
+                "}"
+                "for (const btn of $$('button.trace-btn[data-trace-target]')){"
+                "btn.addEventListener('click', (event) => {"
+                "event.preventDefault();"
+                "const id = btn.getAttribute('data-trace-target');"
+                "const panel = id ? document.getElementById(id) : null;"
+                "if (!panel) return;"
+                "panel.open = !panel.open;"
+                "panel.scrollIntoView({behavior: 'smooth', block: 'start'});"
                 "});"
                 "}"
                 "expandAllBtn?.addEventListener('click', () => groups().forEach(d => d.open = true));"

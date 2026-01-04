@@ -1,7 +1,7 @@
 import os
 import sqlite3
 import time
-from typing import Callable, Optional
+from typing import Callable, Dict, Optional
 from functools import lru_cache
 from utils.path_helpers import ensure_long_path
 
@@ -57,10 +57,13 @@ def get_fingerprint(
     db_path: str,
     compute_func: Callable[[str], tuple[int | None, str | None]],
     log_callback: Optional[Callable[[str], None]] = None,
+    trace: Optional[Dict[str, object]] = None,
 ) -> Optional[str]:
     """Return fingerprint for path using cache; compute if missing."""
     if log_callback is None:
         log_callback = lambda msg: None
+    if trace is None:
+        trace = {}
 
     path = ensure_long_path(path)
     os.makedirs(os.path.dirname(db_path), exist_ok=True)
@@ -70,6 +73,8 @@ def get_fingerprint(
         size = os.path.getsize(path)
     except OSError as e:
         log_callback(f"! Could not stat {path}: {e}")
+        trace["source"] = "stat_error"
+        trace["error"] = str(e)
         conn.close()
         return None
     row = conn.execute(
@@ -88,6 +93,8 @@ def get_fingerprint(
             except Exception:
                 fp = fp.decode("latin1", errors="ignore")
         _dlog("FP", f"fingerprint={fp} prefix={fp[:16]}", log_callback)
+        trace["source"] = "cache"
+        trace["error"] = ""
         return fp
     if row:
         _dlog(
@@ -106,6 +113,12 @@ def get_fingerprint(
         )
         conn.commit()
     conn.close()
+    if fp_hash:
+        trace["source"] = "computed"
+        trace["error"] = ""
+    else:
+        trace["source"] = "missing"
+        trace["error"] = "fingerprint unavailable"
     return fp_hash
 
 

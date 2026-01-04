@@ -2108,12 +2108,13 @@ class DuplicateFinderShell(tk.Toplevel):
         docs_dir = os.path.join(library_root, "Docs")
         os.makedirs(docs_dir, exist_ok=True)
         db_path = os.path.join(docs_dir, ".duplicate_fingerprints.db")
+        excluded_dirs = {"not sorted", "playlists"}
 
         audio_paths: list[str] = []
         for dirpath, _dirs, files in os.walk(library_root):
             rel = os.path.relpath(dirpath, library_root)
             parts = {p.lower() for p in rel.split(os.sep)}
-            if {"not sorted", "playlists"} & parts:
+            if excluded_dirs & parts:
                 continue
             for fname in files:
                 ext = os.path.splitext(fname)[1].lower()
@@ -2123,7 +2124,14 @@ class DuplicateFinderShell(tk.Toplevel):
         tracks: list[dict[str, object]] = []
         total = len(audio_paths) or 1
         for idx, path in enumerate(sorted(audio_paths), start=1):
-            fp = get_fingerprint(path, db_path, _compute_fp, log_callback=self._log_action)
+            fingerprint_trace: dict[str, object] = {}
+            fp = get_fingerprint(
+                path,
+                db_path,
+                _compute_fp,
+                log_callback=self._log_action,
+                trace=fingerprint_trace,
+            )
             if not fp:
                 continue
             bitrate = 0
@@ -2146,6 +2154,12 @@ class DuplicateFinderShell(tk.Toplevel):
                     "bitrate": bitrate,
                     "sample_rate": sample_rate,
                     "bit_depth": bit_depth,
+                    "fingerprint_trace": dict(fingerprint_trace),
+                    "discovery": {
+                        "scan_roots": [library_root],
+                        "excluded_dirs": sorted(excluded_dirs),
+                        "skipped_by_filter": False,
+                    },
                 }
             )
             self._set_status("Scanning…", progress=min(90, int(idx / total * 70) + 20))
