@@ -79,6 +79,7 @@ def load_config():
         cfg.setdefault("allow_mismatched_edits", ALLOW_MISMATCHED_EDITS)
         cfg.setdefault("mixed_codec_threshold_boost", MIXED_CODEC_THRESHOLD_BOOST)
         cfg.setdefault("artwork_vastly_different_threshold", ARTWORK_VASTLY_DIFFERENT_THRESHOLD)
+        cfg.setdefault("duplicate_finder_show_artwork_variants", True)
         cfg.setdefault("library_root", "")
         cfg.setdefault("use_library_sync_review", False)
         cfg.setdefault("library_sync_review", {})
@@ -103,6 +104,7 @@ def load_config():
             "library_sync_review": {},
             "mixed_codec_threshold_boost": MIXED_CODEC_THRESHOLD_BOOST,
             "artwork_vastly_different_threshold": ARTWORK_VASTLY_DIFFERENT_THRESHOLD,
+            "duplicate_finder_show_artwork_variants": True,
         }
 
 

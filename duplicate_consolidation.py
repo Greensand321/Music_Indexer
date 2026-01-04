@@ -2793,7 +2793,12 @@ def export_duplicate_pair_report_html(report: DuplicatePairReport, output_html_p
     return output_html_path
 
 
-def export_consolidation_preview_html(plan: ConsolidationPlan, output_html_path: str) -> str:
+def export_consolidation_preview_html(
+    plan: ConsolidationPlan,
+    output_html_path: str,
+    *,
+    show_artwork_variants: bool = True,
+) -> str:
     """Write an HTML preview of the consolidation plan."""
 
     plan.refresh_plan_signature()
@@ -2887,7 +2892,7 @@ def export_consolidation_preview_html(plan: ConsolidationPlan, output_html_path:
         meta_count = sum(1 for act in actions if act["step"] == "metadata")
         art_count = sum(1 for act in actions if act["step"] == "artwork")
         playlist_count = sum(1 for act in actions if act["step"] == "playlist")
-        loser_count = len(group.losers)
+        loser_count = sum(1 for act in actions if act["step"] == "loser_cleanup")
         if meta_count:
             badges.append(f"metadata updates ({meta_count})")
         if art_count:
@@ -2905,12 +2910,12 @@ def export_consolidation_preview_html(plan: ConsolidationPlan, output_html_path:
             return "metadata-only"
         return "mixed"
 
-    def _group_disposition_count(group: GroupPlan) -> int:
-        return sum(
-            1
-            for loser in group.losers
-            if group.loser_disposition.get(loser, "quarantine") != "retain"
-        )
+    def _is_artwork_variant(group: GroupPlan, loser_path: str, threshold: float) -> bool:
+        winner_hash = group.artwork_hashes.get(group.winner_path)
+        loser_hash = group.artwork_hashes.get(loser_path)
+        if winner_hash is None or loser_hash is None:
+            return False
+        return _hamming_distance(winner_hash, loser_hash) > threshold
 
     def _album_art_src(
         group: GroupPlan,
@@ -3145,20 +3150,6 @@ def export_consolidation_preview_html(plan: ConsolidationPlan, output_html_path:
         lines.append("</div>")
         lines.append("</details>")
         return lines
-
-    def _has_artwork_variants(group: GroupPlan, threshold: float) -> bool:
-        if getattr(group, "artwork_variant_total", 1) > 1:
-            return True
-        winner_hash = group.artwork_hashes.get(group.winner_path)
-        if winner_hash is None:
-            return False
-        for loser in group.losers:
-            loser_hash = group.artwork_hashes.get(loser)
-            if loser_hash is None:
-                continue
-            if _hamming_distance(winner_hash, loser_hash) > threshold:
-                return True
-        return False
 
     generated_at_iso = plan.generated_at.isoformat()
     host_name = platform.node() or "unknown-host"
@@ -3687,9 +3678,6 @@ def export_consolidation_preview_html(plan: ConsolidationPlan, output_html_path:
             "<option value='metadata-only'>Metadata only</option>",
             "<option value='failed'>Any failures</option>",
             "</select>",
-            "<label class='pill' for='toggleArtVariants'>"
-            "<input id='toggleArtVariants' type='checkbox' checked /> "
-            "Show different artwork variants</label>",
             "</div>",
             "<div class='right'>",
             "<span class='tiny muted' id='visibleCount'>0 visible</span>",
@@ -3704,12 +3692,30 @@ def export_consolidation_preview_html(plan: ConsolidationPlan, output_html_path:
     all_actions: List[Dict[str, object]] = []
     for group in plan.groups:
         actions = _planned_actions(group)
+        visible_losers = list(group.losers)
+        hidden_losers: set[str] = set()
+        if not show_artwork_variants:
+            hidden_losers = {
+                loser for loser in group.losers if _is_artwork_variant(group, loser, art_threshold)
+            }
+            if hidden_losers:
+                visible_losers = [loser for loser in group.losers if loser not in hidden_losers]
+                actions = [
+                    act
+                    for act in actions
+                    if not (act["step"] == "loser_cleanup" and act["target"] in hidden_losers)
+                ]
+        if not show_artwork_variants and not actions and not visible_losers:
+            continue
         all_actions.extend(actions)
         state = "review" if group.review_flags else "ready"
         badges = _action_badges(group, actions)
-        group_disposition_count = _group_disposition_count(group)
+        group_disposition_count = sum(
+            1
+            for loser in visible_losers
+            if group.loser_disposition.get(loser, "quarantine") != "retain"
+        )
         group_type_hint = _group_type_hint(actions)
-        group_has_art_variants = _has_artwork_variants(group, art_threshold)
         search_tokens = [group.group_id, group.winner_path, _basename(group.winner_path), state]
         search_tokens.extend(badges)
         for act in actions:
@@ -3732,7 +3738,6 @@ def export_consolidation_preview_html(plan: ConsolidationPlan, output_html_path:
             "<details class='group' "
             f"data-group-id='{esc(group.group_id)}' "
             f"data-has-quarantine='{str(group_disposition_count > 0).lower()}' "
-            f"data-has-art-variant='{str(group_has_art_variants).lower()}' "
             "data-has-failure='false' "
             f"data-type='{esc(group_type_hint)}' "
             f"data-search='{esc(search_text.lower())}' "
@@ -3775,7 +3780,7 @@ def export_consolidation_preview_html(plan: ConsolidationPlan, output_html_path:
             for act in actions
             if act["step"] == "loser_cleanup"
         }
-        loser_paths = group.losers or [""]
+        loser_paths = visible_losers
         winner_art_src = _album_art_src(group, group.winner_path)
         winner_art_hash = group.artwork_hashes.get(group.winner_path)
         html_lines.append("<div class='card-stack'>")
@@ -4076,7 +4081,6 @@ def export_consolidation_preview_html(plan: ConsolidationPlan, output_html_path:
         "const groups = () => $$('#groups details.group');"
         "const searchEl = $('#search');"
         "const filterEl = $('#filter');"
-        "const artToggleEl = $('#toggleArtVariants');"
         "const visibleCountEl = $('#visibleCount');"
         "const expandAllBtn = $('#expandAll');"
         "const collapseAllBtn = $('#collapseAll');"
@@ -4120,14 +4124,11 @@ def export_consolidation_preview_html(plan: ConsolidationPlan, output_html_path:
         "const hasQuarantine = (d.getAttribute('data-has-quarantine') || 'false') === 'true';"
         "const hasFailure = (d.getAttribute('data-has-failure') || 'false') === 'true';"
         "const typeHint = (d.getAttribute('data-type') || '').toLowerCase();"
-        "const hasArtVariant = (d.getAttribute('data-has-art-variant') || 'false') === 'true';"
-        "const showArtVariants = artToggleEl ? artToggleEl.checked : true;"
         "let matchesFilter = true;"
         "if (mode === 'has-quarantine') matchesFilter = hasQuarantine;"
         "if (mode === 'metadata-only') matchesFilter = typeHint === 'metadata-only';"
         "if (mode === 'failed') matchesFilter = hasFailure;"
-        "const matchesArtVariant = showArtVariants || !hasArtVariant;"
-        "const show = matchesSearch && matchesFilter && matchesArtVariant;"
+        "const show = matchesSearch && matchesFilter;"
         "d.classList.toggle('hidden', !show);"
         "if (show) visible += 1;"
         "}"
@@ -4184,7 +4185,6 @@ def export_consolidation_preview_html(plan: ConsolidationPlan, output_html_path:
         "}"
         "searchEl?.addEventListener('input', applyFilters);"
         "filterEl?.addEventListener('change', applyFilters);"
-        "artToggleEl?.addEventListener('change', applyFilters);"
         "computeStats();"
         "applyFilters();"
         "})();"

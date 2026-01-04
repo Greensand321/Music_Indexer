@@ -1505,6 +1505,10 @@ class DuplicateFinderShell(tk.Toplevel):
         self.quarantine_var = tk.BooleanVar(value=True)
         self.delete_losers_var = tk.BooleanVar(value=False)
         self.override_review_var = tk.BooleanVar(value=False)
+        cfg = load_config()
+        self.show_artwork_variants_var = tk.BooleanVar(
+            value=cfg.get("duplicate_finder_show_artwork_variants", True)
+        )
         self.group_disposition_var = tk.StringVar(value="")
         self.group_disposition_overrides: dict[str, str] = {}
         self._selected_group_id: str | None = None
@@ -1574,6 +1578,12 @@ class DuplicateFinderShell(tk.Toplevel):
         ttk.Button(controls, text="⚙️ Thresholds", command=self._open_threshold_settings).pack(
             side="left", padx=(0, 12)
         )
+        ttk.Checkbutton(
+            controls,
+            text="Show different artwork variants",
+            variable=self.show_artwork_variants_var,
+            command=self._toggle_show_artwork_variants,
+        ).pack(side="left", padx=(0, 10))
         ttk.Checkbutton(
             controls,
             text="Update Playlists",
@@ -2225,7 +2235,11 @@ class DuplicateFinderShell(tk.Toplevel):
             self.preview_json_path = json_path
             self._log_action(f"Audit JSON written to {json_path}")
             html_path = os.path.join(docs_dir, "duplicate_preview.html")
-            export_consolidation_preview_html(plan, html_path)
+            export_consolidation_preview_html(
+                plan,
+                html_path,
+                show_artwork_variants=self.show_artwork_variants_var.get(),
+            )
             self.preview_html_path = html_path
             self._log_action(f"Preview HTML written to {html_path}")
             self._set_status("Preview generated", progress=100)
@@ -2307,7 +2321,11 @@ class DuplicateFinderShell(tk.Toplevel):
                 preview_html_path = os.path.join(path, "Docs", "duplicate_preview.html")
                 plan_for_html = plan_for_checks or self._load_preview_plan(preview_plan_path)
                 if plan_for_html:
-                    export_consolidation_preview_html(plan_for_html, preview_html_path)
+                    export_consolidation_preview_html(
+                        plan_for_html,
+                        preview_html_path,
+                        show_artwork_variants=self.show_artwork_variants_var.get(),
+                    )
                     self.preview_html_path = preview_html_path
             if not plan_for_checks:
                 plan_for_checks = self._load_preview_plan(preview_plan_path)
@@ -2394,6 +2412,7 @@ class DuplicateFinderShell(tk.Toplevel):
             retain_losers=not self.quarantine_var.get(),
             allow_deletion=deletions_requested,
             confirm_deletion=deletions_requested,
+            show_artwork_variants=self.show_artwork_variants_var.get(),
         )
 
         if not self.quarantine_var.get():
@@ -2457,6 +2476,14 @@ class DuplicateFinderShell(tk.Toplevel):
     def _toggle_update_playlists(self) -> None:
         state = "enabled" if self.update_playlists_var.get() else "disabled"
         self._log_action(f"Update Playlists {state}")
+
+    def _toggle_show_artwork_variants(self) -> None:
+        enabled = self.show_artwork_variants_var.get()
+        cfg = load_config()
+        cfg["duplicate_finder_show_artwork_variants"] = bool(enabled)
+        save_config(cfg)
+        state = "enabled" if enabled else "disabled"
+        self._log_action(f"Show different artwork variants {state}")
 
     def _toggle_quarantine(self) -> None:
         state = "enabled" if self.quarantine_var.get() else "disabled"
