@@ -1510,26 +1510,6 @@ def execute_consolidation_plan(
                 emoji = "✅" if success else "❌"
                 return status, status_class, f"{emoji} {status}"
 
-            def _has_artwork_variants(group: object | None, threshold: float) -> bool:
-                if group is None:
-                    return False
-                if getattr(group, "artwork_variant_total", 1) > 1:
-                    return True
-                winner_path = getattr(group, "winner_path", "")
-                if not winner_path:
-                    return False
-                artwork_hashes = getattr(group, "artwork_hashes", {}) or {}
-                winner_hash = artwork_hashes.get(winner_path)
-                if winner_hash is None:
-                    return False
-                for loser in getattr(group, "losers", []) or []:
-                    loser_hash = artwork_hashes.get(loser)
-                    if loser_hash is None:
-                        continue
-                    if _hamming_distance(winner_hash, loser_hash) > threshold:
-                        return True
-                return False
-
             settings_entries: List[tuple[str, object]] = []
             if plan and plan.threshold_settings:
                 settings_entries.extend(
@@ -2036,9 +2016,6 @@ def execute_consolidation_plan(
                 "<option value='metadata-only'>Metadata only</option>",
                 "<option value='failed'>Any failures</option>",
                 "</select>",
-                "<label class='pill' for='toggleArtVariants'>"
-                "<input id='toggleArtVariants' type='checkbox' checked /> "
-                "Show different artwork variants</label>",
                 "</div>",
                 "<div class='right'>",
                 "<span class='tiny muted' id='visibleCount'>0 visible</span>",
@@ -2077,7 +2054,6 @@ def execute_consolidation_plan(
                 group_type_hint = _group_type_hint(group_actions)
                 group_has_quarantine = _group_has_quarantine(group_actions)
                 group_has_failure = _group_has_failure(group_actions)
-                group_has_art_variants = _has_artwork_variants(grp, art_threshold)
                 search_tokens = [gid, winner_path, _basename(winner_path), state]
                 search_tokens.extend(badges)
                 for act in group_actions:
@@ -2102,7 +2078,6 @@ def execute_consolidation_plan(
                     "<details class='group' "
                     f"data-group-id='{html.escape(gid)}' "
                     f"data-has-quarantine='{str(group_has_quarantine).lower()}' "
-                    f"data-has-art-variant='{str(group_has_art_variants).lower()}' "
                     f"data-has-failure='{str(group_has_failure).lower()}' "
                     f"data-type='{html.escape(group_type_hint)}' "
                     f"data-search='{html.escape(search_text.lower())}' "
@@ -2463,7 +2438,6 @@ def execute_consolidation_plan(
                 "const groups = () => $$('#groups details.group');"
                 "const searchEl = $('#search');"
                 "const filterEl = $('#filter');"
-                "const artToggleEl = $('#toggleArtVariants');"
                 "const visibleCountEl = $('#visibleCount');"
                 "const expandAllBtn = $('#expandAll');"
                 "const collapseAllBtn = $('#collapseAll');"
@@ -2501,15 +2475,12 @@ def execute_consolidation_plan(
                 "const matchesSearch = !term || hay.includes(term);"
                 "const hasQuarantine = (d.getAttribute('data-has-quarantine') || 'false') === 'true';"
                 "const hasFailure = (d.getAttribute('data-has-failure') || 'false') === 'true';"
-                "const hasArtVariant = (d.getAttribute('data-has-art-variant') || 'false') === 'true';"
-                "const showArtVariants = artToggleEl ? artToggleEl.checked : true;"
                 "const typeHint = (d.getAttribute('data-type') || '').toLowerCase();"
                 "let matchesFilter = true;"
                 "if (mode === 'has-quarantine') matchesFilter = hasQuarantine;"
                 "if (mode === 'metadata-only') matchesFilter = typeHint === 'metadata-only';"
                 "if (mode === 'failed') matchesFilter = hasFailure;"
-                "const matchesArtVariant = showArtVariants || !hasArtVariant;"
-                "const show = matchesSearch && matchesFilter && matchesArtVariant;"
+                "const show = matchesSearch && matchesFilter;"
                 "d.classList.toggle('hidden', !show);"
                 "if (show) visible += 1;"
                 "}"
@@ -2568,7 +2539,6 @@ def execute_consolidation_plan(
                 "}"
                 "searchEl?.addEventListener('input', applyFilters);"
                 "filterEl?.addEventListener('change', applyFilters);"
-                "artToggleEl?.addEventListener('change', applyFilters);"
                 "computeStats();"
                 "applyFilters();"
                 "})();"
