@@ -8,6 +8,7 @@ from collections.abc import Mapping
 from typing import Dict, Iterable, List, Optional, Tuple
 
 from utils.path_helpers import ensure_long_path
+from utils.year_normalizer import normalize_year
 
 logger = logging.getLogger(__name__)
 
@@ -112,18 +113,6 @@ def _parse_int(value: object) -> int | None:
         return int(str(value).split("/")[0])
     except Exception:
         return None
-
-
-def _parse_year(value: object) -> int | None:
-    if value in (None, ""):
-        return None
-    text = str(value)
-    if len(text) >= 4 and text[:4].isdigit():
-        return int(text[:4])
-    digits = "".join(ch for ch in text if ch.isdigit())
-    if len(digits) >= 4:
-        return int(digits[:4])
-    return None
 
 
 def _tags_from_easy(tags: Dict[str, object]) -> Dict[str, object]:
@@ -282,8 +271,7 @@ def read_metadata(
             reader_hint = "easy tags"
         logger.debug("M4A metadata reader used: %s for %s", reader_hint, path)
 
-    if not tags.get("year"):
-        tags["year"] = _parse_year(tags.get("date"))
+    tags["year"] = normalize_year(tags.get("year") or tags.get("date"))
     if not tags.get("track") and tags.get("tracknumber"):
         tags["track"] = _parse_int(tags.get("tracknumber"))
     if not tags.get("disc") and tags.get("discnumber"):
