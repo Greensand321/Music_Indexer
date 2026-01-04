@@ -124,6 +124,8 @@ def sanitize(name: object) -> str:
     cleaned = "".join(c for c in normalized if c not in invalid).strip()
     return cleaned or "Unknown"
 
+
+
 def _normalize_tag_value(value: object, field: str, log_callback=None) -> str:
     text = _coerce_to_string(value).strip()
     if not text:
@@ -1113,7 +1115,9 @@ def find_duplicates(root_path, log_callback=None):
     """Return list of (original_path, duplicate_path) that would be marked as
     duplicates by the indexer.
 
-    Duplicate detection is disabled in the indexer.
+    Duplicate detection and keep/winner ranking are intentionally excluded
+    from the indexer. The indexer treats every file independently and relies
+    on deterministic routing plus collision handling (suffixing/buckets).
     """
     if log_callback:
         log_callback("Duplicate detection is disabled in the indexer.")
