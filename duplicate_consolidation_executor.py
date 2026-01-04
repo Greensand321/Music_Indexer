@@ -82,6 +82,7 @@ class ExecutionConfig:
     dry_run_execute: bool = False
     retain_losers: bool = False
     quarantine_flatten: bool = False
+    show_artwork_variants: bool = True
 
 
 @dataclass
@@ -1525,6 +1526,7 @@ def execute_consolidation_plan(
                     return f"{value:.3f}"
                 return str(value)
 
+            show_artwork_variants = config.show_artwork_variants
             group_pair_stats = {
                 group.group_id: _pairwise_stats(group) for group in (plan.groups if plan else [])
             }
@@ -1535,6 +1537,15 @@ def execute_consolidation_plan(
                     "artwork_vastly_different_threshold", ARTWORK_VASTLY_DIFFERENT_THRESHOLD
                 )
             )
+
+            def _is_artwork_variant(group: object, loser_path: str, threshold: float) -> bool:
+                artwork_hashes = getattr(group, "artwork_hashes", {}) or {}
+                winner_path = getattr(group, "winner_path", "")
+                winner_hash = artwork_hashes.get(winner_path)
+                loser_hash = artwork_hashes.get(loser_path)
+                if winner_hash is None or loser_hash is None:
+                    return False
+                return _hamming_distance(winner_hash, loser_hash) > threshold
 
             html_lines = [
                 "<!doctype html>",
@@ -2048,6 +2059,24 @@ def execute_consolidation_plan(
                 grp = group_lookup.get(gid)
                 winner_path = getattr(grp, "winner_path", "Unknown winner")
                 group_actions = actions_by_group.get(gid, [])
+                visible_losers = list(getattr(grp, "losers", []) or [])
+                if not show_artwork_variants and grp:
+                    hidden_losers = {
+                        loser
+                        for loser in getattr(grp, "losers", [])
+                        if _is_artwork_variant(grp, loser, art_threshold)
+                    }
+                    if hidden_losers:
+                        visible_losers = [
+                            loser for loser in getattr(grp, "losers", []) if loser not in hidden_losers
+                        ]
+                        group_actions = [
+                            act
+                            for act in group_actions
+                            if not (act.step == "loser_cleanup" and act.target in hidden_losers)
+                        ]
+                if not show_artwork_variants and not group_actions and not visible_losers:
+                    continue
                 state = _group_state(group_actions)
                 badges = _action_badges(group_actions)
                 group_quarantine_count = _group_quarantine_count(group_actions)
@@ -2065,7 +2094,7 @@ def execute_consolidation_plan(
                 summary_line = (
                     f"Status: {state}. " + "; ".join(badges) if badges else f"Status: {state}."
                 )
-                group_paths = {winner_path, *getattr(grp, "losers", [])}
+                group_paths = {winner_path, *visible_losers}
                 bucket_stats = group_pair_stats.get(gid, {})
                 best_distance = bucket_stats.get("best")
                 best_distance_label = (
@@ -2167,8 +2196,10 @@ def execute_consolidation_plan(
                 html_lines.append("</div>")
                 if cleanup_actions:
                     loser_entries = cleanup_actions
-                else:
+                elif show_artwork_variants or visible_losers:
                     loser_entries = [None]
+                else:
+                    loser_entries = []
                 for loser_action in loser_entries:
                     loser_path = loser_action.target if loser_action else ""
                     loser_disposition = ""
