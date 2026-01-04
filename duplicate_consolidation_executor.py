@@ -18,6 +18,7 @@ import hashlib
 import html
 import importlib.util
 import json
+import logging
 import platform
 import os
 import shutil
@@ -35,6 +36,7 @@ from duplicate_consolidation import (
     consolidation_plan_from_dict,
 )
 from indexer_control import IndexCancelled, cancel_event as global_cancel_event
+from utils.audio_metadata_reader import _extract_cover_payloads
 from utils.path_helpers import ensure_long_path
 
 try:
@@ -46,6 +48,7 @@ if _MUTAGEN_AVAILABLE:
 else:  # pragma: no cover - optional dependency
     MutagenFile = None  # type: ignore
 
+logger = logging.getLogger(__name__)
 
 def _default_log(msg: str) -> None:
     return None
@@ -274,17 +277,20 @@ def _extract_artwork_bytes(path: str) -> bytes | None:
         audio = MutagenFile(ensure_long_path(path))
         if audio is None:
             return None
-        pictures = getattr(audio, "pictures", None)
-        if pictures:
-            pic = pictures[0]
-            return bytes(pic.data) if hasattr(pic, "data") else bytes(pic)
         tags = getattr(audio, "tags", {}) or {}
-        for key in list(tags.keys()):
-            if key.startswith("APIC"):
-                frame = tags[key]
-                data = getattr(frame, "data", None)
-                if data:
-                    return bytes(data)
+        ext = os.path.splitext(path)[1].lower()
+        if ext in {".m4a", ".mp4"}:
+            covr_payloads = tags.get("covr") if isinstance(tags, Mapping) else None
+            if covr_payloads:
+                if covr_payloads[0]:
+                    logger.debug("Found M4A cover art in covr atom for %s", path)
+                else:
+                    logger.debug("M4A covr atom present but empty for %s", path)
+            else:
+                logger.debug("M4A covr atom missing for %s", path)
+        payloads = _extract_cover_payloads(audio)
+        if payloads:
+            return bytes(payloads[0])
     except Exception:
         return None
     finally:
