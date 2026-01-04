@@ -31,7 +31,7 @@ except Exception:  # pragma: no cover - optional dependency
         """Fallback error when Mutagen is unavailable."""
         pass
 from utils.audio_metadata_reader import read_tags
-from indexer_control import check_cancelled
+from indexer_control import check_cancelled, cancel_event
 
 # ─── CONFIGURATION ─────────────────────────────────────────────────────
 COMMON_ARTIST_THRESHOLD = 10
@@ -981,6 +981,9 @@ def apply_indexer_moves(
     log_callback=None,
     progress_callback=None,
     create_playlists: bool = True,
+    enable_phase_c: bool = False,
+    flush_cache: bool = False,
+    max_workers: int | None = None,
 ):
     """
     1) Call compute_moves_and_tag_index() to get (moves, tag_index, decision_log).
@@ -998,6 +1001,7 @@ def apply_indexer_moves(
         def progress_callback(current, total, path, phase):
             pass
 
+    check_cancelled()
     cfg = load_config()
     trim_silence = bool(cfg.get("trim_silence", False))
 
@@ -1021,9 +1025,10 @@ def apply_indexer_moves(
         db_path,
         log_callback,
         progress_callback,
-        None,
+        max_workers,
         trim_silence,
         phase="A",
+        cancel_event=cancel_event,
     )
 
     moves, _, _ = compute_moves_and_tag_index(
@@ -1031,15 +1036,16 @@ def apply_indexer_moves(
         log_callback,
         progress_callback,
         dry_run=False,
-        enable_phase_c=False,
-        flush_cache=False,
-        max_workers=None,
+        enable_phase_c=enable_phase_c,
+        flush_cache=flush_cache,
+        max_workers=max_workers,
         coord=None,
     )
 
 
 
     total_moves = len(moves)
+    check_cancelled()
 
     MUSIC_ROOT = os.path.join(root_path, "Music") \
         if os.path.isdir(os.path.join(root_path, "Music")) \
@@ -1058,6 +1064,7 @@ def apply_indexer_moves(
 
     # Phase 5: Move audio files
     for idx, (old_path, new_path) in enumerate(moves.items(), start=1):
+        check_cancelled()
         if progress_callback:
             progress_callback(idx, total_moves, old_path, "C")
         if idx % 50 == 0 or idx == total_moves:
@@ -1079,12 +1086,14 @@ def apply_indexer_moves(
     os.makedirs(trash_dir, exist_ok=True)
 
     for dirpath, dirnames, filenames in os.walk(MUSIC_ROOT, topdown=False):
+        check_cancelled()
         # 1) Don’t recurse back into Trash/, Docs/, Playlists, or Not Sorted/
         dirnames[:] = [d for d in dirnames if d.lower() not in ("trash", "docs", "not sorted", "playlists")]
         if {"not sorted", "playlists"} & {p.lower() for p in os.path.relpath(dirpath, root_path).split(os.sep)}:
             continue
 
         for fname in filenames:
+            check_cancelled()
             full = os.path.join(dirpath, fname)
             ext  = os.path.splitext(fname)[1].lower()
 
@@ -1106,9 +1115,11 @@ def apply_indexer_moves(
     skip_names = {"trash", "docs", "not sorted", "playlists"}
     touched_dirs = sorted(olddir_to_newdirs.keys(), key=lambda p: p.count(os.sep), reverse=True)
     for base in touched_dirs:
+        check_cancelled()
         if not os.path.isdir(base):
             continue
         for dirpath, dirnames, filenames in os.walk(base, topdown=False):
+            check_cancelled()
             rel = os.path.relpath(dirpath, root_path)
             first = rel.split(os.sep, 1)[0].lower() if rel != "." else ""
             if first in skip_names:
@@ -1124,6 +1135,7 @@ def apply_indexer_moves(
 
     # Phase 6c: Second pass to remove any remaining empty directories
     for dirpath, dirnames, filenames in os.walk(root_path, topdown=False):
+        check_cancelled()
         dirnames[:] = [d for d in dirnames if d.lower() not in skip_names]
         if os.path.normpath(dirpath) in (root_path, MUSIC_ROOT):
             continue
@@ -1240,6 +1252,9 @@ def run_full_indexer(
             log_callback,
             progress_callback,
             create_playlists=create_playlists,
+            enable_phase_c=enable_phase_c,
+            flush_cache=flush_cache,
+            max_workers=max_workers,
         )
         summary = {"moved": actual_summary["moved"], "html": output_html_path, "dry_run": False}
         return summary
