@@ -4,6 +4,7 @@ from __future__ import annotations
 import importlib.util
 import logging
 import os
+from collections.abc import Mapping
 from typing import Dict, Iterable, List, Optional, Tuple
 
 from utils.path_helpers import ensure_long_path
@@ -194,13 +195,13 @@ def _extract_cover_payloads(audio) -> List[bytes]:
                         payloads.append(data)
                         break
 
-        covr = tags.get("covr") if isinstance(tags, dict) else None
+        covr = tags.get("covr") if isinstance(tags, Mapping) else None
         if covr:
             for cover in covr:
                 if cover:
                     payloads.append(bytes(cover))
 
-        wmp = tags.get("WM/Picture") if isinstance(tags, dict) else None
+        wmp = tags.get("WM/Picture") if isinstance(tags, Mapping) else None
         if wmp:
             for pic in wmp:
                 data = getattr(pic, "value", None)
@@ -265,6 +266,10 @@ def read_metadata(
             if error is None:
                 error = f"read failed: {exc}"
         cover_payloads = _extract_cover_payloads(audio_full)
+        if not cover_payloads:
+            sidecar = read_sidecar_artwork_bytes(path)
+            if sidecar:
+                cover_payloads = [sidecar]
 
     return tags, cover_payloads, error, reader_hint
 
