@@ -25,7 +25,7 @@ from typing import Callable, Dict, Iterable, List, Mapping, MutableMapping, Opti
 from collections import defaultdict
 
 from utils.path_helpers import ensure_long_path
-from utils.audio_metadata_reader import read_metadata
+from utils.audio_metadata_reader import read_metadata, read_sidecar_artwork_bytes
 try:
     _MUTAGEN_AVAILABLE = importlib.util.find_spec("mutagen") is not None
 except ValueError:  # pragma: no cover - defensive: broken mutagen installs
@@ -615,6 +615,12 @@ def _read_tags_and_artwork(
         error = read_error
     artwork: List[ArtworkCandidate] = []
     art_error: Optional[str] = None
+    sidecar_used = False
+    if not cover_payloads:
+        sidecar_payload = read_sidecar_artwork_bytes(path)
+        if sidecar_payload:
+            cover_payloads = [sidecar_payload]
+            sidecar_used = True
     if cover_payloads:
         for payload in cover_payloads:
             width, height = _extract_image_dimensions(payload)
@@ -639,6 +645,7 @@ def _read_tags_and_artwork(
         "reader_hint": _reader,
         "cover_count": len(cover_payloads),
         "mp4_covr_missing": ext in {".m4a", ".mp4"} and not cover_payloads,
+        "sidecar_used": sidecar_used,
     }
     return base, artwork, error, art_error, audio_props, metadata_trace
 

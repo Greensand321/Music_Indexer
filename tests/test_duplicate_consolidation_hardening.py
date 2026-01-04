@@ -1,3 +1,4 @@
+import base64
 import hashlib
 import os
 import threading
@@ -11,6 +12,7 @@ from duplicate_consolidation import (
     _extract_artwork_from_audio,
     _metadata_changes,
     build_consolidation_plan,
+    _normalize_track,
     export_consolidation_preview,
 )
 from duplicate_consolidation_executor import ExecutionConfig, _apply_artwork, execute_consolidation_plan
@@ -232,6 +234,24 @@ def test_invalid_preview_output_fails_safely(tmp_path):
     result = execute_consolidation_plan(str(preview_path), cfg)
     assert result.success is False
     assert any("Invalid consolidation plan" in action.detail for action in result.actions)
+
+
+def test_sidecar_artwork_in_report(monkeypatch, tmp_path):
+    payload = base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/xcAAgMBAp7Hc34AAAAASUVORK5CYII="
+    )
+    with_sidecar = tmp_path / "song.m4a"
+    with_sidecar.write_text("audio")
+    (tmp_path / "song.m4a.jpg").write_bytes(payload)
+
+    monkeypatch.setattr("duplicate_consolidation.read_metadata", lambda _p, include_cover=True: ({}, [], None, None))
+    monkeypatch.setattr("duplicate_consolidation._read_audio_file", lambda _p: (None, None))
+
+    track = _normalize_track({"path": str(with_sidecar), "fingerprint": "1 2 3", "ext": ".m4a"})
+
+    assert track.artwork
+    assert track.trace["album_art"]["cover_count"] == 1
+    assert track.trace["album_art"]["mp4_covr_missing"] is False
 
 def test_missing_tags_and_placeholders_require_review(tmp_path):
     winner = tmp_path / "winner.flac"
