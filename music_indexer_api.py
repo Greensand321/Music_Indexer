@@ -5,6 +5,7 @@ import re
 import shutil  # used for relocating special folders
 import hashlib
 import base64
+import unicodedata
 from collections import defaultdict
 from typing import Dict, List
 from dry_run_coordinator import DryRunCoordinator
@@ -88,16 +89,43 @@ def build_primary_counts(root_path, progress_callback=None, phase="A"):
     return counts
 
 # ─── Shared Utility Functions ─────────────────────────────────────────
+def _coerce_to_string(value: object) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    if isinstance(value, (list, tuple, set)):
+        parts = []
+        for item in value:
+            try:
+                part = "" if item is None else str(item)
+            except Exception:
+                part = ""
+            if part:
+                parts.append(part)
+        return ", ".join(parts)
+    try:
+        return str(value)
+    except Exception:
+        return ""
+
+
 def sanitize(name: object) -> str:
+    """Normalize values for filesystem path segments and HTML/report labels.
+
+    Contract:
+    - Accepts any object (including None, numbers, lists).
+    - Coerces to string deterministically.
+    - Removes filesystem-invalid characters and control chars.
+    - Returns "Unknown" when the result is empty.
+    - Does not HTML-escape to avoid double-escaping upstream content.
+    """
     invalid = r'<>:"/\\|?*'
-    if name is None:
-        raw = "Unknown"
-    else:
-        try:
-            raw = str(name)
-        except Exception:
-            raw = "Unknown"
-    return "".join(c for c in raw if c not in invalid).strip() or "Unknown"
+    raw = _coerce_to_string(name) or "Unknown"
+    normalized = unicodedata.normalize("NFKC", raw)
+    normalized = re.sub(r"[\x00-\x1f\x7f]", "", normalized)
+    cleaned = "".join(c for c in normalized if c not in invalid).strip()
+    return cleaned or "Unknown"
 
 def collapse_repeats(name: str) -> str:
     """
