@@ -3146,6 +3146,20 @@ def export_consolidation_preview_html(plan: ConsolidationPlan, output_html_path:
         lines.append("</details>")
         return lines
 
+    def _has_artwork_variants(group: GroupPlan, threshold: float) -> bool:
+        if getattr(group, "artwork_variant_total", 1) > 1:
+            return True
+        winner_hash = group.artwork_hashes.get(group.winner_path)
+        if winner_hash is None:
+            return False
+        for loser in group.losers:
+            loser_hash = group.artwork_hashes.get(loser)
+            if loser_hash is None:
+                continue
+            if _hamming_distance(winner_hash, loser_hash) > threshold:
+                return True
+        return False
+
     generated_at_iso = plan.generated_at.isoformat()
     host_name = platform.node() or "unknown-host"
     reports_dir = os.path.dirname(output_html_path)
@@ -3673,6 +3687,9 @@ def export_consolidation_preview_html(plan: ConsolidationPlan, output_html_path:
             "<option value='metadata-only'>Metadata only</option>",
             "<option value='failed'>Any failures</option>",
             "</select>",
+            "<label class='pill' for='toggleArtVariants'>"
+            "<input id='toggleArtVariants' type='checkbox' checked /> "
+            "Show different artwork variants</label>",
             "</div>",
             "<div class='right'>",
             "<span class='tiny muted' id='visibleCount'>0 visible</span>",
@@ -3692,6 +3709,7 @@ def export_consolidation_preview_html(plan: ConsolidationPlan, output_html_path:
         badges = _action_badges(group, actions)
         group_disposition_count = _group_disposition_count(group)
         group_type_hint = _group_type_hint(actions)
+        group_has_art_variants = _has_artwork_variants(group, art_threshold)
         search_tokens = [group.group_id, group.winner_path, _basename(group.winner_path), state]
         search_tokens.extend(badges)
         for act in actions:
@@ -3714,6 +3732,7 @@ def export_consolidation_preview_html(plan: ConsolidationPlan, output_html_path:
             "<details class='group' "
             f"data-group-id='{esc(group.group_id)}' "
             f"data-has-quarantine='{str(group_disposition_count > 0).lower()}' "
+            f"data-has-art-variant='{str(group_has_art_variants).lower()}' "
             "data-has-failure='false' "
             f"data-type='{esc(group_type_hint)}' "
             f"data-search='{esc(search_text.lower())}' "
@@ -4057,6 +4076,7 @@ def export_consolidation_preview_html(plan: ConsolidationPlan, output_html_path:
         "const groups = () => $$('#groups details.group');"
         "const searchEl = $('#search');"
         "const filterEl = $('#filter');"
+        "const artToggleEl = $('#toggleArtVariants');"
         "const visibleCountEl = $('#visibleCount');"
         "const expandAllBtn = $('#expandAll');"
         "const collapseAllBtn = $('#collapseAll');"
@@ -4100,11 +4120,14 @@ def export_consolidation_preview_html(plan: ConsolidationPlan, output_html_path:
         "const hasQuarantine = (d.getAttribute('data-has-quarantine') || 'false') === 'true';"
         "const hasFailure = (d.getAttribute('data-has-failure') || 'false') === 'true';"
         "const typeHint = (d.getAttribute('data-type') || '').toLowerCase();"
+        "const hasArtVariant = (d.getAttribute('data-has-art-variant') || 'false') === 'true';"
+        "const showArtVariants = artToggleEl ? artToggleEl.checked : true;"
         "let matchesFilter = true;"
         "if (mode === 'has-quarantine') matchesFilter = hasQuarantine;"
         "if (mode === 'metadata-only') matchesFilter = typeHint === 'metadata-only';"
         "if (mode === 'failed') matchesFilter = hasFailure;"
-        "const show = matchesSearch && matchesFilter;"
+        "const matchesArtVariant = showArtVariants || !hasArtVariant;"
+        "const show = matchesSearch && matchesFilter && matchesArtVariant;"
         "d.classList.toggle('hidden', !show);"
         "if (show) visible += 1;"
         "}"
@@ -4161,6 +4184,7 @@ def export_consolidation_preview_html(plan: ConsolidationPlan, output_html_path:
         "}"
         "searchEl?.addEventListener('input', applyFilters);"
         "filterEl?.addEventListener('change', applyFilters);"
+        "artToggleEl?.addEventListener('change', applyFilters);"
         "computeStats();"
         "applyFilters();"
         "})();"
