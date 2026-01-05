@@ -190,6 +190,70 @@ def _ensure_unique_destination(
         )
     return candidate
 
+
+def _cleanup_trailing_numeric_suffixes(
+    moves: dict[str, str],
+    tag_index: dict[str, dict],
+    log_callback=None,
+) -> None:
+    if log_callback is None:
+        def log_callback(_msg):
+            pass
+
+    occupied = set(moves.values())
+    suffix_pattern = re.compile(r"^(?P<base>.+) \((?P<num>\d+)\)$")
+    for old_path, new_path in list(moves.items()):
+        dir_name, filename = os.path.split(new_path)
+        stem, ext = os.path.splitext(filename)
+        match = suffix_pattern.match(stem)
+        if not match:
+            continue
+        candidate_filename = f"{match.group('base')}{ext}"
+        candidate_path = os.path.join(dir_name, candidate_filename)
+        if candidate_path == new_path:
+            continue
+        if candidate_path in occupied or os.path.exists(candidate_path):
+            continue
+        occupied.remove(new_path)
+        occupied.add(candidate_path)
+        moves[old_path] = candidate_path
+        if new_path in tag_index:
+            tag_index[candidate_path] = tag_index.pop(new_path)
+        log_callback(
+            f"   • Removed redundant suffix: '{os.path.basename(new_path)}' → "
+            f"'{os.path.basename(candidate_path)}'"
+        )
+
+
+def _preview_trailing_suffix_cleanup(
+    moves: dict[str, str],
+    tag_index: dict[str, dict],
+) -> tuple[dict[str, str], dict[str, dict]]:
+    preview_moves = dict(moves)
+    preview_tag_index = dict(tag_index)
+    if not preview_moves:
+        return preview_moves, preview_tag_index
+    occupied = set(preview_moves.values())
+    suffix_pattern = re.compile(r"^(?P<base>.+) \((?P<num>\d+)\)$")
+    for old_path, new_path in list(preview_moves.items()):
+        dir_name, filename = os.path.split(new_path)
+        stem, ext = os.path.splitext(filename)
+        match = suffix_pattern.match(stem)
+        if not match:
+            continue
+        candidate_filename = f"{match.group('base')}{ext}"
+        candidate_path = os.path.join(dir_name, candidate_filename)
+        if candidate_path == new_path:
+            continue
+        if candidate_path in occupied or os.path.exists(candidate_path):
+            continue
+        occupied.remove(new_path)
+        occupied.add(candidate_path)
+        preview_moves[old_path] = candidate_path
+        if new_path in preview_tag_index:
+            preview_tag_index[candidate_path] = preview_tag_index.pop(new_path)
+    return preview_moves, preview_tag_index
+
 def collapse_repeats(name: str) -> str:
     """
     If name is something like 'DROELOEDROELOE', collapse to 'DROELOE'.
@@ -981,7 +1045,14 @@ def build_dry_run_html(
 
     log_callback("4/4: Writing dry-run HTML…")
 
-    render_dry_run_html_from_plan(root_path, output_html_path, moves, tag_index, coord=coord)
+    preview_moves, preview_tag_index = _preview_trailing_suffix_cleanup(moves, tag_index)
+    render_dry_run_html_from_plan(
+        root_path,
+        output_html_path,
+        preview_moves,
+        preview_tag_index,
+        coord=coord,
+    )
     log_callback(f"✓ Dry-run HTML written to: {output_html_path}")
     return {"moved": 0, "html": output_html_path, "dry_run": True}
 
@@ -1035,6 +1106,7 @@ def apply_indexer_moves(
         coord=None,
     )
 
+    _cleanup_trailing_numeric_suffixes(moves, tag_index, log_callback)
 
 
     total_moves = len(moves)
