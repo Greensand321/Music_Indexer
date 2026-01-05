@@ -181,6 +181,40 @@ def _ensure_unique_destination(path: str, moves: dict, log_callback=None) -> str
         )
     return candidate
 
+
+def _cleanup_trailing_numeric_suffixes(
+    moves: dict[str, str],
+    tag_index: dict[str, dict],
+    log_callback=None,
+) -> None:
+    if log_callback is None:
+        def log_callback(_msg):
+            pass
+
+    occupied = set(moves.values())
+    suffix_pattern = re.compile(r"^(?P<base>.+) \((?P<num>\d+)\)$")
+    for old_path, new_path in list(moves.items()):
+        dir_name, filename = os.path.split(new_path)
+        stem, ext = os.path.splitext(filename)
+        match = suffix_pattern.match(stem)
+        if not match:
+            continue
+        candidate_filename = f"{match.group('base')}{ext}"
+        candidate_path = os.path.join(dir_name, candidate_filename)
+        if candidate_path == new_path:
+            continue
+        if candidate_path in occupied or os.path.exists(candidate_path):
+            continue
+        occupied.remove(new_path)
+        occupied.add(candidate_path)
+        moves[old_path] = candidate_path
+        if new_path in tag_index:
+            tag_index[candidate_path] = tag_index.pop(new_path)
+        log_callback(
+            f"   • Removed redundant suffix: '{os.path.basename(new_path)}' → "
+            f"'{os.path.basename(candidate_path)}'"
+        )
+
 def collapse_repeats(name: str) -> str:
     """
     If name is something like 'DROELOEDROELOE', collapse to 'DROELOE'.
@@ -1060,6 +1094,7 @@ def apply_indexer_moves(
         max_workers=max_workers,
         coord=None,
     )
+    _cleanup_trailing_numeric_suffixes(moves, tag_index, log_callback)
 
 
 
