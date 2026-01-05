@@ -1960,6 +1960,7 @@ class DuplicateFinderShell(tk.Toplevel):
         self.resizable(True, True)
 
         self.status_var = tk.StringVar(value="Idle")
+        self.fingerprint_status_var = tk.StringVar(value="Ready.")
         self.progress_var = tk.DoubleVar(value=0)
         self.library_path_var = tk.StringVar(value=library_path or "")
         self.playlist_path_var = tk.StringVar(
@@ -1980,6 +1981,11 @@ class DuplicateFinderShell(tk.Toplevel):
         self.preview_html_path: str | None = None
         self.execution_report_path: str | None = None
         self._plan = None
+        self._progress_weights = {
+            "fingerprinting": 0.7,
+            "grouping": 0.2,
+            "preview": 0.1,
+        }
 
         container = ttk.Frame(self)
         container.pack(fill="both", expand=True, padx=10, pady=10)
@@ -2098,6 +2104,12 @@ class DuplicateFinderShell(tk.Toplevel):
 
         groups_frame = ttk.LabelFrame(results, text="Duplicate Groups")
         groups_frame.grid(row=0, column=0, sticky="nsew", padx=(6, 3), pady=6)
+        ttk.Label(
+            groups_frame,
+            textvariable=self.fingerprint_status_var,
+            anchor="w",
+            foreground="#555",
+        ).pack(fill="x", padx=6, pady=(6, 0))
         cols = ("group", "title", "count", "status")
         self.groups_tree = ttk.Treeview(
             groups_frame,
@@ -2142,6 +2154,7 @@ class DuplicateFinderShell(tk.Toplevel):
         self.group_details.insert("end", "Generate a plan to view duplicate groups.")
         self.group_details.configure(state="disabled")
         self._reset_group_selection()
+        self._set_fingerprint_status("Ready.")
         if note:
             self._log_action(note)
 
@@ -2368,6 +2381,47 @@ class DuplicateFinderShell(tk.Toplevel):
         self.status_var.set(status)
         if progress is not None:
             self.progress_var.set(progress)
+
+    def _set_fingerprint_status(self, status: str) -> None:
+        self.fingerprint_status_var.set(status)
+
+    def _weighted_progress(self, phase: str, ratio: float) -> float:
+        order = ("fingerprinting", "grouping", "preview")
+        total = 0.0
+        for step in order:
+            weight = self._progress_weights.get(step, 0.0)
+            if step == phase:
+                clamped = max(0.0, min(1.0, ratio))
+                total += weight * clamped
+                break
+            total += weight
+        return max(0.0, min(100.0, total * 100.0))
+
+    def _format_track_label(self, path: str, audio: object | None) -> str:
+        if not audio:
+            return os.path.basename(path)
+        tags = getattr(audio, "tags", None) or {}
+
+        def _get_tag(keys: tuple[str, ...]) -> str | None:
+            for key in keys:
+                if key in tags:
+                    raw = tags[key]
+                    if hasattr(raw, "text"):
+                        raw = raw.text
+                    if isinstance(raw, (list, tuple)):
+                        if raw:
+                            return str(raw[0])
+                    elif raw is not None:
+                        return str(raw)
+            return None
+
+        title = _get_tag(("title", "TIT2", "\xa9nam"))
+        artist = _get_tag(("artist", "TPE1", "\xa9ART"))
+        if artist and title:
+            return f"{artist} - {title}"
+        if title:
+            return title
+        return os.path.basename(path)
 
     def _validate_library_root(self) -> str | None:
         path = self.library_path_var.get().strip()
@@ -2614,7 +2668,16 @@ class DuplicateFinderShell(tk.Toplevel):
                     audio_paths.append(os.path.join(dirpath, fname))
 
         tracks: list[dict[str, object]] = []
-        total = len(audio_paths) or 1
+        total = len(audio_paths)
+        if total == 0:
+            self._set_fingerprint_status("No eligible audio files found.")
+            self._set_status("Idle", progress=0)
+            return tracks
+        self._set_fingerprint_status(f"Fingerprinting 0/{total}")
+        self._set_status("Fingerprinting…", progress=self._weighted_progress("fingerprinting", 0))
+        self.update_idletasks()
+        last_update = time.monotonic()
+        update_interval = 0.2
         for idx, path in enumerate(sorted(audio_paths), start=1):
             fingerprint_trace: dict[str, object] = {}
             fp = get_fingerprint(
@@ -2629,6 +2692,7 @@ class DuplicateFinderShell(tk.Toplevel):
             bitrate = 0
             sample_rate = 0
             bit_depth = 0
+            audio = None
             try:
                 audio = MutagenFile(path)
                 info = getattr(audio, "info", None)
@@ -2638,6 +2702,16 @@ class DuplicateFinderShell(tk.Toplevel):
                     bit_depth = int(getattr(info, "bits_per_sample", 0) or getattr(info, "bitdepth", 0) or 0)
             except Exception:
                 pass
+            now = time.monotonic()
+            if idx == total or now - last_update >= update_interval:
+                label = self._format_track_label(path, audio)
+                self._set_fingerprint_status(f"Fingerprinting {idx}/{total} — {label}")
+                self._set_status(
+                    "Fingerprinting…",
+                    progress=self._weighted_progress("fingerprinting", idx / total),
+                )
+                self.update_idletasks()
+                last_update = now
             tracks.append(
                 {
                     "path": path,
@@ -2654,7 +2728,6 @@ class DuplicateFinderShell(tk.Toplevel):
                     },
                 }
             )
-            self._set_status("Scanning…", progress=min(90, int(idx / total * 70) + 20))
         return tracks
 
     def _generate_plan(self, write_preview: bool) -> None:
@@ -2667,7 +2740,8 @@ class DuplicateFinderShell(tk.Toplevel):
             messagebox.showwarning("No Tracks", "No audio tracks were found in the selected library.")
             self._set_status("Idle", progress=0)
             return
-        self._set_status("Building plan…", progress=25)
+        self._set_fingerprint_status("Grouping duplicates…")
+        self._set_status("Grouping…", progress=self._weighted_progress("grouping", 0))
         cfg = load_config()
         threshold_settings = self._current_threshold_settings()
         exact_threshold = threshold_settings["exact_duplicate_threshold"]
@@ -2687,6 +2761,7 @@ class DuplicateFinderShell(tk.Toplevel):
             fingerprint_settings=fingerprint_settings,
             threshold_settings=threshold_settings,
         )
+        self._set_status("Grouping…", progress=self._weighted_progress("grouping", 1))
         self._plan = plan
         self.group_disposition_overrides.clear()
         self._apply_deletion_mode()
@@ -2694,6 +2769,8 @@ class DuplicateFinderShell(tk.Toplevel):
         docs_dir = os.path.join(path, "Docs")
         os.makedirs(docs_dir, exist_ok=True)
         if write_preview:
+            self._set_fingerprint_status("Generating preview…")
+            self._set_status("Preview…", progress=self._weighted_progress("preview", 0))
             json_path = os.path.join(docs_dir, "duplicate_preview.json")
             export_consolidation_preview(plan, json_path)
             self.preview_json_path = json_path
@@ -2706,7 +2783,7 @@ class DuplicateFinderShell(tk.Toplevel):
             )
             self.preview_html_path = html_path
             self._log_action(f"Preview HTML written to {html_path}")
-            self._set_status("Preview generated", progress=100)
+            self._set_status("Preview generated", progress=self._weighted_progress("preview", 1))
         else:
             self.preview_json_path = None
             self.preview_html_path = None
