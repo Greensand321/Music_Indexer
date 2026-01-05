@@ -127,6 +127,23 @@ _cached_filters = None
 
 logger = logging.getLogger(__name__)
 
+YEAR_ASSISTANT_PROMPT = """
+You will be given a list of music tracks in the format `Artist - Title` (one per line).
+For each line, use web search to determine the most likely original release year of the recording
+(prefer the earliest official release of the song, not a later remaster unless that is the only
+identifiable version). Return ONLY valid JSON in the following exact format:
+
+[
+  {"query":"Artist - Title","year":"YYYY" | null,"confidence":"high|medium|low|unknown","notes":"short source hint"},
+  ...
+]
+
+Rules:
+- Include one JSON object for every input line and preserve the input order.
+- Do not add commentary outside JSON.
+- If uncertain or multiple versions exist, set year to null or confidence low and explain in notes.
+"""
+
 
 def make_filters(ex_no_diff: bool, ex_skipped: bool, show_all: bool) -> List[FilterFn]:
     global _cached_filters
@@ -530,6 +547,453 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
             if getattr(app, "raw_genre_list", None):
                 populate_raw_genres(app.raw_genre_list)
             load_existing_mapping()
+
+        frame.refresh_cluster_panel = refresh_panel
+        refresh_panel()
+        return frame
+    elif name == "Year Assistant":
+        lib_var = tk.StringVar(value=app.library_path or "No library selected")
+        status_var = tk.StringVar(value="Paste AI results and parse to review changes.")
+        dry_run_var = tk.BooleanVar(value=True)
+        app.year_assistant_dry_run_var = dry_run_var
+
+        expected_queries: list[str] = []
+        query_to_paths: dict[str, list[str]] = {}
+        results_by_iid: dict[str, dict[str, Any]] = {}
+
+        def update_controls():
+            lib_var.set(app.library_path or "No library selected")
+            apply_selected_btn.config(
+                state="normal" if app.library_path else "disabled"
+            )
+            apply_high_btn.config(
+                state="normal" if app.library_path else "disabled"
+            )
+
+        def coerce_entry(item: Any) -> dict[str, str | None] | None:
+            if isinstance(item, str):
+                return {"query": item.strip(), "path": None}
+            if isinstance(item, (list, tuple)):
+                if len(item) >= 2:
+                    artist = str(item[0]).strip()
+                    title = str(item[1]).strip()
+                    query = f"{artist} - {title}".strip(" -")
+                    path = str(item[2]).strip() if len(item) > 2 and item[2] else None
+                    return {"query": query, "path": path}
+            if isinstance(item, dict):
+                query = item.get("query")
+                artist = item.get("artist") or item.get("Artist")
+                title = item.get("title") or item.get("Title")
+                path = (
+                    item.get("path")
+                    or item.get("filepath")
+                    or item.get("file")
+                    or item.get("filename")
+                )
+                if not query and (artist or title):
+                    artist_str = str(artist or "").strip()
+                    title_str = str(title or "").strip()
+                    query = f"{artist_str} - {title_str}".strip(" -")
+                if query:
+                    return {"query": str(query).strip(), "path": str(path).strip() if path else None}
+            return None
+
+        def load_missing_year_entries() -> list[dict[str, str | None]]:
+            raw_sources = None
+            for attr in (
+                "missing_year_records",
+                "missing_year_list",
+                "missing_year_tracks",
+                "missing_year_entries",
+            ):
+                raw_sources = getattr(app, attr, None)
+                if raw_sources:
+                    break
+            if isinstance(raw_sources, dict):
+                raw_sources = list(raw_sources.values())
+            if not isinstance(raw_sources, (list, tuple)):
+                return []
+            entries: list[dict[str, str | None]] = []
+            for item in raw_sources:
+                entry = coerce_entry(item)
+                if entry and entry["query"]:
+                    entries.append(entry)
+            return entries
+
+        def dedupe_and_sort(lines: list[str]) -> list[str]:
+            unique: dict[str, None] = {}
+            for line in lines:
+                cleaned = line.strip()
+                if cleaned and cleaned not in unique:
+                    unique[cleaned] = None
+            return sorted(unique.keys(), key=lambda s: s.casefold())
+
+        def refresh_track_list():
+            nonlocal expected_queries, query_to_paths
+            entries = load_missing_year_entries()
+            query_to_paths = {}
+            for entry in entries:
+                query = entry["query"]
+                if not query:
+                    continue
+                query_to_paths.setdefault(query, [])
+                if entry.get("path"):
+                    query_to_paths[query].append(str(entry["path"]))
+
+            expected_queries = dedupe_and_sort(list(query_to_paths.keys()))
+            track_list_box.configure(state="normal")
+            track_list_box.delete("1.0", "end")
+            if expected_queries:
+                track_list_box.insert("1.0", "\n".join(expected_queries))
+            else:
+                track_list_box.insert(
+                    "1.0",
+                    "No missing-year entries available yet.",
+                )
+            track_list_box.configure(state="disabled")
+
+        def copy_instructions():
+            app.clipboard_clear()
+            app.clipboard_append(YEAR_ASSISTANT_PROMPT.strip())
+
+        def copy_track_list():
+            app.clipboard_clear()
+            app.clipboard_append("\n".join(expected_queries))
+
+        def set_status(message: str):
+            status_var.set(message)
+
+        def normalize_year_value(raw_year: Any) -> str | None:
+            if raw_year is None:
+                return None
+            if isinstance(raw_year, int):
+                raw_year = str(raw_year)
+            if isinstance(raw_year, str):
+                cleaned = raw_year.strip()
+                if re.fullmatch(r"\d{4}", cleaned):
+                    return cleaned
+            return None
+
+        def parse_results():
+            raw_json = results_box.get("1.0", "end").strip()
+            if not raw_json:
+                messagebox.showwarning("No Results", "Paste the AI JSON output first.")
+                return
+            try:
+                data = json.loads(raw_json)
+            except json.JSONDecodeError as exc:
+                messagebox.showerror("Invalid JSON", str(exc))
+                return
+            if not isinstance(data, list):
+                messagebox.showerror("Invalid JSON", "Expected a JSON array.")
+                return
+
+            allowed_confidence = {"high", "medium", "low", "unknown"}
+            parsed: dict[str, dict[str, Any]] = {}
+            errors: list[str] = []
+            for idx, entry in enumerate(data, start=1):
+                if not isinstance(entry, dict):
+                    errors.append(f"Entry {idx} must be an object.")
+                    continue
+                query = entry.get("query")
+                confidence = entry.get("confidence")
+                notes = entry.get("notes", "")
+                year_value = normalize_year_value(entry.get("year"))
+
+                if not isinstance(query, str) or not query.strip():
+                    errors.append(f"Entry {idx} missing valid query.")
+                    continue
+                query = query.strip()
+                if query in parsed:
+                    errors.append(f"Duplicate query found: {query}")
+                    continue
+                if confidence not in allowed_confidence:
+                    errors.append(f"Entry {idx} has invalid confidence '{confidence}'.")
+                    continue
+                if not isinstance(notes, str):
+                    notes = str(notes)
+
+                parsed[query] = {
+                    "query": query,
+                    "year": year_value,
+                    "confidence": confidence,
+                    "notes": notes,
+                }
+
+            if errors:
+                messagebox.showerror("Parse Errors", "\n".join(errors))
+                return
+
+            missing = [q for q in expected_queries if q not in parsed]
+            extra = [q for q in parsed.keys() if q not in expected_queries]
+
+            results_tree.delete(*results_tree.get_children())
+            results_by_iid.clear()
+
+            def add_row(result: dict[str, Any], status: str, notes_suffix: str | None = None):
+                notes_text = result.get("notes") or ""
+                if notes_suffix:
+                    notes_text = f"{notes_text} ({notes_suffix})" if notes_text else notes_suffix
+                values = (
+                    result.get("query", ""),
+                    result.get("year") or "",
+                    result.get("confidence") or "unknown",
+                    notes_text,
+                    status,
+                )
+                iid = results_tree.insert("", "end", values=values)
+                results_by_iid[iid] = {
+                    **result,
+                    "status": status,
+                    "notes": notes_text,
+                }
+
+            for query in expected_queries:
+                result = parsed.get(
+                    query,
+                    {
+                        "query": query,
+                        "year": None,
+                        "confidence": "unknown",
+                        "notes": "Missing from AI output.",
+                    },
+                )
+                paths = query_to_paths.get(query, [])
+                status = "Ready" if result.get("year") else "Unresolved"
+                notes_suffix = None
+                if not paths:
+                    status = "Unresolved"
+                    notes_suffix = "No matching files."
+                elif len(paths) > 1:
+                    notes_suffix = f"Matches {len(paths)} files."
+                add_row(result, status, notes_suffix)
+
+            for query in extra:
+                result = parsed[query]
+                add_row(result, "Skipped", "Query not in input list.")
+
+            message = "Parsed results."
+            if missing:
+                message += f" Missing {len(missing)} queries from AI output."
+            if extra:
+                message += f" {len(extra)} extra entries skipped."
+            set_status(message)
+
+        def update_row_status(iid: str, status: str, notes: str | None = None):
+            row = results_tree.item(iid)
+            values = list(row.get("values", []))
+            if len(values) < 5:
+                return
+            values[4] = status
+            if notes is not None:
+                values[3] = notes
+            results_tree.item(iid, values=values)
+            if iid in results_by_iid:
+                results_by_iid[iid]["status"] = status
+                if notes is not None:
+                    results_by_iid[iid]["notes"] = notes
+
+        def write_year_tag(path: str, year: str) -> tuple[bool, str | None, bool]:
+            try:
+                audio = MutagenFile(ensure_long_path(path), easy=True)
+            except Exception as exc:
+                return False, f"Failed to read {path}: {exc}", False
+            if audio is None:
+                return False, f"Unsupported file: {path}", False
+            old_tags = read_tags(path)
+            old_year = str(old_tags.get("year") or old_tags.get("date") or "").strip()
+            if old_year == year:
+                return True, old_year, False
+            changed = False
+            for key in ("date", "year"):
+                try:
+                    audio[key] = [year]
+                    changed = True
+                except Exception:
+                    continue
+            if not changed:
+                return False, f"Could not write year tags for {path}", False
+            try:
+                audio.save()
+            except Exception as exc:
+                return False, f"Failed to save {path}: {exc}", False
+            return True, old_year, True
+
+        def log_audit_entry(path: str, old_year: str | None, new_year: str):
+            docs_dir = os.path.join(app.library_path, "Docs")
+            os.makedirs(docs_dir, exist_ok=True)
+            audit_path = os.path.join(docs_dir, "year_assistant_audit.log")
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            with open(audit_path, "a", encoding="utf-8") as handle:
+                handle.write(
+                    f"{timestamp} | {path} | old_year={old_year or ''} | new_year={new_year}\n"
+                )
+
+        def apply_entries(iids: list[str], *, label: str):
+            if not app.library_path:
+                messagebox.showwarning("No Library", "Select a library before applying.")
+                return
+            if not iids:
+                messagebox.showinfo("Apply", "No rows selected.")
+                return
+
+            dry_run = dry_run_var.get()
+            applied = 0
+            skipped = 0
+            errors: list[str] = []
+
+            for iid in iids:
+                result = results_by_iid.get(iid)
+                if not result:
+                    continue
+                query = result.get("query")
+                year = result.get("year")
+                if result.get("status") != "Ready" or not query or not year:
+                    skipped += 1
+                    update_row_status(iid, "Skipped")
+                    continue
+                paths = query_to_paths.get(query, [])
+                if not paths:
+                    skipped += 1
+                    update_row_status(iid, "Unresolved", "No matching files.")
+                    continue
+                if dry_run:
+                    applied += len(paths)
+                    continue
+                for path in paths:
+                    success, info, changed = write_year_tag(path, year)
+                    if not success:
+                        errors.append(info or f"Failed to update {path}")
+                        continue
+                    if not changed:
+                        skipped += 1
+                        continue
+                    log_audit_entry(path, info, year)
+                    applied += 1
+
+            summary = f"{label}: updated {applied} files, skipped {skipped}."
+            if dry_run:
+                summary = f"{label} (Dry Run): would update {applied} files."
+            set_status(summary)
+            if errors:
+                messagebox.showerror("Apply Errors", "\n".join(errors))
+            else:
+                messagebox.showinfo("Apply Results", summary)
+
+        def apply_selected():
+            apply_entries(list(results_tree.selection()), label="Apply Selected")
+
+        def apply_high_confidence():
+            high_iids = [
+                iid
+                for iid, result in results_by_iid.items()
+                if result.get("status") == "Ready"
+                and result.get("confidence") == "high"
+            ]
+            apply_entries(high_iids, label="Apply High Confidence")
+
+        intro = ttk.Frame(frame)
+        intro.pack(fill="x", padx=10, pady=10)
+        ttk.Label(
+            intro,
+            text=(
+                "Use the Year Assistant to generate AI instructions for missing year tags, "
+                "then import AI results to apply release years."
+            ),
+            wraplength=520,
+            justify="left",
+        ).pack(anchor="w")
+
+        status_row = ttk.Frame(intro)
+        status_row.pack(fill="x", pady=(6, 0))
+        ttk.Label(status_row, text="Library:", width=12).pack(side="left")
+        ttk.Label(status_row, textvariable=lib_var).pack(
+            side="left", fill="x", expand=True
+        )
+
+        step1_box = ttk.LabelFrame(frame, text="Step 1: Generate AI Instructions")
+        step1_box.pack(fill="both", expand=False, padx=10, pady=(0, 10))
+
+        prompt_box = ttk.LabelFrame(step1_box, text="Instructions to paste into the AI")
+        prompt_box.pack(fill="both", expand=False, padx=8, pady=(8, 6))
+        prompt_text = ScrolledText(prompt_box, height=8, wrap="word")
+        prompt_text.pack(fill="both", expand=True, padx=6, pady=6)
+        prompt_text.insert("1.0", YEAR_ASSISTANT_PROMPT.strip())
+        prompt_text.configure(state="disabled")
+        ttk.Button(prompt_box, text="Copy AI Instructions", command=copy_instructions).pack(
+            anchor="e", padx=6, pady=(0, 6)
+        )
+
+        track_box = ttk.LabelFrame(step1_box, text="Tracks missing year")
+        track_box.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+        track_list_box = ScrolledText(track_box, height=10, wrap="word")
+        track_list_box.pack(fill="both", expand=True, padx=6, pady=6)
+        track_list_box.configure(state="disabled")
+        ttk.Button(track_box, text="Copy Track List", command=copy_track_list).pack(
+            anchor="e", padx=6, pady=(0, 6)
+        )
+
+        step2_box = ttk.LabelFrame(frame, text="Step 2: Import Results + Apply")
+        step2_box.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+
+        ttk.Label(
+            step2_box,
+            text="Paste the AI JSON output below and import to review the proposed years.",
+            wraplength=520,
+            justify="left",
+        ).pack(anchor="w", padx=8, pady=(6, 0))
+
+        results_box = ScrolledText(step2_box, height=8, wrap="word")
+        results_box.pack(fill="x", expand=False, padx=8, pady=(6, 6))
+
+        action_bar = ttk.Frame(step2_box)
+        action_bar.pack(fill="x", padx=8, pady=(0, 6))
+        ttk.Button(action_bar, text="Import Results", command=parse_results).pack(
+            side="left"
+        )
+        ttk.Checkbutton(action_bar, text="Dry Run", variable=dry_run_var).pack(
+            side="left", padx=(10, 0)
+        )
+        apply_selected_btn = ttk.Button(
+            action_bar, text="Apply Selected", command=apply_selected
+        )
+        apply_selected_btn.pack(side="right")
+        apply_high_btn = ttk.Button(
+            action_bar, text="Apply All High Confidence", command=apply_high_confidence
+        )
+        apply_high_btn.pack(side="right", padx=(0, 6))
+
+        table_frame = ttk.Frame(step2_box)
+        table_frame.pack(fill="both", expand=True, padx=8, pady=(0, 6))
+        results_scroll = ttk.Scrollbar(table_frame, orient="vertical")
+        results_scroll.pack(side="right", fill="y")
+        results_columns = ("Track", "Year", "Confidence", "Notes", "Status")
+        results_tree = ttk.Treeview(
+            table_frame,
+            columns=results_columns,
+            show="headings",
+            yscrollcommand=results_scroll.set,
+            selectmode="extended",
+        )
+        results_scroll.config(command=results_tree.yview)
+        results_tree.pack(fill="both", expand=True)
+
+        for col in results_columns:
+            results_tree.heading(col, text=col)
+            width = 120
+            if col == "Track":
+                width = 240
+            elif col == "Notes":
+                width = 200
+            results_tree.column(col, width=width, anchor="w")
+
+        status_label = ttk.Label(step2_box, textvariable=status_var)
+        status_label.pack(anchor="w", padx=8, pady=(0, 6))
+
+        def refresh_panel():
+            update_controls()
+            refresh_track_list()
+            set_status("Ready to import AI results.")
 
         frame.refresh_cluster_panel = refresh_panel
         refresh_panel()
@@ -3849,6 +4313,7 @@ class SoundVaultImporterApp(tk.Tk):
             "Interactive – KMeans",
             "Interactive – HDBSCAN",
             "Genre Normalizer",
+            "Year Assistant",
             "Tempo/Energy Buckets",
             "Auto-DJ",
         ]:
