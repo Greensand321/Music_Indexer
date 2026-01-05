@@ -193,8 +193,12 @@ def is_repeated(name: str) -> bool:
                 return True
     return False
 
-def _normalize_part_of_set(raw_value: str | None) -> str | None:
-    if not raw_value:
+def _normalize_disc_value(raw_value: object) -> str | None:
+    if raw_value is None:
+        return None
+    if isinstance(raw_value, tuple):
+        raw_value = raw_value[0] if raw_value else None
+    if raw_value is None:
         return None
     text = str(raw_value).strip()
     if not text:
@@ -203,20 +207,27 @@ def _normalize_part_of_set(raw_value: str | None) -> str | None:
     if not first:
         return None
     if first.isdigit():
-        return f"Part {int(first)}"
+        return str(int(first))
     return first
 
 
 def _apply_part_of_set(
     base_folder: str,
     album: str,
-    part_of_set: str | None,
+    disc_value: str | None,
+    is_multi_disc: bool,
     decision_log: list[str],
 ) -> str:
-    if part_of_set and album and os.path.basename(base_folder) == sanitize(album):
-        part_folder = sanitize(part_of_set)
+    if is_multi_disc and disc_value and album and os.path.basename(base_folder) == sanitize(album):
+        if disc_value.lower().startswith("disc "):
+            disc_folder_label = disc_value
+        elif disc_value.isdigit():
+            disc_folder_label = f"Disc {int(disc_value)}"
+        else:
+            disc_folder_label = f"Disc {disc_value}"
+        part_folder = sanitize(disc_folder_label)
         decision_log.append(
-            f"  → Part of set '{part_of_set}' detected; placed under subfolder '{part_folder}'"
+            f"  → Multi-disc album; placed under subfolder '{part_folder}'"
         )
         return os.path.join(base_folder, part_folder)
     return base_folder
@@ -224,7 +235,7 @@ def _apply_part_of_set(
 
 def get_tags(path: str):
     """
-    Read basic tags using Mutagen (artist, title, album, year, track, genre, part_of_set).
+    Read basic tags using Mutagen (artist, title, album, year, track, genre, disc_value).
     Return a dict with those fields (or None if missing).
     """
     tags = read_tags(path)
@@ -234,8 +245,8 @@ def get_tags(path: str):
     year = tags.get("year")
     track = tags.get("track")
     genre = tags.get("genre")
-    raw_part_of_set = tags.get("discnumber") or tags.get("disc")
-    part_of_set = _normalize_part_of_set(raw_part_of_set)
+    raw_disc = tags.get("discnumber") or tags.get("disc")
+    disc_value = _normalize_disc_value(raw_disc)
     return {
         "artist": artist,
         "title": title,
@@ -243,7 +254,7 @@ def get_tags(path: str):
         "year": year,
         "track": track,
         "genre": genre,
-        "part_of_set": part_of_set,
+        "disc_value": disc_value,
     }
 
 def extract_primary_and_collabs(raw_artist: str):
@@ -382,6 +393,7 @@ def compute_moves_and_tag_index(
     songs = {}
     album_counts   = defaultdict(int)
     remix_counts   = defaultdict(int)
+    album_disc_values = defaultdict(set)
     cover_counts   = defaultdict(int)
     total_kept = len(kept_files)
     progress_callback(0, total_kept, "Reading metadata", "B")
@@ -403,7 +415,7 @@ def compute_moves_and_tag_index(
         year = _normalize_tag_value(data.get("year"), "year", log_callback)
         genre = _normalize_tag_value(data.get("genre"), "genre", log_callback)
         track = data.get("track")
-        part_of_set = _normalize_tag_value(data.get("part_of_set"), "part_of_set", log_callback)
+        disc_value = _normalize_tag_value(data.get("disc_value"), "disc_value", log_callback)
 
         # 1) Primary & collabs (preserve original case)
         primary, collabs = extract_primary_and_collabs(raw_artist)
@@ -416,6 +428,10 @@ def compute_moves_and_tag_index(
         # 3) remix_counts for tracks whose album tag contains "remix"
         if album and "remix" in album.lower():
             remix_counts[(p_lower, album.lower())] += 1
+
+        # 4) track distinct disc values per (artist, album)
+        if album and disc_value:
+            album_disc_values[(p_lower, album.lower())].add(disc_value)
 
         # 4) EXTRACT EMBEDDED COVER DATA → compute SHA-1 and store first 10 hex digits
         cover_hash = None
@@ -451,7 +467,7 @@ def compute_moves_and_tag_index(
             "year":       year,
             "genre":      genre,
             "track":      track,
-            "part_of_set": part_of_set,
+            "disc_value": disc_value,
             "cover_hash": cover_hash,
             "folder_tags": folder_tags,
             "missing_core": not raw_artist or not title,
@@ -469,6 +485,9 @@ def compute_moves_and_tag_index(
 
     # Precompute any necessary lookups from songs data
     # (album_counts, remix_counts, etc. were built in Phase 3)
+    multi_disc_albums = {
+        key for key, disc_values in album_disc_values.items() if len(disc_values) >= 2
+    }
 
     for old_path, info in songs.items():
         index += 1
@@ -480,7 +499,7 @@ def compute_moves_and_tag_index(
         album = info["album"] or ""
         year = info["year"] or ""
         track = info["track"]
-        part_of_set = info.get("part_of_set")
+        disc_value = info.get("disc_value")
         folders    = info["folder_tags"]
         year_label = _sanitize_tag_value(year, "year", log_callback)
         if info.get("missing_core"):
@@ -555,7 +574,8 @@ def compute_moves_and_tag_index(
                     MUSIC_ROOT, "By Artist", _sanitize_tag_value(main_artist, "artist", log_callback)
                 )
                 base_folder = os.path.join(artist_folder, _sanitize_tag_value(album, "album", log_callback))
-                base_folder = _apply_part_of_set(base_folder, album, part_of_set, decision_log)
+                is_multi_disc = (p_lower, album.lower()) in multi_disc_albums if album else False
+                base_folder = _apply_part_of_set(base_folder, album, disc_value, is_multi_disc, decision_log)
 
                 # Build filename (skip normal album logic)
                 basename = os.path.basename(old_path)
@@ -629,7 +649,8 @@ def compute_moves_and_tag_index(
                     f"album_count={c2} ≤ 3 → group under '{primary} - Singles'"
                 )
 
-        base_folder = _apply_part_of_set(base_folder, album, part_of_set, decision_log)
+        is_multi_disc = (p_lower, album.lower()) in multi_disc_albums if album else False
+        base_folder = _apply_part_of_set(base_folder, album, disc_value, is_multi_disc, decision_log)
 
         # Build filename for all “common” tracks
         basename = os.path.basename(old_path)
@@ -656,8 +677,14 @@ def compute_moves_and_tag_index(
         leftover.discard(primary)
         if album:
             leftover.discard(album)
-        if part_of_set:
-            leftover.discard(part_of_set)
+        if is_multi_disc and disc_value:
+            if disc_value.lower().startswith("disc "):
+                disc_folder_label = disc_value
+            elif disc_value.isdigit():
+                disc_folder_label = f"Disc {int(disc_value)}"
+            else:
+                disc_folder_label = f"Disc {disc_value}"
+            leftover.discard(disc_folder_label)
         if year:
             leftover.discard(year)
         if genre:
