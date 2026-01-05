@@ -39,10 +39,24 @@ REMIX_FOLDER_THRESHOLD  = 3
 SUPPORTED_EXTS          = {".flac", ".m4a", ".aac", ".mp3", ".wav", ".ogg"}
 
 # ─── Helper: build primary_counts for the entire vault ─────────────────────
+def _select_canonical_primary(casing_counts: dict[str, dict[str, int]]) -> dict[str, str]:
+    canonical = {}
+    for normalized, variants in casing_counts.items():
+        if not variants:
+            continue
+        ordered = sorted(
+            variants.items(),
+            key=lambda item: (-item[1], item[0].casefold(), item[0]),
+        )
+        canonical[normalized] = ordered[0][0]
+    return canonical
+
+
 def build_primary_counts(root_path, progress_callback=None, phase="A", log_callback=None):
     """
     Walk the entire vault (By Artist, By Year, Incoming, etc.) and
-    return a dict mapping each lowercase-normalized artist → total file count.
+    return a dict mapping each lowercase-normalized artist → total file count,
+    plus a canonical casing map for each normalized artist.
     Falls back to filename if metadata “artist” is missing.
 
     ``progress_callback`` will be invoked every 100 files with
@@ -57,6 +71,7 @@ def build_primary_counts(root_path, progress_callback=None, phase="A", log_callb
             pass
 
     counts = {}
+    casing_counts = defaultdict(lambda: defaultdict(int))
     idx = 0
     for dirpath, _, files in os.walk(root_path):
         rel_dir = os.path.relpath(dirpath, root_path)
@@ -89,8 +104,9 @@ def build_primary_counts(root_path, progress_callback=None, phase="A", log_callb
             primary, _ = extract_primary_and_collabs(raw)
             p_lower = primary.lower()
             counts[p_lower] = counts.get(p_lower, 0) + 1
+            casing_counts[p_lower][primary] += 1
 
-    return counts
+    return counts, _select_canonical_primary(casing_counts)
 
 # ─── Shared Utility Functions ─────────────────────────────────────────
 def _coerce_to_string(value: object) -> str:
@@ -294,6 +310,78 @@ def extract_primary_and_collabs(raw_artist: str):
 
     return (text, [])
 
+
+def _split_primary_artist(raw_artist: str) -> tuple[str, str]:
+    text = _coerce_to_string(raw_artist).strip()
+    if not text:
+        return "", ""
+
+    if "/" in text:
+        idx = text.find("/")
+        return text[:idx].strip(), text[idx:]
+
+    lowered = text.lower()
+    separators = [" feat.", " ft.", " & ", " x ", ", ", ";"]
+    for sep in separators:
+        idx = lowered.find(sep)
+        if idx != -1:
+            return text[:idx].strip(), text[idx:]
+
+    match = re.search(r"(?<=[a-z])(?=[A-Z])", text)
+    if match:
+        idx = match.start()
+        return text[:idx].strip(), text[idx:]
+
+    return text, ""
+
+
+def _apply_canonical_primary(raw_artist: str, canonical_primary: str) -> str | None:
+    if not canonical_primary:
+        return None
+    primary, remainder = _split_primary_artist(raw_artist)
+    if not primary:
+        return None
+    if primary == canonical_primary:
+        return None
+    if primary.casefold() != canonical_primary.casefold():
+        return None
+    return f"{canonical_primary}{remainder}"
+
+
+def _update_primary_artist_metadata(
+    path: str,
+    canonical_primary: str | None,
+    log_callback=None,
+) -> bool:
+    if not canonical_primary:
+        return False
+    if log_callback is None:
+        def log_callback(_msg):
+            pass
+
+    tags = read_tags(path)
+    raw_artist = tags.get("artist")
+    updated = _apply_canonical_primary(raw_artist or "", canonical_primary)
+    if not updated:
+        return False
+    audio = MutagenFile(path, easy=True)
+    if audio is None:
+        log_callback(f"   ! Unable to update artist tag (unsupported format): {path}")
+        return False
+    if audio.tags is None and hasattr(audio, "add_tags"):
+        try:
+            audio.add_tags()
+        except Exception:
+            pass
+    try:
+        audio["artist"] = [updated]
+        audio.save()
+        log_callback(f"   → Updated artist tag to '{updated}' for {os.path.basename(path)}")
+        return True
+    except Exception as exc:
+        log_callback(f"   ! Failed to update artist tag for {path}: {exc}")
+        return False
+
 def derive_tags_from_path(filepath: str, music_root: str):
     """
     If a file lives in subfolders under music_root, gather those folder names
@@ -357,7 +445,12 @@ def compute_moves_and_tag_index(
         _flush(db_path)
 
     # --- Phase 0: Pre-scan entire vault (under MUSIC_ROOT) ---
-    global_counts = build_primary_counts(MUSIC_ROOT, progress_callback, phase="A", log_callback=log_callback)
+    global_counts, canonical_primary_map = build_primary_counts(
+        MUSIC_ROOT,
+        progress_callback,
+        phase="A",
+        log_callback=log_callback,
+    )
     log_callback(f"   → Pre-scan: found {len(global_counts)} unique artists")
     log_callback(f"   → DEBUG: MUSIC_ROOT = {MUSIC_ROOT}")
     log_callback(f"   → DEBUG: droeloe count = {global_counts.get('droeloe', 0)}")
@@ -420,6 +513,7 @@ def compute_moves_and_tag_index(
         # 1) Primary & collabs (preserve original case)
         primary, collabs = extract_primary_and_collabs(raw_artist)
         p_lower = primary.lower()
+        canonical_primary = canonical_primary_map.get(p_lower, primary)
 
         # 2) album_counts for genuine (non-remix) tracks under each (artist, album)
         if album and "remix" not in title.lower() and album.strip().lower() != title.strip().lower():
@@ -461,6 +555,7 @@ def compute_moves_and_tag_index(
         songs[fullpath] = {
             "raw_artist": raw_artist,
             "primary":    primary,
+            "canonical_primary": canonical_primary,
             "collabs":    collabs,
             "title":      title,
             "album":      album,
@@ -495,6 +590,7 @@ def compute_moves_and_tag_index(
             log_callback(f"   • Determining destination {index}/{total}")
 
         raw_artist = info["raw_artist"]
+        canonical_primary = info.get("canonical_primary")
         title = info["title"] or ""
         album = info["album"] or ""
         year = info["year"] or ""
@@ -510,6 +606,11 @@ def compute_moves_and_tag_index(
                 candidate = f"{root_c} ({idx_dup}){ext_c}"
                 idx_dup += 1
             moves[old_path] = candidate
+            tag_index[candidate] = {
+                "leftover_tags": [],
+                "old_paths": sorted(folders),
+                "canonical_primary": canonical_primary,
+            }
             decision_log.append(
                 f"  → Missing metadata, placed under Manual Review/{os.path.basename(candidate)}"
             )
@@ -547,6 +648,11 @@ def compute_moves_and_tag_index(
             new_path = os.path.join(base_folder, new_filename)
             new_path = _ensure_unique_destination(new_path, moves, log_callback)
             moves[old_path] = new_path
+            tag_index[new_path] = {
+                "leftover_tags": [],
+                "old_paths": sorted(folders),
+                "canonical_primary": canonical_primary,
+            }
             decision_log.append(
                 f"  → Final: '{os.path.relpath(new_path, MUSIC_ROOT)}'"
             )
@@ -565,6 +671,7 @@ def compute_moves_and_tag_index(
             if rcount >= REMIX_FOLDER_THRESHOLD and count_now >= COMMON_ARTIST_THRESHOLD:
                 # Promote primary to remixer (first part of raw_artist before “/”)
                 main_artist = raw_artist.split("/", 1)[0]
+                main_artist = canonical_primary_map.get(main_artist.lower(), main_artist)
                 p_lower = main_artist.lower()
                 decision_log.append(
                     f"  → Enough remixes ({rcount} ≥ {REMIX_FOLDER_THRESHOLD}) "
@@ -593,6 +700,11 @@ def compute_moves_and_tag_index(
                 new_path = os.path.join(base_folder, new_filename)
                 new_path = _ensure_unique_destination(new_path, moves, log_callback)
                 moves[old_path] = new_path
+                tag_index[new_path] = {
+                    "leftover_tags": [],
+                    "old_paths": sorted(folders),
+                    "canonical_primary": canonical_primary,
+                }
                 decision_log.append(
                     f"  → (Remixes folder) placed under By Artist/{main_artist}/{album} "
                     f"→ Final: '{os.path.relpath(new_path, MUSIC_ROOT)}'"
@@ -610,7 +722,7 @@ def compute_moves_and_tag_index(
         counts = {artist: global_counts.get(artist.lower(), 0) for artist in all_candidates}
         best_artist = max(counts, key=lambda a: counts[a])
         decision_log.append(f"  Candidates: {all_candidates}, counts: {counts}")
-        primary = best_artist
+        primary = canonical_primary_map.get(best_artist.lower(), best_artist)
         p_lower = primary.lower()
         decision_log.append(f"  → After ranking, primary = '{primary}'")
 
@@ -695,7 +807,8 @@ def compute_moves_and_tag_index(
 
         tag_index[new_path] = {
             "leftover_tags": sanitized_leftover,
-            "old_paths": sorted(folders)
+            "old_paths": sorted(folders),
+            "canonical_primary": canonical_primary,
         }
 
     log_callback("   → Destination paths determined for all files.")
@@ -931,7 +1044,7 @@ def apply_indexer_moves(
         cancel_event=cancel_event,
     )
 
-    moves, _, _ = compute_moves_and_tag_index(
+    moves, tag_index, _ = compute_moves_and_tag_index(
         root_path,
         log_callback,
         progress_callback,
@@ -970,14 +1083,19 @@ def apply_indexer_moves(
         if idx % 50 == 0 or idx == total_moves:
             log_callback(f"   • Moving file {idx}/{total_moves}")
         os.makedirs(os.path.dirname(new_path), exist_ok=True)
+        moved_ok = True
         try:
             if os.path.abspath(old_path) != os.path.abspath(new_path):
                 shutil.move(old_path, new_path)
                 summary["moved"] += 1
         except Exception as e:
+            moved_ok = False
             err = f"Failed to move {old_path} → {new_path}: {e}"
             summary["errors"].append(err)
             log_callback(f"   ! {err}")
+        if moved_ok:
+            canonical = tag_index.get(new_path, {}).get("canonical_primary")
+            _update_primary_artist_metadata(new_path, canonical, log_callback)
 
     # Phase 6: Handle non-audio leftovers…
     docs_dir = os.path.join(root_path, "Docs")
