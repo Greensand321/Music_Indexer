@@ -658,8 +658,11 @@ def compute_moves_and_tag_index(
                     f"  → Enough remixes ({rcount} ≥ {REMIX_FOLDER_THRESHOLD}) "
                     f"AND count_now ({count_now}) ≥ {COMMON_ARTIST_THRESHOLD}; force primary = '{main_artist}'"
                 )
+                folder_primary = main_artist
+                if canonical_primary and canonical_primary.casefold() == main_artist.casefold():
+                    folder_primary = canonical_primary
                 artist_folder = os.path.join(
-                    MUSIC_ROOT, "By Artist", _sanitize_tag_value(main_artist, "artist", log_callback)
+                    MUSIC_ROOT, "By Artist", _sanitize_tag_value(folder_primary, "artist", log_callback)
                 )
                 base_folder = os.path.join(artist_folder, _sanitize_tag_value(album, "album", log_callback))
                 is_multi_disc = (p_lower, album.lower()) in multi_disc_albums if album else False
@@ -714,15 +717,18 @@ def compute_moves_and_tag_index(
         decision_log.append(f"  → After ranking, primary = '{primary}'")
 
         # Build “By Artist/<primary>” base path
+        folder_primary = primary
+        if canonical_primary and canonical_primary.casefold() == primary.casefold():
+            folder_primary = canonical_primary
         artist_folder = os.path.join(
-            MUSIC_ROOT, "By Artist", _sanitize_tag_value(primary, "artist", log_callback)
+            MUSIC_ROOT, "By Artist", _sanitize_tag_value(folder_primary, "artist", log_callback)
         )
 
         # ─── 4.4) COMMON ARTIST: decide between “Album” vs. “Singles” ───────────────
         # (At this point, count_now ≥ COMMON_ARTIST_THRESHOLD is guaranteed.)
         if not album or album.strip().lower() == title.strip().lower():
             # No album tag (or album == title) → put into “<Artist> - Singles”
-            primary_label = _sanitize_tag_value(primary, "artist", log_callback)
+            primary_label = _sanitize_tag_value(folder_primary, "artist", log_callback)
             base_folder = os.path.join(artist_folder, f"{primary_label} - Singles")
             decision_log.append(
                 f"  Count {count_now} ≥ {COMMON_ARTIST_THRESHOLD}, no album or album=title "
@@ -741,7 +747,7 @@ def compute_moves_and_tag_index(
                 )
             else:
                 # Few tracks in album → treat as a “Singles” release
-                primary_label = _sanitize_tag_value(primary, "artist", log_callback)
+                primary_label = _sanitize_tag_value(folder_primary, "artist", log_callback)
                 base_folder = os.path.join(artist_folder, f"{primary_label} - Singles")
                 decision_log.append(
                     f"  Count {count_now} ≥ {COMMON_ARTIST_THRESHOLD}, but "
