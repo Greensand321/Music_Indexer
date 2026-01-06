@@ -56,7 +56,7 @@ def test_plan_contains_metadata_and_quality_summary(tmp_path) -> None:
 
     assert group.metadata_changes  # winner tags should be merged
     assert group.winner_quality["reasons"]  # rationale present
-    assert group.playlist_impact.entries == len(group.losers)
+    assert group.playlist_impact.entries == 0
     assert group.winner_current_tags  # real tags captured
     assert group.current_tags[group.winner_path]["title"] == "Song A"
     assert group.chosen_artwork_source  # artwork decision captured even if unchanged

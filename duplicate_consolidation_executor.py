@@ -654,6 +654,7 @@ def execute_consolidation_plan(
     loser_disposition: Dict[str, str] = {}
     artwork_actions: List[ArtworkDirective] = []
     planned_tags: Dict[str, Dict[str, object]] = {}
+    playlist_rewrite_map: Dict[str, str] = {}
     path_to_group: Dict[str, str] = {}
     playlist_targets: Dict[str, str] = {}
     playlist_base_dirs: Dict[str, str] = {}
@@ -671,7 +672,7 @@ def execute_consolidation_plan(
                 continue
             playlist_dir = (playlist_base_dirs or {}).get(playlist) or os.path.dirname(working_path)
             normalized = {_normalize_playlist_entry(ln, playlist_dir) for ln in lines if ln}
-            hits = sorted([loser for loser in loser_to_winner.keys() if loser in normalized])
+            hits = sorted([loser for loser in playlist_rewrite_map.keys() if loser in normalized])
             if hits:
                 refs[playlist] = hits
         return refs
@@ -693,13 +694,15 @@ def execute_consolidation_plan(
 
         group_lookup = {g.group_id: g for g in plan.groups}
         for group in plan.groups:
-            planned_tags[group.winner_path] = dict(group.planned_winner_tags)
+            if group.metadata_changes:
+                planned_tags[group.winner_path] = dict(group.planned_winner_tags)
             for loser in group.losers:
                 loser_to_winner[loser] = group.winner_path
                 loser_disposition[loser] = group.loser_disposition.get(loser, "quarantine")
                 path_to_group[loser] = group.group_id
             path_to_group[group.winner_path] = group.group_id
             artwork_actions.extend(group.artwork)
+            playlist_rewrite_map.update(group.playlist_rewrites)
 
         computed_signature = _compute_plan_signature(plan)
         _check_cancel("start")
@@ -792,7 +795,9 @@ def execute_consolidation_plan(
             )
             raise RuntimeError("Execution blocked: review-required groups present.")
 
-        planned_operations = len(loser_to_winner) + len(artwork_actions) + len(planned_tags)
+        planned_operations = (
+            len(loser_to_winner) + len(artwork_actions) + len(planned_tags) + len(playlist_rewrite_map)
+        )
         if config.operation_limit and planned_operations > config.operation_limit and not config.confirm_operation_overage:
             success = False
             _record(
@@ -847,7 +852,7 @@ def execute_consolidation_plan(
                 continue
             playlist_dir = os.path.dirname(playlist)
             normalized = {_normalize_playlist_entry(ln, playlist_dir) for ln in lines if ln}
-            affected = normalized & loser_to_winner.keys()
+            affected = normalized & playlist_rewrite_map.keys()
             if affected:
                 impacted.append(playlist)
                 playlist_groups[playlist] = {path_to_group.get(path, "") for path in affected if path in path_to_group}
@@ -921,7 +926,7 @@ def execute_consolidation_plan(
             _check_cancel("rewrite_playlists")
             target_playlist = playlist_targets.get(playlist, playlist)
             base_dir = playlist_base_dirs.get(playlist, os.path.dirname(target_playlist))
-            replaced, new_lines = _rewrite_playlist(target_playlist, loser_to_winner, base_dir=base_dir)
+            replaced, new_lines = _rewrite_playlist(target_playlist, playlist_rewrite_map, base_dir=base_dir)
             if replaced == 0:
                 playlist_results.append(
                     PlaylistRewriteResult(
