@@ -93,6 +93,10 @@ class ExecutionAction:
     target: str
     status: str
     detail: str
+    planned: bool = False
+    attempted: bool = False
+    verified: bool = False
+    verification_detail: str | None = None
     metadata: Dict[str, object] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, object]:
@@ -101,6 +105,10 @@ class ExecutionAction:
             "target": self.target,
             "status": self.status,
             "detail": self.detail,
+            "planned": self.planned,
+            "attempted": self.attempted,
+            "verified": self.verified,
+            "verification_detail": self.verification_detail,
             "metadata": dict(self.metadata),
         }
 
@@ -234,6 +242,17 @@ def _write_playlist_atomic(path: str, lines: Sequence[str]) -> None:
                 os.unlink(tmp_path)
             except OSError:
                 pass
+
+
+def _verify_playlist_write(path: str, expected_lines: Sequence[str]) -> tuple[bool, str]:
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            actual_lines = [ln.rstrip("\n") for ln in handle]
+    except FileNotFoundError:
+        return False, "Playlist missing after rewrite."
+    if list(expected_lines) != actual_lines:
+        return False, "Playlist contents do not match expected rewrite."
+    return True, "Playlist rewrite verified."
 
 
 def _validate_playlist(path: str, *, base_dir: str | None = None) -> List[str]:
@@ -373,13 +392,27 @@ def _apply_artwork(action: ArtworkDirective) -> tuple[bool, str]:
         _close_mutagen_audio(audio)
 
 
-def _apply_metadata(target: str, planned_tags: Mapping[str, object]) -> tuple[bool, str]:
+def _verify_artwork_write(action: ArtworkDirective) -> tuple[bool, str]:
+    if not os.path.exists(action.target):
+        return False, "Target missing after artwork update."
+    sidecar = f"{action.target}.artwork"
+    if not os.path.exists(sidecar):
+        return False, "Artwork sidecar missing after update."
+    try:
+        if os.path.getsize(sidecar) <= 0:
+            return False, "Artwork sidecar is empty."
+    except OSError:
+        return False, "Artwork sidecar could not be read."
+    return True, "Artwork write verified."
+
+
+def _apply_metadata(target: str, planned_tags: Mapping[str, object]) -> tuple[bool, str, List[str]]:
     if MutagenFile is None:
-        return True, "Mutagen unavailable; metadata not written."
+        return True, "Mutagen unavailable; metadata not written.", []
     audio = MutagenFile(ensure_long_path(target), easy=True)
     try:
         if audio is None:
-            return True, "Unsupported audio format; metadata not written."
+            return True, "Unsupported audio format; metadata not written.", []
         changed = False
         skipped: List[str] = []
         for key, value in planned_tags.items():
@@ -400,11 +433,36 @@ def _apply_metadata(target: str, planned_tags: Mapping[str, object]) -> tuple[bo
             try:
                 audio.save()
             except Exception:
-                return False, "Failed to save metadata tags."
+                return False, "Failed to save metadata tags.", skipped
         if skipped:
             skipped_list = ", ".join(sorted(set(skipped)))
-            return True, f"Metadata normalized; skipped unsupported keys: {skipped_list}."
-        return True, "Metadata normalized."
+            return True, f"Metadata normalized; skipped unsupported keys: {skipped_list}.", skipped
+        return True, "Metadata normalized.", skipped
+    finally:
+        _close_mutagen_audio(audio)
+
+
+def _verify_metadata_write(target: str, planned_tags: Mapping[str, object], skipped_keys: Iterable[str]) -> tuple[bool, str]:
+    if not os.path.exists(target):
+        return False, "Target missing after metadata update."
+    if MutagenFile is None:
+        return False, "Mutagen unavailable; metadata not verified."
+    audio = MutagenFile(ensure_long_path(target), easy=True)
+    try:
+        if audio is None or audio.tags is None:
+            return False, "Metadata unavailable after update."
+        skipped = set(skipped_keys)
+        mismatched: List[str] = []
+        for key, value in planned_tags.items():
+            if value is None or key in INTERNAL_TAG_KEYS or key in skipped:
+                continue
+            normalized = [str(value)] if not isinstance(value, list) else [str(v) for v in value]
+            current = audio.tags.get(key)
+            if current != normalized:
+                mismatched.append(key)
+        if mismatched:
+            return False, f"Metadata mismatch after write: {', '.join(sorted(mismatched))}."
+        return True, "Metadata write verified."
     finally:
         _close_mutagen_audio(audio)
 
@@ -542,8 +600,31 @@ def execute_consolidation_plan(
     playlists_dir = config.playlists_dir or os.path.join(config.library_root, "Playlists")
     quarantine_dir = config.quarantine_dir or os.path.join(config.library_root, "Quarantine")
 
-    def _record(step: str, target: str, status: str, detail: str, **metadata: object) -> None:
-        actions.append(ExecutionAction(step=step, target=target, status=status, detail=detail, metadata=metadata))
+    def _record(
+        step: str,
+        target: str,
+        status: str,
+        detail: str,
+        *,
+        planned: bool = False,
+        attempted: bool = False,
+        verified: bool = False,
+        verification_detail: str | None = None,
+        **metadata: object,
+    ) -> None:
+        actions.append(
+            ExecutionAction(
+                step=step,
+                target=target,
+                status=status,
+                detail=detail,
+                planned=planned,
+                attempted=attempted,
+                verified=verified,
+                verification_detail=verification_detail,
+                metadata=metadata,
+            )
+        )
 
     def _check_cancel(stage: str) -> None:
         if cancel.is_set():
@@ -763,30 +844,57 @@ def execute_consolidation_plan(
                     playlist_backups[playlist] = working_copy
                     playlist_targets[playlist] = working_copy
                     playlist_base_dirs[playlist] = os.path.dirname(playlist)
+                    verified = os.path.exists(working_copy)
+                    verification_detail = (
+                        "Playlist copy verified." if verified else "Playlist copy missing after write."
+                    )
                     _record(
                         "backup_playlists",
                         playlist,
-                        "success",
+                        "success" if verified else "failed",
                         "Playlist copied for dry-run validation.",
+                        planned=True,
+                        attempted=True,
+                        verified=verified,
+                        verification_detail=verification_detail,
                         backup_path=working_copy,
                         group_ids=sorted(g for g in playlist_groups.get(playlist, []) if g),
                     )
+                    if not verified:
+                        raise RuntimeError(f"Playlist copy verification failed for {playlist}")
                 else:
                     backup_path = _backup_playlist(playlist, backups_dir)
                     playlist_backups[playlist] = backup_path
                     playlist_targets[playlist] = playlist
                     playlist_base_dirs[playlist] = os.path.dirname(playlist)
+                    verified = os.path.exists(backup_path)
+                    verification_detail = (
+                        "Playlist backup verified." if verified else "Playlist backup missing after write."
+                    )
                     _record(
                         "backup_playlists",
                         playlist,
-                        "success",
+                        "success" if verified else "failed",
                         "Playlist backed up.",
+                        planned=True,
+                        attempted=True,
+                        verified=verified,
+                        verification_detail=verification_detail,
                         backup_path=backup_path,
                         group_ids=sorted(g for g in playlist_groups.get(playlist, []) if g),
                     )
+                    if not verified:
+                        raise RuntimeError(f"Playlist backup verification failed for {playlist}")
             except Exception as exc:
                 success = False
-                _record("backup_playlists", playlist, "failed", f"Failed to backup playlist: {exc}")
+                _record(
+                    "backup_playlists",
+                    playlist,
+                    "failed",
+                    f"Failed to backup playlist: {exc}",
+                    planned=True,
+                    attempted=True,
+                )
                 raise
 
         # Step 2: rewrite playlists
@@ -811,12 +919,20 @@ def execute_consolidation_plan(
                     target_playlist,
                     "skipped",
                     "No entries required updates.",
+                    planned=True,
+                    attempted=False,
+                    verified=False,
+                    verification_detail="No rewrite needed.",
                     group_ids=sorted(g for g in playlist_groups.get(playlist, []) if g),
                     original_playlist=playlist if target_playlist != playlist else None,
                 )
                 continue
             try:
                 _write_playlist_atomic(target_playlist, new_lines)
+                verified, verification_detail = _verify_playlist_write(target_playlist, new_lines)
+                status = "success" if verified else "failed"
+                if not verified:
+                    success = False
                 playlist_results.append(
                     PlaylistRewriteResult(
                         playlist=target_playlist,
@@ -828,22 +944,35 @@ def execute_consolidation_plan(
                             ),
                         ),
                         replaced_entries=replaced,
-                        status="success",
+                        status=status,
                         original_playlist=playlist if target_playlist != playlist else None,
                     )
                 )
                 _record(
                     "rewrite_playlists",
                     target_playlist,
-                    "success",
+                    status,
                     "Playlist rewritten.",
+                    planned=True,
+                    attempted=True,
+                    verified=verified,
+                    verification_detail=verification_detail,
                     replaced=replaced,
                     group_ids=sorted(g for g in playlist_groups.get(playlist, []) if g),
                     original_playlist=playlist if target_playlist != playlist else None,
                 )
+                if not verified:
+                    raise RuntimeError(f"Playlist rewrite verification failed for {target_playlist}")
             except Exception as exc:
                 success = False
-                _record("rewrite_playlists", target_playlist, "failed", f"Failed to rewrite playlist: {exc}")
+                _record(
+                    "rewrite_playlists",
+                    target_playlist,
+                    "failed",
+                    f"Failed to rewrite playlist: {exc}",
+                    planned=True,
+                    attempted=True,
+                )
                 raise
 
         # Step 3: validate rewritten playlists
@@ -862,6 +991,7 @@ def execute_consolidation_plan(
                         result.playlist,
                         "failed",
                         "Playlist validation failed; restored backup.",
+                        attempted=True,
                         missing=missing,
                         group_ids=sorted(g for g in playlist_groups.get(result.original_playlist or result.playlist, []) if g),
                         original_playlist=result.original_playlist,
@@ -872,6 +1002,7 @@ def execute_consolidation_plan(
                 result.playlist,
                 "success",
                 "Playlist validated.",
+                attempted=True,
                 group_ids=sorted(g for g in playlist_groups.get(result.original_playlist or result.playlist, []) if g),
                 original_playlist=result.original_playlist,
             )
@@ -898,26 +1029,43 @@ def execute_consolidation_plan(
                     art.target,
                     "skipped",
                     f"Dry-run execute enabled; artwork not applied (source: {art.source}).",
+                    planned=True,
+                    attempted=False,
+                    verified=False,
+                    verification_detail="Dry-run execute enabled.",
                     source=art.source,
                     group_id=path_to_group.get(art.target),
+                    skip_reason="dry_run",
                 )
         elif config.apply_artwork:
             for art in artwork_actions:
                 _check_cancel("artwork")
                 ok, detail = _apply_artwork(art)
-                status = "success" if ok else "failed"
-                if not ok:
+                verified = False
+                verification_detail = None
+                if ok:
+                    verified, verification_detail = _verify_artwork_write(art)
+                status = "success" if ok and verified else "failed"
+                if status == "failed":
                     success = False
+                    if ok and verification_detail:
+                        detail = f"{detail} Verification failed: {verification_detail}"
                 _record(
                     "artwork",
                     art.target,
                     status,
                     f"{detail or art.reason} (source: {art.source})",
+                    planned=True,
+                    attempted=True,
+                    verified=verified,
+                    verification_detail=verification_detail,
                     source=art.source,
                     group_id=path_to_group.get(art.target),
                 )
                 if not ok:
                     raise RuntimeError(f"Artwork copy failed for {art.target}")
+                if ok and not verified:
+                    raise RuntimeError(f"Artwork verification failed for {art.target}")
 
         # Step 5: apply metadata normalization
         if config.dry_run_execute and config.apply_metadata:
@@ -927,18 +1075,69 @@ def execute_consolidation_plan(
                     target,
                     "skipped",
                     "Dry-run execute enabled; metadata not written.",
+                    planned=True,
+                    attempted=False,
+                    verified=False,
+                    verification_detail="Dry-run execute enabled.",
                     group_id=path_to_group.get(target),
+                    skip_reason="dry_run",
                 )
         elif config.apply_metadata:
             for target, tags in planned_tags.items():
                 _check_cancel("metadata")
-                ok, detail = _apply_metadata(target, tags)
-                status = "success" if ok else "failed"
-                if not ok:
+                if not os.path.exists(target):
+                    _record(
+                        "metadata",
+                        target,
+                        "skipped",
+                        "Missing source; metadata not written.",
+                        planned=True,
+                        attempted=False,
+                        verified=False,
+                        verification_detail="Source missing.",
+                        group_id=path_to_group.get(target),
+                        skip_reason="missing_source",
+                    )
+                    continue
+                if MutagenFile is None:
+                    _record(
+                        "metadata",
+                        target,
+                        "skipped",
+                        "Mutagen unavailable; metadata not written.",
+                        planned=True,
+                        attempted=False,
+                        verified=False,
+                        verification_detail="Mutagen unavailable.",
+                        group_id=path_to_group.get(target),
+                        skip_reason="mutagen_unavailable",
+                    )
+                    continue
+                ok, detail, skipped_keys = _apply_metadata(target, tags)
+                verified = False
+                verification_detail = None
+                if ok:
+                    verified, verification_detail = _verify_metadata_write(target, tags, skipped_keys)
+                status = "success" if ok and verified else "failed"
+                if status == "failed":
                     success = False
-                _record("metadata", target, status, detail, group_id=path_to_group.get(target))
+                    if ok and verification_detail:
+                        detail = f"{detail} Verification failed: {verification_detail}"
+                _record(
+                    "metadata",
+                    target,
+                    status,
+                    detail,
+                    planned=True,
+                    attempted=True,
+                    verified=verified,
+                    verification_detail=verification_detail,
+                    group_id=path_to_group.get(target),
+                )
                 if not ok:
                     raise RuntimeError(f"Metadata normalization failed for {target}")
+                if ok and not verified:
+                    raise RuntimeError(f"Metadata verification failed for {target}")
 
         # Step 6: quarantine or delete losers
         for loser, disposition in loser_disposition.items():
@@ -956,8 +1155,13 @@ def execute_consolidation_plan(
                     loser,
                     "skipped",
                     detail,
+                    planned=True,
+                    attempted=False,
+                    verified=False,
+                    verification_detail="Loser retained.",
                     disposition=effective,
                     group_id=path_to_group.get(loser),
+                    skip_reason="retain",
                 )
                 continue
             if config.dry_run_execute:
@@ -967,23 +1171,53 @@ def execute_consolidation_plan(
                     loser,
                     "skipped",
                     "Dry-run execute enabled; loser not moved or deleted.",
+                    planned=True,
+                    attempted=False,
+                    verified=False,
+                    verification_detail="Dry-run execute enabled.",
                     disposition=effective,
                     group_id=path_to_group.get(loser),
+                    skip_reason="dry_run",
+                )
+                continue
+            if not os.path.exists(loser):
+                _record(
+                    "loser_cleanup",
+                    loser,
+                    "skipped",
+                    "Missing source; loser not moved or deleted.",
+                    planned=True,
+                    attempted=False,
+                    verified=False,
+                    verification_detail="Source missing.",
+                    disposition=effective,
+                    group_id=path_to_group.get(loser),
+                    skip_reason="missing_source",
                 )
                 continue
             if effective == "delete":
                 try:
-                    if os.path.exists(loser):
-                        os.remove(loser)
-                    quarantine_index[loser] = "deleted"
+                    os.remove(loser)
+                    verified = not os.path.exists(loser)
+                    verification_detail = (
+                        "Loser deletion verified." if verified else "Loser still present after delete."
+                    )
+                    if verified:
+                        quarantine_index[loser] = "deleted"
                     _record(
                         "loser_cleanup",
                         loser,
-                        "success",
+                        "success" if verified else "failed",
                         "Loser deleted.",
+                        planned=True,
+                        attempted=True,
+                        verified=verified,
+                        verification_detail=verification_detail,
                         disposition=effective,
                         group_id=path_to_group.get(loser),
                     )
+                    if not verified:
+                        raise RuntimeError(f"Loser delete verification failed for {loser}")
                 except Exception as exc:
                     success = False
                     _record(
@@ -991,6 +1225,8 @@ def execute_consolidation_plan(
                         loser,
                         "failed",
                         f"Failed to delete loser: {exc}",
+                        planned=True,
+                        attempted=True,
                         disposition=effective,
                         group_id=path_to_group.get(loser),
                     )
@@ -1003,18 +1239,28 @@ def execute_consolidation_plan(
                     flatten=config.quarantine_flatten,
                 )
                 try:
-                    if os.path.exists(loser):
-                        shutil.move(loser, dest)
-                    quarantine_index[loser] = dest
+                    shutil.move(loser, dest)
+                    verified = os.path.exists(dest) and not os.path.exists(loser)
+                    verification_detail = (
+                        "Loser quarantine verified." if verified else "Quarantine move not confirmed."
+                    )
+                    if verified:
+                        quarantine_index[loser] = dest
                     _record(
                         "loser_cleanup",
                         loser,
-                        "success",
+                        "success" if verified else "failed",
                         "Loser quarantined.",
+                        planned=True,
+                        attempted=True,
+                        verified=verified,
+                        verification_detail=verification_detail,
                         quarantine_path=dest,
                         disposition=effective,
                         group_id=path_to_group.get(loser),
                     )
+                    if not verified:
+                        raise RuntimeError(f"Loser quarantine verification failed for {loser}")
                 except Exception as exc:
                     success = False
                     _record(
@@ -1022,6 +1268,8 @@ def execute_consolidation_plan(
                         loser,
                         "failed",
                         f"Failed to quarantine loser: {exc}",
+                        planned=True,
+                        attempted=True,
                         quarantine_path=dest,
                         disposition=effective,
                         group_id=path_to_group.get(loser),
@@ -1039,6 +1287,13 @@ def execute_consolidation_plan(
 
         plan_signature = plan.plan_signature if plan else None
         source_snapshot = plan.source_snapshot if plan else {}
+        rollup = {
+            "planned": sum(1 for a in actions if a.planned),
+            "attempted": sum(1 for a in actions if a.attempted),
+            "verified": sum(1 for a in actions if a.verified),
+            "skipped": sum(1 for a in actions if a.status == "skipped"),
+            "failed": sum(1 for a in actions if a.status in {"failed", "blocked"}),
+        }
         consolidated_payload = {
             "success": success,
             "actions": [a.to_dict() for a in actions],
@@ -1050,6 +1305,12 @@ def execute_consolidation_plan(
             "playlists": [p.to_dict() for p in playlist_results],
             "quarantine_index": dict(quarantine_index),
             "metadata_plans": {path: dict(tags) for path, tags in planned_tags.items()},
+            "action_rollup": dict(rollup),
+            "execution_context": {
+                "dry_run_execute": config.dry_run_execute,
+                "library_root": os.path.abspath(config.library_root),
+                "quarantine_dir": os.path.abspath(quarantine_dir) if quarantine_dir else None,
+            },
             "run_paths": {
                 "reports_dir": reports_dir,
                 "backups_dir": backups_dir,
@@ -1395,6 +1656,14 @@ def execute_consolidation_plan(
             winners_kept = groups_processed
             generated_at_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
             host_name = platform.node() or "unknown-host"
+            planned_count = rollup.get("planned", 0)
+            attempted_count = rollup.get("attempted", 0)
+            verified_count = rollup.get("verified", 0)
+            skipped_count = rollup.get("skipped", 0)
+            failed_count = rollup.get("failed", 0)
+            execution_mode = "dry-run" if config.dry_run_execute else "real"
+            resolved_library_root = os.path.abspath(config.library_root)
+            resolved_quarantine_dir = os.path.abspath(quarantine_dir) if quarantine_dir else "n/a"
 
             def _status_badge_class(status: str) -> str:
                 if status == "success":
@@ -1994,6 +2263,13 @@ def execute_consolidation_plan(
                 "</div>",
                 "</div>",
                 "<div class='row' style='gap:8px; margin-top:6px;'>",
+                f"<span class='pill'><strong>Planned</strong> {planned_count}</span>",
+                f"<span class='pill'><strong>Attempted</strong> {attempted_count}</span>",
+                f"<span class='pill'><strong>Verified</strong> {verified_count}</span>",
+                f"<span class='pill'><strong>Skipped</strong> {skipped_count}</span>",
+                f"<span class='pill'><strong>Failed</strong> {failed_count}</span>",
+                "</div>",
+                "<div class='row' style='gap:8px; margin-top:6px;'>",
                 f"<span class='pill'><strong>Exact</strong> <span id='statExact'>{total_exact}</span></span>",
                 f"<span class='pill'><strong>Near</strong> <span id='statNear'>{total_near}</span></span>",
                 "</div>",
@@ -2003,6 +2279,12 @@ def execute_consolidation_plan(
                 f"<div class='v mono' id='planSignature'>{html.escape(plan_signature or computed_signature)}</div>",
                 "<div class='k'>Reports directory</div>",
                 f"<div class='v path' id='reportsDir'>{html.escape(reports_dir)}</div>",
+                "<div class='k'>Execution mode</div>",
+                f"<div class='v tiny'>{html.escape(execution_mode)}</div>",
+                "<div class='k'>Library root</div>",
+                f"<div class='v path'>{html.escape(resolved_library_root)}</div>",
+                "<div class='k'>Quarantine dir</div>",
+                f"<div class='v path'>{html.escape(resolved_quarantine_dir)}</div>",
                 "</div>",
                 "</div>",
                 "<div class='card'>",
