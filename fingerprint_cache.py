@@ -120,6 +120,114 @@ def get_fingerprint(
     return fp_hash
 
 
+def get_cached_fingerprint(
+    path: str,
+    db_path: str,
+    log_callback: Optional[Callable[[str], None]] = None,
+    trace: Optional[Dict[str, object]] = None,
+    *,
+    retries: int = 3,
+    retry_delay: float = 0.05,
+) -> Optional[str]:
+    """Return cached fingerprint for path without computing new fingerprints."""
+    if log_callback is None:
+        log_callback = lambda msg: None
+    if trace is None:
+        trace = {}
+
+    path = ensure_long_path(path)
+    os.makedirs(os.path.dirname(db_path), exist_ok=True)
+    for attempt in range(retries):
+        conn: sqlite3.Connection | None = None
+        try:
+            conn = _ensure_db(db_path)
+            try:
+                mtime = os.path.getmtime(path)
+                size = os.path.getsize(path)
+            except OSError as e:
+                log_callback(f"! Could not stat {path}: {e}")
+                trace["source"] = "stat_error"
+                trace["error"] = str(e)
+                return None
+            row = conn.execute(
+                "SELECT mtime, size, fingerprint FROM fingerprints WHERE path=?",
+                (path,),
+            ).fetchone()
+            cached_mtime = row[0] if row else None
+            cached_size = row[1] if row else None
+            if row and abs(cached_mtime - mtime) < 1e-6 and int(cached_size or 0) == int(size):
+                fp = row[2]
+                _dlog("FP", f"cache hit {path}", log_callback)
+                if isinstance(fp, (bytes, bytearray)):
+                    try:
+                        fp = fp.decode("utf-8")
+                    except Exception:
+                        fp = fp.decode("latin1", errors="ignore")
+                _dlog("FP", f"fingerprint={fp} prefix={fp[:16]}", log_callback)
+                trace["source"] = "cache"
+                trace["error"] = ""
+                return fp
+            trace["source"] = "missing"
+            trace["error"] = ""
+            return None
+        except sqlite3.OperationalError as e:
+            if "locked" not in str(e).lower() or attempt >= retries - 1:
+                log_callback(f"! Fingerprint cache read failed: {e}")
+                trace["source"] = "cache_error"
+                trace["error"] = str(e)
+                return None
+            time.sleep(retry_delay)
+        finally:
+            if conn is not None:
+                conn.close()
+    return None
+
+
+def store_fingerprint(
+    path: str,
+    db_path: str,
+    duration: int | None,
+    fingerprint: str | None,
+    log_callback: Optional[Callable[[str], None]] = None,
+    *,
+    retries: int = 3,
+    retry_delay: float = 0.05,
+) -> bool:
+    """Persist a fingerprint in the cache without computing it."""
+    if fingerprint is None:
+        return False
+    if log_callback is None:
+        log_callback = lambda msg: None
+
+    path = ensure_long_path(path)
+    os.makedirs(os.path.dirname(db_path), exist_ok=True)
+    for attempt in range(retries):
+        conn: sqlite3.Connection | None = None
+        try:
+            conn = _ensure_db(db_path)
+            try:
+                mtime = os.path.getmtime(path)
+                size = os.path.getsize(path)
+            except OSError as e:
+                log_callback(f"! Could not stat {path}: {e}")
+                return False
+            conn.execute(
+                "INSERT OR REPLACE INTO fingerprints (path, mtime, size, duration, fingerprint) VALUES (?, ?, ?, ?, ?)",
+                (path, mtime, size, duration, fingerprint),
+            )
+            conn.commit()
+            return True
+        except sqlite3.OperationalError as e:
+            if "locked" not in str(e).lower() or attempt >= retries - 1:
+                log_callback(f"! Fingerprint cache write failed: {e}")
+                return False
+            time.sleep(retry_delay)
+        finally:
+            if conn is not None:
+                conn.close()
+    return False
+
+
 def flush_cache(db_path: str) -> None:
     if not os.path.exists(db_path):
         return
