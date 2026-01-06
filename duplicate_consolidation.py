@@ -1095,6 +1095,62 @@ def _expect_str_mapping(value: object, field: str) -> Dict[str, object]:
     return {str(k): v for k, v in mapping.items()}
 
 
+def _iter_playlists(playlists_dir: str) -> Iterable[str]:
+    if not os.path.isdir(playlists_dir):
+        return []
+    for dirpath, _dirs, files in os.walk(playlists_dir):
+        for fname in files:
+            if fname.lower().endswith(".m3u"):
+                yield os.path.join(dirpath, fname)
+
+
+def _normalize_playlist_entry(entry: str, playlist_dir: str) -> str:
+    if not entry or entry.startswith("#"):
+        return entry
+    if os.path.isabs(entry):
+        return os.path.normpath(entry)
+    return os.path.normpath(os.path.join(playlist_dir, entry))
+
+
+def _playlist_rewrite_losers(playlists_dir: str | None, losers: Iterable[str]) -> tuple[set[str], int]:
+    if not playlists_dir or not os.path.isdir(playlists_dir):
+        return set(), 0
+    loser_set = {os.path.normpath(path) for path in losers if path}
+    if not loser_set:
+        return set(), 0
+    matches: set[str] = set()
+    playlists_with_hits = 0
+    for playlist in _iter_playlists(playlists_dir):
+        try:
+            with open(playlist, "r", encoding="utf-8") as handle:
+                lines = [ln.rstrip("\n") for ln in handle]
+        except OSError:
+            continue
+        playlist_dir = os.path.dirname(playlist)
+        normalized_lines = {_normalize_playlist_entry(ln, playlist_dir) for ln in lines if ln}
+        hit = loser_set & normalized_lines
+        if hit:
+            playlists_with_hits += 1
+            matches.update(hit)
+            if len(matches) == len(loser_set):
+                return matches, playlists_with_hits
+    return matches, playlists_with_hits
+
+
+def _infer_playlists_dir(paths: Sequence[str]) -> str | None:
+    if not paths:
+        return None
+    try:
+        common = os.path.commonpath(paths)
+    except ValueError:
+        return None
+    candidate = common if os.path.isdir(common) else os.path.dirname(common)
+    playlists_dir = os.path.join(candidate, "Playlists")
+    if os.path.isdir(playlists_dir):
+        return playlists_dir
+    return None
+
+
 def build_duplicate_pair_report(
     track_a: Mapping[str, object],
     track_b: Mapping[str, object],
@@ -2099,6 +2155,7 @@ def build_consolidation_plan(
 
     plans: List[GroupPlan] = []
     plan_placeholders = False
+    playlists_dir = _infer_playlists_dir([t.path for t in normalized])
     for cluster in sorted(clusters, key=lambda c: _stable_group_id([t.path for t in c.tracks])):
         cluster_tracks = cluster.tracks
         artwork_hashes = {t.path: _artwork_hash_for_track(t) for t in cluster_tracks}
@@ -2410,7 +2467,8 @@ def build_consolidation_plan(
                     )
 
             dispositions = {loser: "quarantine" for loser in losers}
-            playlist_map = {loser: winner.path for loser in losers}
+            playlist_hits, playlist_count = _playlist_rewrite_losers(playlists_dir, losers)
+            playlist_map = {loser: winner.path for loser in losers if loser in playlist_hits}
 
             group_id = _stable_group_id([t.path for t in group_tracks])
             if ambiguous_art and not suppress_review_flags:
@@ -2434,7 +2492,7 @@ def build_consolidation_plan(
                 group_review = []
                 placeholders = False
 
-            playlist_impact = PlaylistImpact(playlists=len(losers), entries=len(losers))
+            playlist_impact = PlaylistImpact(playlists=playlist_count, entries=len(playlist_hits))
             track_states = {t.path: dict(t.library_state) for t in group_tracks}
 
             artwork_candidates: List[ArtworkCandidate] = []
@@ -2879,6 +2937,16 @@ def export_consolidation_preview_html(
                 }
             )
         return actions
+
+    def _is_noop_group(actions: List[Dict[str, object]]) -> bool:
+        has_non_loser_action = any(
+            act["step"] in {"metadata", "artwork", "playlist"} for act in actions
+        )
+        has_non_retain_loser = any(
+            act["step"] == "loser_cleanup" and act.get("metadata", {}).get("disposition") != "retain"
+            for act in actions
+        )
+        return not has_non_loser_action and not has_non_retain_loser
 
     def _missing_artwork_gate(group: GroupPlan) -> bool:
         for note in group.artwork_evidence:
@@ -3603,6 +3671,8 @@ def export_consolidation_preview_html(
         ".muted{ color: var(--muted); }",
         ".tiny{ font-size: 12px; }",
         ".hidden{ display:none !important; }",
+        ".toggle{ display:flex; align-items:center; gap:6px; }",
+        ".empty{ margin-top:14px; padding:18px; border:1px dashed var(--border); border-radius:8px; color:var(--muted); }",
         "</style>",
         "</head>",
         "<body>",
@@ -3678,6 +3748,7 @@ def export_consolidation_preview_html(
             "<option value='metadata-only'>Metadata only</option>",
             "<option value='failed'>Any failures</option>",
             "</select>",
+            "<label class='toggle tiny'><input type='checkbox' id='showNoOps' /> Show no-op groups</label>",
             "</div>",
             "<div class='right'>",
             "<span class='tiny muted' id='visibleCount'>0 visible</span>",
@@ -3690,6 +3761,7 @@ def export_consolidation_preview_html(
     )
 
     all_actions: List[Dict[str, object]] = []
+    actionable_groups = 0
     for group in plan.groups:
         actions = _planned_actions(group)
         visible_losers = list(group.losers)
@@ -3707,7 +3779,10 @@ def export_consolidation_preview_html(
                 ]
         if not show_artwork_variants and not actions and not visible_losers:
             continue
+        is_noop = _is_noop_group(actions)
         all_actions.extend(actions)
+        if not is_noop:
+            actionable_groups += 1
         state = "review" if group.review_flags else "ready"
         badges = _action_badges(group, actions)
         group_disposition_count = sum(
@@ -3741,6 +3816,7 @@ def export_consolidation_preview_html(
             "data-has-failure='false' "
             f"data-type='{esc(group_type_hint)}' "
             f"data-search='{esc(search_text.lower())}' "
+            f"data-no-op='{str(is_noop).lower()}' "
             f"data-quarantine-count='{group_disposition_count}'>"
         )
         album_art_src = _album_art_src(group, group.winner_path)
@@ -4008,6 +4084,8 @@ def export_consolidation_preview_html(
         html_lines.append("</div>")
         html_lines.append("</details>")
 
+    if actionable_groups == 0:
+        html_lines.append("<div class='empty'>No changes needed.</div>")
     html_lines.append("</main>")
     html_lines.append("<details class='quarantine' id='quarantineIndex'>")
     html_lines.append("<summary class='quarantine-summary'>")
@@ -4081,13 +4159,15 @@ def export_consolidation_preview_html(
         "const groups = () => $$('#groups details.group');"
         "const searchEl = $('#search');"
         "const filterEl = $('#filter');"
+        "const showNoOpsEl = $('#showNoOps');"
         "const visibleCountEl = $('#visibleCount');"
         "const expandAllBtn = $('#expandAll');"
         "const collapseAllBtn = $('#collapseAll');"
         "const settingsBtn = $('#toggleSettings');"
         "const settingsPanel = $('#settingsPanel');"
         "function computeStats(){"
-        "const g = groups();"
+        "const showNoOps = showNoOpsEl ? showNoOpsEl.checked : false;"
+        "const g = groups().filter(d => showNoOps || (d.getAttribute('data-no-op') || 'false') !== 'true');"
         "$('#statGroups').textContent = g.length.toString();"
         "$('#statWinners').textContent = g.length.toString();"
         "let qTotal = 0;"
@@ -4117,6 +4197,7 @@ def export_consolidation_preview_html(
         "function applyFilters(){"
         "const term = (searchEl.value || '').trim().toLowerCase();"
         "const mode = filterEl.value;"
+        "const showNoOps = showNoOpsEl ? showNoOpsEl.checked : false;"
         "let visible = 0;"
         "for (const d of groups()){"
         "const hay = (d.getAttribute('data-search') || '').toLowerCase();"
@@ -4124,15 +4205,17 @@ def export_consolidation_preview_html(
         "const hasQuarantine = (d.getAttribute('data-has-quarantine') || 'false') === 'true';"
         "const hasFailure = (d.getAttribute('data-has-failure') || 'false') === 'true';"
         "const typeHint = (d.getAttribute('data-type') || '').toLowerCase();"
+        "const isNoOp = (d.getAttribute('data-no-op') || 'false') === 'true';"
         "let matchesFilter = true;"
         "if (mode === 'has-quarantine') matchesFilter = hasQuarantine;"
         "if (mode === 'metadata-only') matchesFilter = typeHint === 'metadata-only';"
         "if (mode === 'failed') matchesFilter = hasFailure;"
-        "const show = matchesSearch && matchesFilter;"
+        "const show = matchesSearch && matchesFilter && (showNoOps || !isNoOp);"
         "d.classList.toggle('hidden', !show);"
         "if (show) visible += 1;"
         "}"
         "visibleCountEl.textContent = `${visible} visible`;"
+        "computeStats();"
         "}"
         "for (const btn of $$('button.copy[data-copy], button.copy[data-copy-text]')){"
         "btn.addEventListener('click', async () => {"
@@ -4185,6 +4268,7 @@ def export_consolidation_preview_html(
         "}"
         "searchEl?.addEventListener('input', applyFilters);"
         "filterEl?.addEventListener('change', applyFilters);"
+        "showNoOpsEl?.addEventListener('change', applyFilters);"
         "computeStats();"
         "applyFilters();"
         "})();"
