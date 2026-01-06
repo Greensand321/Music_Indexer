@@ -37,6 +37,7 @@ from tkinter.scrolledtext import ScrolledText
 import textwrap
 import time
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from validator import validate_soundvault_structure
 from music_indexer_api import (
@@ -78,7 +79,7 @@ from config import (
     NEAR_DUPLICATE_THRESHOLD,
     load_config,
 )
-from fingerprint_cache import get_fingerprint
+from fingerprint_cache import get_fingerprint, get_cached_fingerprint, store_fingerprint
 from simple_duplicate_finder import SUPPORTED_EXTS, _compute_fp
 from tag_fixer import MIN_INTERACTIVE_SCORE, FileRecord
 from typing import Any, Callable, List, Mapping
@@ -2688,17 +2689,18 @@ class DuplicateFinderShell(tk.Toplevel):
         self.update_idletasks()
         last_update = time.monotonic()
         update_interval = 0.2
-        for idx, path in enumerate(sorted(audio_paths), start=1):
-            fingerprint_trace: dict[str, object] = {}
-            fp = get_fingerprint(
-                path,
-                db_path,
-                _compute_fp,
-                log_callback=self._log_action,
-                trace=fingerprint_trace,
-            )
-            if not fp:
-                continue
+        def _fingerprint_worker(target_path: str) -> tuple[str, int | None, str | None, str | None]:
+            try:
+                duration, fp = _compute_fp(target_path)
+                return target_path, duration, fp, None
+            except Exception as exc:  # pragma: no cover - depends on external files
+                return target_path, None, None, str(exc)
+
+        def _track_payload(
+            path: str,
+            fp: str,
+            fingerprint_trace: dict[str, object],
+        ) -> dict[str, object]:
             bitrate = 0
             sample_rate = 0
             bit_depth = 0
@@ -2712,31 +2714,92 @@ class DuplicateFinderShell(tk.Toplevel):
                     bit_depth = int(getattr(info, "bits_per_sample", 0) or getattr(info, "bitdepth", 0) or 0)
             except Exception:
                 pass
+            return {
+                "path": path,
+                "fingerprint": fp,
+                "ext": os.path.splitext(path)[1].lower(),
+                "bitrate": bitrate,
+                "sample_rate": sample_rate,
+                "bit_depth": bit_depth,
+                "fingerprint_trace": dict(fingerprint_trace),
+                "discovery": {
+                    "scan_roots": [library_root],
+                    "excluded_dirs": sorted(excluded_dirs),
+                    "skipped_by_filter": False,
+                },
+            }
+
+        tracks_map: dict[str, dict[str, object]] = {}
+        pending_paths: list[str] = []
+        completed = 0
+        failure_count = 0
+        missing_count = 0
+        sorted_paths = sorted(audio_paths)
+        for path in sorted_paths:
+            fingerprint_trace: dict[str, object] = {}
+            fp = get_cached_fingerprint(path, db_path, log_callback=self._log_action, trace=fingerprint_trace)
+            if fp:
+                tracks_map[path] = _track_payload(path, fp, fingerprint_trace)
+                completed += 1
+            else:
+                source = fingerprint_trace.get("source")
+                if source in {"stat_error", "cache_error"}:
+                    failure_count += 1
+                    completed += 1
+                else:
+                    pending_paths.append(path)
             now = time.monotonic()
-            if idx == total or now - last_update >= update_interval:
-                self._set_fingerprint_status(f"Fingerprinting {idx}/{total}")
+            if completed == total or now - last_update >= update_interval:
+                self._set_fingerprint_status(f"Fingerprinting {completed}/{total}")
                 self._set_status(
                     "Fingerprinting…",
-                    progress=self._weighted_progress("fingerprinting", idx / total),
+                    progress=self._weighted_progress("fingerprinting", completed / total),
                 )
                 self.update_idletasks()
                 last_update = now
-            tracks.append(
-                {
-                    "path": path,
-                    "fingerprint": fp,
-                    "ext": os.path.splitext(path)[1].lower(),
-                    "bitrate": bitrate,
-                    "sample_rate": sample_rate,
-                    "bit_depth": bit_depth,
-                    "fingerprint_trace": dict(fingerprint_trace),
-                    "discovery": {
-                        "scan_roots": [library_root],
-                        "excluded_dirs": sorted(excluded_dirs),
-                        "skipped_by_filter": False,
-                    },
-                }
+
+        max_workers = min(8, os.cpu_count() or 4)
+        if pending_paths:
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = {executor.submit(_fingerprint_worker, path): path for path in pending_paths}
+                for fut in as_completed(futures):
+                    path = futures[fut]
+                    error = None
+                    try:
+                        path, duration, fp, error = fut.result()
+                    except Exception as exc:
+                        duration = None
+                        fp = None
+                        error = str(exc)
+                    completed += 1
+                    now = time.monotonic()
+                    if completed == total or now - last_update >= update_interval:
+                        self._set_fingerprint_status(f"Fingerprinting {completed}/{total}")
+                        self._set_status(
+                            "Fingerprinting…",
+                            progress=self._weighted_progress("fingerprinting", completed / total),
+                        )
+                        self.update_idletasks()
+                        last_update = now
+                    if error:
+                        failure_count += 1
+                        self._log_action(f"! Fingerprint failed for {path}: {error}")
+                        continue
+                    if not fp:
+                        missing_count += 1
+                        self._log_action(f"! Missing fingerprint for {path}")
+                        continue
+                    if not store_fingerprint(path, db_path, duration, fp, log_callback=self._log_action):
+                        failure_count += 1
+                    fingerprint_trace = {"source": "computed", "error": ""}
+                    tracks_map[path] = _track_payload(path, fp, fingerprint_trace)
+
+        if missing_count or failure_count:
+            self._log_action(
+                f"Fingerprinting complete with {missing_count} missing fingerprints and "
+                f"{failure_count} failures."
             )
+        tracks = [tracks_map[path] for path in sorted_paths if path in tracks_map]
         return tracks
 
     def _generate_plan(self, write_preview: bool) -> None:
