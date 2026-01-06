@@ -21,6 +21,7 @@ import json
 import logging
 import platform
 import os
+import re
 import shutil
 import tempfile
 import threading
@@ -148,6 +149,7 @@ class ExecutionResult:
 
 EXECUTION_REPORT_FILENAME = "execution_report.html"
 INTERNAL_TAG_KEYS = {"album_type"}
+_NUMERIC_SUFFIX_RE = re.compile(r"\s*\((\d+)\)$")
 
 
 def _timestamped_dir(base: str) -> str:
@@ -279,6 +281,18 @@ def _backup_playlist(path: str, backup_root: str) -> str:
     os.makedirs(os.path.dirname(dest), exist_ok=True)
     shutil.copy2(path, dest)
     return dest
+
+
+def _strip_trailing_numeric_suffix(path: str) -> str | None:
+    base = os.path.basename(path)
+    stem, ext = os.path.splitext(base)
+    match = _NUMERIC_SUFFIX_RE.search(stem)
+    if not match:
+        return None
+    trimmed = stem[: match.start()].rstrip()
+    if not trimmed:
+        return None
+    return os.path.join(os.path.dirname(path), f"{trimmed}{ext}")
 
 
 def _extract_artwork_bytes(path: str) -> bytes | None:
@@ -597,7 +611,12 @@ def execute_consolidation_plan(
     os.makedirs(reports_dir, exist_ok=True)
     os.makedirs(backups_dir, exist_ok=True)
 
-    playlists_dir = config.playlists_dir or os.path.join(config.library_root, "Playlists")
+    playlists_dir = (
+        config.playlists_dir
+        if config.playlists_dir is not None
+        else os.path.join(config.library_root, "Playlists")
+    )
+    update_playlists = bool(playlists_dir)
     quarantine_dir = config.quarantine_dir or os.path.join(config.library_root, "Quarantine")
 
     def _record(
@@ -1275,6 +1294,207 @@ def execute_consolidation_plan(
                         group_id=path_to_group.get(loser),
                     )
                     raise
+
+        # Step 7: cleanup redundant numeric suffixes on winners
+        cleanup_candidates: List[tuple[str, str]] = []
+        for group in plan.groups if plan else []:
+            candidate = _strip_trailing_numeric_suffix(group.winner_path)
+            if candidate and candidate != group.winner_path:
+                cleanup_candidates.append((group.winner_path, candidate))
+
+        rename_map: Dict[str, str] = {}
+        if cleanup_candidates:
+            if config.dry_run_execute:
+                for original, candidate in cleanup_candidates:
+                    _record(
+                        "filename_cleanup",
+                        original,
+                        "skipped",
+                        "Dry-run execute enabled; filename cleanup not applied.",
+                        planned=True,
+                        attempted=False,
+                        verified=False,
+                        verification_detail="Dry-run execute enabled.",
+                        proposed_path=candidate,
+                        group_id=path_to_group.get(original),
+                        skip_reason="dry_run",
+                    )
+            else:
+                for original, candidate in cleanup_candidates:
+                    _check_cancel("filename_cleanup")
+                    if not os.path.exists(original):
+                        _record(
+                            "filename_cleanup",
+                            original,
+                            "skipped",
+                            "Missing source; filename cleanup not applied.",
+                            planned=True,
+                            attempted=False,
+                            verified=False,
+                            verification_detail="Source missing.",
+                            proposed_path=candidate,
+                            group_id=path_to_group.get(original),
+                            skip_reason="missing_source",
+                        )
+                        continue
+                    if os.path.exists(candidate):
+                        _record(
+                            "filename_cleanup",
+                            original,
+                            "skipped",
+                            "Filename cleanup skipped to avoid collision.",
+                            planned=True,
+                            attempted=False,
+                            verified=False,
+                            verification_detail="Destination already exists.",
+                            proposed_path=candidate,
+                            group_id=path_to_group.get(original),
+                            skip_reason="collision",
+                        )
+                        continue
+                    try:
+                        os.replace(
+                            ensure_long_path(original),
+                            ensure_long_path(candidate),
+                        )
+                        verified = os.path.exists(candidate) and not os.path.exists(original)
+                        verification_detail = (
+                            "Filename cleanup verified."
+                            if verified
+                            else "Cleanup rename not confirmed."
+                        )
+                        status = "success" if verified else "failed"
+                        if verified:
+                            rename_map[original] = candidate
+                        else:
+                            success = False
+                        _record(
+                            "filename_cleanup",
+                            original,
+                            status,
+                            "Removed redundant numeric suffix from filename.",
+                            planned=True,
+                            attempted=True,
+                            verified=verified,
+                            verification_detail=verification_detail,
+                            new_path=candidate,
+                            group_id=path_to_group.get(original),
+                        )
+                        if not verified:
+                            raise RuntimeError(f"Filename cleanup verification failed for {original}")
+                    except Exception as exc:
+                        success = False
+                        _record(
+                            "filename_cleanup",
+                            original,
+                            "failed",
+                            f"Failed to cleanup filename: {exc}",
+                            planned=True,
+                            attempted=True,
+                            proposed_path=candidate,
+                            group_id=path_to_group.get(original),
+                        )
+                        raise
+
+        if rename_map:
+            for old_path, new_path in rename_map.items():
+                group_id = path_to_group.pop(old_path, None)
+                if group_id:
+                    path_to_group[new_path] = group_id
+            if not update_playlists:
+                _record(
+                    "filename_cleanup_playlists",
+                    "playlists",
+                    "skipped",
+                    "Playlist updates disabled; filename cleanup not applied to playlists.",
+                    planned=True,
+                    attempted=False,
+                    verified=False,
+                    verification_detail="Playlist updates disabled.",
+                    skip_reason="playlists_disabled",
+                )
+            else:
+                for playlist in _iter_playlists(playlists_dir):
+                    _check_cancel("filename_cleanup_playlists")
+                    base_dir = os.path.dirname(playlist)
+                    replaced, new_lines = _rewrite_playlist(playlist, rename_map, base_dir=base_dir)
+                    if replaced == 0:
+                        continue
+                    if playlist not in playlist_backups:
+                        try:
+                            backup_path = _backup_playlist(playlist, backups_dir)
+                            playlist_backups[playlist] = backup_path
+                            _record(
+                                "backup_playlists",
+                                playlist,
+                                "success",
+                                "Playlist backed up for filename cleanup.",
+                                planned=True,
+                                attempted=True,
+                                verified=os.path.exists(backup_path),
+                                verification_detail="Backup created for filename cleanup.",
+                                backup_path=backup_path,
+                            )
+                        except Exception as exc:
+                            success = False
+                            _record(
+                                "backup_playlists",
+                                playlist,
+                                "failed",
+                                f"Failed to backup playlist for cleanup: {exc}",
+                                planned=True,
+                                attempted=True,
+                            )
+                            raise
+                    try:
+                        _write_playlist_atomic(playlist, new_lines)
+                        verified, verification_detail = _verify_playlist_write(playlist, new_lines)
+                        status = "success" if verified else "failed"
+                        if not verified:
+                            success = False
+                        _record(
+                            "filename_cleanup_playlists",
+                            playlist,
+                            status,
+                            "Playlist rewritten for filename cleanup.",
+                            planned=True,
+                            attempted=True,
+                            verified=verified,
+                            verification_detail=verification_detail,
+                            replaced=replaced,
+                        )
+                        if not verified:
+                            raise RuntimeError(f"Playlist cleanup rewrite verification failed for {playlist}")
+                        missing = _validate_playlist(playlist, base_dir=base_dir)
+                        if missing:
+                            success = False
+                            _record(
+                                "filename_cleanup_validate",
+                                playlist,
+                                "failed",
+                                "Playlist validation failed after filename cleanup.",
+                                attempted=True,
+                                missing=missing,
+                            )
+                            raise RuntimeError(f"Playlist cleanup validation failed for {playlist}")
+                        _record(
+                            "filename_cleanup_validate",
+                            playlist,
+                            "success",
+                            "Playlist validated after filename cleanup.",
+                            attempted=True,
+                        )
+                    except Exception as exc:
+                        success = False
+                        _record(
+                            "filename_cleanup_playlists",
+                            playlist,
+                            "failed",
+                            f"Failed to rewrite playlist for cleanup: {exc}",
+                            planned=True,
+                            attempted=True,
+                        )
+                        raise
     except IndexCancelled:
         success = False
         _record("execution", "execution", "cancelled", "Execution cancelled by user request.")
