@@ -2975,9 +2975,16 @@ class DuplicateFinderShell(tk.Toplevel):
                 self._set_status("Execution failed", progress=100)
                 messagebox.showerror("Execution Failed", str(error))
                 return
-            status = "Executed" if result.success else "Execution failed"
+            cancelled = any(action.status == "cancelled" for action in result.actions)
+            if cancelled:
+                status = "Execution cancelled"
+            else:
+                status = "Executed" if result.success else "Execution failed"
             self._set_status(status, progress=100)
-            self._log_action(f"Execution complete: {'success' if result.success else 'failed'}")
+            if cancelled:
+                self._log_action("Execution complete: cancelled")
+            else:
+                self._log_action(f"Execution complete: {'success' if result.success else 'failed'}")
             report_path = result.report_paths.get("html_report")
             self._log_action(f"Execution report: {report_path}")
             if report_path:
@@ -2988,7 +2995,22 @@ class DuplicateFinderShell(tk.Toplevel):
             else:
                 self.execution_report_path = None
                 self.open_report_btn.config(state="disabled")
-            if not result.success:
+            if cancelled:
+                report_line = ""
+                if report_path:
+                    if os.path.exists(ensure_long_path(report_path)):
+                        report_line = f"\n\nReport (HTML): {report_path}"
+                    else:
+                        report_line = (
+                            "\n\nReport (HTML) was not found at the expected path:\n"
+                            f"{report_path}"
+                        )
+                messagebox.showinfo(
+                    "Execution Cancelled",
+                    "Execution was cancelled. Review the report for details."
+                    f"{report_line}",
+                )
+            elif not result.success:
                 report_line = ""
                 if report_path:
                     if os.path.exists(ensure_long_path(report_path)):
