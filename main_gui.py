@@ -1969,7 +1969,8 @@ class DuplicateFinderShell(tk.Toplevel):
         self.update_playlists_var = tk.BooleanVar(value=False)
         self.quarantine_var = tk.BooleanVar(value=True)
         self.delete_losers_var = tk.BooleanVar(value=False)
-        self.override_review_var = tk.BooleanVar(value=False)
+        self._execute_confirmation_pending = False
+        self.execute_label_var = tk.StringVar(value="Execute")
         cfg = load_config()
         self.show_artwork_variants_var = tk.BooleanVar(
             value=cfg.get("duplicate_finder_show_artwork_variants", True)
@@ -2042,7 +2043,12 @@ class DuplicateFinderShell(tk.Toplevel):
             controls, text="Open Report", command=self._open_execution_report, state="disabled"
         )
         self.open_report_btn.pack(side="left", padx=(0, 6))
-        ttk.Button(controls, text="Execute", command=self._handle_execute).pack(
+        self.execute_btn = ttk.Button(
+            controls,
+            textvariable=self.execute_label_var,
+            command=self._handle_execute,
+        )
+        self.execute_btn.pack(
             side="left", padx=(0, 12)
         )
         ttk.Button(controls, text="⚙️ Thresholds", command=self._open_threshold_settings).pack(
@@ -2072,11 +2078,6 @@ class DuplicateFinderShell(tk.Toplevel):
             variable=self.delete_losers_var,
             command=self._toggle_delete_losers,
         ).pack(side="left", padx=(10, 0))
-        ttk.Checkbutton(
-            controls,
-            text="Override review blocks",
-            variable=self.override_review_var,
-        ).pack(side="left", padx=(10, 0))
 
         # Progress + status
         status_frame = ttk.Frame(container)
@@ -2104,6 +2105,8 @@ class DuplicateFinderShell(tk.Toplevel):
 
         groups_frame = ttk.LabelFrame(results, text="Duplicate Groups")
         groups_frame.grid(row=0, column=0, sticky="nsew", padx=(6, 3), pady=6)
+        groups_frame.configure(height=320)
+        groups_frame.grid_propagate(False)
         ttk.Label(
             groups_frame,
             textvariable=self.fingerprint_status_var,
@@ -2155,8 +2158,13 @@ class DuplicateFinderShell(tk.Toplevel):
         self.group_details.configure(state="disabled")
         self._reset_group_selection()
         self._set_fingerprint_status("Ready.")
+        self._reset_execute_confirmation()
         if note:
             self._log_action(note)
+
+    def _reset_execute_confirmation(self) -> None:
+        self._execute_confirmation_pending = False
+        self.execute_label_var.set("Execute")
 
     def _default_playlist_folder(self, library_path: str) -> str:
         if library_path:
@@ -2364,6 +2372,7 @@ class DuplicateFinderShell(tk.Toplevel):
         self._plan.refresh_plan_signature()
         self._render_group_details(group)
         self._reset_preview_if_needed()
+        self._reset_execute_confirmation()
 
     def _count_group_dispositions(self) -> dict[str, int]:
         counts = {"retain": 0, "quarantine": 0, "delete": 0}
@@ -2629,6 +2638,7 @@ class DuplicateFinderShell(tk.Toplevel):
             self.preview_html_path = None
             self.execution_report_path = None
             self.open_report_btn.config(state="disabled")
+            self._reset_execute_confirmation()
             library_root = self.library_path_var.get().strip()
             if library_root:
                 docs_dir = os.path.join(library_root, "Docs")
@@ -2704,8 +2714,7 @@ class DuplicateFinderShell(tk.Toplevel):
                 pass
             now = time.monotonic()
             if idx == total or now - last_update >= update_interval:
-                label = self._format_track_label(path, audio)
-                self._set_fingerprint_status(f"Fingerprinting {idx}/{total} — {label}")
+                self._set_fingerprint_status(f"Fingerprinting {idx}/{total}")
                 self._set_status(
                     "Fingerprinting…",
                     progress=self._weighted_progress("fingerprinting", idx / total),
@@ -2815,16 +2824,23 @@ class DuplicateFinderShell(tk.Toplevel):
         path = self._validate_library_root()
         if not path:
             return
+        self._reset_execute_confirmation()
         self._log_action("Scan clicked")
         self._generate_plan(write_preview=False)
 
     def _handle_preview(self) -> None:
+        self._reset_execute_confirmation()
         self._log_action("Preview clicked")
         self._generate_plan(write_preview=True)
         if self.preview_html_path:
             self._open_preview()
 
     def _handle_execute(self) -> None:
+        if not self._execute_confirmation_pending:
+            self._execute_confirmation_pending = True
+            self.execute_label_var.set("Confirm Execute")
+            self._log_action("Execute confirmation requested.")
+            return
         path = self._validate_library_root()
         if not path:
             return
@@ -2904,10 +2920,11 @@ class DuplicateFinderShell(tk.Toplevel):
             messagebox.showwarning("Preview Required", "Generate a preview before executing.")
             self._log_action("Execute blocked: no plan generated")
             return
-        if plan_for_checks and plan_for_checks.review_required_count and not self.override_review_var.get():
+        allow_review_required = self._execute_confirmation_pending
+        if plan_for_checks and plan_for_checks.review_required_count and not allow_review_required:
             messagebox.showwarning(
                 "Review Required",
-                "Resolve review-required groups or check Override review blocks to proceed.",
+                "Resolve review-required groups or confirm execution again to bypass the review block.",
             )
             self._log_action("Execute blocked: review required groups pending")
             return
@@ -2949,7 +2966,7 @@ class DuplicateFinderShell(tk.Toplevel):
             quarantine_dir=os.path.join(path, "Quarantine"),
             quarantine_flatten=True,
             log_callback=log_callback,
-            allow_review_required=self.override_review_var.get(),
+            allow_review_required=allow_review_required,
             retain_losers=not self.quarantine_var.get(),
             allow_deletion=deletions_requested,
             confirm_deletion=deletions_requested,
@@ -2968,12 +2985,14 @@ class DuplicateFinderShell(tk.Toplevel):
 
         self._set_status("Executing…", progress=10)
         self._log_action("Execute started")
+        self._reset_execute_confirmation()
 
         def finish(result, error: Exception | None = None) -> None:
             if error is not None:
                 self._log_action(f"Execution failed: {error}")
                 self._set_status("Execution failed", progress=100)
                 messagebox.showerror("Execution Failed", str(error))
+                self._reset_execute_confirmation()
                 return
             cancelled = any(action.status == "cancelled" for action in result.actions)
             if cancelled:
@@ -3025,6 +3044,7 @@ class DuplicateFinderShell(tk.Toplevel):
                     "Execution completed with errors. Review the report for details."
                     f"{report_line}",
                 )
+            self._reset_execute_confirmation()
 
         def worker() -> None:
             try:
@@ -3039,6 +3059,7 @@ class DuplicateFinderShell(tk.Toplevel):
     def _toggle_update_playlists(self) -> None:
         state = "enabled" if self.update_playlists_var.get() else "disabled"
         self._log_action(f"Update Playlists {state}")
+        self._reset_execute_confirmation()
 
     def _toggle_show_artwork_variants(self) -> None:
         enabled = self.show_artwork_variants_var.get()
@@ -3047,6 +3068,7 @@ class DuplicateFinderShell(tk.Toplevel):
         save_config(cfg)
         state = "enabled" if enabled else "disabled"
         self._log_action(f"Show different artwork variants {state}")
+        self._reset_execute_confirmation()
 
     def _toggle_quarantine(self) -> None:
         state = "enabled" if self.quarantine_var.get() else "disabled"
@@ -3059,6 +3081,7 @@ class DuplicateFinderShell(tk.Toplevel):
             self.quarantine_var.set(True)
             self._log_action("Quarantine Duplicates enabled to support deletions.")
         self._reset_preview_if_needed()
+        self._reset_execute_confirmation()
 
     def _toggle_delete_losers(self) -> None:
         if self.delete_losers_var.get():
@@ -3070,6 +3093,7 @@ class DuplicateFinderShell(tk.Toplevel):
             self._log_action("Delete losers disabled; preview will quarantine losers.")
         self._apply_deletion_mode()
         self._reset_preview_if_needed()
+        self._reset_execute_confirmation()
 
     def _apply_deletion_mode(self) -> None:
         if not self._plan:
