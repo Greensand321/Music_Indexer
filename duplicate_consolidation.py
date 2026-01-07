@@ -3750,6 +3750,8 @@ def export_consolidation_preview_html(
             "<option value='metadata-only'>Metadata only</option>",
             "<option value='failed'>Any failures</option>",
             "</select>",
+            "<label class='toggle tiny' title='When unchecked, hides groups marked ready.'>"
+            "<input type='checkbox' id='showReady' /> Show ready groups</label>",
             "<label class='toggle tiny' title='When unchecked, hides groups with no planned operations.'>"
             "<input type='checkbox' id='showNoOps' /> Show no-op groups</label>",
             "<span class='tiny muted'>Hides groups with no planned operations when off.</span>",
@@ -3821,6 +3823,7 @@ def export_consolidation_preview_html(
             f"data-type='{esc(group_type_hint)}' "
             f"data-search='{esc(search_text.lower())}' "
             f"data-no-op='{str(is_noop).lower()}' "
+            f"data-status='{esc(state)}' "
             f"data-quarantine-count='{group_disposition_count}'>"
         )
         album_art_src = _album_art_src(group, group.winner_path)
@@ -4163,6 +4166,7 @@ def export_consolidation_preview_html(
         "const groups = () => $$('#groups details.group');"
         "const searchEl = $('#search');"
         "const filterEl = $('#filter');"
+        "const showReadyEl = $('#showReady');"
         "const showNoOpsEl = $('#showNoOps');"
         "const visibleCountEl = $('#visibleCount');"
         "const expandAllBtn = $('#expandAll');"
@@ -4170,8 +4174,14 @@ def export_consolidation_preview_html(
         "const settingsBtn = $('#toggleSettings');"
         "const settingsPanel = $('#settingsPanel');"
         "function computeStats(){"
+        "const showReady = showReadyEl ? showReadyEl.checked : false;"
         "const showNoOps = showNoOpsEl ? showNoOpsEl.checked : false;"
-        "const g = groups().filter(d => showNoOps || (d.getAttribute('data-no-op') || 'false') !== 'true');"
+        "const g = groups().filter(d => {"
+        "const isNoOp = (d.getAttribute('data-no-op') || 'false') === 'true';"
+        "const status = (d.getAttribute('data-status') || '').toLowerCase();"
+        "const isReady = status === 'ready';"
+        "return (showNoOps || !isNoOp) && (showReady || !isReady);"
+        "});"
         "$('#statGroups').textContent = g.length.toString();"
         "$('#statWinners').textContent = g.length.toString();"
         "let qTotal = 0;"
@@ -4201,6 +4211,7 @@ def export_consolidation_preview_html(
         "function applyFilters(){"
         "const term = (searchEl.value || '').trim().toLowerCase();"
         "const mode = filterEl.value;"
+        "const showReady = showReadyEl ? showReadyEl.checked : false;"
         "const showNoOps = showNoOpsEl ? showNoOpsEl.checked : false;"
         "let visible = 0;"
         "for (const d of groups()){"
@@ -4210,11 +4221,13 @@ def export_consolidation_preview_html(
         "const hasFailure = (d.getAttribute('data-has-failure') || 'false') === 'true';"
         "const typeHint = (d.getAttribute('data-type') || '').toLowerCase();"
         "const isNoOp = (d.getAttribute('data-no-op') || 'false') === 'true';"
+        "const status = (d.getAttribute('data-status') || '').toLowerCase();"
+        "const isReady = status === 'ready';"
         "let matchesFilter = true;"
         "if (mode === 'has-quarantine') matchesFilter = hasQuarantine;"
         "if (mode === 'metadata-only') matchesFilter = typeHint === 'metadata-only';"
         "if (mode === 'failed') matchesFilter = hasFailure;"
-        "const show = matchesSearch && matchesFilter && (showNoOps || !isNoOp);"
+        "const show = matchesSearch && matchesFilter && (showNoOps || !isNoOp) && (showReady || !isReady);"
         "d.classList.toggle('hidden', !show);"
         "if (show) visible += 1;"
         "}"
@@ -4272,6 +4285,7 @@ def export_consolidation_preview_html(
         "}"
         "searchEl?.addEventListener('input', applyFilters);"
         "filterEl?.addEventListener('change', applyFilters);"
+        "showReadyEl?.addEventListener('change', applyFilters);"
         "showNoOpsEl?.addEventListener('change', applyFilters);"
         "computeStats();"
         "applyFilters();"
