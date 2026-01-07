@@ -38,6 +38,7 @@ import textwrap
 import time
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 
 from validator import validate_soundvault_structure
 from music_indexer_api import (
@@ -124,6 +125,17 @@ from utils.audio_metadata_reader import (
     read_sidecar_artwork_bytes,
 )
 from utils.opus_metadata_reader import read_opus_metadata
+
+
+@dataclass
+class PlanGenerationResult:
+    plan: Any | None
+    preview_json_path: str | None
+    preview_html_path: str | None
+    log_messages: list[str]
+    review_required_count: int
+    group_count: int
+    had_tracks: bool
 
 FilterFn = Callable[[FileRecord], bool]
 _cached_filters = None
@@ -2689,9 +2701,17 @@ class DuplicateFinderShell(tk.Toplevel):
         ttk.Button(btn_frame, text="OK", command=_save).pack()
         dlg.wait_window()
 
-    def _gather_tracks(self, library_root: str) -> list[dict[str, object]]:
+    def _gather_tracks(
+        self,
+        library_root: str,
+        *,
+        log_callback: Callable[[str], None] | None = None,
+        status_callback: Callable[[str, float], None] | None = None,
+        fingerprint_status_callback: Callable[[str], None] | None = None,
+        idle_callback: Callable[[], None] | None = None,
+    ) -> tuple[list[dict[str, object]], int, int]:
         if not library_root:
-            return []
+            return [], 0, 0
         docs_dir = os.path.join(library_root, "Docs")
         os.makedirs(docs_dir, exist_ok=True)
         db_path = os.path.join(docs_dir, ".duplicate_fingerprints.db")
@@ -2711,12 +2731,17 @@ class DuplicateFinderShell(tk.Toplevel):
         tracks: list[dict[str, object]] = []
         total = len(audio_paths)
         if total == 0:
-            self._set_fingerprint_status("No eligible audio files found.")
-            self._set_status("Idle", progress=0)
-            return tracks
-        self._set_fingerprint_status(f"Fingerprinting 0/{total}")
-        self._set_status("Fingerprinting…", progress=self._weighted_progress("fingerprinting", 0))
-        self.update_idletasks()
+            if fingerprint_status_callback:
+                fingerprint_status_callback("No eligible audio files found.")
+            if status_callback:
+                status_callback("Idle", progress=0)
+            return tracks, 0, 0
+        if fingerprint_status_callback:
+            fingerprint_status_callback(f"Fingerprinting 0/{total}")
+        if status_callback:
+            status_callback("Fingerprinting…", progress=self._weighted_progress("fingerprinting", 0))
+        if idle_callback:
+            idle_callback()
         last_update = time.monotonic()
         update_interval = 0.2
         def _fingerprint_worker(target_path: str) -> tuple[str, int | None, str | None, str | None]:
@@ -2767,7 +2792,7 @@ class DuplicateFinderShell(tk.Toplevel):
         sorted_paths = sorted(audio_paths)
         for path in sorted_paths:
             fingerprint_trace: dict[str, object] = {}
-            fp = get_cached_fingerprint(path, db_path, log_callback=self._log_action, trace=fingerprint_trace)
+            fp = get_cached_fingerprint(path, db_path, log_callback=log_callback, trace=fingerprint_trace)
             if fp:
                 tracks_map[path] = _track_payload(path, fp, fingerprint_trace)
                 completed += 1
@@ -2780,12 +2805,15 @@ class DuplicateFinderShell(tk.Toplevel):
                     pending_paths.append(path)
             now = time.monotonic()
             if completed == total or now - last_update >= update_interval:
-                self._set_fingerprint_status(f"Fingerprinting {completed}/{total}")
-                self._set_status(
-                    "Fingerprinting…",
-                    progress=self._weighted_progress("fingerprinting", completed / total),
-                )
-                self.update_idletasks()
+                if fingerprint_status_callback:
+                    fingerprint_status_callback(f"Fingerprinting {completed}/{total}")
+                if status_callback:
+                    status_callback(
+                        "Fingerprinting…",
+                        progress=self._weighted_progress("fingerprinting", completed / total),
+                    )
+                if idle_callback:
+                    idle_callback()
                 last_update = now
 
         max_workers = min(8, os.cpu_count() or 4)
@@ -2804,63 +2832,100 @@ class DuplicateFinderShell(tk.Toplevel):
                     completed += 1
                     now = time.monotonic()
                     if completed == total or now - last_update >= update_interval:
-                        self._set_fingerprint_status(f"Fingerprinting {completed}/{total}")
-                        self._set_status(
-                            "Fingerprinting…",
-                            progress=self._weighted_progress("fingerprinting", completed / total),
-                        )
-                        self.update_idletasks()
+                        if fingerprint_status_callback:
+                            fingerprint_status_callback(f"Fingerprinting {completed}/{total}")
+                        if status_callback:
+                            status_callback(
+                                "Fingerprinting…",
+                                progress=self._weighted_progress("fingerprinting", completed / total),
+                            )
+                        if idle_callback:
+                            idle_callback()
                         last_update = now
                     if error:
                         failure_count += 1
-                        self._log_action(f"! Fingerprint failed for {path}: {error}")
+                        if log_callback:
+                            log_callback(f"! Fingerprint failed for {path}: {error}")
                         continue
                     if not fp:
                         missing_count += 1
-                        self._log_action(f"! Missing fingerprint for {path}")
+                        if log_callback:
+                            log_callback(f"! Missing fingerprint for {path}")
                         continue
-                    if not store_fingerprint(path, db_path, duration, fp, log_callback=self._log_action):
+                    if not store_fingerprint(path, db_path, duration, fp, log_callback=log_callback):
                         failure_count += 1
                     fingerprint_trace = {"source": "computed", "error": ""}
                     tracks_map[path] = _track_payload(path, fp, fingerprint_trace)
 
-        if missing_count or failure_count:
-            self._log_action(
-                f"Fingerprinting complete with {missing_count} missing fingerprints and "
-                f"{failure_count} failures."
-            )
         tracks = [tracks_map[path] for path in sorted_paths if path in tracks_map]
-        return tracks
+        return tracks, missing_count, failure_count
 
-    def _generate_plan(self, write_preview: bool) -> None:
+    def _generate_plan(
+        self,
+        library_root: str,
+        *,
+        write_preview: bool,
+        threshold_settings: Mapping[str, float],
+        fingerprint_settings: Mapping[str, object],
+        show_artwork_variants: bool,
+        log_callback: Callable[[str], None] | None = None,
+        status_callback: Callable[[str, float], None] | None = None,
+        fingerprint_status_callback: Callable[[str], None] | None = None,
+        idle_callback: Callable[[], None] | None = None,
+    ) -> PlanGenerationResult:
         timing_enabled = write_preview
+        log_messages: list[str] = []
+
+        def log(msg: str) -> None:
+            log_messages.append(msg)
+            if log_callback:
+                log_callback(msg)
+
+        def report_status(label: str, progress: float) -> None:
+            if status_callback:
+                status_callback(label, progress=progress)
+
+        def report_fingerprint_status(message: str) -> None:
+            if fingerprint_status_callback:
+                fingerprint_status_callback(message)
+
         if timing_enabled:
             plan_start_ts = datetime.now().isoformat(timespec="seconds")
             plan_start_time = time.monotonic()
             logger.info("Preview plan timing start: %s", plan_start_ts)
         try:
-            path = self._validate_library_root()
-            if not path:
-                return
-
-            tracks = self._gather_tracks(path)
+            tracks, missing_count, failure_count = self._gather_tracks(
+                library_root,
+                log_callback=log,
+                status_callback=status_callback,
+                fingerprint_status_callback=fingerprint_status_callback,
+                idle_callback=idle_callback,
+            )
             if not tracks:
-                messagebox.showwarning("No Tracks", "No audio tracks were found in the selected library.")
-                self._set_status("Idle", progress=0)
-                return
-            self._set_fingerprint_status("Grouping duplicates…")
-            self._set_status("Grouping…", progress=self._weighted_progress("grouping", 0))
-            cfg = load_config()
-            threshold_settings = self._current_threshold_settings()
+                return PlanGenerationResult(
+                    plan=None,
+                    preview_json_path=None,
+                    preview_html_path=None,
+                    log_messages=log_messages,
+                    review_required_count=0,
+                    group_count=0,
+                    had_tracks=False,
+                )
+            if missing_count or failure_count:
+                log(
+                    f"Fingerprinting complete with {missing_count} missing fingerprints and "
+                    f"{failure_count} failures."
+                )
+            report_fingerprint_status("Grouping duplicates…")
+            report_status("Grouping…", progress=self._weighted_progress("grouping", 0))
             exact_threshold = threshold_settings["exact_duplicate_threshold"]
             near_threshold = threshold_settings["near_duplicate_threshold"]
             mixed_codec_boost = threshold_settings["mixed_codec_threshold_boost"]
-            fingerprint_settings = self._current_fingerprint_settings()
-            self._log_action(
+            log(
                 "Duplicate scan thresholds: "
                 f"exact={exact_threshold:.3f}, near={near_threshold:.3f}, mixed_codec_boost={mixed_codec_boost:.3f}"
             )
-            self._log_action(f"Fingerprint settings: {fingerprint_settings}")
+            log(f"Fingerprint settings: {fingerprint_settings}")
             plan = build_consolidation_plan(
                 tracks,
                 exact_duplicate_threshold=exact_threshold,
@@ -2869,39 +2934,43 @@ class DuplicateFinderShell(tk.Toplevel):
                 fingerprint_settings=fingerprint_settings,
                 threshold_settings=threshold_settings,
             )
-            self._set_status("Grouping…", progress=self._weighted_progress("grouping", 1))
-            self._plan = plan
-            self.group_disposition_overrides.clear()
-            self._apply_deletion_mode()
+            report_status("Grouping…", progress=self._weighted_progress("grouping", 1))
 
-            docs_dir = os.path.join(path, "Docs")
+            docs_dir = os.path.join(library_root, "Docs")
             os.makedirs(docs_dir, exist_ok=True)
+            preview_json_path = None
+            preview_html_path = None
             if write_preview:
-                self._set_fingerprint_status("Generating preview…")
-                self._set_status("Preview…", progress=self._weighted_progress("preview", 0))
+                report_fingerprint_status("Generating preview…")
+                report_status("Preview…", progress=self._weighted_progress("preview", 0))
                 json_path = os.path.join(docs_dir, "duplicate_preview.json")
                 export_consolidation_preview(plan, json_path)
-                self.preview_json_path = json_path
-                self._log_action(f"Audit JSON written to {json_path}")
+                preview_json_path = json_path
+                log(f"Audit JSON written to {json_path}")
                 html_path = os.path.join(docs_dir, "duplicate_preview.html")
                 export_consolidation_preview_html(
                     plan,
                     html_path,
-                    show_artwork_variants=self.show_artwork_variants_var.get(),
+                    show_artwork_variants=show_artwork_variants,
                 )
-                self.preview_html_path = html_path
-                self._log_action(f"Preview HTML written to {html_path}")
-                self._set_status("Preview generated", progress=self._weighted_progress("preview", 1))
+                preview_html_path = html_path
+                log(f"Preview HTML written to {html_path}")
+                report_status("Preview generated", progress=self._weighted_progress("preview", 1))
             else:
-                self.preview_json_path = None
-                self.preview_html_path = None
-                self._set_status("Plan ready", progress=100)
+                report_status("Plan ready", progress=100)
 
-            self._log_action(
-                f"Plan: {len(plan.groups)} groups, review required={plan.review_required_count}"
-            )
+            log(f"Plan: {len(plan.groups)} groups, review required={plan.review_required_count}")
             if plan.review_required_count:
-                self._log_action("Review required groups will block execution unless overridden.")
+                log("Review required groups will block execution unless overridden.")
+            return PlanGenerationResult(
+                plan=plan,
+                preview_json_path=preview_json_path,
+                preview_html_path=preview_html_path,
+                log_messages=log_messages,
+                review_required_count=plan.review_required_count,
+                group_count=len(plan.groups),
+                had_tracks=True,
+            )
         finally:
             if timing_enabled:
                 plan_elapsed = time.monotonic() - plan_start_time
@@ -2934,7 +3003,27 @@ class DuplicateFinderShell(tk.Toplevel):
             return
         self._reset_execute_confirmation()
         self._log_action("Scan clicked")
-        self._generate_plan(write_preview=False)
+        threshold_settings = self._current_threshold_settings()
+        fingerprint_settings = self._current_fingerprint_settings()
+        result = self._generate_plan(
+            path,
+            write_preview=False,
+            threshold_settings=threshold_settings,
+            fingerprint_settings=fingerprint_settings,
+            show_artwork_variants=self.show_artwork_variants_var.get(),
+            log_callback=self._log_action,
+            status_callback=self._set_status,
+            fingerprint_status_callback=self._set_fingerprint_status,
+            idle_callback=self.update_idletasks,
+        )
+        if not result.had_tracks:
+            messagebox.showwarning("No Tracks", "No audio tracks were found in the selected library.")
+            return
+        self._plan = result.plan
+        self.group_disposition_overrides.clear()
+        self._apply_deletion_mode()
+        self.preview_json_path = None
+        self.preview_html_path = None
 
     def _start_preview_heartbeat(self) -> None:
         self._dup_preview_heartbeat_running = True
@@ -2993,17 +3082,22 @@ class DuplicateFinderShell(tk.Toplevel):
         )
 
     def _handle_preview(self) -> None:
+        path = self._validate_library_root()
+        if not path:
+            return
         self._reset_execute_confirmation()
         self._log_action("Preview clicked")
         start_ts = datetime.now().isoformat(timespec="seconds")
         start_time = time.monotonic()
         logger.info("Preview timing start: %s", start_ts)
         self._start_preview_heartbeat()
-        try:
-            self._generate_plan(write_preview=True)
-            if self.preview_html_path:
-                self._open_preview()
-        finally:
+        self._set_fingerprint_status("Starting preview…")
+        self._set_status("Preview…", progress=0)
+        threshold_settings = self._current_threshold_settings()
+        fingerprint_settings = self._current_fingerprint_settings()
+        show_artwork_variants = self.show_artwork_variants_var.get()
+
+        def finalize_preview() -> None:
             elapsed = time.monotonic() - start_time
             end_ts = datetime.now().isoformat(timespec="seconds")
             self._stop_preview_heartbeat()
@@ -3012,6 +3106,52 @@ class DuplicateFinderShell(tk.Toplevel):
                 end_ts,
                 elapsed,
             )
+
+        def finish(result: PlanGenerationResult | None, error: Exception | None = None) -> None:
+            def schedule(callable_obj, *args) -> None:
+                self.after(0, callable_obj, *args)
+
+            if error is not None:
+                schedule(self._log_action, f"Preview failed: {error}")
+                schedule(self._set_status, "Preview failed", 100)
+                schedule(messagebox.showerror, "Preview Failed", str(error))
+                schedule(finalize_preview)
+                return
+
+            if result is None or not result.had_tracks:
+                schedule(messagebox.showwarning, "No Tracks", "No audio tracks were found in the selected library.")
+                schedule(self._set_status, "Idle", 0)
+                schedule(finalize_preview)
+                return
+
+            self._plan = result.plan
+            self.group_disposition_overrides.clear()
+            self._apply_deletion_mode()
+            self.preview_json_path = result.preview_json_path
+            self.preview_html_path = result.preview_html_path
+
+            for message in result.log_messages:
+                schedule(self._log_action, message)
+            schedule(self._set_status, "Preview generated", self._weighted_progress("preview", 1))
+            if self.preview_html_path:
+                schedule(self._open_preview)
+            schedule(finalize_preview)
+
+        def worker() -> None:
+            try:
+                result = self._generate_plan(
+                    path,
+                    write_preview=True,
+                    threshold_settings=threshold_settings,
+                    fingerprint_settings=fingerprint_settings,
+                    show_artwork_variants=show_artwork_variants,
+                )
+            except Exception as exc:
+                self.after(0, finish, None, exc)
+                return
+            self.after(0, finish, result, None)
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def _handle_execute(self) -> None:
         if not self._execute_confirmation_pending:
