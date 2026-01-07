@@ -2803,69 +2803,82 @@ class DuplicateFinderShell(tk.Toplevel):
         return tracks
 
     def _generate_plan(self, write_preview: bool) -> None:
-        path = self._validate_library_root()
-        if not path:
-            return
+        timing_enabled = write_preview
+        if timing_enabled:
+            plan_start_ts = datetime.now().isoformat(timespec="seconds")
+            plan_start_time = time.monotonic()
+            self._log_action(f"Preview plan timing start: {plan_start_ts}")
+        try:
+            path = self._validate_library_root()
+            if not path:
+                return
 
-        tracks = self._gather_tracks(path)
-        if not tracks:
-            messagebox.showwarning("No Tracks", "No audio tracks were found in the selected library.")
-            self._set_status("Idle", progress=0)
-            return
-        self._set_fingerprint_status("Grouping duplicates…")
-        self._set_status("Grouping…", progress=self._weighted_progress("grouping", 0))
-        cfg = load_config()
-        threshold_settings = self._current_threshold_settings()
-        exact_threshold = threshold_settings["exact_duplicate_threshold"]
-        near_threshold = threshold_settings["near_duplicate_threshold"]
-        mixed_codec_boost = threshold_settings["mixed_codec_threshold_boost"]
-        fingerprint_settings = self._current_fingerprint_settings()
-        self._log_action(
-            "Duplicate scan thresholds: "
-            f"exact={exact_threshold:.3f}, near={near_threshold:.3f}, mixed_codec_boost={mixed_codec_boost:.3f}"
-        )
-        self._log_action(f"Fingerprint settings: {fingerprint_settings}")
-        plan = build_consolidation_plan(
-            tracks,
-            exact_duplicate_threshold=exact_threshold,
-            near_duplicate_threshold=near_threshold,
-            mixed_codec_threshold_boost=mixed_codec_boost,
-            fingerprint_settings=fingerprint_settings,
-            threshold_settings=threshold_settings,
-        )
-        self._set_status("Grouping…", progress=self._weighted_progress("grouping", 1))
-        self._plan = plan
-        self.group_disposition_overrides.clear()
-        self._apply_deletion_mode()
-
-        docs_dir = os.path.join(path, "Docs")
-        os.makedirs(docs_dir, exist_ok=True)
-        if write_preview:
-            self._set_fingerprint_status("Generating preview…")
-            self._set_status("Preview…", progress=self._weighted_progress("preview", 0))
-            json_path = os.path.join(docs_dir, "duplicate_preview.json")
-            export_consolidation_preview(plan, json_path)
-            self.preview_json_path = json_path
-            self._log_action(f"Audit JSON written to {json_path}")
-            html_path = os.path.join(docs_dir, "duplicate_preview.html")
-            export_consolidation_preview_html(
-                plan,
-                html_path,
-                show_artwork_variants=self.show_artwork_variants_var.get(),
+            tracks = self._gather_tracks(path)
+            if not tracks:
+                messagebox.showwarning("No Tracks", "No audio tracks were found in the selected library.")
+                self._set_status("Idle", progress=0)
+                return
+            self._set_fingerprint_status("Grouping duplicates…")
+            self._set_status("Grouping…", progress=self._weighted_progress("grouping", 0))
+            cfg = load_config()
+            threshold_settings = self._current_threshold_settings()
+            exact_threshold = threshold_settings["exact_duplicate_threshold"]
+            near_threshold = threshold_settings["near_duplicate_threshold"]
+            mixed_codec_boost = threshold_settings["mixed_codec_threshold_boost"]
+            fingerprint_settings = self._current_fingerprint_settings()
+            self._log_action(
+                "Duplicate scan thresholds: "
+                f"exact={exact_threshold:.3f}, near={near_threshold:.3f}, mixed_codec_boost={mixed_codec_boost:.3f}"
             )
-            self.preview_html_path = html_path
-            self._log_action(f"Preview HTML written to {html_path}")
-            self._set_status("Preview generated", progress=self._weighted_progress("preview", 1))
-        else:
-            self.preview_json_path = None
-            self.preview_html_path = None
-            self._set_status("Plan ready", progress=100)
+            self._log_action(f"Fingerprint settings: {fingerprint_settings}")
+            plan = build_consolidation_plan(
+                tracks,
+                exact_duplicate_threshold=exact_threshold,
+                near_duplicate_threshold=near_threshold,
+                mixed_codec_threshold_boost=mixed_codec_boost,
+                fingerprint_settings=fingerprint_settings,
+                threshold_settings=threshold_settings,
+            )
+            self._set_status("Grouping…", progress=self._weighted_progress("grouping", 1))
+            self._plan = plan
+            self.group_disposition_overrides.clear()
+            self._apply_deletion_mode()
 
-        self._log_action(
-            f"Plan: {len(plan.groups)} groups, review required={plan.review_required_count}"
-        )
-        if plan.review_required_count:
-            self._log_action("Review required groups will block execution unless overridden.")
+            docs_dir = os.path.join(path, "Docs")
+            os.makedirs(docs_dir, exist_ok=True)
+            if write_preview:
+                self._set_fingerprint_status("Generating preview…")
+                self._set_status("Preview…", progress=self._weighted_progress("preview", 0))
+                json_path = os.path.join(docs_dir, "duplicate_preview.json")
+                export_consolidation_preview(plan, json_path)
+                self.preview_json_path = json_path
+                self._log_action(f"Audit JSON written to {json_path}")
+                html_path = os.path.join(docs_dir, "duplicate_preview.html")
+                export_consolidation_preview_html(
+                    plan,
+                    html_path,
+                    show_artwork_variants=self.show_artwork_variants_var.get(),
+                )
+                self.preview_html_path = html_path
+                self._log_action(f"Preview HTML written to {html_path}")
+                self._set_status("Preview generated", progress=self._weighted_progress("preview", 1))
+            else:
+                self.preview_json_path = None
+                self.preview_html_path = None
+                self._set_status("Plan ready", progress=100)
+
+            self._log_action(
+                f"Plan: {len(plan.groups)} groups, review required={plan.review_required_count}"
+            )
+            if plan.review_required_count:
+                self._log_action("Review required groups will block execution unless overridden.")
+        finally:
+            if timing_enabled:
+                plan_elapsed = time.monotonic() - plan_start_time
+                plan_end_ts = datetime.now().isoformat(timespec="seconds")
+                self._log_action(
+                    f"Preview plan timing end: {plan_end_ts} (elapsed {plan_elapsed:.2f}s)"
+                )
 
     def _load_preview_plan(self, preview_path: str):
         try:
@@ -2891,12 +2904,70 @@ class DuplicateFinderShell(tk.Toplevel):
         self._log_action("Scan clicked")
         self._generate_plan(write_preview=False)
 
+    def _start_preview_heartbeat(self) -> None:
+        self._dup_preview_heartbeat_running = True
+        self._dup_preview_heartbeat_start = time.monotonic()
+        self._dup_preview_heartbeat_last_tick = None
+        self._dup_preview_heartbeat_count = 0
+        self._log_action("Preview heartbeat started (100ms interval).")
+        self.after(int(self._dup_preview_heartbeat_interval * 1000), self._preview_heartbeat_tick)
+
+    def _preview_heartbeat_tick(self) -> None:
+        if not self._dup_preview_heartbeat_running:
+            return
+        now = time.monotonic()
+        if self._dup_preview_heartbeat_last_tick is not None:
+            gap = now - self._dup_preview_heartbeat_last_tick
+            if gap > self._dup_preview_heartbeat_interval * 3:
+                self._log_action(
+                    f"Preview heartbeat delayed by {gap:.2f}s while preview running."
+                )
+        self._dup_preview_heartbeat_last_tick = now
+        self._dup_preview_heartbeat_count += 1
+        self.after(int(self._dup_preview_heartbeat_interval * 1000), self._preview_heartbeat_tick)
+
+    def _stop_preview_heartbeat(self) -> None:
+        if not self._dup_preview_heartbeat_running:
+            return
+        self._dup_preview_heartbeat_running = False
+        now = time.monotonic()
+        elapsed = 0.0
+        if self._dup_preview_heartbeat_start is not None:
+            elapsed = now - self._dup_preview_heartbeat_start
+        if self._dup_preview_heartbeat_count == 0:
+            self._log_action(
+                f"Preview heartbeat did not fire during preview window ({elapsed:.2f}s)."
+            )
+        elif (
+            self._dup_preview_heartbeat_last_tick is not None
+            and now - self._dup_preview_heartbeat_last_tick
+            > self._dup_preview_heartbeat_interval * 3
+        ):
+            stall = now - self._dup_preview_heartbeat_last_tick
+            self._log_action(
+                f"Preview heartbeat stalled for {stall:.2f}s before completion."
+            )
+        self._log_action(
+            f"Preview heartbeat stopped after {elapsed:.2f}s "
+            f"({self._dup_preview_heartbeat_count} ticks)."
+        )
+
     def _handle_preview(self) -> None:
         self._reset_execute_confirmation()
         self._log_action("Preview clicked")
-        self._generate_plan(write_preview=True)
-        if self.preview_html_path:
-            self._open_preview()
+        start_ts = datetime.now().isoformat(timespec="seconds")
+        start_time = time.monotonic()
+        self._log_action(f"Preview timing start: {start_ts}")
+        self._start_preview_heartbeat()
+        try:
+            self._generate_plan(write_preview=True)
+            if self.preview_html_path:
+                self._open_preview()
+        finally:
+            elapsed = time.monotonic() - start_time
+            end_ts = datetime.now().isoformat(timespec="seconds")
+            self._stop_preview_heartbeat()
+            self._log_action(f"Preview timing end: {end_ts} (elapsed {elapsed:.2f}s)")
 
     def _handle_execute(self) -> None:
         if not self._execute_confirmation_pending:
@@ -4246,6 +4317,11 @@ class SoundVaultImporterApp(tk.Tk):
         self._preview_in_progress = False
         self._player_busy_item: str | None = None
         self._ignore_next_preview_finish = False
+        self._dup_preview_heartbeat_running = False
+        self._dup_preview_heartbeat_start: float | None = None
+        self._dup_preview_heartbeat_last_tick: float | None = None
+        self._dup_preview_heartbeat_count = 0
+        self._dup_preview_heartbeat_interval = 0.1
 
         # Player tab state
         self.player_tracks: list[dict[str, str]] = []
