@@ -5,7 +5,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Callable, List, Tuple, Dict, Optional, Iterator
 
 from fingerprint_cache import get_fingerprint
-from near_duplicate_detector import fingerprint_distance
+from near_duplicate_detector import fingerprint_distance, _coarse_fingerprint_keys, _coarse_gate
 import chromaprint_utils
 from config import load_config, FP_DURATION_MS, FP_OFFSET_MS, FP_SILENCE_MIN_LEN_MS, FP_SILENCE_THRESHOLD_DB
 
@@ -148,20 +148,39 @@ def find_duplicates(
 
     groups: List[Dict[str, object]] = []
     prefix_map: Dict[str, List[Dict[str, object]]] = {}
+    coarse_index: Dict[str, List[Dict[str, object]]] = {}
     use_prefix = prefix_len is not None and prefix_len > 0
 
     def handle_fingerprint(path: str, fp: str) -> None:
         prefix = fp[:prefix_len] if use_prefix else ""
         log_callback(f"[GROUP] path={path}, prefix={prefix}")
+        coarse_keys = _coarse_fingerprint_keys(fp)
+        candidate_groups: Dict[int, Dict[str, object]] = {}
+        if coarse_keys:
+            for key in coarse_keys:
+                for g in coarse_index.get(key, []):
+                    candidate_groups[id(g)] = g
+        else:
+            for groups_for_key in prefix_map.values():
+                for g in groups_for_key:
+                    candidate_groups[id(g)] = g
+
+        coarse_candidate_count = len(candidate_groups)
         cand_groups: List[Tuple[Dict[str, object], str]] = []
         if use_prefix:
-            for key, groups_for_key in prefix_map.items():
-                if prefix_distance(prefix, key) <= PREFIX_THRESHOLD:
-                    for g in groups_for_key:
-                        cand_groups.append((g, key))
+            for g in candidate_groups.values():
+                group_prefix = g.get("prefix", "")
+                if not coarse_keys or _coarse_gate(coarse_keys, g.get("coarse_keys", [])):
+                    if prefix_distance(prefix, group_prefix) <= PREFIX_THRESHOLD:
+                        cand_groups.append((g, group_prefix))
         else:
-            for g in prefix_map.get(prefix, []):
-                cand_groups.append((g, prefix))
+            for g in candidate_groups.values():
+                if _coarse_gate(coarse_keys, g.get("coarse_keys", [])) or not coarse_keys:
+                    cand_groups.append((g, g.get("prefix", "")))
+        log_callback(
+            f"[COARSE] {path} coarse candidates {coarse_candidate_count} -> "
+            f"prefix candidates {len(cand_groups)}"
+        )
         _dlog("GROUP", f"file {path} -> prefix {prefix}")
         _dlog("GROUP", f"{len(cand_groups)} groups for prefix")
         placed = False
@@ -181,9 +200,11 @@ def find_duplicates(
                 placed = True
                 break
         if not placed:
-            g = {"fp": fp, "paths": [path]}
+            g = {"fp": fp, "paths": [path], "prefix": prefix, "coarse_keys": coarse_keys}
             prefix_map.setdefault(prefix, []).append(g)
             groups.append(g)
+            for key in coarse_keys:
+                coarse_index.setdefault(key, []).append(g)
             _dlog("GROUP", f"new group for prefix {prefix}")
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
