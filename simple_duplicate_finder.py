@@ -148,21 +148,45 @@ def find_duplicates(
 
     total = len(audio_paths)
     file_data: List[Tuple[str, str]] = []
-    futures: Dict[object, Tuple[int, str]] = {}
+    in_flight: Dict[object, Tuple[int, str]] = {}
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        effective_workers = max_workers if max_workers is not None else executor._max_workers
+        max_in_flight = max(1, effective_workers * 2)
+
+        def submit_task(idx: int, path: str) -> None:
+            if progress_callback:
+                progress_callback("fp_start", idx, total, path)
+            fut = executor.submit(
+                get_fingerprint, path, db_path, compute, log_callback=log_callback
+            )
+            in_flight[fut] = (idx, path)
+
         for idx, p in enumerate(audio_paths, 1):
             if cancel_event and cancel_event.is_set():
                 break
-            if progress_callback:
-                progress_callback("fp_start", idx, total, p)
-            fut = executor.submit(
-                get_fingerprint, p, db_path, compute, log_callback=log_callback
-            )
-            futures[fut] = (idx, p)
+            submit_task(idx, p)
+            while len(in_flight) >= max_in_flight:
+                fut = next(as_completed(in_flight))
+                idx, p = in_flight.pop(fut)
+                if cancel_event and cancel_event.is_set():
+                    break
+                fp = fut.result()
+                if progress_callback:
+                    progress_callback("fp_end", idx, total, p)
+                if fp:
+                    log_callback(f"\u2713 Fingerprinted {p}")
+                    show_pref = fp[:prefix_len] if (prefix_len and prefix_len > 0) else ""
+                    _dlog("FP", f"prefix={show_pref} value={fp}")
+                    file_data.append((p, fp))
+                    _dlog("GROUP", f"added file_data {p}")
+                else:
+                    log_callback(f"\u2717 No fingerprint for {p}")
+            if cancel_event and cancel_event.is_set():
+                break
 
-        for fut in as_completed(futures):
-            idx, p = futures[fut]
+        for fut in as_completed(in_flight):
+            idx, p = in_flight[fut]
             if cancel_event and cancel_event.is_set():
                 break
             fp = fut.result()
@@ -178,7 +202,7 @@ def find_duplicates(
                 log_callback(f"\u2717 No fingerprint for {p}")
 
     if cancel_event and cancel_event.is_set():
-        for fut in futures:
+        for fut in in_flight:
             fut.cancel()
 
     groups: List[Dict[str, object]] = []
