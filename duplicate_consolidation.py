@@ -1003,6 +1003,64 @@ class ConsolidationPlan:
         return signature
 
 
+def _planned_actions(group: GroupPlan) -> List[Dict[str, object]]:
+    actions: List[Dict[str, object]] = []
+    for path, changes in group.metadata_changes.items():
+        fields = sorted(changes.keys()) if isinstance(changes, Mapping) else list(changes or [])
+        actions.append(
+            {
+                "step": "metadata",
+                "target": path,
+                "status": "review",
+                "detail": "Planned metadata updates.",
+                "metadata": {"fields": fields},
+            }
+        )
+    for directive in group.artwork:
+        actions.append(
+            {
+                "step": "artwork",
+                "target": directive.target,
+                "status": "review",
+                "detail": f"Migrate artwork from {directive.source} to {directive.target}.",
+                "metadata": {"source": directive.source, "reason": directive.reason},
+            }
+        )
+    for loser in group.losers:
+        disposition = group.loser_disposition.get(loser, "quarantine")
+        actions.append(
+            {
+                "step": "loser_cleanup",
+                "target": loser,
+                "status": "review",
+                "detail": f"Loser marked for {disposition}.",
+                "metadata": {"disposition": disposition},
+            }
+        )
+    for playlist, destination in group.playlist_rewrites.items():
+        actions.append(
+            {
+                "step": "playlist",
+                "target": playlist,
+                "status": "review",
+                "detail": "Planned playlist rewrite.",
+                "metadata": {"destination": destination},
+            }
+        )
+    return actions
+
+
+def _is_noop_group(actions: List[Dict[str, object]]) -> bool:
+    has_non_loser_action = any(
+        act["step"] in {"metadata", "artwork", "playlist"} for act in actions
+    )
+    has_non_retain_loser = any(
+        act["step"] == "loser_cleanup" and act.get("metadata", {}).get("disposition") != "retain"
+        for act in actions
+    )
+    return not has_non_loser_action and not has_non_retain_loser
+
+
 @dataclass
 class PairInspectionStep:
     name: str
@@ -2892,62 +2950,6 @@ def export_consolidation_preview_html(
             return f"{detail_html}<div class='tiny muted'>{meta_html}</div>"
         return detail_html
 
-    def _planned_actions(group: GroupPlan) -> List[Dict[str, object]]:
-        actions: List[Dict[str, object]] = []
-        for path, changes in group.metadata_changes.items():
-            fields = sorted(changes.keys())
-            actions.append(
-                {
-                    "step": "metadata",
-                    "target": path,
-                    "status": "review",
-                    "detail": "Planned metadata updates.",
-                    "metadata": {"fields": fields},
-                }
-            )
-        for directive in group.artwork:
-            actions.append(
-                {
-                    "step": "artwork",
-                    "target": directive.target,
-                    "status": "review",
-                    "detail": f"Migrate artwork from {directive.source} to {directive.target}.",
-                    "metadata": {"source": directive.source, "reason": directive.reason},
-                }
-            )
-        for loser in group.losers:
-            disposition = group.loser_disposition.get(loser, "quarantine")
-            actions.append(
-                {
-                    "step": "loser_cleanup",
-                    "target": loser,
-                    "status": "review",
-                    "detail": f"Loser marked for {disposition}.",
-                    "metadata": {"disposition": disposition},
-                }
-            )
-        for playlist, destination in group.playlist_rewrites.items():
-            actions.append(
-                {
-                    "step": "playlist",
-                    "target": playlist,
-                    "status": "review",
-                    "detail": "Planned playlist rewrite.",
-                    "metadata": {"destination": destination},
-                }
-            )
-        return actions
-
-    def _is_noop_group(actions: List[Dict[str, object]]) -> bool:
-        has_non_loser_action = any(
-            act["step"] in {"metadata", "artwork", "playlist"} for act in actions
-        )
-        has_non_retain_loser = any(
-            act["step"] == "loser_cleanup" and act.get("metadata", {}).get("disposition") != "retain"
-            for act in actions
-        )
-        return not has_non_loser_action and not has_non_retain_loser
-
     def _missing_artwork_gate(group: GroupPlan) -> bool:
         for note in group.artwork_evidence:
             lowered = note.lower()
@@ -3748,7 +3750,9 @@ def export_consolidation_preview_html(
             "<option value='metadata-only'>Metadata only</option>",
             "<option value='failed'>Any failures</option>",
             "</select>",
-            "<label class='toggle tiny'><input type='checkbox' id='showNoOps' /> Show no-op groups</label>",
+            "<label class='toggle tiny' title='When unchecked, hides groups with no planned operations.'>"
+            "<input type='checkbox' id='showNoOps' /> Show no-op groups</label>",
+            "<span class='tiny muted'>Hides groups with no planned operations when off.</span>",
             "</div>",
             "<div class='right'>",
             "<span class='tiny muted' id='visibleCount'>0 visible</span>",

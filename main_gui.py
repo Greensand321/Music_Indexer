@@ -46,6 +46,8 @@ from music_indexer_api import (
     get_tags,
 )
 from duplicate_consolidation import (
+    _is_noop_group,
+    _planned_actions,
     build_consolidation_plan,
     build_duplicate_pair_report,
     consolidation_plan_from_dict,
@@ -1976,6 +1978,7 @@ class DuplicateFinderShell(tk.Toplevel):
         self.show_artwork_variants_var = tk.BooleanVar(
             value=cfg.get("duplicate_finder_show_artwork_variants", True)
         )
+        self.show_noop_groups_var = tk.BooleanVar(value=False)
         self.group_disposition_var = tk.StringVar(value="")
         self.group_disposition_overrides: dict[str, str] = {}
         self._selected_group_id: str | None = None
@@ -2061,6 +2064,17 @@ class DuplicateFinderShell(tk.Toplevel):
             variable=self.show_artwork_variants_var,
             command=self._toggle_show_artwork_variants,
         ).pack(side="left", padx=(0, 10))
+        show_noop_toggle = ttk.Checkbutton(
+            controls,
+            text="Show no-op groups",
+            variable=self.show_noop_groups_var,
+            command=self._toggle_show_noop_groups,
+        )
+        show_noop_toggle.pack(side="left", padx=(0, 10))
+        Tooltip(
+            show_noop_toggle,
+            lambda: "When unchecked, hides groups with no planned operations.",
+        )
         ttk.Checkbutton(
             controls,
             text="Update Playlists",
@@ -2265,7 +2279,11 @@ class DuplicateFinderShell(tk.Toplevel):
 
     def _update_groups_view(self, plan) -> None:
         self.groups_tree.delete(*self.groups_tree.get_children())
+        show_noop_groups = self.show_noop_groups_var.get()
         for group in plan.groups:
+            actions = _planned_actions(group)
+            if _is_noop_group(actions) and not show_noop_groups:
+                continue
             title = plan and group.planned_winner_tags.get("title") if hasattr(group, "planned_winner_tags") else None
             status = "Review" if group.review_flags else "Ready"
             self.groups_tree.insert(
@@ -2281,6 +2299,12 @@ class DuplicateFinderShell(tk.Toplevel):
         self.group_details.insert("end", "Select a group to view details.")
         self.group_details.configure(state="disabled")
         self._reset_group_selection()
+
+    def _toggle_show_noop_groups(self) -> None:
+        state = "enabled" if self.show_noop_groups_var.get() else "disabled"
+        self._log_action(f"Show no-op groups {state}")
+        if self._plan:
+            self._update_groups_view(self._plan)
 
     def _on_group_select(self, event=None) -> None:
         sel = self.groups_tree.selection()
