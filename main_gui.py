@@ -1991,6 +1991,12 @@ class DuplicateFinderShell(tk.Toplevel):
             "grouping": 0.2,
             "preview": 0.1,
         }
+        self._dup_preview_heartbeat_running = False
+        self._dup_preview_heartbeat_start: float | None = None
+        self._dup_preview_heartbeat_last_tick: float | None = None
+        self._dup_preview_heartbeat_count = 0
+        self._dup_preview_heartbeat_interval = 0.1
+        self._dup_preview_heartbeat_stall_logged = False
 
         container = ttk.Frame(self)
         container.pack(fill="both", expand=True, padx=10, pady=10)
@@ -3160,63 +3166,73 @@ class DuplicateFinderShell(tk.Toplevel):
         self._reset_execute_confirmation()
 
         def finish(result, error: Exception | None = None) -> None:
-            if error is not None:
-                self._log_action(f"Execution failed: {error}")
-                self._set_status("Execution failed", progress=100)
-                messagebox.showerror("Execution Failed", str(error))
+            try:
+                if error is not None:
+                    self._log_action(f"Execution failed: {error}")
+                    self._set_status("Execution failed", progress=100)
+                    messagebox.showerror("Execution Failed", str(error))
+                    self._reset_execute_confirmation()
+                    return
+                cancelled = any(action.status == "cancelled" for action in result.actions)
+                if cancelled:
+                    status = "Execution cancelled"
+                else:
+                    status = "Executed" if result.success else "Execution failed"
+                self._set_status(status, progress=100)
+                if cancelled:
+                    self._log_action("Execution complete: cancelled")
+                else:
+                    self._log_action(f"Execution complete: {'success' if result.success else 'failed'}")
+                report_path = result.report_paths.get("html_report")
+                self._log_action(f"Execution report: {report_path}")
+                if report_path:
+                    if not os.path.exists(ensure_long_path(report_path)):
+                        self._log_action("Execution report missing at expected path; enabling Open Report anyway.")
+                    self.execution_report_path = report_path
+                    self.open_report_btn.config(state="normal")
+                else:
+                    self.execution_report_path = None
+                    self.open_report_btn.config(state="disabled")
+                if cancelled:
+                    report_line = ""
+                    if report_path:
+                        if os.path.exists(ensure_long_path(report_path)):
+                            report_line = f"\n\nReport (HTML): {report_path}"
+                        else:
+                            report_line = (
+                                "\n\nReport (HTML) was not found at the expected path:\n"
+                                f"{report_path}"
+                            )
+                    messagebox.showinfo(
+                        "Execution Cancelled",
+                        "Execution was cancelled. Review the report for details."
+                        f"{report_line}",
+                    )
+                elif not result.success:
+                    report_line = ""
+                    if report_path:
+                        if os.path.exists(ensure_long_path(report_path)):
+                            report_line = f"\n\nReport (HTML): {report_path}"
+                        else:
+                            report_line = (
+                                "\n\nReport (HTML) was not found at the expected path:\n"
+                                f"{report_path}"
+                            )
+                    messagebox.showwarning(
+                        "Execution Failed",
+                        "Execution completed with errors. Review the report for details."
+                        f"{report_line}",
+                    )
                 self._reset_execute_confirmation()
-                return
-            cancelled = any(action.status == "cancelled" for action in result.actions)
-            if cancelled:
-                status = "Execution cancelled"
-            else:
-                status = "Executed" if result.success else "Execution failed"
-            self._set_status(status, progress=100)
-            if cancelled:
-                self._log_action("Execution complete: cancelled")
-            else:
-                self._log_action(f"Execution complete: {'success' if result.success else 'failed'}")
-            report_path = result.report_paths.get("html_report")
-            self._log_action(f"Execution report: {report_path}")
-            if report_path:
-                if not os.path.exists(ensure_long_path(report_path)):
-                    self._log_action("Execution report missing at expected path; enabling Open Report anyway.")
-                self.execution_report_path = report_path
-                self.open_report_btn.config(state="normal")
-            else:
-                self.execution_report_path = None
-                self.open_report_btn.config(state="disabled")
-            if cancelled:
-                report_line = ""
-                if report_path:
-                    if os.path.exists(ensure_long_path(report_path)):
-                        report_line = f"\n\nReport (HTML): {report_path}"
-                    else:
-                        report_line = (
-                            "\n\nReport (HTML) was not found at the expected path:\n"
-                            f"{report_path}"
-                        )
-                messagebox.showinfo(
-                    "Execution Cancelled",
-                    "Execution was cancelled. Review the report for details."
-                    f"{report_line}",
-                )
-            elif not result.success:
-                report_line = ""
-                if report_path:
-                    if os.path.exists(ensure_long_path(report_path)):
-                        report_line = f"\n\nReport (HTML): {report_path}"
-                    else:
-                        report_line = (
-                            "\n\nReport (HTML) was not found at the expected path:\n"
-                            f"{report_path}"
-                        )
-                messagebox.showwarning(
+            except Exception as exc:
+                self._log_action(f"Execution finish handler failed: {exc}")
+                self._set_status("Execution failed", progress=100)
+                messagebox.showerror(
                     "Execution Failed",
-                    "Execution completed with errors. Review the report for details."
-                    f"{report_line}",
+                    "An unexpected error occurred while finalizing execution. "
+                    "Check the log for details.",
                 )
-            self._reset_execute_confirmation()
+                self._reset_execute_confirmation()
 
         def worker() -> None:
             try:
