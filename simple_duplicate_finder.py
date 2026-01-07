@@ -171,7 +171,11 @@ def find_duplicates(
                 idx, p = in_flight.pop(fut)
                 if cancel_event and cancel_event.is_set():
                     break
-                fp = fut.result()
+                try:
+                    fp = fut.result()
+                except Exception as exc:
+                    fp = None
+                    log_callback(f"! Fingerprint task failed for {p}: {exc}")
                 if progress_callback:
                     progress_callback("fp_end", idx, total, p)
                 if fp:
@@ -189,7 +193,11 @@ def find_duplicates(
             idx, p = in_flight[fut]
             if cancel_event and cancel_event.is_set():
                 break
-            fp = fut.result()
+            try:
+                fp = fut.result()
+            except Exception as exc:
+                fp = None
+                log_callback(f"! Fingerprint task failed for {p}: {exc}")
             if progress_callback:
                 progress_callback("fp_end", idx, total, p)
             if fp:
