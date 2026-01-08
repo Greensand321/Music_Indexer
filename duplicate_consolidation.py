@@ -15,6 +15,7 @@ import hashlib
 import importlib.util
 import io
 import json
+import logging
 import os
 import platform
 import re
@@ -41,6 +42,8 @@ if _PIL_AVAILABLE:
     from PIL import Image  # type: ignore
 else:  # pragma: no cover - optional dependency
     Image = None  # type: ignore
+
+logger = logging.getLogger(__name__)
 
 from music_indexer_api import extract_primary_and_collabs
 from near_duplicate_detector import fingerprint_distance, _parse_fp as _parse_fingerprint
@@ -361,7 +364,11 @@ def _hamming_distance(left: int, right: int) -> int:
 
 def _artwork_hash_for_track(track: "DuplicateTrack") -> int | None:
     blob = _best_artwork_blob(track.artwork)
-    if not blob or not blob.bytes:
+    if not blob:
+        return None
+    if blob.perceptual_hash is not None:
+        return blob.perceptual_hash
+    if not blob.bytes:
         return None
     return _artwork_perceptual_hash(blob.bytes)
 
@@ -594,7 +601,10 @@ def _extract_audio_properties(audio, path: str, provided_tags: Mapping[str, obje
 
 
 def _read_tags_and_artwork(
-    path: str, provided_tags: Mapping[str, object] | None
+    path: str,
+    provided_tags: Mapping[str, object] | None,
+    *,
+    include_artwork_bytes: bool = True,
 ) -> tuple[Dict[str, object], List[ArtworkCandidate], Optional[str], Optional[str], Dict[str, object], Dict[str, object]]:
     audio, error = _read_audio_file(path)
     file_tags, cover_payloads, read_error, _reader = read_metadata(path, include_cover=True)
@@ -617,6 +627,7 @@ def _read_tags_and_artwork(
     if cover_payloads:
         for payload in cover_payloads:
             width, height = _extract_image_dimensions(payload)
+            perceptual_hash = _artwork_perceptual_hash(payload)
             artwork.append(
                 ArtworkCandidate(
                     path=path,
@@ -625,7 +636,8 @@ def _read_tags_and_artwork(
                     width=width,
                     height=height,
                     status="ok",
-                    bytes=payload,
+                    bytes=payload if include_artwork_bytes else None,
+                    perceptual_hash=perceptual_hash,
                 )
             )
         base["cover_hash"] = artwork[0].hash
@@ -695,6 +707,7 @@ class ArtworkCandidate:
     height: Optional[int]
     status: str
     bytes: bytes | None = None
+    perceptual_hash: int | None = None
 
     def to_dict(self) -> Dict[str, object]:
         return {
@@ -1583,15 +1596,28 @@ def consolidation_plan_from_dict(raw: Mapping[str, object]) -> ConsolidationPlan
     )
 
 
-def _normalize_track(raw: Mapping[str, object], *, quick_state: bool = False) -> DuplicateTrack:
+def _normalize_track(
+    raw: Mapping[str, object],
+    *,
+    quick_state: bool = False,
+    include_artwork_bytes: bool = True,
+) -> DuplicateTrack:
     path = str(raw.get("path"))
     ext = os.path.splitext(path)[1].lower() or str(raw.get("ext", "")).lower()
     provided_tags = raw.get("tags") if isinstance(raw.get("tags"), Mapping) else {}
-    current_tags, artwork, meta_err, art_err, audio_props, meta_trace = _read_tags_and_artwork(path, provided_tags)
+    current_tags, artwork, meta_err, art_err, audio_props, meta_trace = _read_tags_and_artwork(
+        path,
+        provided_tags,
+        include_artwork_bytes=include_artwork_bytes,
+    )
     library_state = _capture_library_state(path, quick=quick_state)
     provided_artwork: List[ArtworkCandidate] = []
     for art in raw.get("artwork", []) if isinstance(raw.get("artwork"), list) else []:
         try:
+            raw_bytes = art.get("bytes")
+            perceptual_hash = (
+                _artwork_perceptual_hash(raw_bytes) if isinstance(raw_bytes, (bytes, bytearray)) else None
+            )
             provided_artwork.append(
                 ArtworkCandidate(
                     path=path,
@@ -1600,7 +1626,8 @@ def _normalize_track(raw: Mapping[str, object], *, quick_state: bool = False) ->
                     width=art.get("width"),
                     height=art.get("height"),
                     status=art.get("status", "ok"),
-                    bytes=art.get("bytes"),
+                    bytes=raw_bytes if include_artwork_bytes else None,
+                    perceptual_hash=perceptual_hash,
                 )
             )
         except Exception:
@@ -2194,7 +2221,7 @@ def build_consolidation_plan(
         if cancel_event.is_set():
             review_flags.append("Cancelled before normalization.")
             break
-        normalized.append(_normalize_track(raw, quick_state=True))
+        normalized.append(_normalize_track(raw, quick_state=True, include_artwork_bytes=False))
         if len(normalized) >= max_candidates:
             review_flags.append(f"Truncated candidate set to {max_candidates} items to protect runtime.")
             break
@@ -2988,6 +3015,35 @@ def export_consolidation_preview_html(
             return False
         return _hamming_distance(winner_hash, loser_hash) > threshold
 
+    artwork_payload_cache: Dict[str, Dict[str, bytes]] = {}
+
+    def _load_artwork_payloads(path: str) -> Dict[str, bytes]:
+        cached = artwork_payload_cache.get(path)
+        if cached is not None:
+            return cached
+        _tags, cover_payloads, _err, _reader = read_metadata(path, include_cover=True)
+        if not cover_payloads:
+            sidecar_payload = read_sidecar_artwork_bytes(path)
+            if sidecar_payload:
+                cover_payloads = [sidecar_payload]
+        if cover_payloads:
+            logger.info("Loaded artwork bytes for preview: %s (%d payloads)", path, len(cover_payloads))
+        else:
+            logger.info("Loaded artwork bytes for preview: %s (no payloads found)", path)
+        payloads_by_hash: Dict[str, bytes] = {}
+        for payload in cover_payloads:
+            payloads_by_hash[hashlib.sha256(payload).hexdigest()] = payload
+        artwork_payload_cache[path] = payloads_by_hash
+        return payloads_by_hash
+
+    def _candidate_payload(candidate: ArtworkCandidate) -> bytes | None:
+        if candidate.bytes:
+            return candidate.bytes
+        payload = _load_artwork_payloads(candidate.path).get(candidate.hash)
+        if payload:
+            candidate.bytes = payload
+        return payload
+
     def _album_art_src(
         group: GroupPlan,
         track_path: str,
@@ -2998,21 +3054,22 @@ def export_consolidation_preview_html(
             raw_hash = group.chosen_artwork_source.get("hash")
             if raw_hash:
                 chosen_hash = str(raw_hash)
-        fallback: ArtworkCandidate | None = None
-        path_fallback: ArtworkCandidate | None = None
+        fallback: tuple[ArtworkCandidate, bytes] | None = None
+        path_fallback: tuple[ArtworkCandidate, bytes] | None = None
         for candidate in group.artwork_candidates:
-            if not candidate.bytes:
+            payload = _candidate_payload(candidate)
+            if not payload:
                 continue
             if chosen_hash and candidate.hash == chosen_hash:
-                return _image_data_uri(candidate.bytes)
+                return _image_data_uri(payload)
             if track_path and candidate.path == track_path and path_fallback is None:
-                path_fallback = candidate
+                path_fallback = (candidate, payload)
             if fallback is None:
-                fallback = candidate
-        if path_fallback and path_fallback.bytes:
-            return _image_data_uri(path_fallback.bytes)
-        if fallback and fallback.bytes:
-            return _image_data_uri(fallback.bytes)
+                fallback = (candidate, payload)
+        if path_fallback:
+            return _image_data_uri(path_fallback[1])
+        if fallback:
+            return _image_data_uri(fallback[1])
         return None
 
     def _image_data_uri(payload: bytes) -> str:
