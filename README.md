@@ -1,3 +1,5 @@
+<img width="1024" height="432" alt="AlphaDEX" src="https://github.com/user-attachments/assets/d8eb11c2-6a50-47d1-8932-77a53cee9b17" />
+
 # SoundVault a Music Indexer
 
 Welcome to SoundVault! If you have a library of songs with mixed codecs, duplicates, messy metadata, and disorganized folders, SoundVault is built to fix all of it. It is designed for casual users and enthusiasts alike, and the tools inside are the result of years of frustration born from too many songs, too little space, and no desire to manually sort thousands of files. The current feature set represents 500+ hours of focused work over roughly six months, with the original vision first outlined more than five years ago when the music collection began. The advent of AI made it possible to extend those ideas and ship the program you see here.
