@@ -4432,6 +4432,145 @@ class DuplicateBucketingPocDialog(tk.Toplevel):
         messagebox.showerror("Duplicate Bucketing POC", f"Run failed:\n{error}")
 
 
+class FileCleanupDialog(tk.Toplevel):
+    def __init__(self, parent: tk.Widget):
+        super().__init__(parent)
+        self.title("File Clean Up")
+        self.transient(parent)
+        self.resizable(False, False)
+        self.parent = parent
+        self.library_path_var = tk.StringVar(
+            value=getattr(parent, "library_path", "") or ""
+        )
+        self.status_var = tk.StringVar(value="Ready to scan.")
+        self._worker: threading.Thread | None = None
+
+        container = ttk.Frame(self)
+        container.pack(fill="both", expand=True, padx=12, pady=12)
+
+        ttk.Label(
+            container,
+            text="File Clean Up",
+            font=("TkDefaultFont", 12, "bold"),
+        ).pack(anchor="w")
+        ttk.Label(
+            container,
+            text=(
+                "Remove trailing (numbers) from audio filenames in the library. "
+                "Any collisions with existing filenames are skipped."
+            ),
+            foreground="#555",
+            wraplength=420,
+        ).pack(anchor="w", pady=(0, 8))
+
+        ttk.Label(container, text="Library Root").pack(anchor="w")
+        lib_row = ttk.Frame(container)
+        lib_row.pack(fill="x", pady=(0, 8))
+        ttk.Entry(lib_row, textvariable=self.library_path_var, width=60).pack(
+            side="left", fill="x", expand=True
+        )
+        ttk.Button(lib_row, text="Browse…", command=self._browse_library).pack(
+            side="left", padx=(6, 0)
+        )
+
+        ttk.Label(container, textvariable=self.status_var).pack(anchor="w", pady=(4, 8))
+
+        btn_row = ttk.Frame(container)
+        btn_row.pack(anchor="e")
+        self.execute_btn = ttk.Button(
+            btn_row, text="Execute", command=self._execute_cleanup
+        )
+        self.execute_btn.pack(side="right", padx=(6, 0))
+        ttk.Button(btn_row, text="Cancel", command=self.destroy).pack(side="right")
+
+    def _browse_library(self) -> None:
+        initial = self.library_path_var.get() or load_last_path() or os.getcwd()
+        folder = filedialog.askdirectory(
+            parent=self, title="Select Library Root", initialdir=initial
+        )
+        if folder:
+            self.library_path_var.set(folder)
+
+    def _execute_cleanup(self) -> None:
+        library_root = self.library_path_var.get()
+        if not library_root:
+            messagebox.showwarning(
+                "No Library", "Select a library folder before running cleanup."
+            )
+            return
+        if not os.path.isdir(library_root):
+            messagebox.showerror(
+                "Invalid Library", "The selected folder does not exist."
+            )
+            return
+
+        self.execute_btn.configure(state="disabled")
+        self.status_var.set("Scanning files…")
+
+        def task() -> None:
+            summary = self._run_cleanup(library_root)
+            self.after(0, lambda: self._cleanup_finished(summary))
+
+        self._worker = threading.Thread(target=task, daemon=True)
+        self._worker.start()
+
+    def _run_cleanup(self, library_root: str) -> dict[str, int]:
+        total = 0
+        renamed = 0
+        skipped = 0
+        conflicts = 0
+        errors = 0
+        pattern = re.compile(r"\s*\(\d+\)$")
+
+        for root, _dirs, files in os.walk(library_root):
+            for filename in files:
+                ext = os.path.splitext(filename)[1].lower()
+                if ext not in SUPPORTED_EXTS:
+                    continue
+                total += 1
+                stem = os.path.splitext(filename)[0]
+                new_stem = pattern.sub("", stem)
+                if new_stem == stem:
+                    skipped += 1
+                    continue
+                new_name = f"{new_stem}{ext}"
+                src = os.path.join(root, filename)
+                dst = os.path.join(root, new_name)
+                if os.path.exists(dst):
+                    conflicts += 1
+                    continue
+                try:
+                    os.rename(src, dst)
+                    renamed += 1
+                except OSError:
+                    errors += 1
+
+        return {
+            "total": total,
+            "renamed": renamed,
+            "skipped": skipped,
+            "conflicts": conflicts,
+            "errors": errors,
+        }
+
+    def _cleanup_finished(self, summary: dict[str, int]) -> None:
+        self.execute_btn.configure(state="normal")
+        message = (
+            "Finished. "
+            f"Renamed {summary['renamed']} of {summary['total']} files. "
+            f"Skipped {summary['skipped']}, conflicts {summary['conflicts']}, "
+            f"errors {summary['errors']}."
+        )
+        self.status_var.set(message)
+        if hasattr(self.parent, "_log"):
+            self.parent._log(
+                "File Clean Up: "
+                f"renamed={summary['renamed']} total={summary['total']} "
+                f"skipped={summary['skipped']} conflicts={summary['conflicts']} "
+                f"errors={summary['errors']}"
+            )
+
+
 class SoundVaultImporterApp(tk.Tk):
     def __init__(self):
         super().__init__()
@@ -4599,6 +4738,7 @@ class SoundVaultImporterApp(tk.Tk):
         tools_menu.add_command(
             label="Playlist Artwork", command=self.open_playlist_artwork_folder
         )
+        tools_menu.add_command(label="File Clean Up…", command=self._open_file_cleanup_tool)
         tools_menu.add_command(
             label="Similarity Inspector…", command=self._open_similarity_inspector_tool
         )
@@ -6751,6 +6891,9 @@ class SoundVaultImporterApp(tk.Tk):
 
     def _open_similarity_inspector_tool(self) -> None:
         SimilarityInspectorDialog(self)
+
+    def _open_file_cleanup_tool(self) -> None:
+        FileCleanupDialog(self)
 
     def _open_duplicate_bucketing_poc_tool(self) -> None:
         DuplicateBucketingPocDialog(self)
