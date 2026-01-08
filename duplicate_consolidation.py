@@ -658,7 +658,7 @@ def _placeholder_present(tags: Mapping[str, object]) -> bool:
     return False
 
 
-def _capture_library_state(path: str) -> Dict[str, object]:
+def _capture_library_state(path: str, *, quick: bool = False) -> Dict[str, object]:
     """Capture stable file attributes to detect changes between preview and execution."""
 
     state: Dict[str, object] = {"exists": os.path.exists(path)}
@@ -672,14 +672,15 @@ def _capture_library_state(path: str) -> Dict[str, object]:
         state["stat_error"] = str(exc)
         return state
 
-    hasher = hashlib.sha256()
-    try:
-        with open(ensure_long_path(path), "rb") as handle:
-            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-                hasher.update(chunk)
-        state["sha256"] = hasher.hexdigest()
-    except Exception as exc:  # pragma: no cover - depends on filesystem permissions
-        state["hash_error"] = str(exc)
+    if not quick:
+        hasher = hashlib.sha256()
+        try:
+            with open(ensure_long_path(path), "rb") as handle:
+                for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                    hasher.update(chunk)
+            state["sha256"] = hasher.hexdigest()
+        except Exception as exc:  # pragma: no cover - depends on filesystem permissions
+            state["hash_error"] = str(exc)
     return state
 
 
@@ -1582,12 +1583,12 @@ def consolidation_plan_from_dict(raw: Mapping[str, object]) -> ConsolidationPlan
     )
 
 
-def _normalize_track(raw: Mapping[str, object]) -> DuplicateTrack:
+def _normalize_track(raw: Mapping[str, object], *, quick_state: bool = False) -> DuplicateTrack:
     path = str(raw.get("path"))
     ext = os.path.splitext(path)[1].lower() or str(raw.get("ext", "")).lower()
     provided_tags = raw.get("tags") if isinstance(raw.get("tags"), Mapping) else {}
     current_tags, artwork, meta_err, art_err, audio_props, meta_trace = _read_tags_and_artwork(path, provided_tags)
-    library_state = _capture_library_state(path)
+    library_state = _capture_library_state(path, quick=quick_state)
     provided_artwork: List[ArtworkCandidate] = []
     for art in raw.get("artwork", []) if isinstance(raw.get("artwork"), list) else []:
         try:
@@ -2193,7 +2194,7 @@ def build_consolidation_plan(
         if cancel_event.is_set():
             review_flags.append("Cancelled before normalization.")
             break
-        normalized.append(_normalize_track(raw))
+        normalized.append(_normalize_track(raw, quick_state=True))
         if len(normalized) >= max_candidates:
             review_flags.append(f"Truncated candidate set to {max_candidates} items to protect runtime.")
             break
