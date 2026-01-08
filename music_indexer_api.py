@@ -30,7 +30,6 @@ from indexer_control import check_cancelled, cancel_event
 COMMON_ARTIST_THRESHOLD = 10
 REMIX_FOLDER_THRESHOLD  = 3
 SUPPORTED_EXTS          = {".flac", ".m4a", ".aac", ".mp3", ".wav", ".ogg"}
-TRAILING_NUMERIC_SUFFIX_RE = re.compile(r"^(?P<base>.+) \((?P<num>\d+)\)$")
 
 # ─── Helper: build primary_counts for the entire vault ─────────────────────
 def _select_canonical_primary(casing_counts: dict[str, dict[str, int]]) -> dict[str, str]:
@@ -202,10 +201,11 @@ def _cleanup_trailing_numeric_suffixes(
             pass
 
     occupied = set(moves.values())
+    suffix_pattern = re.compile(r"^(?P<base>.+) \((?P<num>\d+)\)$")
     for old_path, new_path in list(moves.items()):
         dir_name, filename = os.path.split(new_path)
         stem, ext = os.path.splitext(filename)
-        match = TRAILING_NUMERIC_SUFFIX_RE.match(stem)
+        match = suffix_pattern.match(stem)
         if not match:
             continue
         candidate_filename = f"{match.group('base')}{ext}"
@@ -220,23 +220,25 @@ def _cleanup_trailing_numeric_suffixes(
         if new_path in tag_index:
             tag_index[candidate_path] = tag_index.pop(new_path)
         log_callback(
-            "   • Removed redundant suffix from move plan file: "
-            f"'{os.path.basename(new_path)}' → '{os.path.basename(candidate_path)}'"
+            f"   • Removed redundant suffix: '{os.path.basename(new_path)}' → "
+            f"'{os.path.basename(candidate_path)}'"
         )
 
 
 def _preview_trailing_suffix_cleanup(
     moves: dict[str, str],
     tag_index: dict[str, dict],
-    music_root: str,
 ) -> tuple[dict[str, str], dict[str, dict]]:
     preview_moves = dict(moves)
     preview_tag_index = dict(tag_index)
+    if not preview_moves:
+        return preview_moves, preview_tag_index
     occupied = set(preview_moves.values())
+    suffix_pattern = re.compile(r"^(?P<base>.+) \((?P<num>\d+)\)$")
     for old_path, new_path in list(preview_moves.items()):
         dir_name, filename = os.path.split(new_path)
         stem, ext = os.path.splitext(filename)
-        match = TRAILING_NUMERIC_SUFFIX_RE.match(stem)
+        match = suffix_pattern.match(stem)
         if not match:
             continue
         candidate_filename = f"{match.group('base')}{ext}"
@@ -250,67 +252,7 @@ def _preview_trailing_suffix_cleanup(
         preview_moves[old_path] = candidate_path
         if new_path in preview_tag_index:
             preview_tag_index[candidate_path] = preview_tag_index.pop(new_path)
-    library_cleanup = _plan_library_suffix_cleanup(music_root, preview_moves)
-    if library_cleanup:
-        preview_moves.update(library_cleanup)
     return preview_moves, preview_tag_index
-
-
-def _plan_library_suffix_cleanup(
-    music_root: str,
-    moves: dict[str, str],
-) -> dict[str, str]:
-    moves_targets = set(moves.values())
-    planned_targets: set[str] = set()
-    suffix_plan: dict[str, str] = {}
-    skip_names = {"trash", "docs", "not sorted", "playlists"}
-    for dirpath, dirnames, filenames in os.walk(music_root):
-        dirnames[:] = [d for d in dirnames if d.lower() not in skip_names]
-        for fname in filenames:
-            stem, ext = os.path.splitext(fname)
-            match = TRAILING_NUMERIC_SUFFIX_RE.match(stem)
-            if not match:
-                continue
-            old_path = os.path.join(dirpath, fname)
-            if old_path in moves:
-                continue
-            candidate_filename = f"{match.group('base')}{ext}"
-            candidate_path = os.path.join(dirpath, candidate_filename)
-            if candidate_path == old_path:
-                continue
-            if (
-                candidate_path in moves_targets
-                or candidate_path in planned_targets
-                or os.path.exists(candidate_path)
-            ):
-                continue
-            suffix_plan[old_path] = candidate_path
-            planned_targets.add(candidate_path)
-    return suffix_plan
-
-
-def _apply_library_suffix_cleanup(
-    music_root: str,
-    moves: dict[str, str],
-    log_callback=None,
-    summary: dict | None = None,
-) -> None:
-    if log_callback is None:
-        def log_callback(_msg):
-            pass
-    suffix_plan = _plan_library_suffix_cleanup(music_root, moves)
-    for old_path, new_path in suffix_plan.items():
-        try:
-            shutil.move(old_path, new_path)
-            log_callback(
-                "   • Removed redundant suffix from existing library file: "
-                f"'{os.path.basename(old_path)}' → '{os.path.basename(new_path)}'"
-            )
-        except Exception as exc:
-            err = f"Failed to remove suffix {old_path} → {new_path}: {exc}"
-            if summary is not None:
-                summary.setdefault("errors", []).append(err)
-            log_callback(f"   ! {err}")
 
 def collapse_repeats(name: str) -> str:
     """
@@ -1102,14 +1044,8 @@ def build_dry_run_html(
     )
 
     log_callback("4/4: Writing dry-run HTML…")
-    music_root = os.path.join(root_path, "Music")
-    if not os.path.isdir(music_root):
-        music_root = root_path
-    preview_moves, preview_tag_index = _preview_trailing_suffix_cleanup(
-        moves,
-        tag_index,
-        music_root,
-    )
+
+    preview_moves, preview_tag_index = _preview_trailing_suffix_cleanup(moves, tag_index)
     render_dry_run_html_from_plan(
         root_path,
         output_html_path,
@@ -1212,8 +1148,6 @@ def apply_indexer_moves(
         if moved_ok:
             canonical = tag_index.get(new_path, {}).get("canonical_primary")
             _update_primary_artist_metadata(new_path, canonical, log_callback)
-
-    _apply_library_suffix_cleanup(music_root, moves, log_callback, summary)
 
     # Phase 6: Handle non-audio leftovers…
     docs_dir = os.path.join(root_path, "Docs")
