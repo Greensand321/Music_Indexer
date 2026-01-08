@@ -1,20 +1,28 @@
 # SoundVault a Music Indexer
 
-If you have a library of songs with mixed codecs, duplicates, messy metadata, and disorganized folders, SoundVault is built to fix all of it. It is designed for casual users and enthusiasts alike, and the tools inside are the result of years of frustration born from too many songs, too little space, and no desire to manually sort thousands of files. The current feature set represents 500+ hours of focused work over roughly six months, with the original vision first outlined more than five years ago when the music collection began. The advent of AI made it possible to extend those ideas and ship the program you see here.
+Welcome to SoundVault! If you have a library of songs with mixed codecs, duplicates, messy metadata, and disorganized folders, SoundVault is built to fix all of it. It is designed for casual users and enthusiasts alike, and the tools inside are the result of years of frustration born from too many songs, too little space, and no desire to manually sort thousands of files. The current feature set represents 500+ hours of focused work over roughly six months, with the original vision first outlined more than five years ago when the music collection began. The advent of AI made it possible to extend those ideas and ship the program you see here.
 
-## Core features (start here)
+This README mirrors the project documentation and provides:
+- A friendly overview of the core programs.
+- A quick path to get running.
+- Supporting tools and configuration details for deeper work.
+
+## Core programs (start here)
+
+These are the main workflows described in the documentation:
 
 1. **Music Indexer**: preview-first workflows to organize, move, and rename your library with a full HTML report before committing changes.
-2. **Visual Music Graph**: an interactive scatter plot for clustered playlists that lets you explore your library as a map.
-3. **Duplicate Detection**: review-first deduplication with fingerprinting, group-by-group decisions, and safety-focused execution reports.
+2. **Duplicate Finder (Redesigned)**: review-first deduplication with fingerprinting, group-by-group decisions, and safety-focused execution reports.
+3. **Similarity Inspector**: a diagnostic tool to understand why two tracks match (or do not match) during duplicate detection.
+4. **Library Sync Review**: compare two libraries, build a plan, and preview or execute copy/move actions.
 
-## More tools (roughly simple → advanced)
+## Supporting tools (roughly simple → advanced)
 
 1. **Tag Fixer**: repair metadata using AcoustID and other services.
 2. **Genre Normalizer**: batch-update genres for consistent tagging.
 3. **Playlist Generator**: build `.m3u` playlists and Auto‑DJ flows.
 4. **Clustered Playlists**: run K-Means/HDBSCAN clustering and visualize the results.
-5. **Library Sync**: compare two libraries, build a plan, and preview or execute copy/move actions.
+5. **Visual Music Graph**: an interactive scatter plot for clustered playlists that lets you explore your library as a map.
 
 ## Prerequisites
 
