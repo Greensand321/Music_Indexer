@@ -1,6 +1,6 @@
 # SoundVault Music Indexer
 
-SoundVault organizes large music libraries. It deduplicates tracks, fixes tags via AcoustID, normalizes genres, and generates playlists while keeping your folder structure intact.
+SoundVault organizes large music libraries. It deduplicates tracks, fixes tags via AcoustID, normalizes genres, and generates playlists with preview-first workflows before moving or renaming files.
 
 ## Prerequisites
 
@@ -56,7 +56,7 @@ python main_gui.py
 ```
 
 1. **Open** your library folder
-2. Use the **Indexer** tab to dedupe, detect near duplicates, and move files
+2. Use the **Indexer** tab to preview and organize files; dry runs open the HTML preview, and full runs apply the move plan.
 3. **Fix Tags** via the AcoustID menu (now supports multiple metadata services)
 4. **Generate Playlists** from your folder structure
 5. **Clustered Playlists** (interactive K-Means/HDBSCAN) via the Tools ▸ Clustered Playlists menu
@@ -64,7 +64,7 @@ python main_gui.py
 7. **Auto‑DJ** mode builds seamless playlists starting from any song
 8. Use the **Library Sync** tab to compare an incoming folder against your existing library, then build/preview/execute an optional copy/move plan.
 9. Launch the **Duplicate Finder** tab to open the updated shell for spotting duplicates.
-10. **Cross-Album Scan** optionally finds duplicates appearing on multiple albums (Indexer tab → Phase 3).
+10. **Cross-Album Scan** is a reserved toggle in the Indexer UI; duplicate detection lives in the **Duplicate Finder** tab.
 11. Use the **Theme** dropdown and **Help** tab for assistance.
 12. Use **Tools → Similarity Inspector** to compare two files and see fingerprint distance details.
 
@@ -77,6 +77,15 @@ Cluster generation writes progress into `<method>_log.txt` inside your library s
 ### Windows Long Paths
 
 The indexer automatically prefixes file paths with `\\?\` on Windows, allowing it to work with directories deeper than the classic 260-character limit.
+
+### Indexer outputs and behavior
+
+- **Preview output:** Every run writes `Docs/MusicIndex.html` under the selected library root; dry runs open the preview automatically.
+- **Decision log:** A detailed `Docs/indexer_log.txt` captures routing decisions and metadata fallbacks.
+- **Missing metadata:** Tracks missing core tags land in `Manual Review/` so you can fix them before re-running.
+- **Excluded folders:** `Not Sorted/` and `Playlists/` are skipped during scans, letting you stash exceptions safely.
+- **Leftover files:** Non-audio leftovers are moved into `Docs/` (`.txt`, `.html`, `.db`) or `Trash/` for everything else.
+- **Playlists:** Full runs generate playlists in `Playlists/` by default; uncheck **Create Playlists** to skip.
 
 ## Threading
 
@@ -175,7 +184,7 @@ The codebase is organized into a handful of key modules:
 
 ```
 main_gui.py               - Tkinter entry point for the desktop app
-music_indexer_api.py      - Core scanning, dedupe and relocation logic
+music_indexer_api.py      - Core scanning and relocation logic (dedupe handled elsewhere)
 playlist_generator.py     - `.m3u` playlist creation helpers
 clustered_playlists.py    - Feature extraction and clustering algorithms
 cluster_graph_panel.py    - Interactive scatter plot for clustered playlists

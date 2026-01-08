@@ -34,10 +34,11 @@
 <ul>
   <li>Scans folders recursively for audio files.</li>
   <li>Reads metadata: artist, title, album, year, track number, embedded cover art.</li>
-  <li>Deduplicates tracks by fingerprint, preferring FLAC &gt; M4A &gt; MP3.</li>
-  <li>Separates workflow into deterministic phases: vault pre-scan (artist counts), fingerprint-based dedupe, metadata aggregation, destination routing, and preview generation.</li>
+  <li>Separates workflow into deterministic phases: vault pre-scan (artist counts), metadata aggregation, destination routing, and preview generation.</li>
   <li>Surfaces every routing decision in <code>decision_log</code> and a tag index to drive consistent HTML previews and downstream plan rendering.</li>
   <li><strong>Phase 0</strong>: Pre-scan the vault under MUSIC_ROOT to build a global artist-count map via <code>build_primary_counts()</code>.</li>
+  <li>Skips <code>Not Sorted/</code> and <code>Playlists/</code> directories during scans so you can exclude files from indexing.</li>
+  <li>Routes missing-metadata tracks into <code>Manual Review/</code> for later cleanup.</li>
   <li>Implements grouping rules:
     <ul>
       <li>Common artist threshold (≥ 10 tracks) → <code>By Artist/&lt;Artist&gt;</code>.</li>
@@ -46,9 +47,10 @@
       <li>“(Remixes)” folder if an album has ≥ 3 remixes.</li>
     </ul>
   </li>
-  <li>Generates a “dry-run” HTML preview of the proposed reorganization (color-coded).</li>
-  <li>Applies the final moves: creates new folders, renames/moves audio files, archives docs into <code>Docs/</code> and other leftovers into <code>Trash/</code>, then deletes empty folders (two passes to also remove now-empty parents).</li>
-  <li>Writes <code>Docs/indexer_log.txt</code> detailing exactly how each file was classified and moved.</li>
+  <li>Generates a “dry-run” HTML preview of the proposed reorganization (color-coded) at <code>Docs/MusicIndex.html</code>.</li>
+  <li>Applies the final moves: creates new folders, renames/moves audio files, updates canonical primary-artist metadata, and archives leftovers into <code>Docs/</code> or <code>Trash/</code>, then deletes empty folders (two passes to also remove now-empty parents).</li>
+  <li>Writes <code>Docs/indexer_log.txt</code> detailing exactly how each file was classified and routed.</li>
+  <li><strong>Note:</strong> the indexer does not deduplicate; duplicate review lives in the Duplicate Finder workflow.</li>
 </ul>
 
 <p><strong>Skeleton of <code>music_indexer_api.py</code> (comments only):</strong></p>
@@ -79,21 +81,17 @@ def extract_primary_and_collabs(raw_artist: str):
 def compute_moves_and_tag_index(root_path, log_callback=None):
     # 0. Pre-scan entire vault under MUSIC_ROOT -> build_primary_counts()
     # 1. Decide music_root (either root_path or root_path/Music).
-    # 2. Walk recursively, collect supported audio files.
-    # 3. Deduplicate by (artist, title, album), choose highest-quality format.
-    # 4. Read metadata for each kept track; build counts:
-    #    • primary_counts: number of tracks per artist
+    # 2. Walk recursively, collect supported audio files (skip Not Sorted/Playlists).
+    # 3. Read metadata for each track; build counts:
     #    • album_counts: number of tracks per (artist, album)
-    #    • remix_counts: number of remixed tracks per (artist, album)
-    #    • cover_counts: number of identical embedded-cover hashes
-    # 5. For each file, decide destination:
-    #    • If "(Remixes)" and remix_count ≥ REMIX_FOLDER_THRESHOLD → create "<Album> (Remixes)" folder
-    #    • Else if remix in title but remix_count < threshold → treat as single
-    #    • Else if album_count ≥ 5 → create album folder
-    #    • Else if primary_count ≥ COMMON_ARTIST_THRESHOLD → create "<Artist>/Album" or "<Artist> – Singles"
-    #    • Else → <Year>/ ...
-    # 6. Build a moves dict mapping old_path → new_path, plus a tag_index for HTML preview.
-    # 7. Return (moves, tag_index, decision_log).
+    #    • remix_counts: number of remix-tagged tracks per (artist, album)
+    #    • album_disc_values: disc values per (artist, album)
+    # 4. For each file, decide destination:
+    #    • If missing core tags → Manual Review/
+    #    • If rare artist → By Year/<Year>
+    #    • Else apply album/singles/remix grouping rules
+    # 5. Build a moves dict mapping old_path → new_path, plus a tag_index for HTML preview.
+    # 6. Return (moves, tag_index, decision_log).
     pass
 
 def build_dry_run_html(root_path, output_html_path, log_callback=None):
@@ -105,10 +103,10 @@ def apply_indexer_moves(root_path, log_callback=None):
     # Actually performs the file moves:
     # 1. Creates new directories as needed.
     # 2. Moves and renames audio files.
-    # 3. Moves docs (*.txt, *.html, *.db) into "Docs/" and other leftovers into "Trash/".
-    # 4. Deletes empty source folders in two passes so parent directories left
+    # 3. Updates canonical primary-artist metadata where possible.
+    # 4. Moves docs (*.txt, *.html, *.db) into "Docs/" and other leftovers into "Trash/".
+    # 5. Deletes empty source folders in two passes so parent directories left
     #    empty after their children are removed are also deleted.
-    # 5. Writes Docs/indexer_log.txt summarizing each file’s action.
     pass
 
 def run_full_indexer(root_path, output_html_path, dry_run_only=False, log_callback=None):
@@ -117,6 +115,7 @@ def run_full_indexer(root_path, output_html_path, dry_run_only=False, log_callba
     #   2. Write Docs/indexer_log.txt
     #   3. build_dry_run_html(...)
     #   4. If not dry_run_only, call apply_indexer_moves(...)
+    #   5. Optionally generate playlists under Playlists/
     pass
 </code></pre>
 
@@ -573,13 +572,13 @@ if __name__ == "__main__":
 
 <h2>3. Current Progress</h2>
 <ul>
-  <li><strong>Indexer</strong>: Fully implemented as <code>music_indexer_api.py</code>, tested on sample folders. It correctly reorganizes by artist, year, album, singles, and remixes, preserving cover-art groups.</li>
+  <li><strong>Indexer</strong>: Implemented as <code>music_indexer_api.py</code>. It reorganizes by artist, year, album, singles, and remixes, writes HTML previews/logs, and leaves deduplication to the Duplicate Finder workflow.</li>
   <li><strong>Fingerprint Generator</strong>: <code>fingerprint_generator.py</code> stores AcoustID hashes for each track.</li>
   <li><strong>Fingerprint Cache</strong>: <code>fingerprint_cache.py</code> keeps computed fingerprints in SQLite.</li>
   <li><strong>Genre Updater</strong>: <code>update_genres.py</code> connects to MusicBrainz, pulls top 3 tags per track, and writes them into files—skipping files that already have ≥ 2 genres.</li>
   <li><strong>Genre Normalizer</strong>: <code>normalize_controller.py</code> scans raw genre tags, suggests clean mappings, and writes normalized genres back to your files.</li>
   <li><strong>Library Index</strong>: <code>library_index_controller.py</code> builds <code>library_index.html</code>, a table listing path, artist, title, album, year, track, and genre(s) for every audio file. Useful for quick review.</li>
-  <li><strong>Near-Duplicate Detector</strong>: integrated into <code>music_indexer_api.py</code> to remove fuzzy duplicates.</li>
+  <li><strong>Near-Duplicate Detector</strong>: available via the Duplicate Finder workflow for review-first deduplication.</li>
   <li><strong>Clustered Playlists</strong>: interactive K-Means and HDBSCAN clustering with a graph-based panel.</li>
   <li><strong>UI Enhancements</strong>: theme selector and automatic DPI scaling.</li>
     <li><strong>Playlist Engine</strong>: tempo/energy buckets and Auto-DJ mode.</li>
@@ -617,7 +616,7 @@ if __name__ == "__main__":
       <li>Before running the indexer or genre updater, snapshot the current state:
         <ul>
           <li>Copy <code>library_index.html</code> and <code>genre_update_log.txt</code> to an “__archive” folder.</li>
-          <li>Allow a “dry‐run” option for both indexer and genre updater to preview changes.</li>
+          <li>Add a “dry‐run” option for the genre updater; the indexer already supports preview-only runs.</li>
         </ul>
       </li>
       <li>Implement a simple “undo” by storing the moves log and reversing the file operations if needed.</li>
