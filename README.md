@@ -29,11 +29,9 @@ These are the main workflows described in the documentation:
 ## Prerequisites
 
 - **Python 3.11+** (use [conda](https://docs.conda.io/en/latest/miniconda.html) or `venv`)
-- **Git** command line
-  ```bash
-  git clone --recurse-submodules https://example.com/yourrepo.git
-  ```
-- **FFmpeg** installed and on your `PATH`
+- **Git** command line for cloning the repo
+- **FFmpeg** installed and on your `PATH` (required for audio analysis)
+- **VLC / libVLC** for in-app playback (recommended; required for audio preview features)
 - **Optional LLM helper**: `third_party/llama/llama-run.exe` (Windows binaries included) plus a GGUF model (place it at `models/your-model.gguf` or update `plugins/assistant_plugin.py`).
 
 ## Installation
@@ -49,9 +47,10 @@ pip install -r requirements.txt
 The indexer will exit with an error if the real `mutagen` package is missing,
 so ensure all dependencies are installed before running.
 
-The **Duplicate Finder** tab now opens the redesigned shell for spotting
-duplicates. Keep the Music Indexer package installed (e.g. `pip install .`) so
-the duplicate detection backend remains available as the new UI rolls out.
+The **Duplicate Finder** tab opens the redesigned shell for spotting duplicates.
+If you run from source, keep this repo on your Python path (run `python
+main_gui.py` from the repo root or install an editable package) so the backend
+modules remain importable.
 
 ### Optional: Essentia audio engine
 
@@ -73,24 +72,26 @@ Expect longer build times on Linux the first time you install Essentia. If you
 prefer the pure-Python stack, you can continue using `librosa` without this
 extra dependency.
 
-## Quickstart
+## Quickstart (basic flow)
 
 ```bash
 python main_gui.py
 ```
 
-1. **Open** your library folder
-2. Use the **Indexer** tab to preview and organize files; dry runs open the HTML preview, and full runs apply the move plan.
-3. **Fix Tags** via the AcoustID menu (now supports multiple metadata services)
-4. **Generate Playlists** from your folder structure
-5. **Clustered Playlists** (interactive K-Means/HDBSCAN) via the Tools ▸ Clustered Playlists menu
-6. **Smart Playlist Engine** with tempo/energy buckets
-7. **Auto‑DJ** mode builds seamless playlists starting from any song
-8. Use the **Library Sync** tab to compare an incoming folder against your existing library, then build/preview/execute an optional copy/move plan.
-9. Launch the **Duplicate Finder** tab to open the updated shell for spotting duplicates.
-10. **Cross-Album Scan** is a reserved toggle in the Indexer UI; duplicate detection lives in the **Duplicate Finder** tab.
-11. Use the **Theme** dropdown and **Help** tab for assistance.
-12. Use **Tools → Similarity Inspector** to compare two files and see fingerprint distance details.
+1. **Open** your library folder.
+2. Run the **Indexer** tab in preview mode to review the HTML plan.
+3. Execute the Indexer to apply moves/renames after the preview looks right.
+4. Open **Duplicate Finder** to scan, preview, and execute dedupe groups.
+5. Use **Tools → Similarity Inspector** to understand tricky duplicate matches.
+6. Explore **Playlists** (folder playlists, Auto‑DJ, clustered playlists) once the library is cleaned.
+7. Use **Library Sync** to compare/merge two libraries when needed.
+
+### Where to find things
+
+- **File organization / rename:** Indexer tab
+- **Duplicates:** Duplicate Finder tab (Cross-Album Scan is a reserved toggle in the Indexer UI)
+- **Playlist tools:** Tools ▸ Playlist Generator / Clustered Playlists
+- **Playback + diagnostics:** Tools ▸ Similarity Inspector, Log tab
 
 ### Playlist generator feedback
 
@@ -251,11 +252,13 @@ third_party/ - Prebuilt llama executables
 
 These items are currently under development and not yet part of the stable release.
 
-- Metadata Plugins (Discogs, Spotify)
+- Expanded metadata plugins beyond AcoustID/Last.fm (Discogs, Spotify)
 
 See [`docs/project_documentation.html`](docs/project_documentation.html) for technical details.
 
 ## Known gaps
 
 - **Tidal-dl sync**: `tidal-dl` is listed in `requirements.txt`, but there is no UI or workflow wired up yet.
+- **Metadata provider breadth**: only AcoustID + Last.fm are wired end-to-end; Discogs/Spotify stubs exist but are not production-ready.
 - **LLM assistant models**: no GGUF model ships with the repo; you must provide one and update `plugins/assistant_plugin.py` if you want to use the helper.
+- **Theme packs**: optional ttk theme packs are listed in `requirements.txt`, but you must install and select them manually.
