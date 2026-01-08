@@ -542,6 +542,31 @@ def _detect_state_drift(expected: Mapping[str, object], actual: Mapping[str, obj
     return None
 
 
+def _hydrate_snapshot_hashes(
+    snapshot: MutableMapping[str, Dict[str, object]],
+    log: Callable[[str], None],
+) -> None:
+    missing = [
+        (path, state)
+        for path, state in snapshot.items()
+        if state.get("exists") and "sha256" not in state and "hash_error" not in state
+    ]
+    if not missing:
+        return
+    log(f"Deferred hashing: capturing SHA-256 for {len(missing)} tracks in the preview snapshot.")
+    updated = 0
+    for path, state in missing:
+        full_state = _capture_library_state(path)
+        if not full_state.get("exists"):
+            continue
+        if "sha256" in full_state:
+            state["sha256"] = full_state["sha256"]
+            updated += 1
+        if "hash_error" in full_state:
+            state["hash_error"] = full_state["hash_error"]
+    log(f"Deferred hashing completed for {updated} tracks.")
+
+
 def _coerce_consolidation_plan(
     plan_input: ConsolidationPlan | Mapping[str, object] | str,
     log: Callable[[str], None],
@@ -809,6 +834,8 @@ def execute_consolidation_plan(
                 operation_limit=config.operation_limit,
             )
             raise RuntimeError("Execution blocked: operation limit exceeded.")
+
+        _hydrate_snapshot_hashes(plan.source_snapshot, log)
 
         drift: Dict[str, str] = {}
         for path, expected in plan.source_snapshot.items():
