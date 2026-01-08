@@ -118,12 +118,12 @@ Long running actions such as indexing, tag fixing and library sync operations ar
 
 ## Configuration
 
-User settings are stored in `~/.soundvault_config.json` (legacy filename from SoundVault). To tweak the fuzzy fingerprint
-threshold used during deduplication, add a value like:
+User settings are stored in `~/.soundvault_config.json` (legacy filename from SoundVault). To tweak the near-duplicate
+fingerprint threshold used during deduplication, add a value like:
 
 ```json
 {
-  "fuzzy_fp_threshold": 0.1
+  "near_duplicate_threshold": 0.1
 }
 ```
 
@@ -137,8 +137,9 @@ configured. Add a `format_fp_thresholds` section with extension keys:
   "format_fp_thresholds": {
     "default": 0.3,
     ".flac": 0.3,
-    ".mp3": 0.2,
-    ".aac": 0.25
+    ".mp3": 0.35,
+    ".m4a": 0.35,
+    ".aac": 0.35
   }
 }
 ```
