@@ -4481,7 +4481,8 @@ class FileCleanupDialog(tk.Toplevel):
             btn_row, text="Execute", command=self._execute_cleanup
         )
         self.execute_btn.pack(side="right", padx=(6, 0))
-        ttk.Button(btn_row, text="Cancel", command=self.destroy).pack(side="right")
+        self.close_btn = ttk.Button(btn_row, text="Cancel", command=self.destroy)
+        self.close_btn.pack(side="right")
 
     def _browse_library(self) -> None:
         initial = self.library_path_var.get() or load_last_path() or os.getcwd()
@@ -4514,12 +4515,13 @@ class FileCleanupDialog(tk.Toplevel):
         self._worker = threading.Thread(target=task, daemon=True)
         self._worker.start()
 
-    def _run_cleanup(self, library_root: str) -> dict[str, int]:
+    def _run_cleanup(self, library_root: str) -> dict[str, int | list[str]]:
         total = 0
         renamed = 0
         skipped = 0
         conflicts = 0
         errors = 0
+        skipped_files: list[str] = []
         pattern = re.compile(r"\s*\(\d+\)$")
 
         for root, _dirs, files in os.walk(library_root):
@@ -4538,6 +4540,7 @@ class FileCleanupDialog(tk.Toplevel):
                 dst = os.path.join(root, new_name)
                 if os.path.exists(dst):
                     conflicts += 1
+                    skipped_files.append(src)
                     continue
                 try:
                     os.rename(src, dst)
@@ -4551,10 +4554,12 @@ class FileCleanupDialog(tk.Toplevel):
             "skipped": skipped,
             "conflicts": conflicts,
             "errors": errors,
+            "skipped_files": skipped_files,
         }
 
-    def _cleanup_finished(self, summary: dict[str, int]) -> None:
+    def _cleanup_finished(self, summary: dict[str, int | list[str]]) -> None:
         self.execute_btn.configure(state="normal")
+        self.close_btn.configure(text="Close")
         message = (
             "Finished. "
             f"Renamed {summary['renamed']} of {summary['total']} files. "
@@ -4569,6 +4574,15 @@ class FileCleanupDialog(tk.Toplevel):
                 f"skipped={summary['skipped']} conflicts={summary['conflicts']} "
                 f"errors={summary['errors']}"
             )
+            skipped_files = summary.get("skipped_files") or []
+            if skipped_files:
+                skipped_details = "\n".join(
+                    f"- {path}" for path in sorted(skipped_files)
+                )
+                self.parent._log(
+                    "File Clean Up: skipped files due to name conflicts:\n"
+                    f"{skipped_details}"
+                )
 
 
 class SoundVaultImporterApp(tk.Tk):
