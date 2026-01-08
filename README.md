@@ -1,8 +1,8 @@
 <img width="1024" height="432" alt="AlphaDEX" src="https://github.com/user-attachments/assets/d8eb11c2-6a50-47d1-8932-77a53cee9b17" />
 
-# SoundVault a Music Indexer
+# AlphaDEX (formerly SoundVault) a Music Indexer
 
-Welcome to SoundVault! If you have a library of songs with mixed codecs, duplicates, messy metadata, and disorganized folders, SoundVault is built to fix all of it. It is designed for casual users and enthusiasts alike, and the tools inside are the result of years of frustration born from too many songs, too little space, and no desire to manually sort thousands of files. The current feature set represents 500+ hours of focused work over roughly six months, with the original vision first outlined more than five years ago when the music collection began. The advent of AI made it possible to extend those ideas and ship the program you see here.
+Welcome to AlphaDEX (formerly SoundVault)! If you have a library of songs with mixed codecs, duplicates, messy metadata, and disorganized folders, AlphaDEX is built to fix all of it. It is designed for casual users and enthusiasts alike, and the tools inside are the result of years of frustration born from too many songs, too little space, and no desire to manually sort thousands of files. The current feature set represents 500+ hours of focused work over roughly six months, with the original vision first outlined more than five years ago when the music collection began. The advent of AI made it possible to extend those ideas and ship the program you see here.
 
 This README mirrors the project documentation and provides:
 - A friendly overview of the core programs.
@@ -117,7 +117,7 @@ Long running actions such as indexing, tag fixing and library sync operations ar
 
 ## Configuration
 
-User settings are stored in `~/.soundvault_config.json`. To tweak the fuzzy fingerprint
+User settings are stored in `~/.soundvault_config.json` (legacy filename from SoundVault). To tweak the fuzzy fingerprint
 threshold used during deduplication, add a value like:
 
 ```json
@@ -217,7 +217,7 @@ fingerprint_cache.py      - Persistent fingerprint cache
 near_duplicate_detector.py - Fuzzy near-duplicate detection helpers
 tag_fixer.py              - Tag fixing engine using plugin metadata
 update_genres.py          - Batch genre tag updater via MusicBrainz
-validator.py              - Verify SoundVault folder layout
+validator.py              - Verify AlphaDEX folder layout
 config.py                 - Read/write persistent configuration
 library_sync_review.py    - Library Sync review UI with plan/preview/execute controls
 library_sync.py           - Library Sync scan/compare logic and plan execution helpers

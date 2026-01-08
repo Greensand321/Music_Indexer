@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>SoundVault Project Documentation</title>
+  <title>AlphaDEX (formerly SoundVault) Project Documentation</title>
   <style>
     body { font-family: Arial, sans-serif; margin: 20px; background: #f7f7f7; color: #333; }
     h1 { color: #2c3e50; }
@@ -15,10 +15,10 @@
 </head>
 <body>
 
-<h1>SoundVault Project Documentation</h1>
+<h1>AlphaDEX (formerly SoundVault) Project Documentation</h1>
 
 <h2>1. Introduction</h2>
-<p>This document compiles all work done so far on the SoundVault project, including:</p>
+<p>This document compiles all work done so far on the AlphaDEX (formerly SoundVault) project, including:</p>
 <ul>
   <li>Detailed descriptions of each program created.</li>
   <li>Current progress and status of the system.</li>
@@ -224,7 +224,7 @@ from mutagen.flac import FLAC
 
 # Configuration
 musicbrainzngs.set_useragent(
-    "SoundVaultGenreUpdater",
+    "AlphaDEXGenreUpdater",
     "1.0",
     "youremail@example.com"
 )
@@ -633,10 +633,10 @@ pydub
 pyacoustid   # provides the acoustid module
 librosa      # optional, for BPM estimation</code></pre>
           FFmpeg and Chromaprint's fpcalc must be installed and on PATH.
-      <li>Create a single-entry point (e.g. <code>soundvault.py</code>) that imports modules:
+      <li>Create a single-entry point (e.g. <code>alphadex.py</code>) that imports modules:
         <ul>
           <li><code>indexer</code>, <code>genre_updater</code>, <code>library_indexer</code>, <code>playlist_generator</code>, and <code>html_utils</code>.</li>
-          <li>Publish as a pip-installable package (<code>pip install soundvault</code>).</li>
+          <li>Publish as a pip-installable package (<code>pip install alphadex</code>).</li>
       </li>
       <li>Create a Windows MSI or PyInstaller build so users can double-click without installing Python.</li>
     </ul>
@@ -664,9 +664,9 @@ librosa      # optional, for BPM estimation</code></pre>
   <li><strong>Splitting into Parts:</strong> If this file feels too large, you can save Part 1 (Introduction, Programs 2.1–2.4) and Part 2 (Programs 2.5–2.9, Current Progress, Future Roadmap) separately. Just cut at the &lt;em&gt;“Continue to Part 2”&lt;/em&gt; line.</li>
   <li><strong>Using Git:</strong> Keep each Python script in its own file, commit to Git. When requesting edits from ChatGPT, refer to specific function names or file paths, not the entire content.</li>
   <li><strong>Incremental Patches:</strong> In VS Code, install the ChatGPT extension. Select only the function you want to change and ask “Please update this function to do X,” which avoids reposting the entire file.</li>
-  <li><strong>Deployment:</strong> After finalizing, bundle everything into a <code>soundvault</code> folder structure:
+  <li><strong>Deployment:</strong> After finalizing, bundle everything into a <code>alphadex</code> folder structure:
     <pre><code>
-soundvault/
+alphadex/
   gui/
     main_gui.py
   controllers/
@@ -692,7 +692,7 @@ soundvault/
   </li>
 </ul>
 
-<p>With this HTML in hand, you can paste it into a new chat session or repository; future edits will be far lighter since you only need to update the small section that changes. Good luck completing your SoundVault system!</p>
+<p>With this HTML in hand, you can paste it into a new chat session or repository; future edits will be far lighter since you only need to update the small section that changes. Good luck completing your AlphaDEX (formerly SoundVault) system!</p>
 
 </body>
 </html>
