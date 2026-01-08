@@ -1,4 +1,4 @@
-# SoundVault Music Indexer
+# SoundVault a Music Indexer
 
 SoundVault organizes large music libraries. It deduplicates tracks, fixes tags via AcoustID, normalizes genres, and generates playlists with preview-first workflows before moving or renaming files.
 
