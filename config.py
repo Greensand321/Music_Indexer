@@ -82,6 +82,7 @@ def load_config():
         cfg.setdefault("mixed_codec_threshold_boost", MIXED_CODEC_THRESHOLD_BOOST)
         cfg.setdefault("artwork_vastly_different_threshold", ARTWORK_VASTLY_DIFFERENT_THRESHOLD)
         cfg.setdefault("duplicate_finder_show_artwork_variants", True)
+        cfg.setdefault("duplicate_finder_debug_trace", False)
         cfg.setdefault("preview_artwork_max_dim", PREVIEW_ARTWORK_MAX_DIM)
         cfg.setdefault("preview_artwork_quality", PREVIEW_ARTWORK_QUALITY)
         cfg.setdefault("library_root", "")
@@ -109,6 +110,7 @@ def load_config():
             "mixed_codec_threshold_boost": MIXED_CODEC_THRESHOLD_BOOST,
             "artwork_vastly_different_threshold": ARTWORK_VASTLY_DIFFERENT_THRESHOLD,
             "duplicate_finder_show_artwork_variants": True,
+            "duplicate_finder_debug_trace": False,
             "preview_artwork_max_dim": PREVIEW_ARTWORK_MAX_DIM,
             "preview_artwork_quality": PREVIEW_ARTWORK_QUALITY,
         }
