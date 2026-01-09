@@ -2166,58 +2166,32 @@ def _cluster_duplicates(
             continue
         bucket_tracks = sorted(bucket_tracks, key=lambda t: t.path.lower())
         path_to_track = {t.path: t for t in bucket_tracks}
-        pair_info: Dict[tuple[str, str], tuple[float, float, str, List[str]]] = {}
-        coarse_keys = {t.path: _coarse_fingerprint_keys(t.fingerprint) for t in bucket_tracks}
-        coarse_index: Dict[str, List[str]] = defaultdict(list)
-        no_coarse = []
-        for path, keys in coarse_keys.items():
-            if not keys:
-                no_coarse.append(path)
-                continue
-            for key in keys:
-                coarse_index[key].append(path)
-        candidate_pairs: set[tuple[str, str]] = set()
-        for members in coarse_index.values():
-            if len(members) < 2:
-                continue
-            members_sorted = sorted(set(members))
-            for idx, left in enumerate(members_sorted):
-                for right in members_sorted[idx + 1 :]:
-                    candidate_pairs.add((left, right))
-        if no_coarse:
-            all_paths = sorted(coarse_keys.keys())
-            for path in no_coarse:
-                for other in all_paths:
-                    if path == other:
-                        continue
-                    left, right = sorted((path, other))
-                    candidate_pairs.add((left, right))
-        candidate_pairs_list = sorted(candidate_pairs)
+        pair_info: Dict[tuple[str, str], tuple[float, float, str]] = {}
 
-        for left_path, right_path in candidate_pairs_list:
-            if cancel_event.is_set() or comparisons >= max_comparisons:
-                review_flags.append("Comparison budget reached; grouping may be incomplete.")
-                stop_requested = True
+        for idx, left in enumerate(bucket_tracks):
+            for right in bucket_tracks[idx + 1 :]:
+                if cancel_event.is_set() or comparisons >= max_comparisons:
+                    review_flags.append("Comparison budget reached; grouping may be incomplete.")
+                    stop_requested = True
+                    break
+                if timeout_sec and (_now() - start_time) > timeout_sec:
+                    review_flags.append("Consolidation planning timed out while grouping.")
+                    stop_requested = True
+                    break
+                comparisons += 1
+                dist = fingerprint_distance(left.fingerprint, right.fingerprint)
+                pair_threshold = near_duplicate_threshold
+                if left.is_lossless != right.is_lossless:
+                    pair_threshold += mixed_codec_threshold_boost
+                if dist <= exact_duplicate_threshold:
+                    verdict = "exact"
+                elif dist <= pair_threshold:
+                    verdict = "near"
+                else:
+                    verdict = "no match"
+                pair_info[(left.path, right.path)] = (dist, pair_threshold, verdict)
+            if stop_requested:
                 break
-            if timeout_sec and (_now() - start_time) > timeout_sec:
-                review_flags.append("Consolidation planning timed out while grouping.")
-                stop_requested = True
-                break
-            comparisons += 1
-            left = path_to_track[left_path]
-            right = path_to_track[right_path]
-            dist = fingerprint_distance(left.fingerprint, right.fingerprint)
-            pair_threshold = near_duplicate_threshold
-            if left.is_lossless != right.is_lossless:
-                pair_threshold += mixed_codec_threshold_boost
-            if dist <= exact_duplicate_threshold:
-                verdict = "exact"
-            elif dist <= pair_threshold:
-                verdict = "near"
-            else:
-                verdict = "no match"
-            shared_keys = sorted(set(coarse_keys.get(left_path, [])) & set(coarse_keys.get(right_path, [])))
-            pair_info[(left.path, right.path)] = (dist, pair_threshold, verdict, shared_keys)
 
         if stop_requested:
             break
@@ -2243,7 +2217,7 @@ def _cluster_duplicates(
                 pair = pair_info.get(left_key) or pair_info.get(right_key)
                 if not pair:
                     continue
-                dist, pair_threshold, verdict, shared_keys = pair
+                dist, pair_threshold, verdict = pair
                 if verdict not in {"exact", "near"}:
                     continue
                 compatible = True
@@ -2257,7 +2231,7 @@ def _cluster_duplicates(
                     if not cmp_pair:
                         compatible = False
                         break
-                    cmp_dist, member_threshold, cmp_verdict, _ = cmp_pair
+                    cmp_dist, member_threshold, cmp_verdict = cmp_pair
                     if cmp_verdict not in {"exact", "near"} or cmp_dist > member_threshold:
                         compatible = False
                         break
@@ -2269,9 +2243,9 @@ def _cluster_duplicates(
                             anchor_path=track.path,
                             candidate_path=other.path,
                             metadata_key=bucket_key,
-                            coarse_keys_anchor=sorted(coarse_keys.get(track.path, [])),
-                            coarse_keys_candidate=sorted(coarse_keys.get(other.path, [])),
-                            shared_coarse_keys=shared_keys,
+                            coarse_keys_anchor=[],
+                            coarse_keys_candidate=[],
+                            shared_coarse_keys=[],
                             distance_to_anchor=dist,
                             max_group_distance=max_candidate_distance,
                             threshold=pair_threshold,
