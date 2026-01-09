@@ -218,39 +218,66 @@ def _scan_paths(
     log_callback,
 ) -> Tuple[List[Tuple[Set[str], float]], int, int, int]:
     """Scan a list of paths for near duplicate clusters."""
+    def _pairs_from_index(index: Dict[tuple[str, ...], List[str]]) -> set[tuple[str, str]]:
+        pairs: set[tuple[str, str]] = set()
+        for members in index.values():
+            if len(members) < 2:
+                continue
+            members_sorted = sorted(members)
+            for i, left in enumerate(members_sorted):
+                for right in members_sorted[i + 1 :]:
+                    pairs.add((left, right))
+        return pairs
+
     adj: Dict[str, Set[str]] = defaultdict(set)
-    comparisons = 0
-    metadata_blocked = 0
-    coarse_blocked = 0
-    coarse_keys = {p: _coarse_fingerprint_keys(file_infos[p].get("fp")) for p in paths}
     pair_distances: Dict[frozenset[str], float] = {}
     path_list = list(paths)
-    for i, p in enumerate(path_list):
-        for q in path_list[i + 1 :]:
-            if not _metadata_gate(file_infos[p], file_infos[q]):
-                metadata_blocked += 1
-                continue
-            if not _coarse_gate(coarse_keys.get(p, []), coarse_keys.get(q, [])):
-                coarse_blocked += 1
-                continue
-            dist = fingerprint_distance(file_infos[p]["fp"], file_infos[q]["fp"])
-            pair_threshold = _pair_threshold(
-                p,
-                q,
-                file_infos[p],
-                file_infos[q],
-                threshold,
-                mixed_codec_boost,
+    total_pairs = len(path_list) * (len(path_list) - 1) // 2
+
+    metadata_index: Dict[tuple[str, ...], List[str]] = defaultdict(list)
+    album_index: Dict[tuple[str, ...], List[str]] = defaultdict(list)
+    for p in path_list:
+        info = file_infos[p]
+        title_key = _normalized(info.get("title"))
+        primary_key = _normalized(info.get("primary") or info.get("artist"))
+        album_key = _normalized(info.get("album"))
+        if title_key and primary_key:
+            metadata_index[(title_key, primary_key)].append(p)
+        if title_key and album_key:
+            album_index[(title_key, album_key)].append(p)
+
+    metadata_pairs = _pairs_from_index(metadata_index) | _pairs_from_index(album_index)
+    metadata_pairs_count = len(metadata_pairs)
+    metadata_blocked = max(0, total_pairs - metadata_pairs_count)
+
+    coarse_keys = {p: _coarse_fingerprint_keys(file_infos[p].get("fp")) for p in path_list}
+    coarse_index: Dict[tuple[str, ...], List[str]] = defaultdict(list)
+    for p, keys in coarse_keys.items():
+        for key in keys:
+            coarse_index[(key,)].append(p)
+    coarse_pairs = _pairs_from_index(coarse_index)
+    candidate_pairs = sorted(metadata_pairs & coarse_pairs)
+    comparisons = len(candidate_pairs)
+    coarse_blocked = max(0, metadata_pairs_count - comparisons)
+
+    for p, q in candidate_pairs:
+        dist = fingerprint_distance(file_infos[p]["fp"], file_infos[q]["fp"])
+        pair_threshold = _pair_threshold(
+            p,
+            q,
+            file_infos[p],
+            file_infos[q],
+            threshold,
+            mixed_codec_boost,
+        )
+        if dist <= pair_threshold:
+            adj[p].add(q)
+            adj[q].add(p)
+            pair_distances[frozenset({p, q})] = dist
+            log_callback(
+                f"   → near-dup {os.path.basename(p)} vs {os.path.basename(q)} "
+                f"dist={dist:.3f} thr={pair_threshold:.3f}"
             )
-            if dist <= pair_threshold:
-                adj[p].add(q)
-                adj[q].add(p)
-                pair_distances[frozenset({p, q})] = dist
-                log_callback(
-                    f"   → near-dup {os.path.basename(p)} vs {os.path.basename(q)} "
-                    f"dist={dist:.3f} thr={pair_threshold:.3f}"
-                )
-            comparisons += 1
 
     visited: Set[str] = set()
     clusters: List[Set[str]] = []
