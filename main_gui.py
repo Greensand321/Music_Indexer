@@ -37,6 +37,7 @@ from tkinter.scrolledtext import ScrolledText
 import textwrap
 import time
 from datetime import datetime
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 
@@ -1992,6 +1993,8 @@ class DuplicateFinderShell(tk.Toplevel):
         self.show_artwork_variants_var = tk.BooleanVar(
             value=cfg.get("duplicate_finder_show_artwork_variants", True)
         )
+        self._preview_trace_enabled = bool(cfg.get("duplicate_finder_debug_trace", False))
+        self._preview_trace = deque(maxlen=50) if self._preview_trace_enabled else None
         self.show_noop_groups_var = tk.BooleanVar(value=False)
         self.group_disposition_var = tk.StringVar(value="")
         self.group_disposition_overrides: dict[str, str] = {}
@@ -2131,6 +2134,8 @@ class DuplicateFinderShell(tk.Toplevel):
         log_box.pack(fill="both", expand=True, pady=(0, 10))
         self.log_text = ScrolledText(log_box, height=6, state="disabled")
         self.log_text.pack(fill="both", expand=True, padx=6, pady=6)
+        if self._preview_trace_enabled:
+            self._log_action("Debug trace enabled")
 
         # Results area
         results = ttk.LabelFrame(container, text="Results")
@@ -2216,6 +2221,23 @@ class DuplicateFinderShell(tk.Toplevel):
         self.log_text.insert("end", line + "\n")
         self.log_text.see("end")
         self.log_text.configure(state="disabled")
+
+    def _record_preview_trace(self, label: str) -> None:
+        if not self._preview_trace_enabled or self._preview_trace is None:
+            return
+        timestamp = datetime.now().isoformat(timespec="seconds")
+        self._preview_trace.append((timestamp, label))
+
+    def _queue_preview_trace(self, label: str) -> None:
+        if not self._preview_trace_enabled or self._preview_trace is None:
+            return
+        self.after(0, self._record_preview_trace, label)
+
+    def _emit_preview_trace(self, header: str = "Duplicate Finder preview trace") -> None:
+        if not self._preview_trace_enabled or not self._preview_trace:
+            return
+        entries = "\n".join(f"{ts} {label}" for ts, label in self._preview_trace)
+        logger.error("%s\n%s", header, entries)
 
     def _current_threshold_settings(self) -> dict[str, float]:
         cfg = load_config()
@@ -2938,6 +2960,10 @@ class DuplicateFinderShell(tk.Toplevel):
                 fingerprint_settings=fingerprint_settings,
                 threshold_settings=threshold_settings,
             )
+            if write_preview:
+                self._queue_preview_trace("metadata-read")
+                self._queue_preview_trace("artwork-read")
+                self._queue_preview_trace("artwork-compress")
             report_status("Grouping…", progress=self._weighted_progress("grouping", 1))
 
             docs_dir = os.path.join(library_root, "Docs")
@@ -2957,6 +2983,7 @@ class DuplicateFinderShell(tk.Toplevel):
                     html_path,
                     show_artwork_variants=show_artwork_variants,
                 )
+                self._queue_preview_trace("preview-html-write")
                 preview_html_path = html_path
                 log(f"Preview HTML written to {html_path}")
                 report_status("Preview generated", progress=self._weighted_progress("preview", 1))
@@ -3091,6 +3118,9 @@ class DuplicateFinderShell(tk.Toplevel):
             return
         self._reset_execute_confirmation()
         self._log_action("Preview clicked")
+        if self._preview_trace_enabled and self._preview_trace is not None:
+            self._preview_trace.clear()
+        self._record_preview_trace("preview-start")
         start_ts = datetime.now().isoformat(timespec="seconds")
         start_time = time.monotonic()
         logger.info("Preview timing start: %s", start_ts)
@@ -3101,7 +3131,8 @@ class DuplicateFinderShell(tk.Toplevel):
         fingerprint_settings = self._current_fingerprint_settings()
         show_artwork_variants = self.show_artwork_variants_var.get()
 
-        def finalize_preview() -> None:
+        def finalize_preview(trace_emit: bool = False) -> None:
+            self._record_preview_trace("preview-finish")
             elapsed = time.monotonic() - start_time
             end_ts = datetime.now().isoformat(timespec="seconds")
             self._stop_preview_heartbeat()
@@ -3110,6 +3141,8 @@ class DuplicateFinderShell(tk.Toplevel):
                 end_ts,
                 elapsed,
             )
+            if trace_emit:
+                self._emit_preview_trace()
 
         def finish(result: PlanGenerationResult | None, error: Exception | None = None) -> None:
             def schedule(callable_obj, *args) -> None:
@@ -3119,7 +3152,7 @@ class DuplicateFinderShell(tk.Toplevel):
                 schedule(self._log_action, f"Preview failed: {error}")
                 schedule(self._set_status, "Preview failed", 100)
                 schedule(messagebox.showerror, "Preview Failed", str(error))
-                schedule(finalize_preview)
+                schedule(finalize_preview, True)
                 return
 
             if result is None or not result.had_tracks:
@@ -3151,6 +3184,7 @@ class DuplicateFinderShell(tk.Toplevel):
                     show_artwork_variants=show_artwork_variants,
                 )
             except Exception as exc:
+                logger.exception("Preview generation failed.")
                 self.after(0, finish, None, exc)
                 return
             self.after(0, finish, result, None)
@@ -3448,6 +3482,7 @@ class DuplicateFinderShell(tk.Toplevel):
             self._log_action("Preview cleared; generate a new preview to reflect delete settings.")
 
     def _open_preview(self) -> None:
+        self._record_preview_trace("preview-open")
         self._open_local_html(
             self.preview_html_path,
             title="Preview Output",
