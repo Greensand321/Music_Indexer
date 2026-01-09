@@ -31,6 +31,19 @@ class UnsortedPopup(tk.Toplevel):
         close_btn.pack(side="right")
 
         self.protocol("WM_DELETE_WINDOW", self.destroy)
+        self.wait_visibility()
+        self._center_on_screen()
+        self.grab_set()
+        self.focus_set()
+        self.bell()
+
+    def _center_on_screen(self) -> None:
+        self.update_idletasks()
+        width = self.winfo_reqwidth()
+        height = self.winfo_reqheight()
+        x = (self.winfo_screenwidth() // 2) - (width // 2)
+        y = (self.winfo_screenheight() // 2) - (height // 2)
+        self.geometry(f"{width}x{height}+{x}+{y}")
 
     def open_folder(self) -> None:
         """Open the Not Sorted folder in the OS file browser."""

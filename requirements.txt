@@ -4,14 +4,17 @@ simpleaudio
 ffmpeg-python
 pyacoustid
 musicbrainzngs
-# essentia  # disabled on Windows
+python-vlc
+# essentia==2.1b6  # optional alternative audio engine; see README.md for install steps
 librosa
 scipy
 numpy
 scikit-learn
 hdbscan
 matplotlib
+Pillow
 requests
+typing_extensions
 # optional metadata helpers
 spotipy
 tidal-dl
