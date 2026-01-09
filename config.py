@@ -17,6 +17,8 @@ NEAR_DUPLICATE_THRESHOLD = 0.1
 EXACT_DUPLICATE_THRESHOLD = 0.02
 MIXED_CODEC_THRESHOLD_BOOST = 0.03
 ARTWORK_VASTLY_DIFFERENT_THRESHOLD = 24
+PREVIEW_ARTWORK_MAX_DIM = 192
+PREVIEW_ARTWORK_QUALITY = 20
 
 # File format quality priority used during Library Sync
 FORMAT_PRIORITY = {".flac": 3, ".wav": 2, ".mp3": 1}
@@ -80,6 +82,8 @@ def load_config():
         cfg.setdefault("mixed_codec_threshold_boost", MIXED_CODEC_THRESHOLD_BOOST)
         cfg.setdefault("artwork_vastly_different_threshold", ARTWORK_VASTLY_DIFFERENT_THRESHOLD)
         cfg.setdefault("duplicate_finder_show_artwork_variants", True)
+        cfg.setdefault("preview_artwork_max_dim", PREVIEW_ARTWORK_MAX_DIM)
+        cfg.setdefault("preview_artwork_quality", PREVIEW_ARTWORK_QUALITY)
         cfg.setdefault("library_root", "")
         cfg.setdefault("use_library_sync_review", False)
         cfg.setdefault("library_sync_review", {})
@@ -105,6 +109,8 @@ def load_config():
             "mixed_codec_threshold_boost": MIXED_CODEC_THRESHOLD_BOOST,
             "artwork_vastly_different_threshold": ARTWORK_VASTLY_DIFFERENT_THRESHOLD,
             "duplicate_finder_show_artwork_variants": True,
+            "preview_artwork_max_dim": PREVIEW_ARTWORK_MAX_DIM,
+            "preview_artwork_quality": PREVIEW_ARTWORK_QUALITY,
         }
 
 
