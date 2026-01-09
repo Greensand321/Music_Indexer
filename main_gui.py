@@ -80,8 +80,6 @@ from config import (
     ALLOW_MISMATCHED_EDITS,
     MIXED_CODEC_THRESHOLD_BOOST,
     NEAR_DUPLICATE_THRESHOLD,
-    PREVIEW_ARTWORK_MAX_DIM,
-    PREVIEW_ARTWORK_QUALITY,
     load_config,
 )
 from fingerprint_cache import get_fingerprint, get_cached_fingerprint, store_fingerprint
@@ -2226,8 +2224,6 @@ class DuplicateFinderShell(tk.Toplevel):
             "artwork_vastly_different_threshold": float(
                 cfg.get("artwork_vastly_different_threshold", ARTWORK_VASTLY_DIFFERENT_THRESHOLD)
             ),
-            "preview_artwork_max_dim": float(cfg.get("preview_artwork_max_dim", PREVIEW_ARTWORK_MAX_DIM)),
-            "preview_artwork_quality": float(cfg.get("preview_artwork_quality", PREVIEW_ARTWORK_QUALITY)),
         }
 
     def _current_fingerprint_settings(self) -> dict[str, float | int | bool]:
@@ -3671,8 +3667,6 @@ class SimilarityInspectorDialog(tk.Toplevel):
             "exact_duplicate_threshold": float(settings["exact_duplicate_threshold"]),
             "near_duplicate_threshold": float(settings["near_duplicate_threshold"]),
             "mixed_codec_threshold_boost": float(settings["mixed_codec_threshold_boost"]),
-            "preview_artwork_max_dim": float(settings.get("preview_artwork_max_dim", PREVIEW_ARTWORK_MAX_DIM)),
-            "preview_artwork_quality": float(settings.get("preview_artwork_quality", PREVIEW_ARTWORK_QUALITY)),
         }
 
     def _fingerprint_settings_snapshot(self, settings: dict[str, float | int | bool]) -> dict[str, object]:
