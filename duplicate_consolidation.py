@@ -24,7 +24,6 @@ from dataclasses import dataclass, field
 from typing import Callable, Dict, Iterable, List, Mapping, MutableMapping, Optional, Sequence
 from collections import defaultdict
 
-from config import PREVIEW_ARTWORK_MAX_DIM, PREVIEW_ARTWORK_QUALITY, load_config
 from utils.path_helpers import ensure_long_path
 from utils.audio_metadata_reader import read_metadata, read_sidecar_artwork_bytes
 try:
@@ -334,60 +333,6 @@ def _image_resample_filter():
     return resampling.LANCZOS
 
 
-def _image_mime(payload: bytes) -> str:
-    if payload.startswith(b"\x89PNG\r\n\x1a\n"):
-        return "image/png"
-    if payload.startswith(b"\xff\xd8"):
-        return "image/jpeg"
-    if payload[:4] == b"RIFF" and payload[8:12] == b"WEBP":
-        return "image/webp"
-    return "image/jpeg"
-
-
-def _image_data_uri(payload: bytes) -> str:
-    mime = _image_mime(payload)
-    encoded = base64.b64encode(payload).decode("ascii")
-    return f"data:{mime};base64,{encoded}"
-
-
-def _preview_artwork_settings() -> tuple[int, int]:
-    cfg = load_config()
-    max_dim = int(cfg.get("preview_artwork_max_dim", PREVIEW_ARTWORK_MAX_DIM))
-    quality = int(cfg.get("preview_artwork_quality", PREVIEW_ARTWORK_QUALITY))
-    max_dim = max(16, min(max_dim, 1024))
-    quality = max(1, min(quality, 95))
-    return max_dim, quality
-
-
-def _compress_preview_artwork(payload: bytes) -> tuple[bytes, str, Optional[int], Optional[int]]:
-    if not payload:
-        return payload, _image_mime(payload), None, None
-    if not Image:
-        width, height = _extract_image_dimensions(payload)
-        return payload, _image_mime(payload), width, height
-    max_dim, quality = _preview_artwork_settings()
-    try:
-        with Image.open(io.BytesIO(payload)) as img:
-            img = img.convert("RGB")
-            img.thumbnail((max_dim, max_dim), resample=_image_resample_filter())
-            width, height = img.size
-            buffer = io.BytesIO()
-            try:
-                img.save(buffer, format="WEBP", quality=quality)
-                mime = "image/webp"
-            except Exception:
-                buffer = io.BytesIO()
-                img.save(buffer, format="JPEG", quality=quality, optimize=True)
-                mime = "image/jpeg"
-        compressed = buffer.getvalue()
-        if not compressed:
-            return payload, _image_mime(payload), width, height
-        return compressed, mime, width, height
-    except Exception:
-        width, height = _extract_image_dimensions(payload)
-        return payload, _image_mime(payload), width, height
-
-
 def _artwork_perceptual_hash(payload: bytes) -> int | None:
     if not payload or not Image:
         return None
@@ -671,16 +616,16 @@ def _read_tags_and_artwork(
             sidecar_used = True
     if cover_payloads:
         for payload in cover_payloads:
-            compressed_payload, _mime, width, height = _compress_preview_artwork(payload)
+            width, height = _extract_image_dimensions(payload)
             artwork.append(
                 ArtworkCandidate(
                     path=path,
                     hash=hashlib.sha256(payload).hexdigest(),
-                    size=len(compressed_payload),
+                    size=len(payload),
                     width=width,
                     height=height,
                     status="ok",
-                    bytes=compressed_payload,
+                    bytes=payload,
                 )
             )
         base["cover_hash"] = artwork[0].hash
@@ -1647,27 +1592,15 @@ def _normalize_track(raw: Mapping[str, object], *, quick_state: bool = False) ->
     provided_artwork: List[ArtworkCandidate] = []
     for art in raw.get("artwork", []) if isinstance(raw.get("artwork"), list) else []:
         try:
-            payload = art.get("bytes")
-            compressed_payload = payload
-            width = art.get("width")
-            height = art.get("height")
-            size = art.get("size")
-            art_hash = art.get("hash")
-            if isinstance(payload, (bytes, bytearray)) and payload:
-                compressed_payload, _mime, width, height = _compress_preview_artwork(bytes(payload))
-                if art_hash is None:
-                    art_hash = hashlib.sha256(bytes(payload)).hexdigest()
-                if size is None:
-                    size = len(compressed_payload)
             provided_artwork.append(
                 ArtworkCandidate(
                     path=path,
-                    hash=str(art_hash or ""),
-                    size=int(size or 0),
-                    width=width,
-                    height=height,
+                    hash=str(art.get("hash")),
+                    size=int(art.get("size") or 0),
+                    width=art.get("width"),
+                    height=art.get("height"),
                     status=art.get("status", "ok"),
-                    bytes=compressed_payload,
+                    bytes=art.get("bytes"),
                 )
             )
         except Exception:
@@ -3060,8 +2993,6 @@ def export_consolidation_preview_html(
         track_path: str,
         include_group_chosen: bool = True,
     ) -> str | None:
-        if not show_artwork_variants:
-            return None
         chosen_hash = ""
         if include_group_chosen and isinstance(group.chosen_artwork_source, Mapping):
             raw_hash = group.chosen_artwork_source.get("hash")
@@ -3083,6 +3014,20 @@ def export_consolidation_preview_html(
         if fallback and fallback.bytes:
             return _image_data_uri(fallback.bytes)
         return None
+
+    def _image_data_uri(payload: bytes) -> str:
+        mime = _image_mime(payload)
+        encoded = base64.b64encode(payload).decode("ascii")
+        return f"data:{mime};base64,{encoded}"
+
+    def _image_mime(payload: bytes) -> str:
+        if payload.startswith(b"\x89PNG\r\n\x1a\n"):
+            return "image/png"
+        if payload.startswith(b"\xff\xd8"):
+            return "image/jpeg"
+        if payload[:4] == b"RIFF" and payload[8:12] == b"WEBP":
+            return "image/webp"
+        return "image/jpeg"
 
     path_counter = 0
 
