@@ -20,7 +20,6 @@ import platform
 import re
 import threading
 import time
-import logging
 from dataclasses import dataclass, field
 from typing import Callable, Dict, Iterable, List, Mapping, MutableMapping, Optional, Sequence
 from collections import defaultdict
@@ -46,8 +45,6 @@ else:  # pragma: no cover - optional dependency
 
 from music_indexer_api import extract_primary_and_collabs
 from near_duplicate_detector import fingerprint_distance, _parse_fp as _parse_fingerprint
-
-logger = logging.getLogger(__name__)
 
 LOSSLESS_EXTS = {".flac", ".wav", ".alac", ".ape", ".aiff", ".aif"}
 EXACT_DUPLICATE_THRESHOLD = 0.02
@@ -364,25 +361,11 @@ def _preview_artwork_settings() -> tuple[int, int]:
 
 def _compress_preview_artwork(payload: bytes) -> tuple[bytes, str, Optional[int], Optional[int]]:
     if not payload:
-        mime = _image_mime(payload)
-        logger.info(
-            "Preview artwork compress: size=0 bytes mime=%s pil=%s fallback=raw",
-            mime,
-            bool(Image),
-        )
-        return payload, mime, None, None
+        return payload, _image_mime(payload), None, None
     if not Image:
         width, height = _extract_image_dimensions(payload)
-        mime = _image_mime(payload)
-        logger.info(
-            "Preview artwork compress: size=%d bytes mime=%s pil=%s fallback=raw",
-            len(payload),
-            mime,
-            bool(Image),
-        )
-        return payload, mime, width, height
+        return payload, _image_mime(payload), width, height
     max_dim, quality = _preview_artwork_settings()
-    original_size = len(payload)
     try:
         with Image.open(io.BytesIO(payload)) as img:
             img = img.convert("RGB")
@@ -398,33 +381,11 @@ def _compress_preview_artwork(payload: bytes) -> tuple[bytes, str, Optional[int]
                 mime = "image/jpeg"
         compressed = buffer.getvalue()
         if not compressed:
-            raw_mime = _image_mime(payload)
-            logger.info(
-                "Preview artwork compress: size=%d bytes mime=%s pil=%s fallback=raw",
-                original_size,
-                raw_mime,
-                bool(Image),
-            )
-            return payload, raw_mime, width, height
-        logger.info(
-            "Preview artwork compress: size=%d->%d bytes mime=%s pil=%s fallback=none",
-            original_size,
-            len(compressed),
-            mime,
-            bool(Image),
-        )
+            return payload, _image_mime(payload), width, height
         return compressed, mime, width, height
     except Exception:
         width, height = _extract_image_dimensions(payload)
-        mime = _image_mime(payload)
-        logger.warning(
-            "Preview artwork compress: size=%d bytes mime=%s pil=%s fallback=raw",
-            len(payload),
-            mime,
-            bool(Image),
-            exc_info=True,
-        )
-        return payload, mime, width, height
+        return payload, _image_mime(payload), width, height
 
 
 def _artwork_perceptual_hash(payload: bytes) -> int | None:
@@ -3025,14 +2986,8 @@ def export_consolidation_preview_html(
     """Write an HTML preview of the consolidation plan."""
 
     plan.refresh_plan_signature()
-    embedded_artwork_count = 0
     def esc(value: object) -> str:
         return html.escape(str(value))
-
-    def _data_uri(payload: bytes) -> str:
-        nonlocal embedded_artwork_count
-        embedded_artwork_count += 1
-        return _image_data_uri(payload)
 
     def _basename(value: str) -> str:
         return os.path.basename(value) or value
@@ -3116,15 +3071,15 @@ def export_consolidation_preview_html(
             if not candidate.bytes:
                 continue
             if chosen_hash and candidate.hash == chosen_hash:
-                return _data_uri(candidate.bytes)
+                return _image_data_uri(candidate.bytes)
             if track_path and candidate.path == track_path and path_fallback is None:
                 path_fallback = candidate
             if fallback is None:
                 fallback = candidate
         if path_fallback and path_fallback.bytes:
-            return _data_uri(path_fallback.bytes)
+            return _image_data_uri(path_fallback.bytes)
         if fallback and fallback.bytes:
-            return _data_uri(fallback.bytes)
+            return _image_data_uri(fallback.bytes)
         return None
 
     path_counter = 0
@@ -4395,21 +4350,4 @@ def export_consolidation_preview_html(
 
     with open(ensure_long_path(output_html_path), "w", encoding="utf-8") as handle:
         handle.write("\n".join(html_lines))
-    try:
-        output_size = os.path.getsize(output_html_path)
-    except OSError:
-        output_size = None
-    if output_size is not None:
-        logger.info(
-            "Preview HTML output: size=%d bytes groups=%d embedded_artwork=%d",
-            output_size,
-            len(plan.groups),
-            embedded_artwork_count,
-        )
-    else:
-        logger.info(
-            "Preview HTML output: groups=%d embedded_artwork=%d",
-            len(plan.groups),
-            embedded_artwork_count,
-        )
     return output_html_path
