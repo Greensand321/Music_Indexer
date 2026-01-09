@@ -2166,7 +2166,8 @@ def _cluster_duplicates(
             continue
         bucket_tracks = sorted(bucket_tracks, key=lambda t: t.path.lower())
         path_to_track = {t.path: t for t in bucket_tracks}
-        pair_info: Dict[tuple[str, str], tuple[float, float, str]] = {}
+        pair_info: Dict[tuple[str, str], tuple[float, float, str, List[str]]] = {}
+        coarse_keys = {t.path: _coarse_fingerprint_keys(t.fingerprint) for t in bucket_tracks}
 
         for idx, left in enumerate(bucket_tracks):
             for right in bucket_tracks[idx + 1 :]:
@@ -2189,7 +2190,8 @@ def _cluster_duplicates(
                     verdict = "near"
                 else:
                     verdict = "no match"
-                pair_info[(left.path, right.path)] = (dist, pair_threshold, verdict)
+                shared_keys = sorted(set(coarse_keys.get(left.path, [])) & set(coarse_keys.get(right.path, [])))
+                pair_info[(left.path, right.path)] = (dist, pair_threshold, verdict, shared_keys)
             if stop_requested:
                 break
 
@@ -2217,7 +2219,7 @@ def _cluster_duplicates(
                 pair = pair_info.get(left_key) or pair_info.get(right_key)
                 if not pair:
                     continue
-                dist, pair_threshold, verdict = pair
+                dist, pair_threshold, verdict, shared_keys = pair
                 if verdict not in {"exact", "near"}:
                     continue
                 compatible = True
@@ -2231,7 +2233,7 @@ def _cluster_duplicates(
                     if not cmp_pair:
                         compatible = False
                         break
-                    cmp_dist, member_threshold, cmp_verdict = cmp_pair
+                    cmp_dist, member_threshold, cmp_verdict, _ = cmp_pair
                     if cmp_verdict not in {"exact", "near"} or cmp_dist > member_threshold:
                         compatible = False
                         break
@@ -2243,9 +2245,9 @@ def _cluster_duplicates(
                             anchor_path=track.path,
                             candidate_path=other.path,
                             metadata_key=bucket_key,
-                            coarse_keys_anchor=[],
-                            coarse_keys_candidate=[],
-                            shared_coarse_keys=[],
+                            coarse_keys_anchor=sorted(coarse_keys.get(track.path, [])),
+                            coarse_keys_candidate=sorted(coarse_keys.get(other.path, [])),
+                            shared_coarse_keys=shared_keys,
                             distance_to_anchor=dist,
                             max_group_distance=max_candidate_distance,
                             threshold=pair_threshold,
