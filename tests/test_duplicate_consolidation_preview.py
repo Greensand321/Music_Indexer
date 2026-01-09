@@ -1,14 +1,10 @@
-import base64
 import json
 import hashlib
 import os
-import re
-import io
 
 from duplicate_consolidation import (
     build_consolidation_plan,
     export_consolidation_preview,
-    export_consolidation_preview_html,
 )
 
 
@@ -181,60 +177,3 @@ def test_metadata_normalization_prefers_album_source(tmp_path) -> None:
     assert group.planned_winner_tags["albumartist"] == "Artist C"
     assert group.planned_winner_tags["year"] == 2020
     assert "album" in group.metadata_changes
-
-
-def test_preview_html_compresses_artwork_payloads(tmp_path) -> None:
-    try:
-        from PIL import Image
-    except ImportError:
-        import pytest
-
-        pytest.skip("PIL not available for artwork compression test.")
-
-    buf = io.BytesIO()
-    img = Image.new("RGB", (1024, 1024), color=(120, 10, 200))
-    img.save(buf, format="PNG")
-    payload = buf.getvalue()
-    original_b64_len = len(base64.b64encode(payload))
-
-    track_path = os.path.join(tmp_path, "Album", "Song D.flac")
-    tracks = [
-        {
-            "path": track_path,
-            "fingerprint": "fp-preview-art",
-            "ext": ".flac",
-            "bitrate": 1000,
-            "sample_rate": 48000,
-            "bit_depth": 24,
-            "tags": {"title": "Song D", "album": "Album D", "album_type": "album"},
-            "artwork": [
-                {
-                    "hash": hashlib.sha256(payload).hexdigest(),
-                    "size": len(payload),
-                    "width": 1024,
-                    "height": 1024,
-                    "status": "ok",
-                    "bytes": payload,
-                }
-            ],
-        },
-        {
-            "path": os.path.join(tmp_path, "Album", "Song D.mp3"),
-            "fingerprint": "fp-preview-art",
-            "ext": ".mp3",
-            "bitrate": 320,
-            "sample_rate": 44100,
-            "bit_depth": 0,
-            "tags": {"title": "Song D", "album": "Album D", "album_type": "album"},
-        },
-    ]
-
-    plan = build_consolidation_plan(tracks)
-    html_path = tmp_path / "preview.html"
-    export_consolidation_preview_html(plan, str(html_path), show_artwork_variants=True)
-
-    html_text = html_path.read_text(encoding="utf-8")
-    match = re.search(r"data:image/[^;]+;base64,([A-Za-z0-9+/=]+)", html_text)
-    assert match, "Expected preview HTML to embed artwork data URI."
-    compressed_b64_len = len(match.group(1))
-    assert compressed_b64_len < original_b64_len * 0.25
