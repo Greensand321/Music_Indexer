@@ -3123,6 +3123,7 @@ class DuplicateFinderShell(tk.Toplevel):
                 mixed_codec_threshold_boost=mixed_codec_boost,
                 fingerprint_settings=fingerprint_settings,
                 threshold_settings=threshold_settings,
+                log_callback=log,
             )
             if write_preview:
                 self._queue_preview_trace("metadata-read")
