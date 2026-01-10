@@ -254,7 +254,10 @@ def test_sidecar_artwork_in_report(monkeypatch, tmp_path):
     with_sidecar.write_text("audio")
     (tmp_path / "song.m4a.jpg").write_bytes(payload)
 
-    monkeypatch.setattr("duplicate_consolidation.read_metadata", lambda _p, include_cover=True: ({}, [], None, None))
+    monkeypatch.setattr(
+        "duplicate_consolidation.read_metadata",
+        lambda _p, include_cover=True, audio=None: ({}, [], None, None),
+    )
     monkeypatch.setattr("duplicate_consolidation._read_audio_file", lambda _p: (None, None))
 
     track = _normalize_track({"path": str(with_sidecar), "fingerprint": "1 2 3", "ext": ".m4a"})
