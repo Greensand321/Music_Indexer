@@ -34,7 +34,14 @@ def _initialize_db(conn: sqlite3.Connection) -> None:
             mtime REAL,
             size INTEGER,
             duration INT,
-            fingerprint TEXT
+            fingerprint TEXT,
+            ext TEXT,
+            bitrate INT,
+            sample_rate INT,
+            bit_depth INT,
+            normalized_artist TEXT,
+            normalized_title TEXT,
+            normalized_album TEXT
         );
         """
     )
@@ -49,6 +56,20 @@ def _initialize_db(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE fingerprints ADD COLUMN duration INT")
     if "fingerprint" not in cols:
         conn.execute("ALTER TABLE fingerprints ADD COLUMN fingerprint TEXT")
+    if "ext" not in cols:
+        conn.execute("ALTER TABLE fingerprints ADD COLUMN ext TEXT")
+    if "bitrate" not in cols:
+        conn.execute("ALTER TABLE fingerprints ADD COLUMN bitrate INT")
+    if "sample_rate" not in cols:
+        conn.execute("ALTER TABLE fingerprints ADD COLUMN sample_rate INT")
+    if "bit_depth" not in cols:
+        conn.execute("ALTER TABLE fingerprints ADD COLUMN bit_depth INT")
+    if "normalized_artist" not in cols:
+        conn.execute("ALTER TABLE fingerprints ADD COLUMN normalized_artist TEXT")
+    if "normalized_title" not in cols:
+        conn.execute("ALTER TABLE fingerprints ADD COLUMN normalized_title TEXT")
+    if "normalized_album" not in cols:
+        conn.execute("ALTER TABLE fingerprints ADD COLUMN normalized_album TEXT")
     conn.commit()
 
 
@@ -78,8 +99,34 @@ class FingerprintWriter:
         size: int,
         duration: int | None,
         fingerprint: str,
+        *,
+        ext: str | None = None,
+        bitrate: int | None = None,
+        sample_rate: int | None = None,
+        bit_depth: int | None = None,
+        normalized_artist: str | None = None,
+        normalized_title: str | None = None,
+        normalized_album: str | None = None,
     ) -> None:
-        self._queue.put(("write", (path, mtime, size, duration, fingerprint)))
+        self._queue.put(
+            (
+                "write",
+                (
+                    path,
+                    mtime,
+                    size,
+                    duration,
+                    fingerprint,
+                    ext,
+                    bitrate,
+                    sample_rate,
+                    bit_depth,
+                    normalized_artist,
+                    normalized_title,
+                    normalized_album,
+                ),
+            )
+        )
 
     def flush(self, timeout: float | None = None) -> None:
         event = threading.Event()
@@ -97,7 +144,22 @@ class FingerprintWriter:
         try:
             conn = sqlite3.connect(self._db_path, check_same_thread=False)
             _initialize_db(conn)
-            pending: list[tuple[str, float, int, int | None, str]] = []
+            pending: list[
+                tuple[
+                    str,
+                    float,
+                    int,
+                    int | None,
+                    str,
+                    str | None,
+                    int | None,
+                    int | None,
+                    int | None,
+                    str | None,
+                    str | None,
+                    str | None,
+                ]
+            ] = []
             last_flush = time.monotonic()
             while True:
                 timeout = self._flush_interval - (time.monotonic() - last_flush)
@@ -140,14 +202,44 @@ class FingerprintWriter:
     def _flush_pending(
         self,
         conn: sqlite3.Connection,
-        pending: list[tuple[str, float, int, int | None, str]],
+        pending: list[
+            tuple[
+                str,
+                float,
+                int,
+                int | None,
+                str,
+                str | None,
+                int | None,
+                int | None,
+                int | None,
+                str | None,
+                str | None,
+                str | None,
+            ]
+        ],
     ) -> None:
         if not pending:
             return
         for attempt in range(3):
             try:
                 conn.executemany(
-                    "INSERT OR REPLACE INTO fingerprints (path, mtime, size, duration, fingerprint) VALUES (?, ?, ?, ?, ?)",
+                    """
+                    INSERT OR REPLACE INTO fingerprints (
+                        path,
+                        mtime,
+                        size,
+                        duration,
+                        fingerprint,
+                        ext,
+                        bitrate,
+                        sample_rate,
+                        bit_depth,
+                        normalized_artist,
+                        normalized_title,
+                        normalized_album
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
                     pending,
                 )
                 conn.commit()
@@ -159,7 +251,22 @@ class FingerprintWriter:
                 time.sleep(0.05)
 
     def _drain_remaining(self, conn: sqlite3.Connection) -> None:
-        pending: list[tuple[str, float, int, int | None, str]] = []
+        pending: list[
+            tuple[
+                str,
+                float,
+                int,
+                int | None,
+                str,
+                str | None,
+                int | None,
+                int | None,
+                int | None,
+                str | None,
+                str | None,
+                str | None,
+            ]
+        ] = []
         while True:
             try:
                 kind, payload = self._queue.get_nowait()
@@ -189,8 +296,18 @@ def _open_readonly_connection(db_path: str) -> sqlite3.Connection | None:
     if not os.path.exists(db_path):
         return None
     conn = sqlite3.connect(db_path)
+    _initialize_db(conn)
     conn.execute("PRAGMA query_only = ON")
     return conn
+
+
+def _decode_fingerprint(fp: object) -> str | None:
+    if not isinstance(fp, (bytes, bytearray)):
+        return fp  # type: ignore[return-value]
+    try:
+        return fp.decode("utf-8")
+    except Exception:
+        return fp.decode("latin1", errors="ignore")
 
 
 def _ensure_db(db_path: str) -> sqlite3.Connection:
@@ -240,11 +357,11 @@ def get_fingerprint(
         _dlog("FP", f"cache hit {path}", log_callback)
         if conn is not None:
             conn.close()
-        if isinstance(fp, (bytes, bytearray)):
-            try:
-                fp = fp.decode("utf-8")
-            except Exception:
-                fp = fp.decode("latin1", errors="ignore")
+        fp = _decode_fingerprint(fp)
+        if fp is None:
+            trace["source"] = "missing"
+            trace["error"] = "fingerprint unavailable"
+            return None
         _dlog("FP", f"fingerprint={fp} prefix={fp[:16]}", log_callback)
         trace["source"] = "cache"
         trace["error"] = ""
@@ -314,11 +431,11 @@ def get_cached_fingerprint(
             if row and abs(cached_mtime - mtime) < 1e-6 and int(cached_size or 0) == int(size):
                 fp = row[2]
                 _dlog("FP", f"cache hit {path}", log_callback)
-                if isinstance(fp, (bytes, bytearray)):
-                    try:
-                        fp = fp.decode("utf-8")
-                    except Exception:
-                        fp = fp.decode("latin1", errors="ignore")
+                fp = _decode_fingerprint(fp)
+                if fp is None:
+                    trace["source"] = "missing"
+                    trace["error"] = "fingerprint unavailable"
+                    return None
                 _dlog("FP", f"fingerprint={fp} prefix={fp[:16]}", log_callback)
                 trace["source"] = "cache"
                 trace["error"] = ""
@@ -339,6 +456,95 @@ def get_cached_fingerprint(
     return None
 
 
+def get_cached_fingerprint_metadata(
+    path: str,
+    db_path: str,
+    log_callback: Optional[Callable[[str], None]] = None,
+    trace: Optional[Dict[str, object]] = None,
+    *,
+    retries: int = 3,
+    retry_delay: float = 0.05,
+) -> tuple[str | None, dict[str, object] | None]:
+    """Return cached fingerprint and metadata for path without computing new fingerprints."""
+    if log_callback is None:
+        log_callback = lambda msg: None
+    if trace is None:
+        trace = {}
+
+    path = ensure_long_path(path)
+    os.makedirs(os.path.dirname(db_path), exist_ok=True)
+    for attempt in range(retries):
+        conn: sqlite3.Connection | None = None
+        try:
+            conn = _open_readonly_connection(db_path)
+            if conn is None:
+                trace["source"] = "missing"
+                trace["error"] = ""
+                return None, None
+            try:
+                mtime = os.path.getmtime(path)
+                size = os.path.getsize(path)
+            except OSError as e:
+                log_callback(f"! Could not stat {path}: {e}")
+                trace["source"] = "stat_error"
+                trace["error"] = str(e)
+                return None, None
+            row = conn.execute(
+                """
+                SELECT
+                    mtime,
+                    size,
+                    fingerprint,
+                    ext,
+                    bitrate,
+                    sample_rate,
+                    bit_depth,
+                    normalized_artist,
+                    normalized_title,
+                    normalized_album
+                FROM fingerprints
+                WHERE path=?
+                """,
+                (path,),
+            ).fetchone()
+            cached_mtime = row[0] if row else None
+            cached_size = row[1] if row else None
+            if row and abs(cached_mtime - mtime) < 1e-6 and int(cached_size or 0) == int(size):
+                fp = _decode_fingerprint(row[2])
+                _dlog("FP", f"cache hit {path}", log_callback)
+                if fp is None:
+                    trace["source"] = "missing"
+                    trace["error"] = "fingerprint unavailable"
+                    return None, None
+                _dlog("FP", f"fingerprint={fp} prefix={fp[:16]}", log_callback)
+                trace["source"] = "cache"
+                trace["error"] = ""
+                metadata = {
+                    "ext": row[3],
+                    "bitrate": row[4],
+                    "sample_rate": row[5],
+                    "bit_depth": row[6],
+                    "normalized_artist": row[7],
+                    "normalized_title": row[8],
+                    "normalized_album": row[9],
+                }
+                return fp, metadata
+            trace["source"] = "missing"
+            trace["error"] = ""
+            return None, None
+        except sqlite3.OperationalError as e:
+            if "locked" not in str(e).lower() or attempt >= retries - 1:
+                log_callback(f"! Fingerprint cache read failed: {e}")
+                trace["source"] = "cache_error"
+                trace["error"] = str(e)
+                return None, None
+            time.sleep(retry_delay)
+        finally:
+            if conn is not None:
+                conn.close()
+    return None, None
+
+
 def store_fingerprint(
     path: str,
     db_path: str,
@@ -346,6 +552,13 @@ def store_fingerprint(
     fingerprint: str | None,
     log_callback: Optional[Callable[[str], None]] = None,
     *,
+    ext: str | None = None,
+    bitrate: int | None = None,
+    sample_rate: int | None = None,
+    bit_depth: int | None = None,
+    normalized_artist: str | None = None,
+    normalized_title: str | None = None,
+    normalized_album: str | None = None,
     retries: int = 3,
     retry_delay: float = 0.05,
     flush: bool = False,
@@ -366,7 +579,20 @@ def store_fingerprint(
             except OSError as e:
                 log_callback(f"! Could not stat {path}: {e}")
                 return False
-            _get_writer(db_path).enqueue(path, mtime, size, duration, fingerprint)
+            _get_writer(db_path).enqueue(
+                path,
+                mtime,
+                size,
+                duration,
+                fingerprint,
+                ext=ext,
+                bitrate=bitrate,
+                sample_rate=sample_rate,
+                bit_depth=bit_depth,
+                normalized_artist=normalized_artist,
+                normalized_title=normalized_title,
+                normalized_album=normalized_album,
+            )
             if flush:
                 flush_fingerprint_writes(db_path)
             return True
