@@ -90,7 +90,6 @@ from fingerprint_cache import (
     get_fingerprint,
     get_cached_fingerprint_metadata,
     store_fingerprint,
-    flush_fingerprint_writes,
 )
 from simple_duplicate_finder import SUPPORTED_EXTS, _compute_fp
 from tag_fixer import MIN_INTERACTIVE_SCORE, FileRecord
@@ -3039,8 +3038,6 @@ class DuplicateFinderShell(tk.Toplevel):
                         normalized_album=metadata.get("normalized_album"),
                         ):
                             failure_count += 1
-
-        flush_fingerprint_writes(db_path)
 
         tracks = [tracks_map[path] for path in sorted_paths if path in tracks_map]
         if log_callback:
