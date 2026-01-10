@@ -90,7 +90,6 @@ from fingerprint_cache import (
     get_fingerprint,
     get_cached_fingerprint_metadata,
     store_fingerprint,
-    flush_fingerprint_writes,
 )
 from simple_duplicate_finder import SUPPORTED_EXTS, _compute_fp
 from tag_fixer import MIN_INTERACTIVE_SCORE, FileRecord
@@ -2777,14 +2776,13 @@ class DuplicateFinderShell(tk.Toplevel):
         self,
         library_root: str,
         *,
-        allow_compute: bool = True,
         log_callback: Callable[[str], None] | None = None,
         status_callback: Callable[[str, float], None] | None = None,
         fingerprint_status_callback: Callable[[str], None] | None = None,
         idle_callback: Callable[[], None] | None = None,
-    ) -> tuple[list[dict[str, object]], int, int, int]:
+    ) -> tuple[list[dict[str, object]], int, int]:
         if not library_root:
-            return [], 0, 0, 0
+            return [], 0, 0
         docs_dir = os.path.join(library_root, "Docs")
         os.makedirs(docs_dir, exist_ok=True)
         db_path = os.path.join(docs_dir, ".duplicate_fingerprints.db")
@@ -2809,7 +2807,7 @@ class DuplicateFinderShell(tk.Toplevel):
                 fingerprint_status_callback("No eligible audio files found.")
             if status_callback:
                 status_callback("Idle", progress=0)
-            return tracks, 0, 0, 0
+            return tracks, 0, 0
         if fingerprint_status_callback:
             fingerprint_status_callback(f"Fingerprinting 0/{total}")
         if status_callback:
@@ -2955,9 +2953,6 @@ class DuplicateFinderShell(tk.Toplevel):
                 if source in {"stat_error", "cache_error"}:
                     failure_count += 1
                     completed += 1
-                elif not allow_compute:
-                    missing_count += 1
-                    completed += 1
                 else:
                     pending_paths.append(path)
             now = time.monotonic()
@@ -2987,7 +2982,7 @@ class DuplicateFinderShell(tk.Toplevel):
             )
 
         max_workers = min(8, os.cpu_count() or 4)
-        if pending_paths and allow_compute:
+        if pending_paths:
             if log_callback:
                 log_callback(f"Computing {len(pending_paths)} missing fingerprints…")
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -3044,8 +3039,6 @@ class DuplicateFinderShell(tk.Toplevel):
                         ):
                             failure_count += 1
 
-        flush_fingerprint_writes(db_path)
-
         tracks = [tracks_map[path] for path in sorted_paths if path in tracks_map]
         if log_callback:
             log_callback(
@@ -3053,7 +3046,7 @@ class DuplicateFinderShell(tk.Toplevel):
                 f"{cached_count} cached, {computed_count} computed, "
                 f"{missing_count} missing, {failure_count} failures."
             )
-        return tracks, missing_count, failure_count, computed_count
+        return tracks, missing_count, failure_count
 
     def _generate_plan(
         self,
@@ -3089,23 +3082,13 @@ class DuplicateFinderShell(tk.Toplevel):
             plan_start_time = time.monotonic()
             logger.info("Preview plan timing start: %s", plan_start_ts)
         try:
-            tracks, missing_count, failure_count, computed_count = self._gather_tracks(
+            tracks, missing_count, failure_count = self._gather_tracks(
                 library_root,
                 log_callback=log,
                 status_callback=status_callback,
                 fingerprint_status_callback=fingerprint_status_callback,
                 idle_callback=idle_callback,
             )
-            if computed_count:
-                log("Fingerprinting completed; refreshing catalog from cache before grouping.")
-                tracks, missing_count, failure_count, _ = self._gather_tracks(
-                    library_root,
-                    allow_compute=False,
-                    log_callback=log,
-                    status_callback=status_callback,
-                    fingerprint_status_callback=fingerprint_status_callback,
-                    idle_callback=idle_callback,
-                )
             if not tracks:
                 return PlanGenerationResult(
                     plan=None,
