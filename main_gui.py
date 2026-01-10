@@ -2776,7 +2776,6 @@ class DuplicateFinderShell(tk.Toplevel):
         self,
         library_root: str,
         *,
-        flush_after_compute: bool = False,
         log_callback: Callable[[str], None] | None = None,
         status_callback: Callable[[str, float], None] | None = None,
         fingerprint_status_callback: Callable[[str], None] | None = None,
@@ -2909,82 +2908,6 @@ class DuplicateFinderShell(tk.Toplevel):
                 },
             }
 
-        def _load_cached_tracks(
-            *,
-            allow_pending: bool,
-        ) -> tuple[dict[str, dict[str, object]], list[str], int, int, int, int]:
-            nonlocal last_update
-            refreshed_map: dict[str, dict[str, object]] = {}
-            refreshed_pending: list[str] = []
-            refreshed_cached_count = 0
-            refreshed_missing_count = 0
-            refreshed_failure_count = 0
-            refreshed_metadata_refresh_count = 0
-            refreshed_completed = 0
-            for path in sorted_paths:
-                fingerprint_trace: dict[str, object] = {}
-                fp, cached_metadata = get_cached_fingerprint_metadata(
-                    path,
-                    db_path,
-                    log_callback=log_callback,
-                    trace=fingerprint_trace,
-                )
-                if fp:
-                    metadata = _metadata_for_payload(path, cached_metadata)
-                    if _needs_metadata_refresh(cached_metadata):
-                        metadata = _extract_metadata(path)
-                        refreshed_metadata_refresh_count += 1
-                        if not store_fingerprint(
-                            path,
-                            db_path,
-                            None,
-                            fp,
-                            log_callback=log_callback,
-                            ext=str(metadata.get("ext") or ""),
-                            bitrate=int(metadata.get("bitrate") or 0),
-                            sample_rate=int(metadata.get("sample_rate") or 0),
-                            bit_depth=int(metadata.get("bit_depth") or 0),
-                            normalized_artist=metadata.get("normalized_artist"),
-                            normalized_title=metadata.get("normalized_title"),
-                            normalized_album=metadata.get("normalized_album"),
-                        ):
-                            refreshed_failure_count += 1
-                    refreshed_map[path] = _track_payload(path, fp, fingerprint_trace, metadata)
-                    refreshed_cached_count += 1
-                    refreshed_completed += 1
-                else:
-                    source = fingerprint_trace.get("source")
-                    if source in {"stat_error", "cache_error"}:
-                        refreshed_failure_count += 1
-                        refreshed_completed += 1
-                    elif allow_pending:
-                        refreshed_pending.append(path)
-                    else:
-                        refreshed_missing_count += 1
-                now = time.monotonic()
-                if refreshed_completed == total or now - last_update >= update_interval:
-                    if fingerprint_status_callback:
-                        fingerprint_status_callback(f"Fingerprinting {refreshed_completed}/{total}")
-                    if status_callback:
-                        status_callback(
-                            "Fingerprinting…",
-                            progress=self._weighted_progress(
-                                "fingerprinting",
-                                0 if total == 0 else refreshed_completed / total,
-                            ),
-                        )
-                    if idle_callback:
-                        idle_callback()
-                    last_update = now
-            return (
-                refreshed_map,
-                refreshed_pending,
-                refreshed_cached_count,
-                refreshed_missing_count,
-                refreshed_failure_count,
-                refreshed_metadata_refresh_count,
-            )
-
         tracks_map: dict[str, dict[str, object]] = {}
         pending_paths: list[str] = []
         completed = 0
@@ -2994,15 +2917,56 @@ class DuplicateFinderShell(tk.Toplevel):
         missing_count = 0
         metadata_refresh_count = 0
         sorted_paths = sorted(audio_paths)
-        (
-            tracks_map,
-            pending_paths,
-            cached_count,
-            missing_count,
-            failure_count,
-            metadata_refresh_count,
-        ) = _load_cached_tracks(allow_pending=True)
-        completed = cached_count + failure_count
+        for path in sorted_paths:
+            fingerprint_trace: dict[str, object] = {}
+            fp, cached_metadata = get_cached_fingerprint_metadata(
+                path,
+                db_path,
+                log_callback=log_callback,
+                trace=fingerprint_trace,
+            )
+            if fp:
+                metadata = _metadata_for_payload(path, cached_metadata)
+                if _needs_metadata_refresh(cached_metadata):
+                    metadata = _extract_metadata(path)
+                    metadata_refresh_count += 1
+                    if not store_fingerprint(
+                        path,
+                        db_path,
+                        None,
+                        fp,
+                        log_callback=log_callback,
+                        ext=str(metadata.get("ext") or ""),
+                        bitrate=int(metadata.get("bitrate") or 0),
+                        sample_rate=int(metadata.get("sample_rate") or 0),
+                        bit_depth=int(metadata.get("bit_depth") or 0),
+                        normalized_artist=metadata.get("normalized_artist"),
+                        normalized_title=metadata.get("normalized_title"),
+                        normalized_album=metadata.get("normalized_album"),
+                    ):
+                        failure_count += 1
+                tracks_map[path] = _track_payload(path, fp, fingerprint_trace, metadata)
+                completed += 1
+                cached_count += 1
+            else:
+                source = fingerprint_trace.get("source")
+                if source in {"stat_error", "cache_error"}:
+                    failure_count += 1
+                    completed += 1
+                else:
+                    pending_paths.append(path)
+            now = time.monotonic()
+            if completed == total or now - last_update >= update_interval:
+                if fingerprint_status_callback:
+                    fingerprint_status_callback(f"Fingerprinting {completed}/{total}")
+                if status_callback:
+                    status_callback(
+                        "Fingerprinting…",
+                        progress=self._weighted_progress("fingerprinting", completed / total),
+                    )
+                if idle_callback:
+                    idle_callback()
+                last_update = now
 
         if not pending_paths and metadata_refresh_count == 0 and failure_count == 0:
             refresh_message = "Catalog up to date; using cached metadata."
@@ -3075,19 +3039,6 @@ class DuplicateFinderShell(tk.Toplevel):
                         ):
                             failure_count += 1
 
-        if flush_after_compute:
-            if log_callback:
-                log_callback("Fingerprint cache flushed; refreshing track list from cache.")
-            flush_fingerprint_writes(db_path)
-            (
-                tracks_map,
-                _pending_paths,
-                cached_count,
-                missing_count,
-                failure_count,
-                metadata_refresh_count,
-            ) = _load_cached_tracks(allow_pending=False)
-
         tracks = [tracks_map[path] for path in sorted_paths if path in tracks_map]
         if log_callback:
             log_callback(
@@ -3133,7 +3084,6 @@ class DuplicateFinderShell(tk.Toplevel):
         try:
             tracks, missing_count, failure_count = self._gather_tracks(
                 library_root,
-                flush_after_compute=True,
                 log_callback=log,
                 status_callback=status_callback,
                 fingerprint_status_callback=fingerprint_status_callback,
