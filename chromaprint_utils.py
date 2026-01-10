@@ -149,7 +149,7 @@ def fingerprint_fpcalc(
         if not fp:
             return None
         fp_str = " ".join(fp.split(","))
-        _dlog("FP", f"prefix={fp_str[:16]} len={len(fp_str)}")
+        _dlog("FP", f"value={fp_str} prefix={fp_str[:16]}")
         return fp_str
     finally:
         for t in (tmp1 if trim else None, tmp2.name if tmp2 else None):

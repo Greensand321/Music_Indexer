@@ -372,11 +372,7 @@ def get_fingerprint(
             trace["source"] = "missing"
             trace["error"] = "fingerprint unavailable"
             return None
-        _dlog(
-            "FP",
-            f"fingerprint_prefix={fp[:16]} len={len(fp)}",
-            log_callback,
-        )
+        _dlog("FP", f"fingerprint={fp} prefix={fp[:16]}", log_callback)
         trace["source"] = "cache"
         trace["error"] = ""
         return fp
@@ -390,11 +386,7 @@ def get_fingerprint(
     _dlog("FP", f"cache miss {path}", log_callback)
     duration, fp_hash = compute_func(path)
     if fp_hash is not None:
-        _dlog(
-            "FP",
-            f"computed fingerprint prefix={fp_hash[:16]} len={len(fp_hash)}",
-            log_callback,
-        )
+        _dlog("FP", f"computed fingerprint {fp_hash} prefix={fp_hash[:16]}", log_callback)
         _get_writer(db_path).enqueue(path, mtime, size, duration, fp_hash)
     if conn is not None:
         conn.close()
@@ -454,11 +446,7 @@ def get_cached_fingerprint(
                     trace["source"] = "missing"
                     trace["error"] = "fingerprint unavailable"
                     return None
-                _dlog(
-                    "FP",
-                    f"fingerprint_prefix={fp[:16]} len={len(fp)}",
-                    log_callback,
-                )
+                _dlog("FP", f"fingerprint={fp} prefix={fp[:16]}", log_callback)
                 trace["source"] = "cache"
                 trace["error"] = ""
                 return fp
@@ -538,11 +526,7 @@ def get_cached_fingerprint_metadata(
                     trace["source"] = "missing"
                     trace["error"] = "fingerprint unavailable"
                     return None, None
-                _dlog(
-                    "FP",
-                    f"fingerprint_prefix={fp[:16]} len={len(fp)}",
-                    log_callback,
-                )
+                _dlog("FP", f"fingerprint={fp} prefix={fp[:16]}", log_callback)
                 trace["source"] = "cache"
                 trace["error"] = ""
                 metadata = {
