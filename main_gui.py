@@ -2066,12 +2066,10 @@ class DuplicateFinderShell(tk.Toplevel):
         # Controls
         controls = ttk.Frame(container)
         controls.pack(fill="x", pady=(0, 10))
-        ttk.Button(controls, text="Scan Library", command=self._handle_scan).pack(
-            side="left", padx=(0, 6)
-        )
-        ttk.Button(controls, text="Preview", command=self._handle_preview).pack(
-            side="left", padx=(0, 6)
-        )
+        self.scan_btn = ttk.Button(controls, text="Scan Library", command=self._handle_scan)
+        self.scan_btn.pack(side="left", padx=(0, 6))
+        self.preview_btn = ttk.Button(controls, text="Preview", command=self._handle_preview)
+        self.preview_btn.pack(side="left", padx=(0, 6))
         self.open_report_btn = ttk.Button(
             controls, text="Open Report", command=self._open_execution_report, state="disabled"
         )
@@ -2211,6 +2209,14 @@ class DuplicateFinderShell(tk.Toplevel):
     def _reset_execute_confirmation(self) -> None:
         self._execute_confirmation_pending = False
         self.execute_label_var.set("Execute")
+
+    def _set_scan_controls_enabled(self, enabled: bool) -> None:
+        state = "normal" if enabled else "disabled"
+        if hasattr(self, "scan_btn"):
+            self.scan_btn.config(state=state)
+        if hasattr(self, "preview_btn"):
+            self.preview_btn.config(state=state)
+        self.execute_btn.config(state=state)
 
     def _default_playlist_folder(self, library_path: str) -> str:
         if library_path:
@@ -3172,27 +3178,70 @@ class DuplicateFinderShell(tk.Toplevel):
             return
         self._reset_execute_confirmation()
         self._log_action("Scan clicked")
+        self._set_status("Starting scan…", progress=0)
+        self._set_fingerprint_status("Starting scan…")
+        self._set_scan_controls_enabled(False)
         threshold_settings = self._current_threshold_settings()
         fingerprint_settings = self._current_fingerprint_settings()
-        result = self._generate_plan(
-            path,
-            write_preview=False,
-            threshold_settings=threshold_settings,
-            fingerprint_settings=fingerprint_settings,
-            show_artwork_variants=self.show_artwork_variants_var.get(),
-            log_callback=self._log_action,
-            status_callback=self._set_status,
-            fingerprint_status_callback=self._set_fingerprint_status,
-            idle_callback=self.update_idletasks,
-        )
-        if not result.had_tracks:
-            messagebox.showwarning("No Tracks", "No audio tracks were found in the selected library.")
-            return
-        self._plan = result.plan
-        self.group_disposition_overrides.clear()
-        self._apply_deletion_mode()
-        self.preview_json_path = None
-        self.preview_html_path = None
+        show_artwork_variants = self.show_artwork_variants_var.get()
+
+        def schedule(callable_obj, *args) -> None:
+            self.after(0, callable_obj, *args)
+
+        def log_callback(message: str) -> None:
+            schedule(self._log_action, message)
+
+        def status_callback(status: str, progress: float) -> None:
+            schedule(self._set_status, status, progress)
+
+        def fingerprint_status_callback(status: str) -> None:
+            schedule(self._set_fingerprint_status, status)
+
+        def idle_callback() -> None:
+            schedule(self.update_idletasks)
+
+        def finish(result: PlanGenerationResult | None, error: Exception | None = None) -> None:
+            if error is not None:
+                self._log_action(f"Scan failed: {error}")
+                self._set_status("Scan failed", 100)
+                messagebox.showerror("Scan Failed", str(error))
+                self._set_scan_controls_enabled(True)
+                return
+            if result is None or not result.had_tracks:
+                messagebox.showwarning(
+                    "No Tracks",
+                    "No audio tracks were found in the selected library.",
+                )
+                self._set_status("Idle", 0)
+                self._set_scan_controls_enabled(True)
+                return
+            self._plan = result.plan
+            self.group_disposition_overrides.clear()
+            self._apply_deletion_mode()
+            self.preview_json_path = None
+            self.preview_html_path = None
+            self._set_scan_controls_enabled(True)
+
+        def worker() -> None:
+            try:
+                result = self._generate_plan(
+                    path,
+                    write_preview=False,
+                    threshold_settings=threshold_settings,
+                    fingerprint_settings=fingerprint_settings,
+                    show_artwork_variants=show_artwork_variants,
+                    log_callback=log_callback,
+                    status_callback=status_callback,
+                    fingerprint_status_callback=fingerprint_status_callback,
+                    idle_callback=idle_callback,
+                )
+            except Exception as exc:
+                logger.exception("Scan generation failed.")
+                self.after(0, finish, None, exc)
+                return
+            self.after(0, finish, result, None)
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def _start_preview_heartbeat(self) -> None:
         self._dup_preview_heartbeat_running = True
