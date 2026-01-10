@@ -2328,26 +2328,55 @@ class DuplicateFinderShell(tk.Toplevel):
 
     def _update_groups_view(self, plan) -> None:
         self.groups_tree.delete(*self.groups_tree.get_children())
+        groups_batch_size = 150
         show_noop_groups = self.show_noop_groups_var.get()
+        group_rows = []
         for group in plan.groups:
             actions = _planned_actions(group)
             if _is_noop_group(actions) and not show_noop_groups:
                 continue
             title = plan and group.planned_winner_tags.get("title") if hasattr(group, "planned_winner_tags") else None
             status = "Review" if group.review_flags else "Ready"
-            self.groups_tree.insert(
-                "",
-                "end",
-                iid=group.group_id,
-                values=(group.group_id, title or os.path.basename(group.winner_path), len(group.losers) + 1, status),
-                tags=("review",) if group.review_flags else (),
+            group_rows.append(
+                {
+                    "iid": group.group_id,
+                    "values": (
+                        group.group_id,
+                        title or os.path.basename(group.winner_path),
+                        len(group.losers) + 1,
+                        status,
+                    ),
+                    "tags": ("review",) if group.review_flags else (),
+                }
             )
-        self.groups_tree.tag_configure("review", background="#fff3cd")
-        self.group_details.configure(state="normal")
-        self.group_details.delete("1.0", "end")
-        self.group_details.insert("end", "Select a group to view details.")
-        self.group_details.configure(state="disabled")
-        self._reset_group_selection()
+
+        total_rows = len(group_rows)
+
+        def insert_chunk(start_index: int = 0) -> None:
+            end_index = min(start_index + groups_batch_size, total_rows)
+            for row in group_rows[start_index:end_index]:
+                self.groups_tree.insert(
+                    "",
+                    "end",
+                    iid=row["iid"],
+                    values=row["values"],
+                    tags=row["tags"],
+                )
+            if total_rows:
+                progress = int((end_index / total_rows) * 100)
+                self._set_status("Loading groups…", progress=progress)
+                self.fingerprint_status_var.set(f"Loading groups {end_index}/{total_rows}…")
+            if end_index < total_rows:
+                self.after(0, insert_chunk, end_index)
+                return
+            self.groups_tree.tag_configure("review", background="#fff3cd")
+            self.group_details.configure(state="normal")
+            self.group_details.delete("1.0", "end")
+            self.group_details.insert("end", "Select a group to view details.")
+            self.group_details.configure(state="disabled")
+            self._reset_group_selection()
+
+        insert_chunk()
 
     def _toggle_show_noop_groups(self) -> None:
         state = "enabled" if self.show_noop_groups_var.get() else "disabled"
