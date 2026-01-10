@@ -91,6 +91,7 @@ from fingerprint_cache import (
     get_cached_fingerprint_metadata,
     flush_fingerprint_writes,
     store_fingerprint,
+    wait_for_fingerprint_writes,
 )
 from simple_duplicate_finder import SUPPORTED_EXTS, _compute_fp
 from tag_fixer import MIN_INTERACTIVE_SCORE, FileRecord

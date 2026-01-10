@@ -128,10 +128,10 @@ class FingerprintWriter:
             )
         )
 
-    def flush(self, timeout: float | None = None) -> None:
+    def flush(self, timeout: float | None = None) -> bool:
         event = threading.Event()
         self._queue.put(("flush", event))
-        event.wait(timeout=timeout)
+        return event.wait(timeout=timeout)
 
     def shutdown(self) -> None:
         event = threading.Event()
@@ -646,6 +646,17 @@ def flush_fingerprint_writes(db_path: str, timeout: float | None = None) -> None
     if not os.path.exists(db_path):
         return
     _get_writer(db_path).flush(timeout=timeout)
+
+
+def wait_for_fingerprint_writes(db_path: str, timeout: float | None = None) -> bool:
+    """Block until queued fingerprint writes have finished flushing."""
+    if not os.path.exists(db_path):
+        return True
+    with _writer_lock:
+        writer = _writer if _writer_db_path == db_path else None
+    if writer is None:
+        return True
+    return writer.flush(timeout=timeout)
 
 
 def shutdown_fingerprint_writer() -> None:
