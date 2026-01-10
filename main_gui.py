@@ -2911,6 +2911,8 @@ class DuplicateFinderShell(tk.Toplevel):
         tracks_map: dict[str, dict[str, object]] = {}
         pending_paths: list[str] = []
         completed = 0
+        cached_count = 0
+        computed_count = 0
         failure_count = 0
         missing_count = 0
         metadata_refresh_count = 0
@@ -2945,6 +2947,7 @@ class DuplicateFinderShell(tk.Toplevel):
                         failure_count += 1
                 tracks_map[path] = _track_payload(path, fp, fingerprint_trace, metadata)
                 completed += 1
+                cached_count += 1
             else:
                 source = fingerprint_trace.get("source")
                 if source in {"stat_error", "cache_error"}:
@@ -2955,7 +2958,9 @@ class DuplicateFinderShell(tk.Toplevel):
             now = time.monotonic()
             if completed == total or now - last_update >= update_interval:
                 if fingerprint_status_callback:
-                    fingerprint_status_callback(f"Fingerprinting {completed}/{total}")
+                    fingerprint_status_callback(
+                        f"Fingerprinting {completed}/{total}: {os.path.basename(path)}"
+                    )
                 if status_callback:
                     status_callback(
                         "Fingerprinting…",
@@ -2971,9 +2976,17 @@ class DuplicateFinderShell(tk.Toplevel):
                 log_callback(refresh_message)
             if fingerprint_status_callback:
                 fingerprint_status_callback(refresh_message)
+        elif log_callback:
+            log_callback(
+                "Fingerprint cache scan complete: "
+                f"{cached_count} cached, {len(pending_paths)} pending, "
+                f"{metadata_refresh_count} metadata refresh, {failure_count} failures."
+            )
 
         max_workers = min(8, os.cpu_count() or 4)
         if pending_paths:
+            if log_callback:
+                log_callback(f"Computing {len(pending_paths)} missing fingerprints…")
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
                 futures = {executor.submit(_fingerprint_worker, path): path for path in pending_paths}
                 for fut in as_completed(futures):
@@ -2989,7 +3002,9 @@ class DuplicateFinderShell(tk.Toplevel):
                     now = time.monotonic()
                     if completed == total or now - last_update >= update_interval:
                         if fingerprint_status_callback:
-                            fingerprint_status_callback(f"Fingerprinting {completed}/{total}")
+                            fingerprint_status_callback(
+                                f"Fingerprinting {completed}/{total}: {os.path.basename(path)}"
+                            )
                         if status_callback:
                             status_callback(
                                 "Fingerprinting…",
@@ -3008,6 +3023,7 @@ class DuplicateFinderShell(tk.Toplevel):
                         if log_callback:
                             log_callback(f"! Missing fingerprint for {path}")
                         continue
+                    computed_count += 1
                     fingerprint_trace = {"source": "computed", "error": ""}
                     metadata = _extract_metadata(path)
                     tracks_map[path] = _track_payload(path, fp, fingerprint_trace, metadata)
@@ -3024,10 +3040,16 @@ class DuplicateFinderShell(tk.Toplevel):
                         normalized_artist=metadata.get("normalized_artist"),
                         normalized_title=metadata.get("normalized_title"),
                         normalized_album=metadata.get("normalized_album"),
-                    ):
-                        failure_count += 1
+                        ):
+                            failure_count += 1
 
         tracks = [tracks_map[path] for path in sorted_paths if path in tracks_map]
+        if log_callback:
+            log_callback(
+                "Fingerprinting summary: "
+                f"{cached_count} cached, {computed_count} computed, "
+                f"{missing_count} missing, {failure_count} failures."
+            )
         return tracks, missing_count, failure_count
 
     def _generate_plan(
@@ -3086,6 +3108,8 @@ class DuplicateFinderShell(tk.Toplevel):
                     f"Fingerprinting complete with {missing_count} missing fingerprints and "
                     f"{failure_count} failures."
                 )
+            log(f"Fingerprinting complete: {len(tracks)} tracks ready for grouping.")
+            log("Beginning duplicate grouping…")
             report_fingerprint_status("Grouping duplicates…")
             report_status("Grouping…", progress=self._weighted_progress("grouping", 0))
             exact_threshold = threshold_settings["exact_duplicate_threshold"]
