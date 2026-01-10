@@ -2135,9 +2135,20 @@ def _cluster_duplicates(
     progress_callback: Callable[[int, int, str], None],
     start_time: float,
     review_flags: List[str],
+    log_callback: Callable[[str], None] | None = None,
 ) -> List[ClusterResult]:
+    def log(message: str) -> None:
+        if log_callback:
+            log_callback(message)
+
     near_duplicate_threshold = max(near_duplicate_threshold, exact_duplicate_threshold)
+    log("Grouping phase: building metadata buckets...")
     buckets = _build_metadata_buckets(tracks)
+    total_tracks = sum(len(bucket.tracks) for bucket in buckets)
+    log(
+        "Grouping phase: metadata buckets ready "
+        f"({len(buckets)} buckets, {total_tracks} tracks)."
+    )
     for bucket in buckets:
         bucket_key = _bucket_primary_key(bucket)
         for track in bucket.tracks:
@@ -2154,8 +2165,8 @@ def _cluster_duplicates(
     clusters: List[ClusterResult] = []
     comparisons = 0
     processed = 0
-    total_tracks = sum(len(bucket.tracks) for bucket in buckets)
     stop_requested = False
+    log("Grouping phase: comparing fingerprint distances...")
     for bucket in buckets:
         if cancel_event.is_set() or (timeout_sec and (_now() - start_time) > timeout_sec):
             review_flags.append("Consolidation planning cancelled or timed out during grouping.")
@@ -2272,6 +2283,10 @@ def _cluster_duplicates(
             progress_callback(processed, total_tracks, track.path)
         if stop_requested:
             break
+    log(
+        "Grouping phase: comparison pass complete "
+        f"({comparisons} comparisons, {len(clusters)} clusters)."
+    )
     return clusters
 
 
@@ -2286,6 +2301,7 @@ def build_consolidation_plan(
     timeout_sec: float = DEFAULT_TIMEOUT_SEC,
     cancel_event: Optional[threading.Event] = None,
     progress_callback: Callable[[int, int, str], None] | None = None,
+    log_callback: Callable[[str], None] | None = None,
     fingerprint_settings: Mapping[str, object] | None = None,
     threshold_settings: Mapping[str, float] | None = None,
 ) -> ConsolidationPlan:
@@ -2297,7 +2313,12 @@ def build_consolidation_plan(
     start_time = _now()
     threshold_settings = dict(threshold_settings or {})
 
+    def log(message: str) -> None:
+        if log_callback:
+            log_callback(message)
+
     normalized: List[DuplicateTrack] = []
+    log("Grouping phase: normalizing tracks...")
     for raw in tracks:
         if cancel_event.is_set():
             review_flags.append("Cancelled before normalization.")
@@ -2306,7 +2327,9 @@ def build_consolidation_plan(
         if len(normalized) >= max_candidates:
             review_flags.append(f"Truncated candidate set to {max_candidates} items to protect runtime.")
             break
+    log(f"Grouping phase: normalized {len(normalized)} tracks.")
 
+    log("Grouping phase: running duplicate clustering...")
     clusters = _cluster_duplicates(
         normalized,
         exact_duplicate_threshold=exact_duplicate_threshold,
@@ -2318,8 +2341,11 @@ def build_consolidation_plan(
         progress_callback=progress_callback,
         start_time=start_time,
         review_flags=review_flags,
+        log_callback=log_callback,
     )
+    log(f"Grouping phase: clustering complete ({len(clusters)} clusters).")
 
+    log("Grouping phase: building consolidation plan...")
     plans: List[GroupPlan] = []
     plan_placeholders = False
     playlists_dir = _infer_playlists_dir([t.path for t in normalized])
