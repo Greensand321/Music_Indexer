@@ -750,7 +750,9 @@ def _read_tags_and_artwork(
     path: str, provided_tags: Mapping[str, object] | None
 ) -> tuple[Dict[str, object], List[ArtworkCandidate], Optional[str], Optional[str], Dict[str, object], Dict[str, object]]:
     audio, error = _read_audio_file(path)
-    file_tags, cover_payloads, read_error, _reader = read_metadata(path, include_cover=False)
+    file_tags, cover_payloads, read_error, _reader = read_metadata(
+        path, include_cover=False, audio=audio
+    )
     base = _merge_tags(_blank_tags(), file_tags)
     fallback = provided_tags or {}
     for key, val in (fallback or {}).items():

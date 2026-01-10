@@ -148,12 +148,8 @@ def _format_part_of_set(value: object) -> Tuple[object, object]:
     return value, _parse_int(value)
 
 
-def _tags_from_mp4_atoms(path: str) -> Dict[str, object]:
-    if MP4 is None:
-        return {}
+def _tags_from_mp4_mapping(tags: Mapping[str, object]) -> Dict[str, object]:
     values = _blank_tags()
-    mp4 = MP4(ensure_long_path(path))
-    tags = mp4.tags or {}
 
     def atom(key: str) -> object:
         return _first_value(tags.get(key))
@@ -173,6 +169,46 @@ def _tags_from_mp4_atoms(path: str) -> Dict[str, object]:
     values["track"] = track_num
     values["discnumber"] = disc_raw
     values["disc"] = disc_num
+
+    return values
+
+
+def _tags_from_mp4_atoms(path: str) -> Dict[str, object]:
+    if MP4 is None:
+        return {}
+    values = _blank_tags()
+    mp4 = MP4(ensure_long_path(path))
+    tags = mp4.tags or {}
+    return _tags_from_mp4_mapping(tags)
+
+
+def _tags_from_mutagen_tags(tags: Mapping[str, object]) -> Dict[str, object]:
+    values = _blank_tags()
+
+    def pick(keys: Iterable[str]) -> object:
+        for key in keys:
+            if key in tags:
+                return _first_value(tags.get(key))
+            if hasattr(tags, "getall"):
+                found = tags.getall(key)
+                if found:
+                    return _first_value(found)
+        return None
+
+    values["artist"] = pick(["artist", "TPE1"])
+    values["albumartist"] = pick(["albumartist", "album artist", "TPE2"])
+    values["title"] = pick(["title", "TIT2"])
+    values["album"] = pick(["album", "TALB"])
+    values["date"] = pick(["date", "year", "TDRC"])
+    values["genre"] = pick(["genre", "TCON"])
+    values["compilation"] = pick(["compilation", "TCMP"])
+
+    track_raw = pick(["tracknumber", "track", "TRCK"])
+    disc_raw = pick(["discnumber", "disc", "TPOS"])
+    values["tracknumber"] = track_raw
+    values["discnumber"] = disc_raw
+    values["track"] = _parse_int(track_raw) if track_raw not in (None, "") else None
+    values["disc"] = _parse_int(disc_raw) if disc_raw not in (None, "") else None
 
     return values
 
@@ -231,45 +267,36 @@ def _extract_cover_payloads(audio) -> List[bytes]:
     return payloads
 
 
-def read_metadata(
+def read_metadata_from_mutagen(
+    audio,
     path: str,
     *,
     include_cover: bool = True,
+    reader_hint_suffix: str | None = None,
 ) -> Tuple[Dict[str, object], List[bytes], Optional[str], Optional[str]]:
-    """Return (tags, cover_payloads, error, reader_hint) for ``path``."""
+    """Return (tags, cover_payloads, error, reader_hint) for a loaded mutagen object."""
     tags = _blank_tags()
     cover_payloads: List[bytes] = []
     error: Optional[str] = None
     reader_hint: Optional[str] = None
-
-    if MutagenFile is None:
-        return tags, cover_payloads, "mutagen unavailable", None
-
     ext = os.path.splitext(path)[1].lower()
+    suffix = f" ({reader_hint_suffix})" if reader_hint_suffix else ""
 
-    try:
-        audio_easy = MutagenFile(ensure_long_path(path), easy=True)
-    except Exception as exc:  # pragma: no cover - depends on local files
-        audio_easy = None
-        error = f"read failed: {exc}"
-
-    if audio_easy and getattr(audio_easy, "tags", None):
-        tags = _merge_missing(tags, _tags_from_easy(audio_easy.tags))
-
-    if ext in {".m4a", ".mp4"}:
-        mp4_tags = {}
-        try:
-            mp4_tags = _tags_from_mp4_atoms(path)
-        except Exception as exc:  # pragma: no cover - depends on local files
-            if error is None:
-                error = f"mp4 read failed: {exc}"
-            mp4_tags = {}
-        if mp4_tags:
-            tags = _merge_missing(mp4_tags, tags)
-            reader_hint = "mp4 atoms"
+    if audio and getattr(audio, "tags", None):
+        if ext in {".m4a", ".mp4"}:
+            mp4_tags = _tags_from_mp4_mapping(audio.tags)
+            fallback_tags = _tags_from_mutagen_tags(audio.tags)
+            if mp4_tags:
+                tags = _merge_missing(mp4_tags, fallback_tags)
+                reader_hint = f"mp4 atoms{suffix}"
+            else:
+                tags = fallback_tags
+                reader_hint = f"mutagen tags{suffix}"
         else:
-            reader_hint = "easy tags"
-        logger.debug("M4A metadata reader used: %s for %s", reader_hint, path)
+            tags = _tags_from_mutagen_tags(audio.tags)
+            reader_hint = f"mutagen tags{suffix}"
+    elif audio:
+        reader_hint = f"mutagen tags{suffix}"
 
     tags["year"] = normalize_year(tags.get("year") or tags.get("date"))
     if not tags.get("track") and tags.get("tracknumber"):
@@ -278,17 +305,49 @@ def read_metadata(
         tags["disc"] = _parse_int(tags.get("discnumber"))
 
     if include_cover:
-        try:
-            audio_full = MutagenFile(ensure_long_path(path))
-        except Exception as exc:  # pragma: no cover - depends on local files
-            audio_full = None
-            if error is None:
-                error = f"read failed: {exc}"
-        cover_payloads = _extract_cover_payloads(audio_full)
+        cover_payloads = _extract_cover_payloads(audio)
         if not cover_payloads:
             sidecar = read_sidecar_artwork_bytes(path)
             if sidecar:
                 cover_payloads = [sidecar]
+
+    return tags, cover_payloads, error, reader_hint
+
+
+def read_metadata(
+    path: str,
+    *,
+    include_cover: bool = True,
+    audio=None,
+) -> Tuple[Dict[str, object], List[bytes], Optional[str], Optional[str]]:
+    """Return (tags, cover_payloads, error, reader_hint) for ``path``."""
+    tags = _blank_tags()
+    cover_payloads: List[bytes] = []
+    error: Optional[str] = None
+    reader_hint: Optional[str] = None
+
+    preloaded = audio is not None
+    if audio is None:
+        if MutagenFile is None:
+            return tags, cover_payloads, "mutagen unavailable", None
+        try:
+            audio = MutagenFile(ensure_long_path(path))
+        except Exception as exc:  # pragma: no cover - depends on local files
+            audio = None
+            error = f"read failed: {exc}"
+
+    tags, cover_payloads, extra_error, reader_hint = read_metadata_from_mutagen(
+        audio,
+        path,
+        include_cover=include_cover,
+        reader_hint_suffix="preloaded" if preloaded else "file",
+    )
+    if error is None:
+        error = extra_error
+
+    ext = os.path.splitext(path)[1].lower()
+    if ext in {".m4a", ".mp4"}:
+        logger.debug("M4A metadata reader used: %s for %s", reader_hint, path)
 
     return tags, cover_payloads, error, reader_hint
 

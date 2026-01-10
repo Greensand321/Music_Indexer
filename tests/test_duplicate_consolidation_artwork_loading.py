@@ -7,7 +7,7 @@ from duplicate_consolidation import build_consolidation_plan
 def test_artwork_loading_deferred_until_cluster(monkeypatch, tmp_path) -> None:
     calls: list[tuple[str, bool]] = []
 
-    def fake_read_metadata(path: str, *, include_cover: bool = False):
+    def fake_read_metadata(path: str, *, include_cover: bool = False, audio=None):
         calls.append((path, include_cover))
         tags = {}
         payloads = [f"art:{os.path.basename(path)}".encode()] if include_cover else []
