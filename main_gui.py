@@ -89,6 +89,7 @@ from fingerprint_cache import (
     ensure_fingerprint_cache,
     get_fingerprint,
     get_cached_fingerprint_metadata,
+    flush_fingerprint_writes,
     store_fingerprint,
 )
 from simple_duplicate_finder import SUPPORTED_EXTS, _compute_fp
