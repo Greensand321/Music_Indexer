@@ -90,7 +90,6 @@ from fingerprint_cache import (
     get_fingerprint,
     get_cached_fingerprint_metadata,
     store_fingerprint,
-    flush_fingerprint_writes,
 )
 from simple_duplicate_finder import SUPPORTED_EXTS, _compute_fp
 from tag_fixer import MIN_INTERACTIVE_SCORE, FileRecord
@@ -2781,7 +2780,6 @@ class DuplicateFinderShell(tk.Toplevel):
         status_callback: Callable[[str, float], None] | None = None,
         fingerprint_status_callback: Callable[[str], None] | None = None,
         idle_callback: Callable[[], None] | None = None,
-        flush_after_compute: bool = False,
     ) -> tuple[list[dict[str, object]], int, int]:
         if not library_root:
             return [], 0, 0
@@ -3041,12 +3039,6 @@ class DuplicateFinderShell(tk.Toplevel):
                         ):
                             failure_count += 1
 
-        if flush_after_compute:
-            flush_fingerprint_writes(db_path)
-            if log_callback:
-                log_callback(
-                    "Fingerprint cache flushed after compute; continuing with in-memory track list."
-                )
         tracks = [tracks_map[path] for path in sorted_paths if path in tracks_map]
         if log_callback:
             log_callback(
@@ -3096,7 +3088,6 @@ class DuplicateFinderShell(tk.Toplevel):
                 status_callback=status_callback,
                 fingerprint_status_callback=fingerprint_status_callback,
                 idle_callback=idle_callback,
-                flush_after_compute=True,
             )
             if not tracks:
                 return PlanGenerationResult(
