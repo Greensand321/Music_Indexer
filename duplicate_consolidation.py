@@ -498,6 +498,8 @@ def _split_by_artwork_similarity(
 def _artwork_status(track: "DuplicateTrack", art_hash: int | None) -> Dict[str, str]:
     if art_hash is not None:
         return {"status": "known", "reason": "embedded artwork"}
+    if track.artwork_error == "deferred":
+        return {"status": "unknown", "reason": "artwork deferred"}
     reason = track.artwork_error or "no artwork found"
     ext = track.ext.lower()
     if ext in {".m4a", ".mp4"} and reason == "no artwork found":
@@ -505,6 +507,63 @@ def _artwork_status(track: "DuplicateTrack", art_hash: int | None) -> Dict[str, 
     if track.artwork_error:
         return {"status": "unknown", "reason": f"art missing/unreadable ({track.artwork_error})"}
     return {"status": "unknown", "reason": "art missing/unreadable (no artwork found)"}
+
+
+def _has_artwork_error(track: "DuplicateTrack") -> bool:
+    return bool(track.artwork_error and track.artwork_error != "deferred")
+
+
+def _load_artwork_for_track(track: "DuplicateTrack") -> None:
+    if track.artwork:
+        if track.artwork_error == "deferred":
+            track.artwork_error = None
+        return
+    _tags, cover_payloads, read_error, reader_hint = read_metadata(track.path, include_cover=True)
+    sidecar_used = False
+    if not cover_payloads:
+        sidecar_payload = read_sidecar_artwork_bytes(track.path)
+        if sidecar_payload:
+            cover_payloads = [sidecar_payload]
+            sidecar_used = True
+
+    artwork: List[ArtworkCandidate] = []
+    if cover_payloads:
+        for payload in cover_payloads:
+            compressed_payload, _mime, width, height = _compress_preview_artwork(payload)
+            artwork.append(
+                ArtworkCandidate(
+                    path=track.path,
+                    hash=hashlib.sha256(payload).hexdigest(),
+                    size=len(compressed_payload),
+                    width=width,
+                    height=height,
+                    status="ok",
+                    bytes=compressed_payload,
+                )
+            )
+        if not track.cover_hash:
+            track.current_tags["cover_hash"] = artwork[0].hash
+            track.current_tags["artwork_hash"] = artwork[0].hash
+        track.artwork_error = None
+    else:
+        track.artwork_error = read_error or "no artwork found"
+
+    track.artwork = artwork
+    ext = track.ext.lower()
+    album_art_trace = track.trace.get("album_art") if isinstance(track.trace, Mapping) else {}
+    album_art_trace = dict(album_art_trace or {})
+    album_art_trace.update(
+        {
+            "success": track.artwork_error is None,
+            "error": "" if track.artwork_error is None else track.artwork_error,
+            "cover_count": len(cover_payloads),
+            "mp4_covr_missing": ext in {".m4a", ".mp4"} and not cover_payloads,
+            "deferred": False,
+            "reader_hint": reader_hint,
+            "sidecar_used": sidecar_used,
+        }
+    )
+    track.trace["album_art"] = album_art_trace
 
 
 def _read_audio_file(path: str):
@@ -691,7 +750,7 @@ def _read_tags_and_artwork(
     path: str, provided_tags: Mapping[str, object] | None
 ) -> tuple[Dict[str, object], List[ArtworkCandidate], Optional[str], Optional[str], Dict[str, object], Dict[str, object]]:
     audio, error = _read_audio_file(path)
-    file_tags, cover_payloads, read_error, _reader = read_metadata(path, include_cover=True)
+    file_tags, cover_payloads, read_error, _reader = read_metadata(path, include_cover=False)
     base = _merge_tags(_blank_tags(), file_tags)
     fallback = provided_tags or {}
     for key, val in (fallback or {}).items():
@@ -701,38 +760,15 @@ def _read_tags_and_artwork(
     if read_error and error is None:
         error = read_error
     artwork: List[ArtworkCandidate] = []
-    art_error: Optional[str] = None
-    sidecar_used = False
-    if not cover_payloads:
-        sidecar_payload = read_sidecar_artwork_bytes(path)
-        if sidecar_payload:
-            cover_payloads = [sidecar_payload]
-            sidecar_used = True
-    if cover_payloads:
-        for payload in cover_payloads:
-            compressed_payload, _mime, width, height = _compress_preview_artwork(payload)
-            artwork.append(
-                ArtworkCandidate(
-                    path=path,
-                    hash=hashlib.sha256(payload).hexdigest(),
-                    size=len(compressed_payload),
-                    width=width,
-                    height=height,
-                    status="ok",
-                    bytes=compressed_payload,
-                )
-            )
-        base["cover_hash"] = artwork[0].hash
-        base["artwork_hash"] = artwork[0].hash
-    else:
-        art_error = "no artwork found"
+    art_error: Optional[str] = "deferred"
     audio_props = _extract_audio_properties(audio, path, provided_tags or {}, os.path.splitext(path)[1])
     ext = os.path.splitext(path)[1].lower()
     metadata_trace = {
         "reader_hint": _reader,
-        "cover_count": len(cover_payloads),
+        "cover_count": None,
         "mp4_covr_missing": ext in {".m4a", ".mp4"} and not cover_payloads,
-        "sidecar_used": sidecar_used,
+        "sidecar_used": False,
+        "cover_deferred": True,
     }
     return base, artwork, error, art_error, audio_props, metadata_trace
 
@@ -1716,6 +1752,10 @@ def _normalize_track(raw: Mapping[str, object], *, quick_state: bool = False) ->
         if "cover_hash" not in current_tags:
             current_tags["cover_hash"] = provided_artwork[0].hash
             current_tags["artwork_hash"] = provided_artwork[0].hash
+        art_err = None
+        meta_trace = dict(meta_trace)
+        meta_trace["cover_count"] = len(provided_artwork)
+        meta_trace["cover_deferred"] = False
     tags = dict(current_tags)
     discovery = raw.get("discovery") if isinstance(raw.get("discovery"), Mapping) else {}
     fingerprint_trace = (
@@ -1741,9 +1781,10 @@ def _normalize_track(raw: Mapping[str, object], *, quick_state: bool = False) ->
         },
         "album_art": {
             "success": art_err is None,
-            "error": art_err or "",
+            "error": "" if art_err in (None, "deferred") else art_err,
             "cover_count": meta_trace.get("cover_count"),
             "mp4_covr_missing": meta_trace.get("mp4_covr_missing"),
+            "deferred": art_err == "deferred",
         },
         "fingerprint": {
             "success": bool(raw.get("fingerprint")),
@@ -2345,6 +2386,17 @@ def build_consolidation_plan(
     )
     log(f"Grouping phase: clustering complete ({len(clusters)} clusters).")
 
+    cluster_track_map: Dict[str, DuplicateTrack] = {}
+    for cluster in clusters:
+        for track in cluster.tracks:
+            cluster_track_map[track.path] = track
+    if cluster_track_map:
+        log("Grouping phase: loading artwork for clustered tracks...")
+        for track in sorted(cluster_track_map.values(), key=lambda t: t.path):
+            if track.artwork_error == "deferred" and not track.artwork:
+                _load_artwork_for_track(track)
+        log("Grouping phase: artwork loading complete.")
+
     log("Grouping phase: building consolidation plan...")
     plans: List[GroupPlan] = []
     plan_placeholders = False
@@ -2631,7 +2683,7 @@ def build_consolidation_plan(
                 )
             if not (single_art_blob or overall_art_blob) and not suppress_review_flags:
                 missing_reason = "No artwork candidates available"
-                if any(t.artwork_error for t in group_tracks):
+                if any(_has_artwork_error(t) for t in group_tracks):
                     missing_reason = "Artwork present but unreadable"
                 review_flags.append(f"{missing_reason} for group {_stable_group_id([t.path for t in group_tracks])}.")
                 chosen_artwork_source["reason"] = missing_reason
@@ -2678,7 +2730,7 @@ def build_consolidation_plan(
                 plan_placeholders = True
             if winner.metadata_error and not suppress_review_flags:
                 group_review.append(f"Metadata read issue for winner: {winner.metadata_error}")
-            if any(t.artwork_error for t in group_tracks) and not suppress_review_flags:
+            if any(_has_artwork_error(t) for t in group_tracks) and not suppress_review_flags:
                 group_review.append("Artwork extraction failed for at least one track.")
 
             if suppress_review_flags:
