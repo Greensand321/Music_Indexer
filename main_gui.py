@@ -2780,6 +2780,7 @@ class DuplicateFinderShell(tk.Toplevel):
         status_callback: Callable[[str, float], None] | None = None,
         fingerprint_status_callback: Callable[[str], None] | None = None,
         idle_callback: Callable[[], None] | None = None,
+        refresh_after_flush: bool = False,
     ) -> tuple[list[dict[str, object]], int, int]:
         if not library_root:
             return [], 0, 0
@@ -2907,6 +2908,72 @@ class DuplicateFinderShell(tk.Toplevel):
                     "skipped_by_filter": False,
                 },
             }
+
+        def _load_cached_tracks(
+            paths: list[str],
+            *,
+            lock_retry_attempts: int = 0,
+        ) -> tuple[dict[str, dict[str, object]], int, int, int, int, int]:
+            cached_tracks: dict[str, dict[str, object]] = {}
+            refresh_missing = 0
+            refresh_failure = 0
+            refresh_cached = 0
+            refresh_metadata = 0
+            lock_contention = 0
+            for cached_path in paths:
+                fingerprint_trace: dict[str, object] = {}
+                fp, cached_metadata = get_cached_fingerprint_metadata(
+                    cached_path,
+                    db_path,
+                    log_callback=log_callback,
+                    trace=fingerprint_trace,
+                    lock_retry_attempts=lock_retry_attempts,
+                    lock_retry_delay=0.1,
+                    lock_retry_backoff=1.5,
+                )
+                if fingerprint_trace.get("lock_contention"):
+                    lock_contention += 1
+                if fp:
+                    metadata = _metadata_for_payload(cached_path, cached_metadata)
+                    if _needs_metadata_refresh(cached_metadata):
+                        metadata = _extract_metadata(cached_path)
+                        refresh_metadata += 1
+                        if not store_fingerprint(
+                            cached_path,
+                            db_path,
+                            None,
+                            fp,
+                            log_callback=log_callback,
+                            ext=str(metadata.get("ext") or ""),
+                            bitrate=int(metadata.get("bitrate") or 0),
+                            sample_rate=int(metadata.get("sample_rate") or 0),
+                            bit_depth=int(metadata.get("bit_depth") or 0),
+                            normalized_artist=metadata.get("normalized_artist"),
+                            normalized_title=metadata.get("normalized_title"),
+                            normalized_album=metadata.get("normalized_album"),
+                        ):
+                            refresh_failure += 1
+                    cached_tracks[cached_path] = _track_payload(
+                        cached_path,
+                        fp,
+                        fingerprint_trace,
+                        metadata,
+                    )
+                    refresh_cached += 1
+                else:
+                    source = fingerprint_trace.get("source")
+                    if source in {"stat_error", "cache_error"}:
+                        refresh_failure += 1
+                    else:
+                        refresh_missing += 1
+            return (
+                cached_tracks,
+                refresh_missing,
+                refresh_failure,
+                refresh_cached,
+                refresh_metadata,
+                lock_contention,
+            )
 
         tracks_map: dict[str, dict[str, object]] = {}
         pending_paths: list[str] = []
@@ -3039,6 +3106,28 @@ class DuplicateFinderShell(tk.Toplevel):
                         ):
                             failure_count += 1
 
+        if refresh_after_flush:
+            if log_callback:
+                log_callback("Flushing fingerprint cache writes before refresh…")
+            flush_fingerprint_writes(db_path)
+            if log_callback:
+                log_callback("Refreshing fingerprint cache after flush…")
+            if fingerprint_status_callback:
+                fingerprint_status_callback("Refreshing fingerprint cache…")
+            (
+                tracks_map,
+                missing_count,
+                failure_count,
+                cached_count,
+                metadata_refresh_count,
+                lock_contention_count,
+            ) = _load_cached_tracks(sorted_paths, lock_retry_attempts=8)
+            if lock_contention_count and log_callback:
+                log_callback(
+                    "Fingerprint cache refresh encountered lock contention; "
+                    f"retried {lock_contention_count} reads."
+                )
+
         tracks = [tracks_map[path] for path in sorted_paths if path in tracks_map]
         if log_callback:
             log_callback(
@@ -3088,6 +3177,7 @@ class DuplicateFinderShell(tk.Toplevel):
                 status_callback=status_callback,
                 fingerprint_status_callback=fingerprint_status_callback,
                 idle_callback=idle_callback,
+                refresh_after_flush=True,
             )
             if not tracks:
                 return PlanGenerationResult(
