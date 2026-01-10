@@ -85,7 +85,12 @@ from config import (
     PREVIEW_ARTWORK_QUALITY,
     load_config,
 )
-from fingerprint_cache import get_fingerprint, get_cached_fingerprint, store_fingerprint
+from fingerprint_cache import (
+    ensure_fingerprint_cache,
+    get_fingerprint,
+    get_cached_fingerprint_metadata,
+    store_fingerprint,
+)
 from simple_duplicate_finder import SUPPORTED_EXTS, _compute_fp
 from tag_fixer import MIN_INTERACTIVE_SCORE, FileRecord
 from typing import Any, Callable, List, Mapping
@@ -2741,6 +2746,7 @@ class DuplicateFinderShell(tk.Toplevel):
         docs_dir = os.path.join(library_root, "Docs")
         os.makedirs(docs_dir, exist_ok=True)
         db_path = os.path.join(docs_dir, ".duplicate_fingerprints.db")
+        ensure_fingerprint_cache(db_path)
         excluded_dirs = {"not sorted", "playlists"}
 
         audio_paths: list[str] = []
@@ -2777,31 +2783,83 @@ class DuplicateFinderShell(tk.Toplevel):
             except Exception as exc:  # pragma: no cover - depends on external files
                 return target_path, None, None, str(exc)
 
-        def _track_payload(
-            path: str,
-            fp: str,
-            fingerprint_trace: dict[str, object],
-        ) -> dict[str, object]:
+        def _normalized_key(text: str | None) -> str | None:
+            if not text:
+                return None
+            return " ".join(re.findall(r"[a-z0-9]+", text.lower()))
+
+        def _extract_metadata(path: str) -> dict[str, object]:
+            ext = os.path.splitext(path)[1].lower()
             bitrate = 0
             sample_rate = 0
             bit_depth = 0
-            audio = None
             try:
                 audio = MutagenFile(path)
                 info = getattr(audio, "info", None)
                 if info:
                     bitrate = int(getattr(info, "bitrate", 0) or 0)
-                    sample_rate = int(getattr(info, "sample_rate", 0) or getattr(info, "samplerate", 0) or 0)
-                    bit_depth = int(getattr(info, "bits_per_sample", 0) or getattr(info, "bitdepth", 0) or 0)
+                    sample_rate = int(
+                        getattr(info, "sample_rate", 0)
+                        or getattr(info, "samplerate", 0)
+                        or 0
+                    )
+                    bit_depth = int(
+                        getattr(info, "bits_per_sample", 0)
+                        or getattr(info, "bitdepth", 0)
+                        or 0
+                    )
             except Exception:
                 pass
+            tags: dict[str, object] = {}
+            try:
+                tags = read_tags(path)
+            except Exception:
+                tags = {}
+            artist_value = tags.get("artist") or tags.get("albumartist")
+            title_value = tags.get("title")
+            album_value = tags.get("album")
+            normalized_artist = _normalized_key(artist_value if isinstance(artist_value, str) else None)
+            normalized_title = _normalized_key(title_value if isinstance(title_value, str) else None)
+            normalized_album = _normalized_key(album_value if isinstance(album_value, str) else None)
             return {
-                "path": path,
-                "fingerprint": fp,
-                "ext": os.path.splitext(path)[1].lower(),
+                "ext": ext,
                 "bitrate": bitrate,
                 "sample_rate": sample_rate,
                 "bit_depth": bit_depth,
+                "normalized_artist": normalized_artist,
+                "normalized_title": normalized_title,
+                "normalized_album": normalized_album,
+            }
+
+        def _needs_metadata_refresh(metadata: dict[str, object] | None) -> bool:
+            if metadata is None:
+                return True
+            return any(metadata.get(key) is None for key in ("bitrate", "sample_rate", "bit_depth"))
+
+        def _metadata_for_payload(path: str, metadata: dict[str, object] | None) -> dict[str, object]:
+            payload = dict(metadata or {})
+            ext = payload.get("ext") or os.path.splitext(path)[1].lower()
+            if isinstance(ext, str) and ext and not ext.startswith("."):
+                ext = f".{ext}"
+            payload["ext"] = ext
+            return payload
+
+        def _track_payload(
+            path: str,
+            fp: str,
+            fingerprint_trace: dict[str, object],
+            metadata: dict[str, object],
+        ) -> dict[str, object]:
+            ext = metadata.get("ext") or os.path.splitext(path)[1].lower()
+            if isinstance(ext, str) and ext and not ext.startswith("."):
+                ext = f".{ext}"
+            return {
+                "path": path,
+                "fingerprint": fp,
+                "ext": ext,
+                "bitrate": int(metadata.get("bitrate") or 0),
+                "sample_rate": int(metadata.get("sample_rate") or 0),
+                "bit_depth": int(metadata.get("bit_depth") or 0),
                 "fingerprint_trace": dict(fingerprint_trace),
                 "discovery": {
                     "scan_roots": [library_root],
@@ -2815,12 +2873,37 @@ class DuplicateFinderShell(tk.Toplevel):
         completed = 0
         failure_count = 0
         missing_count = 0
+        metadata_refresh_count = 0
         sorted_paths = sorted(audio_paths)
         for path in sorted_paths:
             fingerprint_trace: dict[str, object] = {}
-            fp = get_cached_fingerprint(path, db_path, log_callback=log_callback, trace=fingerprint_trace)
+            fp, cached_metadata = get_cached_fingerprint_metadata(
+                path,
+                db_path,
+                log_callback=log_callback,
+                trace=fingerprint_trace,
+            )
             if fp:
-                tracks_map[path] = _track_payload(path, fp, fingerprint_trace)
+                metadata = _metadata_for_payload(path, cached_metadata)
+                if _needs_metadata_refresh(cached_metadata):
+                    metadata = _extract_metadata(path)
+                    metadata_refresh_count += 1
+                    if not store_fingerprint(
+                        path,
+                        db_path,
+                        None,
+                        fp,
+                        log_callback=log_callback,
+                        ext=str(metadata.get("ext") or ""),
+                        bitrate=int(metadata.get("bitrate") or 0),
+                        sample_rate=int(metadata.get("sample_rate") or 0),
+                        bit_depth=int(metadata.get("bit_depth") or 0),
+                        normalized_artist=metadata.get("normalized_artist"),
+                        normalized_title=metadata.get("normalized_title"),
+                        normalized_album=metadata.get("normalized_album"),
+                    ):
+                        failure_count += 1
+                tracks_map[path] = _track_payload(path, fp, fingerprint_trace, metadata)
                 completed += 1
             else:
                 source = fingerprint_trace.get("source")
@@ -2841,6 +2924,13 @@ class DuplicateFinderShell(tk.Toplevel):
                 if idle_callback:
                     idle_callback()
                 last_update = now
+
+        if not pending_paths and metadata_refresh_count == 0 and failure_count == 0:
+            refresh_message = "Catalog up to date; using cached metadata."
+            if log_callback:
+                log_callback(refresh_message)
+            if fingerprint_status_callback:
+                fingerprint_status_callback(refresh_message)
 
         max_workers = min(8, os.cpu_count() or 4)
         if pending_paths:
@@ -2878,10 +2968,24 @@ class DuplicateFinderShell(tk.Toplevel):
                         if log_callback:
                             log_callback(f"! Missing fingerprint for {path}")
                         continue
-                    if not store_fingerprint(path, db_path, duration, fp, log_callback=log_callback):
-                        failure_count += 1
                     fingerprint_trace = {"source": "computed", "error": ""}
-                    tracks_map[path] = _track_payload(path, fp, fingerprint_trace)
+                    metadata = _extract_metadata(path)
+                    tracks_map[path] = _track_payload(path, fp, fingerprint_trace, metadata)
+                    if not store_fingerprint(
+                        path,
+                        db_path,
+                        duration,
+                        fp,
+                        log_callback=log_callback,
+                        ext=str(metadata.get("ext") or ""),
+                        bitrate=int(metadata.get("bitrate") or 0),
+                        sample_rate=int(metadata.get("sample_rate") or 0),
+                        bit_depth=int(metadata.get("bit_depth") or 0),
+                        normalized_artist=metadata.get("normalized_artist"),
+                        normalized_title=metadata.get("normalized_title"),
+                        normalized_album=metadata.get("normalized_album"),
+                    ):
+                        failure_count += 1
 
         tracks = [tracks_map[path] for path in sorted_paths if path in tracks_map]
         return tracks, missing_count, failure_count
