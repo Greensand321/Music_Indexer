@@ -128,10 +128,10 @@ class FingerprintWriter:
             )
         )
 
-    def flush(self, timeout: float | None = None) -> None:
+    def flush(self, timeout: float | None = None) -> bool:
         event = threading.Event()
         self._queue.put(("flush", event))
-        event.wait(timeout=timeout)
+        return event.wait(timeout=timeout)
 
     def shutdown(self) -> None:
         event = threading.Event()
@@ -486,6 +486,9 @@ def get_cached_fingerprint_metadata(
     *,
     retries: int = 3,
     retry_delay: float = 0.05,
+    lock_retry_attempts: int = 0,
+    lock_retry_delay: float = 0.1,
+    lock_retry_backoff: float = 2.0,
 ) -> tuple[str | None, dict[str, object] | None]:
     """Return cached fingerprint and metadata for path without computing new fingerprints."""
     if log_callback is None:
@@ -495,7 +498,9 @@ def get_cached_fingerprint_metadata(
 
     path = ensure_long_path(path)
     os.makedirs(os.path.dirname(db_path), exist_ok=True)
-    for attempt in range(retries):
+    total_attempts = max(retries, 1) + max(lock_retry_attempts, 0)
+    lock_delay = max(lock_retry_delay, 0.0)
+    for attempt in range(total_attempts):
         conn: sqlite3.Connection | None = None
         try:
             conn = _open_readonly_connection(db_path)
@@ -559,12 +564,18 @@ def get_cached_fingerprint_metadata(
             trace["error"] = ""
             return None, None
         except sqlite3.OperationalError as e:
-            if "locked" not in str(e).lower() or attempt >= retries - 1:
+            locked = "locked" in str(e).lower()
+            if not locked or attempt >= total_attempts - 1:
                 log_callback(f"! Fingerprint cache read failed: {e}")
                 trace["source"] = "cache_error"
                 trace["error"] = str(e)
                 return None, None
-            time.sleep(retry_delay)
+            if locked and attempt >= retries - 1:
+                trace["lock_contention"] = True
+                time.sleep(lock_delay)
+                lock_delay *= max(lock_retry_backoff, 1.0)
+            else:
+                time.sleep(retry_delay)
         finally:
             if conn is not None:
                 conn.close()
@@ -635,6 +646,17 @@ def flush_fingerprint_writes(db_path: str, timeout: float | None = None) -> None
     if not os.path.exists(db_path):
         return
     _get_writer(db_path).flush(timeout=timeout)
+
+
+def wait_for_fingerprint_writes(db_path: str, timeout: float | None = None) -> bool:
+    """Block until queued fingerprint writes have finished flushing."""
+    if not os.path.exists(db_path):
+        return True
+    with _writer_lock:
+        writer = _writer if _writer_db_path == db_path else None
+    if writer is None:
+        return True
+    return writer.flush(timeout=timeout)
 
 
 def shutdown_fingerprint_writer() -> None:
