@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 import base64
+import html
 import importlib.util
 import os
 import shutil
 import subprocess
+from datetime import datetime
 from typing import Callable, Iterable, Mapping
 
 from utils.path_helpers import ensure_long_path, strip_ext_prefix
@@ -23,6 +25,8 @@ else:  # pragma: no cover - optional dependency
 ProgressCallback = Callable[[int, int, int, int, int], None]
 LogCallback = Callable[[str], None]
 
+AUDIO_EXTS = {".flac", ".m4a", ".aac", ".mp3", ".wav", ".ogg", ".opus"}
+
 
 def mirror_library(
     source: str,
@@ -30,12 +34,14 @@ def mirror_library(
     overwrite: bool,
     progress_callback: ProgressCallback | None = None,
     log_callback: LogCallback | None = None,
-) -> dict[str, int]:
+) -> dict[str, object]:
     total_files = 0
     converted = 0
     copied = 0
     skipped = 0
     errors = 0
+    skipped_files: list[tuple[str, str]] = []
+    error_files: list[tuple[str, str]] = []
 
     for root, _dirs, files in os.walk(source):
         rel = os.path.relpath(root, source)
@@ -46,29 +52,36 @@ def mirror_library(
             total_files += 1
             src_path = os.path.join(root, filename)
             ext = os.path.splitext(filename)[1].lower()
+            is_audio = ext in AUDIO_EXTS
             if ext == ".flac":
                 dest_name = f"{os.path.splitext(filename)[0]}.opus"
                 dest_path = os.path.join(dest_root, dest_name)
                 if os.path.exists(dest_path) and not overwrite:
-                    skipped += 1
+                    if is_audio:
+                        skipped += 1
+                        skipped_files.append((src_path, "Destination already exists."))
                     continue
-                result = convert_flac_to_opus(
+                result, error = convert_flac_to_opus(
                     src_path, dest_path, overwrite, log_callback=log_callback
                 )
                 if result:
                     converted += 1
                 else:
                     errors += 1
+                    error_files.append((src_path, error or "Conversion failed."))
             else:
                 dest_path = os.path.join(dest_root, filename)
                 if os.path.exists(dest_path) and not overwrite:
-                    skipped += 1
+                    if is_audio:
+                        skipped += 1
+                        skipped_files.append((src_path, "Destination already exists."))
                     continue
                 try:
                     shutil.copy2(src_path, dest_path)
                     copied += 1
-                except OSError:
+                except OSError as exc:
                     errors += 1
+                    error_files.append((src_path, f"Copy failed: {exc}"))
 
             if progress_callback and total_files % 50 == 0:
                 progress_callback(total_files, converted, copied, skipped, errors)
@@ -79,6 +92,8 @@ def mirror_library(
         "copied": copied,
         "skipped": skipped,
         "errors": errors,
+        "skipped_files": skipped_files,
+        "error_files": error_files,
     }
 
 
@@ -87,10 +102,12 @@ def convert_flac_to_opus(
     dest_path: str,
     overwrite: bool,
     log_callback: LogCallback | None = None,
-) -> bool:
-    tags, pictures = _load_flac_metadata(source_path, log_callback=log_callback)
+) -> tuple[bool, str | None]:
+    tags, pictures, metadata_error = _load_flac_metadata(
+        source_path, log_callback=log_callback
+    )
     if tags is None:
-        return False
+        return False, metadata_error or "Metadata unavailable."
     cmd = [
         "ffmpeg",
         "-v",
@@ -112,8 +129,8 @@ def convert_flac_to_opus(
         result = subprocess.run(
             cmd, check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE
         )
-    except OSError:
-        return False
+    except OSError as exc:
+        return False, f"FFmpeg failed to start: {exc}"
     if result.returncode != 0:
         error = result.stderr.decode("utf-8", errors="ignore")[-500:]
         _log_message(
@@ -121,34 +138,34 @@ def convert_flac_to_opus(
             "Opus Library Mirror: conversion failed for "
             f"{strip_ext_prefix(source_path)}: {error}",
         )
-        return False
+        return False, f"FFmpeg error: {error}"
 
     _write_opus_metadata(dest_path, tags, pictures, log_callback=log_callback)
 
-    return True
+    return True, None
 
 
 def _load_flac_metadata(
     source_path: str, log_callback: LogCallback | None = None
-) -> tuple[Mapping[str, list[str]] | None, list["Picture"]]:
+) -> tuple[Mapping[str, list[str]] | None, list["Picture"], str | None]:
     if FLAC is None:
         _log_message(
             log_callback,
             "Opus Library Mirror: mutagen unavailable for metadata transfer.",
         )
-        return None, []
+        return None, [], "Mutagen not available."
     try:
         flac = FLAC(ensure_long_path(source_path))
         tags = flac.tags or {}
         pictures = list(flac.pictures)
-        return tags, pictures
+        return tags, pictures, None
     except Exception:
         _log_message(
             log_callback,
             "Opus Library Mirror: failed to read metadata from "
             f"{strip_ext_prefix(source_path)}.",
         )
-        return None, []
+        return None, [], "Failed to read FLAC metadata."
 
 
 def _write_opus_metadata(
@@ -275,3 +292,59 @@ def _encode_picture(
 def _log_message(log_callback: LogCallback | None, message: str) -> None:
     if log_callback:
         log_callback(message)
+
+
+def write_mirror_report(report_path: str, summary: Mapping[str, object]) -> None:
+    os.makedirs(os.path.dirname(report_path), exist_ok=True)
+    skipped_files = summary.get("skipped_files", [])
+    error_files = summary.get("error_files", [])
+
+    def format_rows(rows: Iterable[tuple[str, str]]) -> str:
+        entries = []
+        for path, reason in rows:
+            display_path = strip_ext_prefix(path)
+            entries.append(
+                "<tr>"
+                f"<td>{html.escape(display_path)}</td>"
+                f"<td>{html.escape(reason)}</td>"
+                "</tr>"
+            )
+        return "\n".join(entries)
+
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    html_content = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Opus Library Mirror Report</title>
+  <style>
+    body {{ font-family: Arial, sans-serif; margin: 24px; color: #1f1f1f; }}
+    h1 {{ margin-top: 0; }}
+    table {{ width: 100%; border-collapse: collapse; margin-bottom: 24px; }}
+    th, td {{ border: 1px solid #ddd; padding: 8px; text-align: left; }}
+    th {{ background: #f2f2f2; }}
+    .empty {{ color: #666; font-style: italic; }}
+  </style>
+</head>
+<body>
+  <h1>Opus Library Mirror Report</h1>
+  <p>Generated: {html.escape(now)}</p>
+  <h2>Summary</h2>
+  <ul>
+    <li>Total files processed: {summary.get("total", 0)}</li>
+    <li>FLAC converted: {summary.get("converted", 0)}</li>
+    <li>Other files copied: {summary.get("copied", 0)}</li>
+    <li>Skipped audio files: {summary.get("skipped", 0)}</li>
+    <li>Errors: {summary.get("errors", 0)}</li>
+  </ul>
+  <h2>Errors</h2>
+  {"<table><thead><tr><th>File</th><th>Reason</th></tr></thead><tbody>"
+   + format_rows(error_files) + "</tbody></table>" if error_files else "<p class=\"empty\">No errors.</p>"}
+  <h2>Skipped Audio Files</h2>
+  {"<table><thead><tr><th>File</th><th>Reason</th></tr></thead><tbody>"
+   + format_rows(skipped_files) + "</tbody></table>" if skipped_files else "<p class=\"empty\">No skipped audio files.</p>"}
+</body>
+</html>
+"""
+    with open(report_path, "w", encoding="utf-8") as handle:
+        handle.write(html_content)
