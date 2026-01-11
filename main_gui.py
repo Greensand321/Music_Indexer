@@ -4855,13 +4855,21 @@ class OpusLibraryMirrorDialog(tk.Toplevel):
     def _convert_flac_to_opus(
         self, source_path: str, dest_path: str, overwrite: bool
     ) -> bool:
+        has_cover = False
+        try:
+            from mutagen.flac import FLAC  # type: ignore
+
+            has_cover = bool(FLAC(source_path).pictures)
+        except Exception:
+            has_cover = False
         cmd = [
             "ffmpeg",
             "-v",
             "error",
             "-i",
             ensure_long_path(source_path),
-            "-vn",
+            "-map",
+            "0:a",
             "-c:a",
             "libopus",
             "-b:a",
@@ -4869,6 +4877,21 @@ class OpusLibraryMirrorDialog(tk.Toplevel):
             "-map_metadata",
             "0",
         ]
+        if has_cover:
+            cmd.extend(
+                [
+                    "-map",
+                    "0:v?",
+                    "-c:v",
+                    "copy",
+                    "-disposition:v:0",
+                    "attached_pic",
+                    "-metadata:s:v",
+                    "title=Album cover",
+                    "-metadata:s:v",
+                    "comment=Cover (front)",
+                ]
+            )
         cmd.append("-y" if overwrite else "-n")
         cmd.append(ensure_long_path(dest_path))
 
