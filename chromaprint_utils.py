@@ -6,6 +6,7 @@ import shutil
 import time
 import logging
 
+from config import FP_SUBPROCESS_TIMEOUT_SEC, load_config
 from utils.path_helpers import ensure_long_path, strip_ext_prefix
 
 verbose: bool = True
@@ -99,6 +100,8 @@ def fingerprint_fpcalc(
     tmp2 = None
     to_process = path
     try:
+        cfg = load_config()
+        timeout_sec = float(cfg.get("fingerprint_subprocess_timeout_sec", FP_SUBPROCESS_TIMEOUT_SEC))
         if trim:
             tmp1 = trim_silence(
                 path,
@@ -131,7 +134,10 @@ def fingerprint_fpcalc(
                 check=True,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
+                timeout=timeout_sec,
             )
+        except subprocess.TimeoutExpired as exc:
+            raise FingerprintError("Fingerprint timeout") from exc
         except subprocess.CalledProcessError as exc:
             msg = _tail_stderr((exc.stderr or b"").decode(errors="ignore"))
             raise FingerprintError(f"FFmpeg error: {msg}") from exc
@@ -139,7 +145,16 @@ def fingerprint_fpcalc(
         safe_path = strip_ext_prefix(to_process)
         cmd = ["fpcalc", "-json", safe_path]
         _dlog("FPCLI", f"cmd={cmd}")
-        proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        try:
+            proc = subprocess.run(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=timeout_sec,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise FingerprintError("Fingerprint timeout") from exc
         _dlog("FPCLI", f"stdout={proc.stdout.strip()}")
         _dlog("FPCLI", f"stderr={_tail_stderr(proc.stderr)}")
         if proc.returncode != 0:
