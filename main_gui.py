@@ -6257,9 +6257,10 @@ class SoundVaultImporterApp(tk.Tk):
             return
 
         output_path = os.path.join(docs_dir, "artist_title_list.txt")
-        exts = {".m4a", ".aac", ".mp3", ".wav", ".ogg", ".opus"}
+        exts = {".m4a", ".aac", ".mp3", ".wav", ".ogg", ".opus", ".flac"}
         q: queue.Queue[tuple[str, object]] = queue.Queue()
         running = tk.BooleanVar(value=False)
+        exclude_flac_var = tk.BooleanVar(value=False)
 
         dlg = tk.Toplevel(self)
         dlg.title("Export Artist/Title List")
@@ -6289,6 +6290,14 @@ class SoundVaultImporterApp(tk.Tk):
         ttk.Label(output_frame, text=output_path, wraplength=520).pack(
             anchor="w", padx=8, pady=6
         )
+
+        options_frame = ttk.LabelFrame(dlg, text="Options")
+        options_frame.pack(fill="x", padx=12, pady=(0, 10))
+        ttk.Checkbutton(
+            options_frame,
+            text="Exclude flac files",
+            variable=exclude_flac_var,
+        ).pack(anchor="w", padx=8, pady=6)
 
         progress_var = tk.StringVar(value="Ready to start.")
         progress = ttk.Progressbar(dlg, mode="determinate")
@@ -6338,9 +6347,12 @@ class SoundVaultImporterApp(tk.Tk):
             def worker() -> None:
                 try:
                     audio_files: list[str] = []
+                    exclude_flac = exclude_flac_var.get()
                     for dirpath, _, files in os.walk(library):
                         for filename in files:
                             ext = os.path.splitext(filename)[1].lower()
+                            if exclude_flac and ext == ".flac":
+                                continue
                             if ext in exts:
                                 audio_files.append(os.path.join(dirpath, filename))
                     q.put(("files", len(audio_files)))
