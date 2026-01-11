@@ -272,26 +272,8 @@ class LibrarySyncReviewPanel(ttk.Frame):
     def _build_ui(self) -> None:
         padding = {"padx": 10, "pady": 5}
 
-        outer = ttk.Frame(self)
-        outer.pack(fill="both", expand=True)
-
-        canvas = tk.Canvas(outer, borderwidth=0, highlightthickness=0)
-        scrollbar = ttk.Scrollbar(outer, orient="vertical", command=canvas.yview)
-        canvas.configure(yscrollcommand=scrollbar.set)
-        scrollbar.pack(side="right", fill="y")
-        canvas.pack(side="left", fill="both", expand=True)
-
-        root = ttk.Frame(canvas)
-        root_id = canvas.create_window((0, 0), window=root, anchor="nw")
-
-        def _on_frame_config(_event=None):
-            canvas.configure(scrollregion=canvas.bbox("all"))
-
-        def _on_canvas_config(event):
-            canvas.itemconfigure(root_id, width=event.width)
-
-        root.bind("<Configure>", _on_frame_config)
-        canvas.bind("<Configure>", _on_canvas_config)
+        root = ttk.Frame(self)
+        root.pack(fill="both", expand=True)
 
         folder_frame = ttk.LabelFrame(root, text="Folders")
         folder_frame.pack(fill="x", **padding)
@@ -301,86 +283,6 @@ class LibrarySyncReviewPanel(ttk.Frame):
         self._add_browse_row(
             folder_frame, "Incoming Folder:", self.incoming_var, self._browse_incoming
         )
-
-        scan_frame = ttk.LabelFrame(root, text="Scan Configuration")
-        scan_frame.pack(fill="x", **padding)
-
-        thr_row = ttk.Frame(scan_frame)
-        thr_row.pack(fill="x", padx=5, pady=(5, 2))
-        ttk.Label(thr_row, text="Global Threshold:").pack(side="left")
-        ttk.Entry(thr_row, textvariable=self.global_threshold_var, width=10).pack(
-            side="left", padx=(5, 0)
-        )
-
-        preset_row = ttk.Frame(scan_frame)
-        preset_row.pack(fill="x", padx=5, pady=2)
-        ttk.Label(preset_row, text="Preset Name:").pack(side="left")
-        ttk.Entry(preset_row, textvariable=self.preset_var, width=20).pack(
-            side="left", padx=(5, 0)
-        )
-
-        overrides_frame = ttk.Frame(scan_frame)
-        overrides_frame.pack(fill="both", expand=True, padx=5, pady=(2, 5))
-        ttk.Label(
-            overrides_frame,
-            text="Per-format overrides (ext=threshold per line):",
-        ).pack(anchor="w")
-        self.overrides_text = tk.Text(overrides_frame, height=4)
-        self.overrides_text.pack(fill="x", expand=True, pady=(2, 0))
-        self.overrides_text.insert("1.0", self._format_overrides())
-
-        meta_row = ttk.Frame(scan_frame)
-        meta_row.pack(fill="x", padx=5, pady=(2, 5))
-        ttk.Label(meta_row, text="Report Version:").pack(side="left")
-        ttk.Entry(meta_row, textvariable=self.report_version_var, width=6).pack(side="left", padx=(5, 10))
-        ttk.Label(meta_row, text="Scan State:").pack(side="left")
-        ttk.Label(meta_row, textvariable=self.scan_state_var).pack(side="left", padx=(5, 0))
-
-        controls = ttk.LabelFrame(root, text="Scan Progress")
-        controls.pack(fill="x", **padding)
-        controls.columnconfigure((0, 1), weight=1)
-        self._build_scan_column(controls, "Existing Library", "library", 0)
-        self._build_scan_column(controls, "Incoming Folder", "incoming", 1)
-
-        plan_frame = ttk.LabelFrame(root, text="Plan & Execution")
-        plan_frame.pack(fill="x", **padding)
-        self._build_plan_controls(plan_frame)
-
-        body = ttk.Frame(root)
-        body.pack(fill="both", expand=True, **padding)
-        body.columnconfigure(0, weight=1)
-        body.columnconfigure(1, weight=1)
-        body.rowconfigure(0, weight=2)
-        body.rowconfigure(1, weight=1)
-
-        # Two-list UI
-        incoming_frame = ttk.LabelFrame(body, text="Incoming Tracks")
-        existing_frame = ttk.LabelFrame(body, text="Existing Tracks")
-        incoming_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 5))
-        existing_frame.grid(row=0, column=1, sticky="nsew", padx=(5, 0))
-        self._build_incoming_tree(incoming_frame)
-        self._build_existing_tree(existing_frame)
-
-        # Inspector drawer
-        inspector = ttk.LabelFrame(body, text="Inspector")
-        inspector.grid(row=1, column=0, columnspan=2, sticky="nsew", pady=(8, 0))
-        inspector.columnconfigure((0, 1), weight=1)
-        self.inspector_text = tk.Text(inspector, height=8, state="disabled", wrap="word")
-        self.inspector_text.grid(row=0, column=0, columnspan=2, sticky="nsew", padx=5, pady=5)
-
-        # Log panel
-        log_frame = ttk.LabelFrame(root, text="Logs")
-        log_frame.pack(fill="both", expand=True, **padding)
-        log_frame.columnconfigure(0, weight=1)
-        self.log_widget = tk.Text(log_frame, height=8, state="disabled", wrap="word")
-        self.log_widget.grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
-        log_btns = ttk.Frame(log_frame)
-        log_btns.grid(row=1, column=0, sticky="ew", padx=5, pady=(0, 5))
-        ttk.Button(log_btns, text="Export Logs…", command=self._export_logs).pack(side="left")
-        ttk.Button(log_btns, text="Save Session", command=self._persist_session).pack(
-            side="left", padx=(5, 0)
-        )
-        ttk.Button(log_btns, text="Close", command=self._on_close).pack(side="right")
 
     def _add_browse_row(
         self,
