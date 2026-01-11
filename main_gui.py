@@ -6364,7 +6364,7 @@ class SoundVaultImporterApp(tk.Tk):
                     q.put(("files", len(audio_files)))
 
                     entries: list[str] = []
-                    entry_data: list[tuple[str, str, str | None]] = []
+                    entry_data: list[tuple[str, str, str | None, str | None]] = []
                     error_count = 0
                     for idx, full_path in enumerate(audio_files, start=1):
                         ext = os.path.splitext(full_path)[1].lower()
@@ -6383,22 +6383,37 @@ class SoundVaultImporterApp(tk.Tk):
                         )
                         title = self._clean_tag_text(tags.get("title"))
                         album = self._clean_tag_text(tags.get("album"))
+                        track = self._clean_tag_text(
+                            tags.get("tracknumber") or tags.get("track")
+                        )
+                        if track and "/" in track:
+                            track = track.split("/", 1)[0].strip() or None
                         if not title:
                             title = os.path.splitext(filename)[0]
                         if not artist:
                             artist = "Unknown Artist"
-                        entry_data.append((artist, title, album))
+                        entry_data.append((artist, title, album, track))
                         if idx == 1 or idx % 50 == 0 or idx == len(audio_files):
                             q.put(("progress", idx, len(audio_files)))
 
                     add_album_duplicates = add_album_duplicates_var.get()
                     duplicate_counts = Counter(
-                        (artist, title) for artist, title, _album in entry_data
+                        (artist, title) for artist, title, _album, _track in entry_data
                     )
-                    for artist, title, album in entry_data:
+                    album_duplicate_counts = Counter(
+                        (artist, title, album)
+                        for artist, title, album, _track in entry_data
+                    )
+                    for artist, title, album, track in entry_data:
                         if add_album_duplicates and duplicate_counts[(artist, title)] > 1:
                             album_label = album or "Unknown Album"
-                            entries.append(f"{artist} - {title} - {album_label}")
+                            if album_duplicate_counts[(artist, title, album)] > 1:
+                                track_label = track or "Unknown Track"
+                                entries.append(
+                                    f"{artist} - {title} - {album_label} - {track_label}"
+                                )
+                            else:
+                                entries.append(f"{artist} - {title} - {album_label}")
                         else:
                             entries.append(f"{artist} - {title}")
 
