@@ -4510,6 +4510,261 @@ class M4ATesterDialog(tk.Toplevel):
         self.cover_label.configure(image=self._cover_photo, text="")
 
 
+class LibraryCompressionPanel(ttk.Frame):
+    """UI panel for converting a library mirror into Opus files."""
+
+    def __init__(self, parent: tk.Widget, controller: tk.Widget):
+        super().__init__(parent, padding=12)
+        self.controller = controller
+
+        default_path = ""
+        if hasattr(controller, "library_path_var"):
+            default_path = controller.library_path_var.get()
+
+        self.source_var = tk.StringVar(value=default_path)
+        self.destination_var = tk.StringVar(value="")
+        self.status_var = tk.StringVar(value="Ready to mirror library.")
+        self.overwrite_var = tk.BooleanVar(value=False)
+        self._worker: threading.Thread | None = None
+        self.report_path: str | None = None
+
+        ttk.Label(
+            self,
+            text="Library Compression",
+            font=("TkDefaultFont", 12, "bold"),
+        ).pack(anchor="w")
+        ttk.Label(
+            self,
+            text="Create a mirror of your library with FLAC files converted to Opus (96 kbps).",
+            foreground="#555",
+            wraplength=520,
+        ).pack(anchor="w", pady=(0, 8))
+
+        source_frame = ttk.LabelFrame(self, text="Source Library")
+        source_frame.pack(fill="x", pady=(10, 6))
+        ttk.Entry(source_frame, textvariable=self.source_var, width=60).grid(
+            row=0, column=0, sticky="ew", padx=6, pady=6
+        )
+        ttk.Button(source_frame, text="Browse…", command=self._browse_source).grid(
+            row=0, column=1, sticky="e", padx=6, pady=6
+        )
+        source_frame.columnconfigure(0, weight=1)
+
+        dest_frame = ttk.LabelFrame(self, text="Destination Mirror")
+        dest_frame.pack(fill="x", pady=(0, 6))
+        ttk.Entry(dest_frame, textvariable=self.destination_var, width=60).grid(
+            row=0, column=0, sticky="ew", padx=6, pady=6
+        )
+        ttk.Button(dest_frame, text="Browse…", command=self._browse_destination).grid(
+            row=0, column=1, sticky="e", padx=6, pady=6
+        )
+        dest_frame.columnconfigure(0, weight=1)
+
+        ttk.Checkbutton(
+            self,
+            text="Overwrite existing files in the destination",
+            variable=self.overwrite_var,
+        ).pack(anchor="w", pady=(0, 4))
+
+        ttk.Label(self, textvariable=self.status_var).pack(anchor="w", pady=(4, 8))
+        self.progress = ttk.Progressbar(
+            self,
+            mode="determinate",
+        )
+        self.progress.pack(fill="x", pady=(0, 8))
+
+        controls = ttk.Frame(self)
+        controls.pack(anchor="e")
+        self.run_btn = ttk.Button(controls, text="Start", command=self._start)
+        self.run_btn.pack(side="right", padx=(6, 0))
+        self.open_report_btn = ttk.Button(
+            controls,
+            text="Open Report",
+            command=self._open_report,
+            state="disabled",
+        )
+        self.open_report_btn.pack(side="right", padx=(0, 6))
+
+    def _browse_source(self) -> None:
+        initial = self.source_var.get() or load_last_path() or os.getcwd()
+        folder = filedialog.askdirectory(
+            parent=self, title="Select Source Library", initialdir=initial
+        )
+        if folder:
+            self.source_var.set(folder)
+
+    def _browse_destination(self) -> None:
+        initial = self.destination_var.get() or load_last_path() or os.getcwd()
+        folder = filedialog.askdirectory(
+            parent=self, title="Select Destination Folder", initialdir=initial
+        )
+        if folder:
+            self.destination_var.set(folder)
+
+    def _start(self) -> None:
+        source = self.source_var.get().strip()
+        destination = self.destination_var.get().strip()
+
+        if not source or not os.path.isdir(source):
+            messagebox.showwarning(
+                "Source Required", "Select a valid source library folder."
+            )
+            return
+        if not destination or not os.path.isdir(destination):
+            messagebox.showwarning(
+                "Destination Required", "Select a valid destination folder."
+            )
+            return
+        if os.path.abspath(source) == os.path.abspath(destination):
+            messagebox.showerror(
+                "Invalid Destination",
+                "The destination folder must be different from the source.",
+            )
+            return
+        try:
+            if os.path.commonpath([source, destination]) == os.path.abspath(source):
+                messagebox.showerror(
+                    "Invalid Destination",
+                    "The destination cannot be inside the source library.",
+                )
+                return
+        except ValueError:
+            pass
+        if not shutil.which("ffmpeg"):
+            messagebox.showerror(
+                "FFmpeg Required",
+                "FFmpeg was not found on your PATH. Install it to convert FLAC files.",
+            )
+            return
+
+        self._set_running(True, "Scanning library…")
+        overwrite = self.overwrite_var.get()
+        self.report_path = None
+        self.open_report_btn.configure(state="disabled")
+
+        def worker() -> None:
+            try:
+                summary = self._mirror_library(source, destination, overwrite)
+                self.after(0, lambda: self._finished(summary))
+            except Exception as exc:  # pragma: no cover - safety net
+                self.after(0, lambda: self._failed(str(exc)))
+
+        self._worker = threading.Thread(target=worker, daemon=True)
+        self._worker.start()
+
+    def _set_running(self, running: bool, status: str) -> None:
+        self.status_var.set(status)
+        state = "disabled" if running else "normal"
+        self.run_btn.configure(state=state)
+        if running:
+            self.progress.configure(maximum=1, value=0)
+
+    def _log(self, message: str) -> None:
+        if hasattr(self.controller, "_log"):
+            self.controller._log(message)
+            if hasattr(self.controller, "show_log_tab"):
+                self.controller.show_log_tab()
+        else:
+            print(message)
+
+    def _mirror_library(
+        self, source: str, destination: str, overwrite: bool
+    ) -> dict[str, object]:
+        def progress_callback(
+            total_tasks: int,
+            completed: int,
+            converted: int,
+            copied: int,
+            skipped: int,
+            errors: int,
+        ) -> None:
+            self.after(
+                0,
+                lambda t=total_tasks, d=completed: (
+                    self.status_var.set("Mirroring library…"),
+                    self.progress.configure(maximum=max(t, 1)),
+                    self.progress.configure(value=d),
+                ),
+            )
+
+        return mirror_library(
+            source,
+            destination,
+            overwrite,
+            progress_callback=progress_callback,
+            log_callback=self._log,
+        )
+
+    def _finished(self, summary: dict[str, object]) -> None:
+        self._set_running(False, "Completed.")
+        message = (
+            "Mirror complete.\n\n"
+            f"Files processed: {summary['total']}\n"
+            f"FLAC converted: {summary['converted']}\n"
+            f"Other files copied: {summary['copied']}\n"
+            f"Skipped: {summary['skipped']}\n"
+            f"Errors: {summary['errors']}"
+        )
+        self.status_var.set(
+            f"Done. Converted {summary['converted']} and copied {summary['copied']}."
+        )
+        messagebox.showinfo("Library Compression", message)
+        self._write_report(summary)
+        self._log(
+            "Library Compression: "
+            f"total={summary['total']} converted={summary['converted']} "
+            f"copied={summary['copied']} skipped={summary['skipped']} "
+            f"errors={summary['errors']}"
+        )
+
+    def _failed(self, error: str) -> None:
+        self._set_running(False, "Failed.")
+        messagebox.showerror("Library Compression", f"Run failed:\n{error}")
+
+    def _write_report(self, summary: dict[str, object]) -> None:
+        destination = self.destination_var.get().strip()
+        if not destination:
+            return
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        reports_dir = os.path.join(
+            destination,
+            "Docs",
+            "opus_library_mirror_reports",
+        )
+        report_path = os.path.join(
+            reports_dir,
+            f"opus_library_mirror_report_{timestamp}.html",
+        )
+        try:
+            write_mirror_report(report_path, summary)
+        except OSError as exc:
+            self._log(f"Library Compression: failed to write report: {exc}")
+            self.report_path = None
+            self.open_report_btn.configure(state="disabled")
+            return
+        self.report_path = report_path
+        self.open_report_btn.configure(state="normal")
+        self._log(f"Library Compression: report saved to {report_path}")
+
+    def _open_report(self) -> None:
+        if not self.report_path:
+            messagebox.showinfo("Library Compression", "No report is available yet.")
+            return
+        safe_path = ensure_long_path(self.report_path)
+        if not os.path.exists(safe_path):
+            messagebox.showerror(
+                "Report Missing",
+                "The report could not be found. Run the mirror again to generate a new report.",
+            )
+            return
+        display_path = strip_ext_prefix(self.report_path)
+        try:
+            uri = Path(display_path).resolve().as_uri()
+        except Exception:
+            uri = display_path
+        webbrowser.open(uri)
+
+
 class OpusTesterDialog(tk.Toplevel):
     """Standalone UI for validating Opus metadata/album art parsing."""
 
@@ -5339,9 +5594,6 @@ class SoundVaultImporterApp(tk.Tk):
         )
         tools_menu.add_command(label="M4A Tester…", command=self._open_m4a_tester_tool)
         tools_menu.add_command(label="Opus Tester…", command=self._open_opus_tester_tool)
-        tools_menu.add_command(
-            label="Opus Library Mirror…", command=self._open_opus_mirror_tool
-        )
         tools_menu.add_separator()
         tools_menu.add_command(label="Reset Tag-Fix Log", command=self.reset_tagfix_log)
         menubar.add_cascade(label="Tools", menu=tools_menu)
@@ -5771,6 +6023,15 @@ class SoundVaultImporterApp(tk.Tk):
         ).pack(side="left", expand=True, fill="x", padx=(5, 0))
         self._sync_player_playlist()
 
+        # ─── Library Compression Tab ──────────────────────────────────────
+        self.library_compression_tab = ttk.Frame(self.notebook)
+        self.notebook.add(self.library_compression_tab, text="Library Compression")
+        self.library_compression_panel = LibraryCompressionPanel(
+            self.library_compression_tab,
+            controller=self,
+        )
+        self.library_compression_panel.pack(fill="both", expand=True)
+
         # ─── Library Sync Tab ─────────────────────────────────────────────
         self.sync_tab = ttk.Frame(self.notebook)
         self.notebook.add(self.sync_tab, text="Library Sync")
@@ -5781,22 +6042,24 @@ class SoundVaultImporterApp(tk.Tk):
         self.sync_review_panel.pack(fill="both", expand=True)
 
         # after your other tabs
-        help_frame = ttk.Frame(self.notebook)
-        self.notebook.add(help_frame, text="Help")
+        self.help_tab = ttk.Frame(self.notebook)
+        self.notebook.add(self.help_tab, text="Help")
 
         # Chat history display
         self.chat_history = ScrolledText(
-            help_frame, height=15, state="disabled", wrap="word"
+            self.help_tab, height=15, state="disabled", wrap="word"
         )
         self.chat_history.pack(fill="both", expand=True, padx=10, pady=(10, 5))
 
         # Entry + send button
-        entry_frame = ttk.Frame(help_frame)
+        entry_frame = ttk.Frame(self.help_tab)
         entry_frame.pack(fill="x", padx=10, pady=(0, 10))
         self.chat_input = ttk.Entry(entry_frame)
         self.chat_input.pack(side="left", fill="x", expand=True)
         send_btn = ttk.Button(entry_frame, text="Send", command=self._send_help_query)
         send_btn.pack(side="right", padx=(5, 0))
+
+        self._reorder_tabs()
 
     def on_theme_change(self, event=None):
         """Apply the selected theme and persist to config."""
@@ -7363,6 +7626,22 @@ class SoundVaultImporterApp(tk.Tk):
             return
         self._player_set_temp_playlist([])
 
+    def _reorder_tabs(self) -> None:
+        desired = [
+            getattr(self, "log_tab", None),
+            getattr(self, "indexer_tab", None),
+            getattr(self, "dup_tab", None),
+            getattr(self, "library_compression_tab", None),
+            getattr(self, "sync_tab", None),
+            getattr(self, "playlist_tab", None),
+            getattr(self, "tagfix_tab", None),
+            getattr(self, "player_tab", None),
+            getattr(self, "help_tab", None),
+        ]
+        for tab in [t for t in desired if t is not None]:
+            if str(tab) in self.notebook.tabs():
+                self.notebook.insert("end", tab)
+
     def _player_load_playlist(self) -> None:
         playlists_dir = os.path.join(self.library_path, "Playlists")
         initial_dir = (
@@ -7497,9 +7776,6 @@ class SoundVaultImporterApp(tk.Tk):
 
     def _open_opus_tester_tool(self) -> None:
         OpusTesterDialog(self)
-
-    def _open_opus_mirror_tool(self) -> None:
-        OpusLibraryMirrorDialog(self)
 
     def _create_player_library_table(self, parent: tk.Widget) -> ttk.Frame:
         table = ttk.Frame(parent)
