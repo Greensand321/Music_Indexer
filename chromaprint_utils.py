@@ -74,10 +74,25 @@ def trim_silence(
         str(channels),
         output_path,
     ]
+    start = time.perf_counter()
+    _logger.info("Trim silence ffmpeg start: path=%s cmd=%s", input_path, cmd)
     proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    elapsed = time.perf_counter() - start
+    _logger.info(
+        "Trim silence ffmpeg end: path=%s returncode=%s elapsed=%.2fs",
+        input_path,
+        proc.returncode,
+        elapsed,
+    )
     if proc.returncode != 0:
         os.remove(output_path)
         msg = _tail_stderr(proc.stderr.decode(errors="ignore"))
+        _logger.error(
+            "Trim silence ffmpeg failed: path=%s returncode=%s stderr_tail=%s",
+            input_path,
+            proc.returncode,
+            msg,
+        )
         raise FingerprintError(f"FFmpeg error: {msg}")
     return output_path
 
@@ -129,6 +144,13 @@ def fingerprint_fpcalc(
             tmp2.name,
         ]
         try:
+            start = time.perf_counter()
+            _logger.info(
+                "Fingerprint ffmpeg start: path=%s cmd=%s timeout=%.2fs",
+                path,
+                ffmpeg_cmd,
+                timeout_sec,
+            )
             subprocess.run(
                 ffmpeg_cmd,
                 check=True,
@@ -136,16 +158,41 @@ def fingerprint_fpcalc(
                 stderr=subprocess.PIPE,
                 timeout=timeout_sec,
             )
+            elapsed = time.perf_counter() - start
+            _logger.info(
+                "Fingerprint ffmpeg end: path=%s elapsed=%.2fs output=%s",
+                path,
+                elapsed,
+                tmp2.name,
+            )
         except subprocess.TimeoutExpired as exc:
+            _logger.error(
+                "Fingerprint ffmpeg timeout: path=%s timeout=%.2fs",
+                path,
+                timeout_sec,
+            )
             raise FingerprintError("Fingerprint timeout") from exc
         except subprocess.CalledProcessError as exc:
             msg = _tail_stderr((exc.stderr or b"").decode(errors="ignore"))
+            _logger.error(
+                "Fingerprint ffmpeg failed: path=%s returncode=%s stderr_tail=%s",
+                path,
+                exc.returncode,
+                msg,
+            )
             raise FingerprintError(f"FFmpeg error: {msg}") from exc
         to_process = tmp2.name
         safe_path = strip_ext_prefix(to_process)
         cmd = ["fpcalc", "-json", safe_path]
+        _logger.info(
+            "Fingerprint fpcalc start: path=%s cmd=%s timeout=%.2fs",
+            path,
+            cmd,
+            timeout_sec,
+        )
         _dlog("FPCLI", f"cmd={cmd}")
         try:
+            start = time.perf_counter()
             proc = subprocess.run(
                 cmd,
                 stdout=subprocess.PIPE,
@@ -154,10 +201,28 @@ def fingerprint_fpcalc(
                 timeout=timeout_sec,
             )
         except subprocess.TimeoutExpired as exc:
+            _logger.error(
+                "Fingerprint fpcalc timeout: path=%s timeout=%.2fs",
+                path,
+                timeout_sec,
+            )
             raise FingerprintError("Fingerprint timeout") from exc
+        elapsed = time.perf_counter() - start
+        _logger.info(
+            "Fingerprint fpcalc end: path=%s returncode=%s elapsed=%.2fs",
+            path,
+            proc.returncode,
+            elapsed,
+        )
         _dlog("FPCLI", f"stdout={proc.stdout.strip()}")
         _dlog("FPCLI", f"stderr={_tail_stderr(proc.stderr)}")
         if proc.returncode != 0:
+            _logger.error(
+                "Fingerprint fpcalc failed: path=%s returncode=%s stderr_tail=%s",
+                path,
+                proc.returncode,
+                _tail_stderr(proc.stderr),
+            )
             raise FingerprintError(_tail_stderr(proc.stderr))
         data = json.loads(proc.stdout)
         fp = data.get("fingerprint")

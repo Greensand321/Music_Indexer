@@ -459,6 +459,7 @@ def _compress_preview_artwork(payload: bytes) -> tuple[bytes, str, Optional[int]
         return payload, mime, width, height
     max_dim, quality = _preview_artwork_settings()
     original_size = len(payload)
+    start = time.perf_counter()
     try:
         with Image.open(io.BytesIO(payload)) as img:
             img = img.convert("RGB")
@@ -483,22 +484,28 @@ def _compress_preview_artwork(payload: bytes) -> tuple[bytes, str, Optional[int]
             )
             return payload, raw_mime, width, height
         logger.info(
-            "Preview artwork compress: size=%d->%d bytes mime=%s pil=%s fallback=none",
+            "Preview artwork compress: size=%d->%d bytes mime=%s pil=%s fallback=none elapsed=%.2fs",
             original_size,
             len(compressed),
             mime,
             bool(Image),
+            time.perf_counter() - start,
         )
         return compressed, mime, width, height
-    except Exception:
+    except Exception as exc:
         width, height = _extract_image_dimensions(payload)
         mime = _image_mime(payload)
         logger.warning(
-            "Preview artwork compress: size=%d bytes mime=%s pil=%s fallback=raw",
+            "Preview artwork compress: size=%d bytes mime=%s pil=%s fallback=raw elapsed=%.2fs",
             len(payload),
             mime,
             bool(Image),
-            exc_info=True,
+            time.perf_counter() - start,
+        )
+        logger.exception(
+            "Preview artwork compress failed: size=%d bytes error=%s",
+            len(payload),
+            exc,
         )
         return payload, mime, width, height
 
@@ -646,9 +653,14 @@ def _compress_artwork_for_preview(track: "DuplicateTrack") -> None:
     if not track.artwork:
         return
     for candidate in track.artwork:
+        raw_payload = candidate.bytes or b""
+        logger.info(
+            "Preview artwork candidate: track=%s size=%d",
+            track.path,
+            len(raw_payload),
+        )
         if not candidate.bytes:
             continue
-        raw_payload = candidate.bytes
         if not candidate.hash:
             candidate.hash = hashlib.sha256(raw_payload).hexdigest()
         compressed_payload, _mime, width, height = _compress_preview_artwork(raw_payload)
@@ -658,6 +670,14 @@ def _compress_artwork_for_preview(track: "DuplicateTrack") -> None:
             candidate.width = width
         if height is not None:
             candidate.height = height
+        logger.info(
+            "Preview artwork candidate compressed: track=%s size=%d->%d dims=%sx%s",
+            track.path,
+            len(raw_payload),
+            candidate.size,
+            width,
+            height,
+        )
 
 
 def _read_audio_file(path: str):

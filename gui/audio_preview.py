@@ -34,6 +34,13 @@ class VlcPreviewPlayer:
         self._init_error: Exception | None = VLC_IMPORT_ERROR
         self._setup_player()
 
+    @staticmethod
+    def _state_name(state: object) -> str:
+        try:
+            return state.name  # type: ignore[attr-defined]
+        except Exception:
+            return str(state)
+
     def _setup_player(self) -> None:
         if self._init_error:
             self._logger.error("python-vlc not available: %s", self._init_error)
@@ -52,7 +59,10 @@ class VlcPreviewPlayer:
             self._event_mgr.event_attach(
                 vlc.EventType.MediaPlayerEncounteredError, self._handle_error
             )
-            self._logger.debug("VLC preview backend initialized")
+            self._logger.debug(
+                "VLC preview backend initialized: thread=%s",
+                threading.get_ident(),
+            )
         except Exception as exc:
             self._init_error = exc
             self._logger.exception("Failed to initialize VLC preview backend")
@@ -75,7 +85,12 @@ class VlcPreviewPlayer:
                 self._stop_timer.cancel()
                 self._stop_timer = None
             try:
-                self._logger.debug("Stopping VLC preview playback")
+                state = self._player.get_state()
+                self._logger.debug(
+                    "Stopping VLC preview playback: thread=%s state=%s",
+                    threading.get_ident(),
+                    self._state_name(state),
+                )
                 self._player.stop()
             except Exception:
                 self._logger.exception("Error while stopping VLC preview")
@@ -96,10 +111,11 @@ class VlcPreviewPlayer:
             media.add_option(f":run-time={duration_ms / 1000}")
 
             self._logger.info(
-                "Starting VLC preview: path=%s start_ms=%s duration_ms=%s",
+                "Starting VLC preview: path=%s start_ms=%s duration_ms=%s thread=%s",
                 path,
                 start_ms,
                 duration_ms,
+                threading.get_ident(),
             )
             self._player.set_media(media)
             try:
@@ -125,7 +141,13 @@ class VlcPreviewPlayer:
             self._is_playing = False
             if self._stop_timer:
                 self._stop_timer = None
-        self._logger.debug("VLC preview finished")
+        state = self._player.get_state() if self._player else None
+        self._logger.debug(
+            "VLC preview finished: thread=%s state=%s event=%s",
+            threading.get_ident(),
+            self._state_name(state),
+            event,
+        )
         if self._on_done:
             try:
                 self._on_done()
@@ -137,7 +159,13 @@ class VlcPreviewPlayer:
             self._is_playing = False
             if self._stop_timer:
                 self._stop_timer = None
-        self._logger.error("VLC reported an error during preview playback")
+        state = self._player.get_state() if self._player else None
+        self._logger.error(
+            "VLC reported an error during preview playback: thread=%s state=%s event=%s",
+            threading.get_ident(),
+            self._state_name(state),
+            event,
+        )
         if self._on_done:
             try:
                 self._on_done()
@@ -167,6 +195,11 @@ class VlcPreviewPlayer:
                 return
 
         try:
+            self._logger.debug(
+                "Unmuting VLC preview: thread=%s state=%s",
+                threading.get_ident(),
+                self._state_name(self._player.get_state()),
+            )
             self._player.audio_set_mute(False)
         except Exception:
             self._logger.exception("Failed to unmute VLC preview")
