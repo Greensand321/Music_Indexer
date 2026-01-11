@@ -284,6 +284,89 @@ class LibrarySyncReviewPanel(ttk.Frame):
             folder_frame, "Incoming Folder:", self.incoming_var, self._browse_incoming
         )
 
+        settings_frame = ttk.LabelFrame(root, text="Scan Settings")
+        settings_frame.pack(fill="x", **padding)
+        settings_frame.columnconfigure(1, weight=1)
+
+        ttk.Label(settings_frame, text="Global Threshold:").grid(row=0, column=0, sticky="w", padx=5, pady=2)
+        ttk.Entry(settings_frame, textvariable=self.global_threshold_var, width=10).grid(
+            row=0, column=1, sticky="ew", padx=5, pady=2
+        )
+        ttk.Label(settings_frame, text="Preset Name:").grid(row=1, column=0, sticky="w", padx=5, pady=2)
+        ttk.Entry(settings_frame, textvariable=self.preset_var).grid(
+            row=1, column=1, sticky="ew", padx=5, pady=2
+        )
+        ttk.Label(settings_frame, text="Report Version:").grid(row=2, column=0, sticky="w", padx=5, pady=2)
+        ttk.Entry(settings_frame, textvariable=self.report_version_var, width=10).grid(
+            row=2, column=1, sticky="ew", padx=5, pady=2
+        )
+        ttk.Label(settings_frame, text="Scan State:").grid(row=3, column=0, sticky="w", padx=5, pady=2)
+        ttk.Label(settings_frame, textvariable=self.scan_state_var).grid(
+            row=3, column=1, sticky="w", padx=5, pady=2
+        )
+
+        ttk.Label(settings_frame, text="Format Overrides (ext=threshold):").grid(
+            row=4, column=0, columnspan=2, sticky="w", padx=5, pady=(6, 2)
+        )
+        self.overrides_text = tk.Text(settings_frame, height=4, wrap="word")
+        self.overrides_text.grid(row=5, column=0, columnspan=2, sticky="ew", padx=5, pady=(0, 5))
+        overrides = self._format_overrides()
+        if overrides:
+            self.overrides_text.insert("1.0", overrides)
+
+        ttk.Button(settings_frame, text="Save Settings", command=self._persist_session).grid(
+            row=6, column=0, columnspan=2, sticky="w", padx=5, pady=(0, 5)
+        )
+
+        scan_frame = ttk.LabelFrame(root, text="Scan")
+        scan_frame.pack(fill="x", **padding)
+        scan_container = ttk.Frame(scan_frame)
+        scan_container.pack(fill="x")
+        scan_container.columnconfigure(0, weight=1)
+        scan_container.columnconfigure(1, weight=1)
+        self._build_scan_column(scan_container, "Existing Library", "library", 0)
+        self._build_scan_column(scan_container, "Incoming Folder", "incoming", 1)
+
+        plan_frame = ttk.LabelFrame(root, text="Plan & Execute")
+        plan_frame.pack(fill="x", **padding)
+        self._build_plan_controls(plan_frame)
+
+        match_frame = ttk.LabelFrame(root, text="Matches")
+        match_frame.pack(fill="both", expand=True, **padding)
+        list_frame = ttk.Frame(match_frame)
+        list_frame.pack(fill="both", expand=True, padx=5, pady=5)
+        list_frame.columnconfigure(0, weight=1)
+        list_frame.columnconfigure(1, weight=1)
+        list_frame.rowconfigure(0, weight=1)
+
+        incoming_frame = ttk.LabelFrame(list_frame, text="Incoming")
+        incoming_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 5))
+        existing_frame = ttk.LabelFrame(list_frame, text="Existing Library")
+        existing_frame.grid(row=0, column=1, sticky="nsew", padx=(5, 0))
+        self._build_incoming_tree(incoming_frame)
+        self._build_existing_tree(existing_frame)
+
+        inspector_frame = ttk.LabelFrame(match_frame, text="Inspector")
+        inspector_frame.pack(fill="x", padx=5, pady=(0, 5))
+        inspector_scroll = ttk.Scrollbar(inspector_frame)
+        inspector_scroll.pack(side="right", fill="y")
+        self.inspector_text = tk.Text(inspector_frame, height=8, wrap="word", state="disabled")
+        self.inspector_text.pack(fill="both", expand=True)
+        inspector_scroll.config(command=self.inspector_text.yview)
+        self.inspector_text.config(yscrollcommand=inspector_scroll.set)
+
+        log_frame = ttk.LabelFrame(root, text="Logs")
+        log_frame.pack(fill="both", expand=True, **padding)
+        log_controls = ttk.Frame(log_frame)
+        log_controls.pack(fill="x", padx=5, pady=(5, 0))
+        ttk.Button(log_controls, text="Export Logs", command=self._export_logs).pack(side="left")
+        log_scroll = ttk.Scrollbar(log_frame)
+        log_scroll.pack(side="right", fill="y")
+        self.log_widget = tk.Text(log_frame, height=8, wrap="word", state="disabled")
+        self.log_widget.pack(fill="both", expand=True, padx=5, pady=5)
+        log_scroll.config(command=self.log_widget.yview)
+        self.log_widget.config(yscrollcommand=log_scroll.set)
+
     def _add_browse_row(
         self,
         parent: ttk.Frame,
