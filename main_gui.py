@@ -6417,7 +6417,7 @@ class SoundVaultImporterApp(tk.Tk):
                         else:
                             entries.append(f"{artist} - {title}")
 
-                    entries.sort(key=str.lower)
+                    entries = sorted(set(entries), key=str.lower)
                     with open(output_path, "w", encoding="utf-8") as handle:
                         handle.write("\n".join(entries))
                     q.put(("done", output_path, len(entries), error_count))
