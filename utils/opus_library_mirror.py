@@ -6,7 +6,7 @@ import importlib.util
 import os
 import shutil
 import subprocess
-from typing import Callable, Iterable
+from typing import Callable, Iterable, Mapping
 
 from utils.path_helpers import ensure_long_path, strip_ext_prefix
 
@@ -88,20 +88,22 @@ def convert_flac_to_opus(
     overwrite: bool,
     log_callback: LogCallback | None = None,
 ) -> bool:
-    pictures = _load_flac_pictures(source_path)
+    tags, pictures = _load_flac_metadata(source_path, log_callback=log_callback)
+    if tags is None:
+        return False
     cmd = [
         "ffmpeg",
         "-v",
         "error",
         "-i",
         ensure_long_path(source_path),
+        "-map",
+        "0:a:0",
         "-vn",
         "-c:a",
         "libopus",
         "-b:a",
         "96k",
-        "-map_metadata",
-        "0",
     ]
     cmd.append("-y" if overwrite else "-n")
     cmd.append(ensure_long_path(dest_path))
@@ -121,55 +123,153 @@ def convert_flac_to_opus(
         )
         return False
 
-    if pictures:
-        _write_opus_pictures(dest_path, pictures, log_callback=log_callback)
+    _write_opus_metadata(dest_path, tags, pictures, log_callback=log_callback)
 
     return True
 
 
-def _load_flac_pictures(source_path: str) -> list["Picture"]:
+def _load_flac_metadata(
+    source_path: str, log_callback: LogCallback | None = None
+) -> tuple[Mapping[str, list[str]] | None, list["Picture"]]:
     if FLAC is None:
-        return []
+        _log_message(
+            log_callback,
+            "Opus Library Mirror: mutagen unavailable for metadata transfer.",
+        )
+        return None, []
     try:
-        return list(FLAC(ensure_long_path(source_path)).pictures)
+        flac = FLAC(ensure_long_path(source_path))
+        tags = flac.tags or {}
+        pictures = list(flac.pictures)
+        return tags, pictures
     except Exception:
-        return []
+        _log_message(
+            log_callback,
+            "Opus Library Mirror: failed to read metadata from "
+            f"{strip_ext_prefix(source_path)}.",
+        )
+        return None, []
 
 
-def _write_opus_pictures(
+def _write_opus_metadata(
     dest_path: str,
+    tags: Mapping[str, list[str]],
     pictures: Iterable["Picture"],
     log_callback: LogCallback | None = None,
 ) -> None:
     if OggOpus is None:
         _log_message(
             log_callback,
-            "Opus Library Mirror: mutagen unavailable for embedding artwork.",
+            "Opus Library Mirror: mutagen unavailable for metadata transfer.",
         )
-        return
-
-    encoded = []
-    for picture in pictures:
-        try:
-            encoded.append(base64.b64encode(picture.write()).decode("ascii"))
-        except Exception:
-            continue
-
-    if not encoded:
         return
 
     try:
         audio = OggOpus(ensure_long_path(dest_path))
         if audio.tags is None:
             audio.add_tags()
-        audio.tags["metadata_block_picture"] = encoded
+        audio.tags.clear()
+        normalized = _normalize_tags(tags, log_callback=log_callback)
+        for key, value in normalized.items():
+            audio.tags[key] = value
+        encoded = _encode_picture(pictures, log_callback=log_callback)
+        if encoded:
+            audio.tags["METADATA_BLOCK_PICTURE"] = [encoded]
         audio.save()
     except Exception as exc:
         _log_message(
             log_callback,
-            f"Opus Library Mirror: failed to embed artwork in "
+            f"Opus Library Mirror: failed to write metadata to "
             f"{strip_ext_prefix(dest_path)}: {exc}",
         )
+
+
+def _normalize_tags(
+    tags: Mapping[str, object], log_callback: LogCallback | None = None
+) -> dict[str, list[str]]:
+    normalized: dict[str, list[str]] = {}
+    for key, value in tags.items():
+        if value is None:
+            _log_message(
+                log_callback,
+                f"Opus Library Mirror: skipped empty tag {key}.",
+            )
+            continue
+        if isinstance(value, (str, bytes)):
+            if isinstance(value, bytes):
+                normalized[key] = [value.decode("utf-8", errors="ignore")]
+            else:
+                normalized[key] = [value]
+            _log_message(
+                log_callback,
+                f"Opus Library Mirror: normalized tag {key}.",
+            )
+            continue
+        if isinstance(value, Mapping):
+            normalized[key] = [str(value)]
+            _log_message(
+                log_callback,
+                f"Opus Library Mirror: normalized tag {key}.",
+            )
+            continue
+        if isinstance(value, Iterable):
+            converted: list[str] = []
+            for item in value:
+                if item is None:
+                    continue
+                if isinstance(item, bytes):
+                    converted.append(item.decode("utf-8", errors="ignore"))
+                else:
+                    converted.append(str(item))
+            if converted:
+                normalized[key] = converted
+                _log_message(
+                    log_callback,
+                    f"Opus Library Mirror: normalized tag {key}.",
+                )
+            else:
+                _log_message(
+                    log_callback,
+                    f"Opus Library Mirror: skipped empty tag {key}.",
+                )
+            continue
+        normalized[key] = [str(value)]
+        _log_message(
+            log_callback,
+            f"Opus Library Mirror: normalized tag {key}.",
+        )
+    return normalized
+
+
+def _encode_picture(
+    pictures: Iterable["Picture"], log_callback: LogCallback | None = None
+) -> str | None:
+    selected = None
+    for picture in pictures:
+        if picture.type == 3:
+            selected = picture
+            break
+        if selected is None:
+            selected = picture
+    if selected is None:
+        _log_message(
+            log_callback,
+            "Opus Library Mirror: no artwork found; skipping embed.",
+        )
+        return None
+    try:
+        encoded = base64.b64encode(selected.write()).decode("ascii")
+        _log_message(
+            log_callback,
+            "Opus Library Mirror: embedded artwork.",
+        )
+        return encoded
+    except Exception:
+        _log_message(
+            log_callback,
+            "Opus Library Mirror: failed to encode artwork; skipping embed.",
+        )
+        return None
 
 
 def _log_message(log_callback: LogCallback | None, message: str) -> None:
