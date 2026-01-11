@@ -27,6 +27,7 @@ from collections import defaultdict
 
 from config import PREVIEW_ARTWORK_MAX_DIM, PREVIEW_ARTWORK_QUALITY, load_config
 from utils.path_helpers import ensure_long_path
+from utils.year_normalizer import normalize_year
 from utils.audio_metadata_reader import read_metadata, read_sidecar_artwork_bytes
 try:
     _MUTAGEN_AVAILABLE = importlib.util.find_spec("mutagen") is not None
@@ -84,6 +85,8 @@ TAG_KEYS = [
     "genre",
     "compilation",
 ]
+PRELOADED_TAG_FIELDS = ("title", "artist", "albumartist")
+PRELOADED_AUDIO_FIELDS = ("bitrate", "sample_rate", "channels")
 TITLE_JUNK_TOKENS = {
     "remaster",
     "remastered",
@@ -131,6 +134,79 @@ def _first_value(value: object) -> object:
         return str(value)
     except Exception:
         return None
+
+
+def _normalize_provided_tags(provided_tags: Mapping[str, object]) -> Dict[str, object]:
+    normalized = {key: _first_value(val) for key, val in dict(provided_tags or {}).items()}
+
+    track_raw = _first_value(normalized.get("tracknumber") or normalized.get("track"))
+    track_int = _parse_int(track_raw) if track_raw not in (None, "") else None
+    if track_raw in (None, ""):
+        normalized["track"] = None
+        normalized["tracknumber"] = None
+    else:
+        normalized["track"] = track_int if track_int is not None else track_raw
+        normalized["tracknumber"] = track_raw
+
+    disc_raw = _first_value(normalized.get("discnumber") or normalized.get("disc"))
+    disc_int = _parse_int(disc_raw) if disc_raw not in (None, "") else None
+    if disc_raw in (None, ""):
+        normalized["disc"] = None
+        normalized["discnumber"] = None
+    else:
+        normalized["disc"] = disc_int if disc_int is not None else disc_raw
+        normalized["discnumber"] = disc_raw
+
+    date_val = _first_value(normalized.get("date") or normalized.get("year"))
+    normalized["date"] = str(date_val).strip() if date_val not in (None, "") else None
+    normalized["year"] = normalize_year(normalized.get("year") or normalized.get("date"))
+    return normalized
+
+
+def _provided_tags_complete(tags: Mapping[str, object]) -> bool:
+    return bool(tags.get("title") and (tags.get("artist") or tags.get("albumartist")))
+
+
+def _provided_audio_props_complete(raw: Mapping[str, object]) -> bool:
+    for key in PRELOADED_AUDIO_FIELDS:
+        value = raw.get(key)
+        coerced = _coerce_int(value)
+        if coerced is None or coerced <= 0:
+            return False
+    return True
+
+
+def _provided_artwork_complete(raw_artwork: Sequence[object]) -> bool:
+    for art in raw_artwork:
+        if not isinstance(art, Mapping):
+            continue
+        payload = art.get("bytes")
+        art_hash = art.get("hash")
+        size = art.get("size")
+        if isinstance(payload, (bytes, bytearray)) and payload:
+            return True
+        if art_hash and size:
+            return True
+    return False
+
+
+def _metadata_payload_complete(
+    tags: Mapping[str, object],
+    raw: Mapping[str, object],
+    raw_artwork: Sequence[object],
+) -> tuple[bool, Dict[str, bool]]:
+    tags_complete = _provided_tags_complete(tags)
+    audio_complete = _provided_audio_props_complete(raw)
+    artwork_complete = _provided_artwork_complete(raw_artwork) if raw_artwork else False
+    can_skip = tags_complete and audio_complete and (not raw_artwork or artwork_complete)
+    return (
+        can_skip,
+        {
+            "tags_complete": tags_complete,
+            "audio_props_complete": audio_complete,
+            "artwork_complete": artwork_complete,
+        },
+    )
 
 
 def _parse_int(value: object) -> int | None:
@@ -789,6 +865,7 @@ def _read_tags_and_artwork(
         "mp4_covr_missing": ext in {".m4a", ".mp4"} and not cover_payloads,
         "sidecar_used": False,
         "cover_deferred": True,
+        "source": "file",
     }
     return base, artwork, error, art_error, audio_props, metadata_trace
 
@@ -1736,11 +1813,44 @@ def consolidation_plan_from_dict(raw: Mapping[str, object]) -> ConsolidationPlan
 def _normalize_track(raw: Mapping[str, object], *, quick_state: bool = False) -> DuplicateTrack:
     path = str(raw.get("path"))
     ext = os.path.splitext(path)[1].lower() or str(raw.get("ext", "")).lower()
-    provided_tags = raw.get("tags") if isinstance(raw.get("tags"), Mapping) else {}
-    current_tags, artwork, meta_err, art_err, audio_props, meta_trace = _read_tags_and_artwork(path, provided_tags)
+    raw_tags = raw.get("tags") if isinstance(raw.get("tags"), Mapping) else {}
+    provided_tags = _normalize_provided_tags(raw_tags)
+    raw_artwork = raw.get("artwork") if isinstance(raw.get("artwork"), list) else []
+    should_skip, completeness = _metadata_payload_complete(provided_tags, raw, raw_artwork)
+    if should_skip:
+        current_tags = _merge_tags(_blank_tags(), provided_tags)
+        artwork = []
+        meta_err = None
+        art_err = "deferred"
+        audio_payload = {
+            "bitrate": raw.get("bitrate"),
+            "sample_rate": raw.get("sample_rate"),
+            "samplerate": raw.get("samplerate"),
+            "bit_depth": raw.get("bit_depth"),
+            "bitdepth": raw.get("bitdepth"),
+            "channels": raw.get("channels"),
+            "codec": raw.get("codec"),
+            "codec_name": raw.get("codec_name"),
+            "container": raw.get("container"),
+            "format": raw.get("format"),
+        }
+        audio_props = _extract_audio_properties(None, path, audio_payload, ext)
+        meta_trace = {
+            "reader_hint": "provided metadata",
+            "cover_count": None,
+            "mp4_covr_missing": ext in {".m4a", ".mp4"} and not raw_artwork,
+            "sidecar_used": False,
+            "cover_deferred": True,
+            "source": "provided",
+            **completeness,
+        }
+    else:
+        current_tags, artwork, meta_err, art_err, audio_props, meta_trace = _read_tags_and_artwork(
+            path, provided_tags
+        )
     library_state = _capture_library_state(path, quick=quick_state)
     provided_artwork: List[ArtworkCandidate] = []
-    for art in raw.get("artwork", []) if isinstance(raw.get("artwork"), list) else []:
+    for art in raw_artwork:
         try:
             payload = art.get("bytes")
             width = art.get("width")
@@ -1781,6 +1891,7 @@ def _normalize_track(raw: Mapping[str, object], *, quick_state: bool = False) ->
         meta_trace = dict(meta_trace)
         meta_trace["cover_count"] = len(provided_artwork)
         meta_trace["cover_deferred"] = False
+        meta_trace["artwork_source"] = "provided"
     tags = dict(current_tags)
     discovery = raw.get("discovery") if isinstance(raw.get("discovery"), Mapping) else {}
     fingerprint_trace = (
@@ -1803,6 +1914,9 @@ def _normalize_track(raw: Mapping[str, object], *, quick_state: bool = False) ->
             "error": meta_err or "",
             "reader_hint": meta_trace.get("reader_hint"),
             "normalized_fields": normalized_fields,
+            "source": meta_trace.get("source"),
+            "tags_complete": meta_trace.get("tags_complete"),
+            "audio_props_complete": meta_trace.get("audio_props_complete"),
         },
         "album_art": {
             "success": art_err is None,
@@ -1810,6 +1924,7 @@ def _normalize_track(raw: Mapping[str, object], *, quick_state: bool = False) ->
             "cover_count": meta_trace.get("cover_count"),
             "mp4_covr_missing": meta_trace.get("mp4_covr_missing"),
             "deferred": art_err == "deferred",
+            "source": meta_trace.get("artwork_source"),
         },
         "fingerprint": {
             "success": bool(raw.get("fingerprint")),
