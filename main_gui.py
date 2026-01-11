@@ -2020,6 +2020,8 @@ class DuplicateFinderShell(tk.Toplevel):
         self._dup_preview_heartbeat_interval = 0.1
         self._dup_preview_heartbeat_stall_logged = False
         self._groups_view_update_id = 0
+        self._after_ids: set[str] = set()
+        self._closing = False
 
         container = ttk.Frame(self)
         container.pack(fill="both", expand=True, padx=10, pady=10)
@@ -2038,6 +2040,9 @@ class DuplicateFinderShell(tk.Toplevel):
             foreground="#555",
             wraplength=520,
         ).pack(anchor="w", pady=(0, 8))
+
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
+        self.bind("<Destroy>", self._on_destroy)
 
         # Library selection
         lib_frame = ttk.LabelFrame(container, text="Library Selection")
@@ -2226,7 +2231,60 @@ class DuplicateFinderShell(tk.Toplevel):
             return library_path
         return ""
 
+    def _schedule_after(self, delay_ms: int, callable_obj, *args) -> str | None:
+        if self._closing:
+            return None
+        after_id: str | None = None
+
+        def _run() -> None:
+            if after_id is not None:
+                self._after_ids.discard(after_id)
+            if self._closing:
+                return
+            callable_obj(*args)
+
+        after_id = self.after(delay_ms, _run)
+        self._after_ids.add(after_id)
+        return after_id
+
+    def _cancel_scheduled_callbacks(self) -> None:
+        for after_id in list(self._after_ids):
+            try:
+                self.after_cancel(after_id)
+            except tk.TclError:
+                pass
+            self._after_ids.discard(after_id)
+
+    def _prepare_close(self) -> None:
+        if self._closing:
+            return
+        self._closing = True
+        self._stop_preview_heartbeat()
+        self._cancel_scheduled_callbacks()
+
+    def _on_close(self) -> None:
+        self._prepare_close()
+        self.destroy()
+
+    def _on_destroy(self, event) -> None:
+        if event.widget is self:
+            self._prepare_close()
+
+    def destroy(self) -> None:
+        self._prepare_close()
+        super().destroy()
+
+    def _widget_alive(self, widget: tk.Widget | None) -> bool:
+        if self._closing or widget is None:
+            return False
+        try:
+            return bool(self.winfo_exists()) and bool(widget.winfo_exists())
+        except tk.TclError:
+            return False
+
     def _log_action(self, message: str) -> None:
+        if not self._widget_alive(self.log_text):
+            return
         timestamp = datetime.now().strftime("%H:%M:%S")
         line = f"{timestamp} {message}"
         self.log_text.configure(state="normal")
@@ -2243,7 +2301,7 @@ class DuplicateFinderShell(tk.Toplevel):
     def _queue_preview_trace(self, label: str) -> None:
         if not self._preview_trace_enabled or self._preview_trace is None:
             return
-        self.after(0, self._record_preview_trace, label)
+        self._schedule_after(0, self._record_preview_trace, label)
 
     def _emit_preview_trace(self, header: str = "Duplicate Finder preview trace") -> None:
         if not self._preview_trace_enabled or not self._preview_trace:
@@ -2334,6 +2392,8 @@ class DuplicateFinderShell(tk.Toplevel):
         self.group_disposition_menu.configure(state="disabled")
 
     def _update_groups_view(self, plan) -> None:
+        if not self._widget_alive(self.groups_tree):
+            return
         self.groups_tree.delete(*self.groups_tree.get_children())
         groups_batch_size = 150
         self._groups_view_update_id += 1
@@ -2365,6 +2425,8 @@ class DuplicateFinderShell(tk.Toplevel):
         def insert_chunk(start_index: int = 0) -> None:
             if update_id != self._groups_view_update_id:
                 return
+            if not self._widget_alive(self.groups_tree):
+                return
             end_index = min(start_index + groups_batch_size, total_rows)
             for row in group_rows[start_index:end_index]:
                 self.groups_tree.insert(
@@ -2377,7 +2439,7 @@ class DuplicateFinderShell(tk.Toplevel):
             if total_rows:
                 self.fingerprint_status_var.set(f"Loading groups {end_index}/{total_rows}…")
             if end_index < total_rows:
-                self.after(0, insert_chunk, end_index)
+                self._schedule_after(0, insert_chunk, end_index)
                 return
             self.groups_tree.tag_configure("review", background="#fff3cd")
             self.group_details.configure(state="normal")
@@ -2387,7 +2449,7 @@ class DuplicateFinderShell(tk.Toplevel):
             self._reset_group_selection()
             self.fingerprint_status_var.set(prior_fingerprint_status)
 
-        self.after(0, insert_chunk)
+        self._schedule_after(0, insert_chunk)
 
     def _toggle_show_noop_groups(self) -> None:
         state = "enabled" if self.show_noop_groups_var.get() else "disabled"
@@ -3207,7 +3269,7 @@ class DuplicateFinderShell(tk.Toplevel):
         show_artwork_variants = self.show_artwork_variants_var.get()
 
         def schedule(callable_obj, *args) -> None:
-            self.after(0, callable_obj, *args)
+            self._schedule_after(0, callable_obj, *args)
 
         def log_callback(message: str) -> None:
             schedule(self._log_action, message)
@@ -3258,9 +3320,9 @@ class DuplicateFinderShell(tk.Toplevel):
                 )
             except Exception as exc:
                 logger.exception("Scan generation failed.")
-                self.after(0, finish, None, exc)
+                self._schedule_after(0, finish, None, exc)
                 return
-            self.after(0, finish, result, None)
+            self._schedule_after(0, finish, result, None)
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -3270,10 +3332,13 @@ class DuplicateFinderShell(tk.Toplevel):
         self._dup_preview_heartbeat_last_tick = None
         self._dup_preview_heartbeat_count = 0
         self._dup_preview_heartbeat_stall_logged = False
-        self.after(int(self._dup_preview_heartbeat_interval * 1000), self._preview_heartbeat_tick)
+        self._schedule_after(
+            int(self._dup_preview_heartbeat_interval * 1000),
+            self._preview_heartbeat_tick,
+        )
 
     def _preview_heartbeat_tick(self) -> None:
-        if not self._dup_preview_heartbeat_running:
+        if not self._dup_preview_heartbeat_running or self._closing:
             return
         now = time.monotonic()
         if self._dup_preview_heartbeat_last_tick is not None:
@@ -3289,7 +3354,10 @@ class DuplicateFinderShell(tk.Toplevel):
                 self._dup_preview_heartbeat_stall_logged = True
         self._dup_preview_heartbeat_last_tick = now
         self._dup_preview_heartbeat_count += 1
-        self.after(int(self._dup_preview_heartbeat_interval * 1000), self._preview_heartbeat_tick)
+        self._schedule_after(
+            int(self._dup_preview_heartbeat_interval * 1000),
+            self._preview_heartbeat_tick,
+        )
 
     def _stop_preview_heartbeat(self) -> None:
         if not self._dup_preview_heartbeat_running:
@@ -3354,7 +3422,7 @@ class DuplicateFinderShell(tk.Toplevel):
 
         def finish(result: PlanGenerationResult | None, error: Exception | None = None) -> None:
             def schedule(callable_obj, *args) -> None:
-                self.after(0, callable_obj, *args)
+                self._schedule_after(0, callable_obj, *args)
 
             if error is not None:
                 schedule(self._log_action, f"Preview failed: {error}")
@@ -3393,9 +3461,9 @@ class DuplicateFinderShell(tk.Toplevel):
                 )
             except Exception as exc:
                 logger.exception("Preview generation failed.")
-                self.after(0, finish, None, exc)
+                self._schedule_after(0, finish, None, exc)
                 return
-            self.after(0, finish, result, None)
+            self._schedule_after(0, finish, result, None)
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -3517,7 +3585,7 @@ class DuplicateFinderShell(tk.Toplevel):
         reports_dir = os.path.join(docs_dir, "duplicate_execution_reports")
 
         def log_callback(msg: str) -> None:
-            self.after(0, self._log_action, msg)
+            self._schedule_after(0, self._log_action, msg)
 
         disposition_counts = self._count_group_dispositions()
         deletions_requested = disposition_counts.get("delete", 0) > 0
@@ -3624,9 +3692,9 @@ class DuplicateFinderShell(tk.Toplevel):
             try:
                 result = execute_consolidation_plan(plan_input, config)
             except Exception as exc:
-                self.after(0, finish, None, exc)
+                self._schedule_after(0, finish, None, exc)
                 return
-            self.after(0, finish, result, None)
+            self._schedule_after(0, finish, result, None)
 
         threading.Thread(target=worker, daemon=True).start()
 
