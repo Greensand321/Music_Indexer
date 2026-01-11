@@ -2176,12 +2176,17 @@ def _best_artwork_blob(candidates: Sequence[ArtworkCandidate]) -> ArtworkCandida
     return sorted(usable, key=lambda c: (_artwork_blob_score(c), c.hash), reverse=True)[0]
 
 
+def _artwork_tiebreak_key(track: DuplicateTrack, blob: ArtworkCandidate) -> tuple[str, str]:
+    return (track.path or "", blob.hash or "")
+
+
 def _select_single_release_artwork_candidate(
     candidates: Sequence[DuplicateTrack], release_sizes: Mapping[str, str]
 ) -> tuple[DuplicateTrack | None, ArtworkCandidate | None, bool]:
     best_track: DuplicateTrack | None = None
     best_blob: ArtworkCandidate | None = None
     best_score: tuple | None = None
+    best_tiebreak: tuple[str, str] | None = None
     ambiguous = False
     for track in candidates:
         if release_sizes.get(track.path) != "single" or not track.artwork:
@@ -2194,9 +2199,14 @@ def _select_single_release_artwork_candidate(
             best_score = score
             best_track = track
             best_blob = blob
+            best_tiebreak = _artwork_tiebreak_key(track, blob)
             ambiguous = False
         elif score == best_score:
-            ambiguous = True
+            tiebreak = _artwork_tiebreak_key(track, blob)
+            if best_tiebreak is None or tiebreak < best_tiebreak:
+                best_track = track
+                best_blob = blob
+                best_tiebreak = tiebreak
     return best_track, best_blob, ambiguous
 
 
@@ -2204,6 +2214,7 @@ def _select_overall_artwork_candidate(candidates: Sequence[DuplicateTrack]) -> t
     best_track: DuplicateTrack | None = None
     best_blob: ArtworkCandidate | None = None
     best_score: tuple | None = None
+    best_tiebreak: tuple[str, str] | None = None
     ambiguous = False
     for track in candidates:
         if not track.artwork:
@@ -2216,9 +2227,14 @@ def _select_overall_artwork_candidate(candidates: Sequence[DuplicateTrack]) -> t
             best_score = score
             best_track = track
             best_blob = blob
+            best_tiebreak = _artwork_tiebreak_key(track, blob)
             ambiguous = False
         elif score == best_score:
-            ambiguous = True
+            tiebreak = _artwork_tiebreak_key(track, blob)
+            if best_tiebreak is None or tiebreak < best_tiebreak:
+                best_track = track
+                best_blob = blob
+                best_tiebreak = tiebreak
     return best_track, best_blob, ambiguous
 
 
