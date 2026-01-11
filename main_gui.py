@@ -132,6 +132,7 @@ from utils.audio_metadata_reader import (
     read_tags,
     read_sidecar_artwork_bytes,
 )
+from utils.opus_library_mirror import mirror_library
 from utils.opus_metadata_reader import read_opus_metadata
 
 
@@ -4797,95 +4798,27 @@ class OpusLibraryMirrorDialog(tk.Toplevel):
     def _mirror_library(
         self, source: str, destination: str, overwrite: bool
     ) -> dict[str, int]:
-        total_files = 0
-        converted = 0
-        copied = 0
-        skipped = 0
-        errors = 0
-
-        for root, _dirs, files in os.walk(source):
-            rel = os.path.relpath(root, source)
-            dest_root = destination if rel == "." else os.path.join(destination, rel)
-            os.makedirs(dest_root, exist_ok=True)
-
-            for filename in files:
-                total_files += 1
-                src_path = os.path.join(root, filename)
-                ext = os.path.splitext(filename)[1].lower()
-                if ext == ".flac":
-                    dest_name = f"{os.path.splitext(filename)[0]}.opus"
-                    dest_path = os.path.join(dest_root, dest_name)
-                    if os.path.exists(dest_path) and not overwrite:
-                        skipped += 1
-                        continue
-                    result = self._convert_flac_to_opus(
-                        src_path, dest_path, overwrite
-                    )
-                    if result:
-                        converted += 1
-                    else:
-                        errors += 1
-                else:
-                    dest_path = os.path.join(dest_root, filename)
-                    if os.path.exists(dest_path) and not overwrite:
-                        skipped += 1
-                        continue
-                    try:
-                        shutil.copy2(src_path, dest_path)
-                        copied += 1
-                    except OSError:
-                        errors += 1
-
-                if total_files % 50 == 0:
-                    self.after(
-                        0,
-                        lambda t=total_files, c=converted, p=copied, s=skipped, e=errors: self.status_var.set(
-                            f"Processed {t} files (converted {c}, copied {p}, skipped {s}, errors {e})…"
-                        ),
-                    )
-
-        return {
-            "total": total_files,
-            "converted": converted,
-            "copied": copied,
-            "skipped": skipped,
-            "errors": errors,
-        }
-
-    def _convert_flac_to_opus(
-        self, source_path: str, dest_path: str, overwrite: bool
-    ) -> bool:
-        cmd = [
-            "ffmpeg",
-            "-v",
-            "error",
-            "-i",
-            ensure_long_path(source_path),
-            "-vn",
-            "-c:a",
-            "libopus",
-            "-b:a",
-            "96k",
-            "-map_metadata",
-            "0",
-        ]
-        cmd.append("-y" if overwrite else "-n")
-        cmd.append(ensure_long_path(dest_path))
-
-        try:
-            result = subprocess.run(
-                cmd, check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+        def progress_callback(
+            total_files: int,
+            converted: int,
+            copied: int,
+            skipped: int,
+            errors: int,
+        ) -> None:
+            self.after(
+                0,
+                lambda t=total_files, c=converted, p=copied, s=skipped, e=errors: self.status_var.set(
+                    f"Processed {t} files (converted {c}, copied {p}, skipped {s}, errors {e})…"
+                ),
             )
-        except OSError:
-            return False
-        if result.returncode != 0:
-            error = result.stderr.decode("utf-8", errors="ignore")[-500:]
-            self._log(
-                "Opus Library Mirror: conversion failed for "
-                f"{strip_ext_prefix(source_path)}: {error}"
-            )
-            return False
-        return True
+
+        return mirror_library(
+            source,
+            destination,
+            overwrite,
+            progress_callback=progress_callback,
+            log_callback=self._log,
+        )
 
     def _finished(self, summary: dict[str, int]) -> None:
         self._set_running(False, "Completed.")
