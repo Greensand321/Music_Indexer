@@ -131,6 +131,10 @@ def update_playlists(changes):
     else:
         move_map = {p: p for p in changes}
 
+    normalized_map = {
+        os.path.normcase(os.path.normpath(old)): new for old, new in move_map.items()
+    }
+
     all_paths = list(move_map.keys()) + [p for p in move_map.values() if p]
     root = os.path.commonpath(all_paths) if all_paths else None
     if not root:
@@ -143,7 +147,7 @@ def update_playlists(changes):
 
     for dirpath, _dirs, files in os.walk(playlists_dir):
         for fname in files:
-            if not fname.lower().endswith(".m3u"):
+            if not fname.lower().endswith((".m3u", ".m3u8")):
                 continue
             pl_path = os.path.join(dirpath, fname)
             try:
@@ -155,9 +159,9 @@ def update_playlists(changes):
             changed = False
             new_lines = []
             for ln in lines:
-                abs_line = os.path.normpath(os.path.join(dirpath, ln))
-                if abs_line in move_map:
-                    new = move_map[abs_line]
+                abs_line = os.path.normcase(os.path.normpath(os.path.join(dirpath, ln)))
+                if abs_line in normalized_map:
+                    new = normalized_map[abs_line]
                     if new is None:
                         changed = True
                         continue
