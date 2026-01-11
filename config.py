@@ -48,6 +48,7 @@ FP_TRIM_LEAD_MAX_MS = 1000
 FP_TRIM_TRAIL_MAX_MS = 1000
 FP_TRIM_PADDING_MS = 100
 ALLOW_MISMATCHED_EDITS = True
+FP_SUBPROCESS_TIMEOUT_SEC = 180
 
 
 def load_config():
@@ -79,6 +80,7 @@ def load_config():
         cfg.setdefault("fingerprint_trim_trail_max_ms", FP_TRIM_TRAIL_MAX_MS)
         cfg.setdefault("fingerprint_trim_padding_ms", FP_TRIM_PADDING_MS)
         cfg.setdefault("allow_mismatched_edits", ALLOW_MISMATCHED_EDITS)
+        cfg.setdefault("fingerprint_subprocess_timeout_sec", FP_SUBPROCESS_TIMEOUT_SEC)
         cfg.setdefault("mixed_codec_threshold_boost", MIXED_CODEC_THRESHOLD_BOOST)
         cfg.setdefault("artwork_vastly_different_threshold", ARTWORK_VASTLY_DIFFERENT_THRESHOLD)
         cfg.setdefault("duplicate_finder_show_artwork_variants", True)
@@ -102,6 +104,7 @@ def load_config():
             "fingerprint_trim_trail_max_ms": FP_TRIM_TRAIL_MAX_MS,
             "fingerprint_trim_padding_ms": FP_TRIM_PADDING_MS,
             "allow_mismatched_edits": ALLOW_MISMATCHED_EDITS,
+            "fingerprint_subprocess_timeout_sec": FP_SUBPROCESS_TIMEOUT_SEC,
             "library_root": "",
             "duplicate_threshold": DEFAULT_DUP_THRESHOLD,
             "duplicate_prefix_len": DEFAULT_DUP_PREFIX_LEN,
