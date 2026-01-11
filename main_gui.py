@@ -132,7 +132,7 @@ from utils.audio_metadata_reader import (
     read_tags,
     read_sidecar_artwork_bytes,
 )
-from utils.opus_library_mirror import mirror_library
+from utils.opus_library_mirror import mirror_library, write_mirror_report
 from utils.opus_metadata_reader import read_opus_metadata
 
 
@@ -4670,6 +4670,7 @@ class OpusLibraryMirrorDialog(tk.Toplevel):
         self.status_var = tk.StringVar(value="Ready to mirror library.")
         self.overwrite_var = tk.BooleanVar(value=False)
         self._worker: threading.Thread | None = None
+        self.report_path: str | None = None
 
         container = ttk.Frame(self, padding=12)
         container.pack(fill="both", expand=True)
@@ -4715,6 +4716,13 @@ class OpusLibraryMirrorDialog(tk.Toplevel):
         self.run_btn.pack(side="right", padx=(6, 0))
         self.close_btn = ttk.Button(controls, text="Close", command=self.destroy)
         self.close_btn.pack(side="right")
+        self.open_report_btn = ttk.Button(
+            controls,
+            text="Open Report",
+            command=self._open_report,
+            state="disabled",
+        )
+        self.open_report_btn.pack(side="right", padx=(0, 6))
 
     def _browse_source(self) -> None:
         initial = self.source_var.get() or load_last_path() or os.getcwd()
@@ -4770,6 +4778,8 @@ class OpusLibraryMirrorDialog(tk.Toplevel):
 
         self._set_running(True, "Scanning library…")
         overwrite = self.overwrite_var.get()
+        self.report_path = None
+        self.open_report_btn.configure(state="disabled")
 
         def worker() -> None:
             try:
@@ -4797,7 +4807,7 @@ class OpusLibraryMirrorDialog(tk.Toplevel):
 
     def _mirror_library(
         self, source: str, destination: str, overwrite: bool
-    ) -> dict[str, int]:
+    ) -> dict[str, object]:
         def progress_callback(
             total_files: int,
             converted: int,
@@ -4820,7 +4830,7 @@ class OpusLibraryMirrorDialog(tk.Toplevel):
             log_callback=self._log,
         )
 
-    def _finished(self, summary: dict[str, int]) -> None:
+    def _finished(self, summary: dict[str, object]) -> None:
         self._set_running(False, "Completed.")
         message = (
             "Mirror complete.\n\n"
@@ -4834,6 +4844,7 @@ class OpusLibraryMirrorDialog(tk.Toplevel):
             f"Done. Converted {summary['converted']} and copied {summary['copied']}."
         )
         messagebox.showinfo("Opus Library Mirror", message)
+        self._write_report(summary)
         self._log(
             "Opus Library Mirror: "
             f"total={summary['total']} converted={summary['converted']} "
@@ -4844,6 +4855,49 @@ class OpusLibraryMirrorDialog(tk.Toplevel):
     def _failed(self, error: str) -> None:
         self._set_running(False, "Failed.")
         messagebox.showerror("Opus Library Mirror", f"Run failed:\n{error}")
+
+    def _write_report(self, summary: dict[str, object]) -> None:
+        destination = self.destination_var.get().strip()
+        if not destination:
+            return
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        reports_dir = os.path.join(
+            destination,
+            "Docs",
+            "opus_library_mirror_reports",
+        )
+        report_path = os.path.join(
+            reports_dir,
+            f"opus_library_mirror_report_{timestamp}.html",
+        )
+        try:
+            write_mirror_report(report_path, summary)
+        except OSError as exc:
+            self._log(f"Opus Library Mirror: failed to write report: {exc}")
+            self.report_path = None
+            self.open_report_btn.configure(state="disabled")
+            return
+        self.report_path = report_path
+        self.open_report_btn.configure(state="normal")
+        self._log(f"Opus Library Mirror: report saved to {report_path}")
+
+    def _open_report(self) -> None:
+        if not self.report_path:
+            messagebox.showinfo("Opus Library Mirror", "No report is available yet.")
+            return
+        safe_path = ensure_long_path(self.report_path)
+        if not os.path.exists(safe_path):
+            messagebox.showerror(
+                "Report Missing",
+                "The report could not be found. Run the mirror again to generate a new report.",
+            )
+            return
+        display_path = strip_ext_prefix(self.report_path)
+        try:
+            uri = Path(display_path).resolve().as_uri()
+        except Exception:
+            uri = display_path
+        webbrowser.open(uri)
 
 
 class DuplicateBucketingPocDialog(tk.Toplevel):
