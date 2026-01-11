@@ -4650,6 +4650,269 @@ class OpusTesterDialog(tk.Toplevel):
         self.cover_label.configure(image=self._cover_photo, text="")
 
 
+class OpusLibraryMirrorDialog(tk.Toplevel):
+    """Create a mirrored library with FLAC files converted to Opus."""
+
+    def __init__(self, parent: tk.Widget):
+        super().__init__(parent)
+        self.title("Opus Library Mirror")
+        self.transient(parent)
+        self.resizable(True, False)
+        self.parent = parent
+
+        default_path = ""
+        if hasattr(parent, "library_path_var"):
+            default_path = parent.library_path_var.get()
+
+        self.source_var = tk.StringVar(value=default_path)
+        self.destination_var = tk.StringVar(value="")
+        self.status_var = tk.StringVar(value="Ready to mirror library.")
+        self.overwrite_var = tk.BooleanVar(value=False)
+        self._worker: threading.Thread | None = None
+
+        container = ttk.Frame(self, padding=12)
+        container.pack(fill="both", expand=True)
+
+        ttk.Label(
+            container,
+            text="Create a mirror of your library with FLAC files converted to Opus (96 kbps).",
+            foreground="#555",
+            wraplength=520,
+        ).pack(anchor="w")
+
+        source_frame = ttk.LabelFrame(container, text="Source Library")
+        source_frame.pack(fill="x", pady=(10, 6))
+        ttk.Entry(source_frame, textvariable=self.source_var, width=60).grid(
+            row=0, column=0, sticky="ew", padx=6, pady=6
+        )
+        ttk.Button(source_frame, text="Browse…", command=self._browse_source).grid(
+            row=0, column=1, sticky="e", padx=6, pady=6
+        )
+        source_frame.columnconfigure(0, weight=1)
+
+        dest_frame = ttk.LabelFrame(container, text="Destination Mirror")
+        dest_frame.pack(fill="x", pady=(0, 6))
+        ttk.Entry(dest_frame, textvariable=self.destination_var, width=60).grid(
+            row=0, column=0, sticky="ew", padx=6, pady=6
+        )
+        ttk.Button(dest_frame, text="Browse…", command=self._browse_destination).grid(
+            row=0, column=1, sticky="e", padx=6, pady=6
+        )
+        dest_frame.columnconfigure(0, weight=1)
+
+        ttk.Checkbutton(
+            container,
+            text="Overwrite existing files in the destination",
+            variable=self.overwrite_var,
+        ).pack(anchor="w", pady=(0, 4))
+
+        ttk.Label(container, textvariable=self.status_var).pack(anchor="w", pady=(4, 8))
+
+        controls = ttk.Frame(container)
+        controls.pack(anchor="e")
+        self.run_btn = ttk.Button(controls, text="Start", command=self._start)
+        self.run_btn.pack(side="right", padx=(6, 0))
+        self.close_btn = ttk.Button(controls, text="Close", command=self.destroy)
+        self.close_btn.pack(side="right")
+
+    def _browse_source(self) -> None:
+        initial = self.source_var.get() or load_last_path() or os.getcwd()
+        folder = filedialog.askdirectory(
+            parent=self, title="Select Source Library", initialdir=initial
+        )
+        if folder:
+            self.source_var.set(folder)
+
+    def _browse_destination(self) -> None:
+        initial = self.destination_var.get() or load_last_path() or os.getcwd()
+        folder = filedialog.askdirectory(
+            parent=self, title="Select Destination Folder", initialdir=initial
+        )
+        if folder:
+            self.destination_var.set(folder)
+
+    def _start(self) -> None:
+        source = self.source_var.get().strip()
+        destination = self.destination_var.get().strip()
+
+        if not source or not os.path.isdir(source):
+            messagebox.showwarning(
+                "Source Required", "Select a valid source library folder."
+            )
+            return
+        if not destination or not os.path.isdir(destination):
+            messagebox.showwarning(
+                "Destination Required", "Select a valid destination folder."
+            )
+            return
+        if os.path.abspath(source) == os.path.abspath(destination):
+            messagebox.showerror(
+                "Invalid Destination",
+                "The destination folder must be different from the source.",
+            )
+            return
+        try:
+            if os.path.commonpath([source, destination]) == os.path.abspath(source):
+                messagebox.showerror(
+                    "Invalid Destination",
+                    "The destination cannot be inside the source library.",
+                )
+                return
+        except ValueError:
+            pass
+        if not shutil.which("ffmpeg"):
+            messagebox.showerror(
+                "FFmpeg Required",
+                "FFmpeg was not found on your PATH. Install it to convert FLAC files.",
+            )
+            return
+
+        self._set_running(True, "Scanning library…")
+        overwrite = self.overwrite_var.get()
+
+        def worker() -> None:
+            try:
+                summary = self._mirror_library(source, destination, overwrite)
+                self.after(0, lambda: self._finished(summary))
+            except Exception as exc:  # pragma: no cover - safety net
+                self.after(0, lambda: self._failed(str(exc)))
+
+        self._worker = threading.Thread(target=worker, daemon=True)
+        self._worker.start()
+
+    def _set_running(self, running: bool, status: str) -> None:
+        self.status_var.set(status)
+        state = "disabled" if running else "normal"
+        self.run_btn.configure(state=state)
+        self.close_btn.configure(state=state)
+
+    def _log(self, message: str) -> None:
+        if hasattr(self.parent, "_log"):
+            self.parent._log(message)
+            if hasattr(self.parent, "show_log_tab"):
+                self.parent.show_log_tab()
+        else:
+            print(message)
+
+    def _mirror_library(
+        self, source: str, destination: str, overwrite: bool
+    ) -> dict[str, int]:
+        total_files = 0
+        converted = 0
+        copied = 0
+        skipped = 0
+        errors = 0
+
+        for root, _dirs, files in os.walk(source):
+            rel = os.path.relpath(root, source)
+            dest_root = destination if rel == "." else os.path.join(destination, rel)
+            os.makedirs(dest_root, exist_ok=True)
+
+            for filename in files:
+                total_files += 1
+                src_path = os.path.join(root, filename)
+                ext = os.path.splitext(filename)[1].lower()
+                if ext == ".flac":
+                    dest_name = f"{os.path.splitext(filename)[0]}.opus"
+                    dest_path = os.path.join(dest_root, dest_name)
+                    if os.path.exists(dest_path) and not overwrite:
+                        skipped += 1
+                        continue
+                    result = self._convert_flac_to_opus(
+                        src_path, dest_path, overwrite
+                    )
+                    if result:
+                        converted += 1
+                    else:
+                        errors += 1
+                else:
+                    dest_path = os.path.join(dest_root, filename)
+                    if os.path.exists(dest_path) and not overwrite:
+                        skipped += 1
+                        continue
+                    try:
+                        shutil.copy2(src_path, dest_path)
+                        copied += 1
+                    except OSError:
+                        errors += 1
+
+                if total_files % 50 == 0:
+                    self.after(
+                        0,
+                        lambda t=total_files, c=converted, p=copied, s=skipped, e=errors: self.status_var.set(
+                            f"Processed {t} files (converted {c}, copied {p}, skipped {s}, errors {e})…"
+                        ),
+                    )
+
+        return {
+            "total": total_files,
+            "converted": converted,
+            "copied": copied,
+            "skipped": skipped,
+            "errors": errors,
+        }
+
+    def _convert_flac_to_opus(
+        self, source_path: str, dest_path: str, overwrite: bool
+    ) -> bool:
+        cmd = [
+            "ffmpeg",
+            "-v",
+            "error",
+            "-i",
+            ensure_long_path(source_path),
+            "-vn",
+            "-c:a",
+            "libopus",
+            "-b:a",
+            "96k",
+            "-map_metadata",
+            "0",
+        ]
+        cmd.append("-y" if overwrite else "-n")
+        cmd.append(ensure_long_path(dest_path))
+
+        try:
+            result = subprocess.run(
+                cmd, check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+            )
+        except OSError:
+            return False
+        if result.returncode != 0:
+            error = result.stderr.decode("utf-8", errors="ignore")[-500:]
+            self._log(
+                "Opus Library Mirror: conversion failed for "
+                f"{strip_ext_prefix(source_path)}: {error}"
+            )
+            return False
+        return True
+
+    def _finished(self, summary: dict[str, int]) -> None:
+        self._set_running(False, "Completed.")
+        message = (
+            "Mirror complete.\n\n"
+            f"Files processed: {summary['total']}\n"
+            f"FLAC converted: {summary['converted']}\n"
+            f"Other files copied: {summary['copied']}\n"
+            f"Skipped: {summary['skipped']}\n"
+            f"Errors: {summary['errors']}"
+        )
+        self.status_var.set(
+            f"Done. Converted {summary['converted']} and copied {summary['copied']}."
+        )
+        messagebox.showinfo("Opus Library Mirror", message)
+        self._log(
+            "Opus Library Mirror: "
+            f"total={summary['total']} converted={summary['converted']} "
+            f"copied={summary['copied']} skipped={summary['skipped']} "
+            f"errors={summary['errors']}"
+        )
+
+    def _failed(self, error: str) -> None:
+        self._set_running(False, "Failed.")
+        messagebox.showerror("Opus Library Mirror", f"Run failed:\n{error}")
+
+
 class DuplicateBucketingPocDialog(tk.Toplevel):
     """Minimal UI for the Duplicate Bucketing proof-of-concept tool."""
 
@@ -5079,6 +5342,9 @@ class SoundVaultImporterApp(tk.Tk):
         )
         tools_menu.add_command(label="M4A Tester…", command=self._open_m4a_tester_tool)
         tools_menu.add_command(label="Opus Tester…", command=self._open_opus_tester_tool)
+        tools_menu.add_command(
+            label="Opus Library Mirror…", command=self._open_opus_mirror_tool
+        )
         tools_menu.add_separator()
         tools_menu.add_command(label="Reset Tag-Fix Log", command=self.reset_tagfix_log)
         menubar.add_cascade(label="Tools", menu=tools_menu)
@@ -7234,6 +7500,9 @@ class SoundVaultImporterApp(tk.Tk):
 
     def _open_opus_tester_tool(self) -> None:
         OpusTesterDialog(self)
+
+    def _open_opus_mirror_tool(self) -> None:
+        OpusLibraryMirrorDialog(self)
 
     def _create_player_library_table(self, parent: tk.Widget) -> ttk.Frame:
         table = ttk.Frame(parent)
