@@ -110,8 +110,8 @@ def test_album_winner_gets_single_artwork_applied(tmp_path) -> None:
     assert group.artwork
     assert group.artwork[0].source == single_path
     assert group.artwork[0].target == album_path
-    assert group.chosen_artwork_source.get("context") == "single"
-    assert any("single artwork" in ev.lower() for ev in group.artwork_evidence)
+    assert group.chosen_artwork_source.get("context") == "single-release"
+    assert any("single-release artwork" in ev.lower() for ev in group.artwork_evidence)
 
 
 def test_single_winner_keeps_artwork_even_with_album_cover(tmp_path) -> None:
@@ -160,7 +160,7 @@ def test_metadata_normalization_prefers_album_source(tmp_path) -> None:
             "bitrate": 900,
             "sample_rate": 48000,
             "bit_depth": 24,
-            "tags": {"title": "Song C", "album_type": "single"},
+            "tags": {"title": "Song C", "artist": "Artist C", "album_type": "single"},
         },
         {
             "path": album_path,

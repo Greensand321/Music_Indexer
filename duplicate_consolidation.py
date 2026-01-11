@@ -529,16 +529,16 @@ def _load_artwork_for_track(track: "DuplicateTrack") -> None:
     artwork: List[ArtworkCandidate] = []
     if cover_payloads:
         for payload in cover_payloads:
-            compressed_payload, _mime, width, height = _compress_preview_artwork(payload)
+            width, height = _extract_image_dimensions(payload)
             artwork.append(
                 ArtworkCandidate(
                     path=track.path,
                     hash=hashlib.sha256(payload).hexdigest(),
-                    size=len(compressed_payload),
+                    size=len(payload),
                     width=width,
                     height=height,
                     status="ok",
-                    bytes=compressed_payload,
+                    bytes=payload,
                 )
             )
         if not track.cover_hash:
@@ -564,6 +564,24 @@ def _load_artwork_for_track(track: "DuplicateTrack") -> None:
         }
     )
     track.trace["album_art"] = album_art_trace
+
+
+def _compress_artwork_for_preview(track: "DuplicateTrack") -> None:
+    if not track.artwork:
+        return
+    for candidate in track.artwork:
+        if not candidate.bytes:
+            continue
+        raw_payload = candidate.bytes
+        if not candidate.hash:
+            candidate.hash = hashlib.sha256(raw_payload).hexdigest()
+        compressed_payload, _mime, width, height = _compress_preview_artwork(raw_payload)
+        candidate.bytes = compressed_payload
+        candidate.size = len(compressed_payload)
+        if width is not None:
+            candidate.width = width
+        if height is not None:
+            candidate.height = height
 
 
 def _read_audio_file(path: str):
@@ -1725,17 +1743,22 @@ def _normalize_track(raw: Mapping[str, object], *, quick_state: bool = False) ->
     for art in raw.get("artwork", []) if isinstance(raw.get("artwork"), list) else []:
         try:
             payload = art.get("bytes")
-            compressed_payload = payload
             width = art.get("width")
             height = art.get("height")
             size = art.get("size")
             art_hash = art.get("hash")
             if isinstance(payload, (bytes, bytearray)) and payload:
-                compressed_payload, _mime, width, height = _compress_preview_artwork(bytes(payload))
+                payload = bytes(payload)
                 if art_hash is None:
-                    art_hash = hashlib.sha256(bytes(payload)).hexdigest()
+                    art_hash = hashlib.sha256(payload).hexdigest()
                 if size is None:
-                    size = len(compressed_payload)
+                    size = len(payload)
+                if width is None or height is None:
+                    raw_width, raw_height = _extract_image_dimensions(payload)
+                    if width is None:
+                        width = raw_width
+                    if height is None:
+                        height = raw_height
             provided_artwork.append(
                 ArtworkCandidate(
                     path=path,
@@ -1744,7 +1767,7 @@ def _normalize_track(raw: Mapping[str, object], *, quick_state: bool = False) ->
                     width=width,
                     height=height,
                     status=art.get("status", "ok"),
-                    bytes=compressed_payload,
+                    bytes=payload if isinstance(payload, (bytes, bytearray)) else None,
                 )
             )
         except Exception:
@@ -2397,6 +2420,7 @@ def build_consolidation_plan(
         for track in sorted(cluster_track_map.values(), key=lambda t: t.path):
             if track.artwork_error == "deferred" and not track.artwork:
                 _load_artwork_for_track(track)
+            _compress_artwork_for_preview(track)
         log("Grouping phase: artwork loading complete.")
 
     log("Grouping phase: building consolidation plan...")
