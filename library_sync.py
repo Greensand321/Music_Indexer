@@ -21,7 +21,7 @@ from library_sync_indexer_engine import (
     music_indexer_api as idx,
     near_duplicate_detector as idx_near_duplicate_detector,
 )
-from playlist_generator import write_playlist
+from playlist_generator import update_playlists, write_playlist
 
 fingerprint_generator = idx_fingerprint_generator
 fingerprint_distance = idx_near_duplicate_detector.fingerprint_distance
@@ -107,6 +107,14 @@ class ExecutionDecision(str, Enum):
     SKIP_DUPLICATE = "SKIP_DUPLICATE"
     SKIP_KEEP_EXISTING = "SKIP_KEEP_EXISTING"
     REVIEW_REQUIRED = "REVIEW_REQUIRED"
+
+
+class ReviewAction(str, Enum):
+    """Review-first replacement actions for Library Sync."""
+
+    REPLACE_ALL = "replace_all"
+    REPLACE_WITH_BETTER = "replace_with_better"
+    CANCEL = "cancel"
 
 
 @dataclass
@@ -645,6 +653,7 @@ def compare_libraries(
     cancel_event: threading.Event | None = None,
     profiler: PerformanceProfile | None = None,
     include_profile: bool = False,
+    include_match_objects: bool = False,
 ) -> Dict[str, object]:
     """Return classification of incoming files vs. an existing library.
 
@@ -737,6 +746,8 @@ def compare_libraries(
         "matches": [m.to_dict() for m in match_results],
         "partial": cancel_event.is_set(),
     }
+    if include_match_objects:
+        result["match_objects"] = match_results
     if include_profile and profiler:
         result["profile"] = profiler.to_dict()
     record_event(
@@ -798,6 +809,7 @@ class LibrarySyncPlan:
     decision_log: List[str]
     copy_only: set[str] = field(default_factory=set)
     allowed_replacements: set[str] = field(default_factory=set)
+    replacement_targets: Dict[str, str] = field(default_factory=dict)
     items: List[PlannedItem] = field(default_factory=list)
     transfer_mode: str = "move"
 
@@ -952,6 +964,92 @@ def compute_library_sync_plan(
         items=plan_items,
         transfer_mode="copy" if str(transfer_mode).lower() == "copy" else "move",
     )
+
+
+def _select_replacement_sources(
+    results: Iterable[MatchResult],
+    action: ReviewAction,
+) -> Dict[str, MatchResult]:
+    if action == ReviewAction.CANCEL:
+        return {}
+
+    selected: Dict[str, MatchResult] = {}
+    for res in results:
+        if res.existing is None:
+            continue
+        if action == ReviewAction.REPLACE_WITH_BETTER:
+            if res.existing_score is None:
+                continue
+            if res.incoming_score <= (res.existing_score or 0):
+                continue
+        selected[_normalize_path(res.incoming.path)] = res
+    return selected
+
+
+def build_review_replacement_plan(
+    library_root: str,
+    incoming_folder: str,
+    results: Iterable[MatchResult],
+    action: ReviewAction,
+    *,
+    log_callback: Callable[[str], None] | None = None,
+    progress_callback: Callable[[int, int, str, str], None] | None = None,
+    flush_cache: bool = False,
+    max_workers: int | None = None,
+    cancel_event: threading.Event | None = None,
+    transfer_mode: str = "copy",
+) -> LibrarySyncPlan:
+    """Build a Library Sync plan that replaces matched tracks per review action."""
+    if action == ReviewAction.CANCEL:
+        raise ValueError("Cannot build a replacement plan for a cancelled action.")
+
+    selected = _select_replacement_sources(results, action)
+    base_plan = compute_library_sync_plan(
+        library_root,
+        incoming_folder,
+        log_callback=log_callback,
+        progress_callback=progress_callback,
+        flush_cache=flush_cache,
+        max_workers=max_workers,
+        cancel_event=cancel_event,
+        transfer_mode=transfer_mode,
+    )
+    if not selected:
+        base_plan.moves = {}
+        base_plan.tag_index = {}
+        base_plan.allowed_replacements = set()
+        base_plan.replacement_targets = {}
+        base_plan.items = []
+        base_plan.decision_log.append("No replacement candidates selected.")
+        return base_plan
+
+    filtered_moves = {
+        src: dst for src, dst in base_plan.moves.items() if src in selected
+    }
+    filtered_tag_index = {
+        dst: data for dst, data in base_plan.tag_index.items() if dst in filtered_moves.values()
+    }
+    replacement_targets = {
+        src: _normalize_path(selected[src].existing.path)  # type: ignore[union-attr]
+        for src in filtered_moves
+        if selected[src].existing is not None
+    }
+    base_plan.moves = filtered_moves
+    base_plan.tag_index = filtered_tag_index
+    base_plan.allowed_replacements = set(filtered_moves.values())
+    base_plan.replacement_targets = replacement_targets
+    base_plan.items = _compute_plan_items(
+        base_plan.moves,
+        destination_root=base_plan.destination_root,
+        copy_only=base_plan.copy_only,
+        allow_all_replacements=False,
+        allowed_replacements=base_plan.allowed_replacements,
+        transfer_mode=base_plan.transfer_mode,
+    )
+    base_plan.decision_log.append(
+        f"Review action {action.value} selected {len(filtered_moves)} replacement(s)."
+    )
+    return base_plan
 
 
 def build_library_sync_preview(
@@ -1119,6 +1217,8 @@ def execute_plan(
     }
     audit_items: List[Dict[str, object]] = []
     executed_moves: Dict[str, str] = {}
+    playlist_updates: Dict[str, str] = {}
+    replacement_targets = dict(getattr(plan, "replacement_targets", {}) or {})
 
     if cancel_event.is_set():
         log_callback("✘ Execution cancelled before start.")
@@ -1142,6 +1242,7 @@ def execute_plan(
             "action": action,
             "timestamp": timestamp,
         }
+        replacement_target = replacement_targets.get(src)
 
         if item.decision in (
             ExecutionDecision.SKIP_DUPLICATE,
@@ -1196,6 +1297,24 @@ def execute_plan(
                     summary["errors"].append(f"Backup failed for {dst}: {exc}")  # type: ignore[arg-type]
             outcome["backup_path"] = backup_path
 
+        if replacement_target and replacement_target != dst:
+            if os.path.exists(replacement_target):
+                rel_old = os.path.relpath(
+                    replacement_target,
+                    plan.destination_root if os.path.isdir(plan.destination_root) else plan.library_root,
+                )
+                old_backup_path = os.path.join(backup_root, rel_old)
+                if not dry_run:
+                    try:
+                        os.makedirs(os.path.dirname(old_backup_path), exist_ok=True)
+                        shutil.copy2(replacement_target, old_backup_path)
+                        summary["backups"].append(old_backup_path)
+                        os.remove(replacement_target)
+                    except Exception as exc:  # pragma: no cover - OS interaction
+                        summary["errors"].append(f"Backup failed for {replacement_target}: {exc}")  # type: ignore[arg-type]
+                outcome["replaced_path"] = replacement_target
+                outcome["replaced_backup_path"] = old_backup_path
+
         if dry_run:
             outcome["status"] = "dry_run"
             outcome["reason"] = outcome.get("reason", "No changes written (dry run)")
@@ -1221,6 +1340,8 @@ def execute_plan(
             outcome["status"] = "success"
             if backup_path:
                 outcome["backup_path"] = backup_path
+            if replacement_target and replacement_target != dst:
+                playlist_updates[replacement_target] = dst
         except Exception as exc:  # pragma: no cover - OS interaction
             msg = f"Failed to {action} {src} → {dst}: {exc}"
             summary["errors"].append(msg)  # type: ignore[arg-type]
@@ -1276,6 +1397,12 @@ def execute_plan(
         except Exception as exc:  # pragma: no cover - OS interaction
             log_callback(f"✘ Failed to write playlist: {exc}")
     summary["playlist_path"] = playlist_created
+
+    if playlist_updates and not dry_run and not summary.get("cancelled"):
+        try:
+            update_playlists(playlist_updates)
+        except Exception as exc:  # pragma: no cover - OS interaction
+            log_callback(f"✘ Failed to update playlists: {exc}")
 
     if not summary.get("cancelled"):
         log_callback("✓ Execution complete.")
