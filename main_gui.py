@@ -4709,6 +4709,11 @@ class OpusLibraryMirrorDialog(tk.Toplevel):
         ).pack(anchor="w", pady=(0, 4))
 
         ttk.Label(container, textvariable=self.status_var).pack(anchor="w", pady=(4, 8))
+        self.progress = ttk.Progressbar(
+            container,
+            mode="determinate",
+        )
+        self.progress.pack(fill="x", pady=(0, 8))
 
         controls = ttk.Frame(container)
         controls.pack(anchor="e")
@@ -4796,6 +4801,8 @@ class OpusLibraryMirrorDialog(tk.Toplevel):
         state = "disabled" if running else "normal"
         self.run_btn.configure(state=state)
         self.close_btn.configure(state=state)
+        if running:
+            self.progress.configure(maximum=1, value=0)
 
     def _log(self, message: str) -> None:
         if hasattr(self.parent, "_log"):
@@ -4809,7 +4816,8 @@ class OpusLibraryMirrorDialog(tk.Toplevel):
         self, source: str, destination: str, overwrite: bool
     ) -> dict[str, object]:
         def progress_callback(
-            total_files: int,
+            total_tasks: int,
+            completed: int,
             converted: int,
             copied: int,
             skipped: int,
@@ -4817,8 +4825,10 @@ class OpusLibraryMirrorDialog(tk.Toplevel):
         ) -> None:
             self.after(
                 0,
-                lambda t=total_files, c=converted, p=copied, s=skipped, e=errors: self.status_var.set(
-                    f"Processed {t} files (converted {c}, copied {p}, skipped {s}, errors {e})…"
+                lambda t=total_tasks, d=completed: (
+                    self.status_var.set("Mirroring library…"),
+                    self.progress.configure(maximum=max(t, 1)),
+                    self.progress.configure(value=d),
                 ),
             )
 

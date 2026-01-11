@@ -7,6 +7,8 @@ import importlib.util
 import os
 import shutil
 import subprocess
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from typing import Callable, Iterable, Mapping
 
@@ -22,7 +24,7 @@ else:  # pragma: no cover - optional dependency
     OggOpus = None  # type: ignore
 
 
-ProgressCallback = Callable[[int, int, int, int, int], None]
+ProgressCallback = Callable[[int, int, int, int, int, int], None]
 LogCallback = Callable[[str], None]
 
 AUDIO_EXTS = {".flac", ".m4a", ".aac", ".mp3", ".wav", ".ogg", ".opus"}
@@ -36,12 +38,11 @@ def mirror_library(
     log_callback: LogCallback | None = None,
 ) -> dict[str, object]:
     total_files = 0
-    converted = 0
-    copied = 0
-    skipped = 0
-    errors = 0
+    counters = {"total": 0, "converted": 0, "copied": 0, "skipped": 0, "errors": 0}
     skipped_files: list[tuple[str, str]] = []
     error_files: list[tuple[str, str]] = []
+    lock = threading.Lock()
+    tasks: list[tuple[str, str, str]] = []
 
     for root, _dirs, files in os.walk(source):
         rel = os.path.relpath(root, source)
@@ -58,40 +59,90 @@ def mirror_library(
                 dest_path = os.path.join(dest_root, dest_name)
                 if os.path.exists(dest_path) and not overwrite:
                     if is_audio:
-                        skipped += 1
-                        skipped_files.append((src_path, "Destination already exists."))
+                        with lock:
+                            counters["skipped"] += 1
+                            skipped_files.append(
+                                (src_path, "Destination already exists.")
+                            )
                     continue
-                result, error = convert_flac_to_opus(
-                    src_path, dest_path, overwrite, log_callback=log_callback
-                )
-                if result:
-                    converted += 1
-                else:
-                    errors += 1
-                    error_files.append((src_path, error or "Conversion failed."))
+                tasks.append(("convert", src_path, dest_path))
             else:
                 dest_path = os.path.join(dest_root, filename)
                 if os.path.exists(dest_path) and not overwrite:
                     if is_audio:
-                        skipped += 1
-                        skipped_files.append((src_path, "Destination already exists."))
+                        with lock:
+                            counters["skipped"] += 1
+                            skipped_files.append(
+                                (src_path, "Destination already exists.")
+                            )
                     continue
+                tasks.append(("copy", src_path, dest_path))
+
+    total_tasks = len(tasks)
+    if progress_callback:
+        progress_callback(
+            total_tasks,
+            counters["total"],
+            counters["converted"],
+            counters["copied"],
+            counters["skipped"],
+            counters["errors"],
+        )
+
+    def _process_task(task: tuple[str, str, str]) -> None:
+        action, src_path, dest_path = task
+        try:
+            if action == "convert":
+                result, error = convert_flac_to_opus(
+                    src_path, dest_path, overwrite, log_callback=log_callback
+                )
+                with lock:
+                    counters["total"] += 1
+                    if result:
+                        counters["converted"] += 1
+                    else:
+                        counters["errors"] += 1
+                        error_files.append(
+                            (src_path, error or "Conversion failed.")
+                        )
+            else:
                 try:
                     shutil.copy2(src_path, dest_path)
-                    copied += 1
+                    with lock:
+                        counters["total"] += 1
+                        counters["copied"] += 1
                 except OSError as exc:
-                    errors += 1
-                    error_files.append((src_path, f"Copy failed: {exc}"))
+                    with lock:
+                        counters["total"] += 1
+                        counters["errors"] += 1
+                        error_files.append((src_path, f"Copy failed: {exc}"))
+        except Exception as exc:  # pragma: no cover - safety net
+            with lock:
+                counters["total"] += 1
+                counters["errors"] += 1
+                error_files.append((src_path, f"Task failed: {exc}"))
+        if progress_callback:
+            with lock:
+                progress_callback(
+                    total_tasks,
+                    counters["total"],
+                    counters["converted"],
+                    counters["copied"],
+                    counters["skipped"],
+                    counters["errors"],
+                )
 
-            if progress_callback and total_files % 50 == 0:
-                progress_callback(total_files, converted, copied, skipped, errors)
+    with ThreadPoolExecutor(max_workers=os.cpu_count() or 1) as executor:
+        futures = [executor.submit(_process_task, task) for task in tasks]
+        for future in futures:
+            future.result()
 
     return {
         "total": total_files,
-        "converted": converted,
-        "copied": copied,
-        "skipped": skipped,
-        "errors": errors,
+        "converted": counters["converted"],
+        "copied": counters["copied"],
+        "skipped": counters["skipped"],
+        "errors": counters["errors"],
         "skipped_files": skipped_files,
         "error_files": error_files,
     }
