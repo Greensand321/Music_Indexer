@@ -5327,6 +5327,10 @@ class SoundVaultImporterApp(tk.Tk):
             command=lambda: generate_index(self.require_library()),
         )
         tools_menu.add_command(
+            label="Export Artist/Title List…",
+            command=self._export_artist_title_list,
+        )
+        tools_menu.add_command(
             label="Playlist Artwork", command=self.open_playlist_artwork_folder
         )
         tools_menu.add_command(label="File Clean Up…", command=self._open_file_cleanup_tool)
@@ -5954,6 +5958,94 @@ class SoundVaultImporterApp(tk.Tk):
         messagebox.showinfo("Playlist Artwork", info)
         self._log(f"🎨 Playlist artwork folder ready at {artwork_dir}")
         self._open_path(artwork_dir)
+
+    def _clean_tag_text(self, value: object | None) -> str | None:
+        if value is None:
+            return None
+        if isinstance(value, bytes):
+            for encoding in ("utf-8", "utf-16", "latin-1"):
+                try:
+                    return value.decode(encoding).strip() or None
+                except UnicodeDecodeError:
+                    continue
+            return value.decode("utf-8", errors="replace").strip() or None
+        if isinstance(value, str):
+            cleaned = value.strip()
+            return cleaned or None
+        try:
+            cleaned = str(value).strip()
+            return cleaned or None
+        except Exception:
+            return None
+
+    def _export_artist_title_list(self) -> None:
+        library = self.require_library()
+        if not library:
+            return
+
+        docs_dir = os.path.join(library, "Docs")
+        try:
+            os.makedirs(docs_dir, exist_ok=True)
+        except OSError as exc:
+            messagebox.showerror(
+                "Export Artist/Title List",
+                f"Could not create documentation folder:\n{exc}",
+            )
+            return
+
+        output_path = os.path.join(docs_dir, "artist_title_list.txt")
+        exts = {".m4a", ".aac", ".mp3", ".wav", ".ogg", ".opus"}
+        q: queue.Queue[tuple[str, object]] = queue.Queue()
+
+        def worker() -> None:
+            entries: list[str] = []
+            error_count = 0
+            for dirpath, _, files in os.walk(library):
+                for filename in files:
+                    ext = os.path.splitext(filename)[1].lower()
+                    if ext not in exts:
+                        continue
+                    full_path = os.path.join(dirpath, filename)
+                    if ext == ".opus":
+                        tags, _covers, error = read_opus_metadata(full_path)
+                        if error:
+                            error_count += 1
+                    else:
+                        tags = read_tags(full_path)
+                    artist = self._clean_tag_text(
+                        tags.get("artist") or tags.get("albumartist")
+                    )
+                    title = self._clean_tag_text(tags.get("title"))
+                    if not title:
+                        title = os.path.splitext(filename)[0]
+                    if not artist:
+                        artist = "Unknown Artist"
+                    entries.append(f"{artist} - {title}")
+
+            entries.sort(key=str.lower)
+            with open(output_path, "w", encoding="utf-8") as handle:
+                handle.write("\n".join(entries))
+            q.put(("done", output_path, len(entries), error_count))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+        def poll_queue() -> None:
+            try:
+                message = q.get_nowait()
+            except queue.Empty:
+                self.after(200, poll_queue)
+                return
+            if message[0] == "done":
+                _, path, count, error_count = message
+                note = ""
+                if error_count:
+                    note = f"\n\nFiles skipped due to read errors: {error_count}"
+                messagebox.showinfo(
+                    "Export Artist/Title List",
+                    f"Saved {count} entries to:\n{path}{note}",
+                )
+
+        self.after(200, poll_queue)
 
     def _set_status(self, text: str) -> None:
         self._full_status = text
