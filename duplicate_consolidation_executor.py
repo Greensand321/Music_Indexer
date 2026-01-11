@@ -76,7 +76,7 @@ class ExecutionConfig:
     apply_metadata: bool = True
     apply_artwork: bool = True
     allow_review_required: bool = False
-    operation_limit: int | None = 500
+    operation_limit: int | None = 20_000
     confirm_operation_overage: bool = False
     allow_deletion: bool = False
     confirm_deletion: bool = False
