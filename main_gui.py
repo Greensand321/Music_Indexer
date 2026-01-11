@@ -6259,56 +6259,195 @@ class SoundVaultImporterApp(tk.Tk):
         output_path = os.path.join(docs_dir, "artist_title_list.txt")
         exts = {".m4a", ".aac", ".mp3", ".wav", ".ogg", ".opus"}
         q: queue.Queue[tuple[str, object]] = queue.Queue()
+        running = tk.BooleanVar(value=False)
 
-        def worker() -> None:
-            entries: list[str] = []
-            error_count = 0
-            for dirpath, _, files in os.walk(library):
-                for filename in files:
-                    ext = os.path.splitext(filename)[1].lower()
-                    if ext not in exts:
-                        continue
-                    full_path = os.path.join(dirpath, filename)
-                    if ext == ".opus":
-                        tags, _covers, error = read_opus_metadata(full_path)
-                        if error:
-                            error_count += 1
-                    else:
-                        tags = read_tags(full_path)
-                    artist = self._clean_tag_text(
-                        tags.get("artist") or tags.get("albumartist")
-                    )
-                    title = self._clean_tag_text(tags.get("title"))
-                    if not title:
-                        title = os.path.splitext(filename)[0]
-                    if not artist:
-                        artist = "Unknown Artist"
-                    entries.append(f"{artist} - {title}")
+        dlg = tk.Toplevel(self)
+        dlg.title("Export Artist/Title List")
+        dlg.resizable(True, False)
 
-            entries.sort(key=str.lower)
-            with open(output_path, "w", encoding="utf-8") as handle:
-                handle.write("\n".join(entries))
-            q.put(("done", output_path, len(entries), error_count))
+        header = ttk.Frame(dlg)
+        header.pack(fill="x", padx=12, pady=(12, 6))
+        ttk.Label(
+            header,
+            text="Export Artist/Title List",
+            font=("TkDefaultFont", 11, "bold"),
+        ).pack(anchor="w")
+        ttk.Label(
+            header,
+            text="Generate a sorted list of all artist/title pairs in the library.",
+            wraplength=520,
+        ).pack(anchor="w", pady=(2, 0))
 
-        threading.Thread(target=worker, daemon=True).start()
+        info_frame = ttk.LabelFrame(dlg, text="Library Path")
+        info_frame.pack(fill="x", padx=12, pady=(0, 10))
+        ttk.Label(info_frame, text=library, wraplength=520).pack(
+            anchor="w", padx=8, pady=6
+        )
+
+        output_frame = ttk.LabelFrame(dlg, text="Output File")
+        output_frame.pack(fill="x", padx=12, pady=(0, 10))
+        ttk.Label(output_frame, text=output_path, wraplength=520).pack(
+            anchor="w", padx=8, pady=6
+        )
+
+        progress_var = tk.StringVar(value="Ready to start.")
+        progress = ttk.Progressbar(dlg, mode="determinate")
+        progress.pack(fill="x", padx=12)
+        ttk.Label(dlg, textvariable=progress_var).pack(
+            anchor="w", padx=14, pady=(4, 0)
+        )
+
+        log_group = ttk.LabelFrame(dlg, text="Export Log")
+        log_group.pack(fill="both", expand=True, padx=12, pady=(10, 0))
+        log_box = ScrolledText(log_group, height=8, state="disabled")
+        log_box.pack(fill="both", expand=True, padx=6, pady=6)
+
+        button_frame = ttk.Frame(dlg)
+        button_frame.pack(fill="x", padx=12, pady=12)
+
+        def append_log(message: str) -> None:
+            self._log(message)
+            log_box.configure(state="normal")
+            log_box.insert("end", message + "\n")
+            log_box.see("end")
+            log_box.configure(state="disabled")
+
+        def set_controls(active: bool) -> None:
+            start_btn.config(state="disabled" if active else "normal")
+            open_state = (
+                "normal" if not active and open_btn_enabled.get() else "disabled"
+            )
+            open_btn.config(state=open_state)
+            close_btn.config(state="disabled" if active else "normal")
+
+        def start_export() -> None:
+            if running.get():
+                return
+            running.set(True)
+            open_btn_enabled.set(False)
+            progress_var.set("Scanning library for audio files…")
+            progress.config(mode="indeterminate", value=0)
+            progress.start(10)
+            log_box.configure(state="normal")
+            log_box.delete("1.0", "end")
+            log_box.configure(state="disabled")
+            append_log("Starting artist/title export…")
+            append_log(f"Library: {library}")
+            set_controls(active=True)
+
+            def worker() -> None:
+                try:
+                    audio_files: list[str] = []
+                    for dirpath, _, files in os.walk(library):
+                        for filename in files:
+                            ext = os.path.splitext(filename)[1].lower()
+                            if ext in exts:
+                                audio_files.append(os.path.join(dirpath, filename))
+                    q.put(("files", len(audio_files)))
+
+                    entries: list[str] = []
+                    error_count = 0
+                    for idx, full_path in enumerate(audio_files, start=1):
+                        ext = os.path.splitext(full_path)[1].lower()
+                        filename = os.path.basename(full_path)
+                        if ext == ".opus":
+                            tags, _covers, error = read_opus_metadata(full_path)
+                            if error:
+                                error_count += 1
+                                q.put(
+                                    ("log", f"Skipped unreadable OPUS file: {filename}")
+                                )
+                        else:
+                            tags = read_tags(full_path)
+                        artist = self._clean_tag_text(
+                            tags.get("artist") or tags.get("albumartist")
+                        )
+                        title = self._clean_tag_text(tags.get("title"))
+                        if not title:
+                            title = os.path.splitext(filename)[0]
+                        if not artist:
+                            artist = "Unknown Artist"
+                        entries.append(f"{artist} - {title}")
+                        if idx == 1 or idx % 50 == 0 or idx == len(audio_files):
+                            q.put(("progress", idx, len(audio_files)))
+
+                    entries.sort(key=str.lower)
+                    with open(output_path, "w", encoding="utf-8") as handle:
+                        handle.write("\n".join(entries))
+                    q.put(("done", output_path, len(entries), error_count))
+                except Exception as exc:  # pragma: no cover - UI surface only
+                    q.put(("error", str(exc)))
+
+            threading.Thread(target=worker, daemon=True).start()
+            poll_queue()
 
         def poll_queue() -> None:
             try:
-                message = q.get_nowait()
+                while True:
+                    message = q.get_nowait()
+                    tag = message[0]
+                    if tag == "log":
+                        append_log(message[1])
+                    elif tag == "files":
+                        total = message[1]
+                        progress.stop()
+                        progress.config(
+                            mode="determinate", maximum=max(1, total), value=0
+                        )
+                        progress_var.set(f"0/{total} processed")
+                        append_log(f"Found {total} audio files to process.")
+                    elif tag == "progress":
+                        value, total = message[1], message[2]
+                        progress["value"] = value
+                        progress_var.set(f"{value}/{total} processed")
+                    elif tag == "done":
+                        _, path, count, error_count = message
+                        running.set(False)
+                        open_btn_enabled.set(True)
+                        progress["value"] = progress["maximum"]
+                        note = ""
+                        if error_count:
+                            note = f" ({error_count} files skipped)"
+                        progress_var.set(f"Completed – {count} entries{note}")
+                        append_log(f"Export complete: {path}")
+                        if error_count:
+                            append_log(f"Skipped {error_count} files due to read errors.")
+                        set_controls(active=False)
+                    elif tag == "error":
+                        running.set(False)
+                        progress.stop()
+                        progress_var.set("Export failed")
+                        set_controls(active=False)
+                        messagebox.showerror("Export Artist/Title List", message[1])
             except queue.Empty:
-                self.after(200, poll_queue)
-                return
-            if message[0] == "done":
-                _, path, count, error_count = message
-                note = ""
-                if error_count:
-                    note = f"\n\nFiles skipped due to read errors: {error_count}"
+                pass
+            if running.get():
+                dlg.after(200, poll_queue)
+
+        open_btn_enabled = tk.BooleanVar(value=False)
+
+        start_btn = ttk.Button(button_frame, text="Start Export", command=start_export)
+        start_btn.pack(side="left")
+        open_btn = ttk.Button(
+            button_frame,
+            text="Open List",
+            command=lambda: self._open_path(output_path),
+            state="disabled",
+        )
+        open_btn.pack(side="left", padx=(6, 0))
+        close_btn = ttk.Button(button_frame, text="Close", command=dlg.destroy)
+        close_btn.pack(side="right")
+
+        def on_close() -> None:
+            if running.get():
                 messagebox.showinfo(
                     "Export Artist/Title List",
-                    f"Saved {count} entries to:\n{path}{note}",
+                    "Please wait for the export to finish before closing this window.",
                 )
+                return
+            dlg.destroy()
 
-        self.after(200, poll_queue)
+        dlg.protocol("WM_DELETE_WINDOW", on_close)
 
     def _set_status(self, text: str) -> None:
         self._full_status = text
