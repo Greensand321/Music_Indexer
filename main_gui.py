@@ -37,7 +37,7 @@ from tkinter.scrolledtext import ScrolledText
 import textwrap
 import time
 from datetime import datetime
-from collections import deque
+from collections import Counter, deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 
@@ -6261,6 +6261,7 @@ class SoundVaultImporterApp(tk.Tk):
         q: queue.Queue[tuple[str, object]] = queue.Queue()
         running = tk.BooleanVar(value=False)
         exclude_flac_var = tk.BooleanVar(value=False)
+        add_album_duplicates_var = tk.BooleanVar(value=False)
 
         dlg = tk.Toplevel(self)
         dlg.title("Export Artist/Title List")
@@ -6298,6 +6299,11 @@ class SoundVaultImporterApp(tk.Tk):
             text="Exclude flac files",
             variable=exclude_flac_var,
         ).pack(anchor="w", padx=8, pady=6)
+        ttk.Checkbutton(
+            options_frame,
+            text="Add album song duplicates",
+            variable=add_album_duplicates_var,
+        ).pack(anchor="w", padx=8, pady=0)
 
         progress_var = tk.StringVar(value="Ready to start.")
         progress = ttk.Progressbar(dlg, mode="determinate")
@@ -6358,6 +6364,7 @@ class SoundVaultImporterApp(tk.Tk):
                     q.put(("files", len(audio_files)))
 
                     entries: list[str] = []
+                    entry_data: list[tuple[str, str, str | None]] = []
                     error_count = 0
                     for idx, full_path in enumerate(audio_files, start=1):
                         ext = os.path.splitext(full_path)[1].lower()
@@ -6375,13 +6382,25 @@ class SoundVaultImporterApp(tk.Tk):
                             tags.get("artist") or tags.get("albumartist")
                         )
                         title = self._clean_tag_text(tags.get("title"))
+                        album = self._clean_tag_text(tags.get("album"))
                         if not title:
                             title = os.path.splitext(filename)[0]
                         if not artist:
                             artist = "Unknown Artist"
-                        entries.append(f"{artist} - {title}")
+                        entry_data.append((artist, title, album))
                         if idx == 1 or idx % 50 == 0 or idx == len(audio_files):
                             q.put(("progress", idx, len(audio_files)))
+
+                    add_album_duplicates = add_album_duplicates_var.get()
+                    duplicate_counts = Counter(
+                        (artist, title) for artist, title, _album in entry_data
+                    )
+                    for artist, title, album in entry_data:
+                        if add_album_duplicates and duplicate_counts[(artist, title)] > 1:
+                            album_label = album or "Unknown Album"
+                            entries.append(f"{artist} - {title} - {album_label}")
+                        else:
+                            entries.append(f"{artist} - {title}")
 
                     entries.sort(key=str.lower)
                     with open(output_path, "w", encoding="utf-8") as handle:
