@@ -284,6 +284,111 @@ class LibrarySyncReviewPanel(ttk.Frame):
             folder_frame, "Incoming Folder:", self.incoming_var, self._browse_incoming
         )
 
+        config_frame = ttk.LabelFrame(root, text="Scan Configuration")
+        config_frame.pack(fill="x", **padding)
+
+        config_row = ttk.Frame(config_frame)
+        config_row.pack(fill="x", padx=5, pady=(5, 0))
+        ttk.Label(config_row, text="Global Threshold:").pack(side="left")
+        ttk.Entry(config_row, textvariable=self.global_threshold_var, width=8).pack(
+            side="left", padx=(5, 12)
+        )
+        ttk.Label(config_row, text="Preset Name:").pack(side="left")
+        ttk.Entry(config_row, textvariable=self.preset_var, width=18).pack(
+            side="left", padx=(5, 12)
+        )
+        ttk.Label(config_row, text="Report Version:").pack(side="left")
+        ttk.Entry(config_row, textvariable=self.report_version_var, width=6).pack(
+            side="left", padx=(5, 12)
+        )
+        ttk.Label(config_row, text="Scan State:").pack(side="left")
+        ttk.Label(config_row, textvariable=self.scan_state_var).pack(side="left", padx=(5, 0))
+
+        overrides_row = ttk.Frame(config_frame)
+        overrides_row.pack(fill="x", padx=5, pady=(6, 0))
+        ttk.Label(overrides_row, text="Per-format overrides (ext=threshold):").pack(
+            anchor="w"
+        )
+        overrides_body = ttk.Frame(config_frame)
+        overrides_body.pack(fill="x", padx=5, pady=(2, 5))
+        self.overrides_text = tk.Text(overrides_body, height=4, wrap="none")
+        overrides_scroll = ttk.Scrollbar(
+            overrides_body, orient="vertical", command=self.overrides_text.yview
+        )
+        self.overrides_text.configure(yscrollcommand=overrides_scroll.set)
+        self.overrides_text.pack(side="left", fill="both", expand=True)
+        overrides_scroll.pack(side="right", fill="y")
+        initial_overrides = self._format_overrides()
+        if initial_overrides:
+            self.overrides_text.insert("1.0", initial_overrides)
+
+        config_actions = ttk.Frame(config_frame)
+        config_actions.pack(fill="x", padx=5, pady=(0, 6))
+        ttk.Button(config_actions, text="Save Session", command=self._persist_session).pack(
+            side="right"
+        )
+        ttk.Button(
+            config_actions,
+            text="Recompute Matches",
+            command=self._refresh_matches,
+        ).pack(side="right", padx=(0, 6))
+
+        scan_frame = ttk.LabelFrame(root, text="Scan Progress")
+        scan_frame.pack(fill="x", **padding)
+        scan_frame.columnconfigure(0, weight=1)
+        scan_frame.columnconfigure(1, weight=1)
+        self._build_scan_column(scan_frame, "Existing Library", "library", 0)
+        self._build_scan_column(scan_frame, "Incoming Folder", "incoming", 1)
+
+        review_frame = ttk.LabelFrame(root, text="Review Results")
+        review_frame.pack(fill="both", expand=True, **padding)
+        lists_frame = ttk.Frame(review_frame)
+        lists_frame.pack(fill="both", expand=True)
+        lists_frame.columnconfigure(0, weight=1)
+        lists_frame.columnconfigure(1, weight=1)
+        incoming_frame = ttk.LabelFrame(lists_frame, text="Incoming Tracks")
+        incoming_frame.grid(row=0, column=0, sticky="nsew", padx=(5, 5), pady=5)
+        existing_frame = ttk.LabelFrame(lists_frame, text="Existing Tracks")
+        existing_frame.grid(row=0, column=1, sticky="nsew", padx=(5, 5), pady=5)
+        self._build_incoming_tree(incoming_frame)
+        self._build_existing_tree(existing_frame)
+
+        self.match_summary_var = tk.StringVar(value="No matches yet.")
+        ttk.Label(review_frame, textvariable=self.match_summary_var).pack(
+            anchor="w", padx=5, pady=(0, 4)
+        )
+
+        inspector_frame = ttk.LabelFrame(review_frame, text="Inspector")
+        inspector_frame.pack(fill="x", padx=5, pady=(0, 5))
+        inspector_body = ttk.Frame(inspector_frame)
+        inspector_body.pack(fill="both", expand=True)
+        self.inspector_text = tk.Text(inspector_body, height=8, wrap="word", state="disabled")
+        inspector_scroll = ttk.Scrollbar(
+            inspector_body, orient="vertical", command=self.inspector_text.yview
+        )
+        self.inspector_text.configure(yscrollcommand=inspector_scroll.set)
+        self.inspector_text.pack(side="left", fill="both", expand=True)
+        inspector_scroll.pack(side="right", fill="y")
+
+        plan_frame = ttk.LabelFrame(root, text="Plan & Execution")
+        plan_frame.pack(fill="x", **padding)
+        self._build_plan_controls(plan_frame)
+
+        logs_frame = ttk.LabelFrame(root, text="Logs")
+        logs_frame.pack(fill="both", expand=True, **padding)
+        logs_actions = ttk.Frame(logs_frame)
+        logs_actions.pack(fill="x", padx=5, pady=(5, 0))
+        ttk.Button(logs_actions, text="Export Logs…", command=self._export_logs).pack(
+            side="right"
+        )
+        logs_body = ttk.Frame(logs_frame)
+        logs_body.pack(fill="both", expand=True, padx=5, pady=(2, 5))
+        self.log_widget = tk.Text(logs_body, height=10, wrap="word", state="disabled")
+        log_scroll = ttk.Scrollbar(logs_body, orient="vertical", command=self.log_widget.yview)
+        self.log_widget.configure(yscrollcommand=log_scroll.set)
+        self.log_widget.pack(side="left", fill="both", expand=True)
+        log_scroll.pack(side="right", fill="y")
+
     def _add_browse_row(
         self,
         parent: ttk.Frame,
@@ -465,6 +570,17 @@ class LibrarySyncReviewPanel(ttk.Frame):
         if reason:
             self.plan_status_var.set(reason)
         self._refresh_plan_actions()
+
+    def _refresh_matches(self) -> None:
+        if not self._persist_session():
+            return
+        if not self.library_records or not self.incoming_records:
+            messagebox.showinfo(
+                "Library Sync",
+                "Scan both the Existing Library and Incoming Folder before recomputing matches.",
+            )
+            return
+        self._maybe_match()
 
     def _current_transfer_mode(self) -> str:
         return "copy" if self.transfer_mode_var.get().lower() == "copy" else "move"
@@ -946,7 +1062,13 @@ class LibrarySyncReviewPanel(ttk.Frame):
             if res.existing:
                 match_by_existing.setdefault(res.existing.track_id, []).append(res)
         self.match_by_existing = match_by_existing
-        self._log_event("match_stats", "Updated matching statistics", self._summarize_matches(results))
+        summary = self._summarize_matches(results)
+        self._log_event("match_stats", "Updated matching statistics", summary)
+        self.match_summary_var.set(
+            "Incoming: {total} | New: {new} | Collisions: {collision} | Exact: {exact} | Low Confidence: {low_confidence}".format(
+                **summary
+            )
+        )
         self._render_lists()
         self._update_inspector()
 
