@@ -373,6 +373,17 @@ def _bucket_comparisons(
     return comparisons
 
 
+def _expand_bidirectional(comparisons: Iterable[dict]) -> List[dict]:
+    expanded: List[dict] = []
+    for comp in comparisons:
+        expanded.append(comp)
+        if comp.get("left") != comp.get("right"):
+            mirrored = dict(comp)
+            mirrored["left"], mirrored["right"] = comp.get("right"), comp.get("left")
+            expanded.append(mirrored)
+    return expanded
+
+
 def run_duplicate_bucketing_poc(
     root: str,
     *,
@@ -417,6 +428,7 @@ def run_duplicate_bucketing_poc(
     bucket_payloads: List[dict] = []
     for bucket in buckets:
         comparisons = _bucket_comparisons(bucket, fingerprints, exact_threshold, near_threshold, mixed_boost)
+        expanded_comparisons = _expand_bidirectional(comparisons)
         exact_count = sum(1 for comp in comparisons if comp["verdict"] == "exact")
         near_count = sum(1 for comp in comparisons if comp["verdict"] == "near")
         no_match_count = sum(1 for comp in comparisons if comp["verdict"] == "no match")
@@ -431,6 +443,7 @@ def run_duplicate_bucketing_poc(
             {
                 "bucket": bucket,
                 "comparisons": comparisons,
+                "expanded_comparisons": expanded_comparisons,
                 "exact_count": exact_count,
                 "near_count": near_count,
                 "no_match_count": no_match_count,
@@ -592,11 +605,11 @@ def run_duplicate_bucketing_poc(
         html_lines.append(
             "<div class='compare-header'>"
             "<h3>Matches</h3>"
-            f"<span class='muted'>Showing {payload['exact_count'] + payload['near_count']} near/exact pairs</span>"
+            f"<span class='muted'>Showing {sum(1 for comp in payload['expanded_comparisons'] if comp['verdict'] in {'exact', 'near'})} near/exact pairs (bidirectional)</span>"
             "</div>"
         )
         match_pairs = [
-            comp for comp in payload["comparisons"] if comp["verdict"] in {"exact", "near"}
+            comp for comp in payload["expanded_comparisons"] if comp["verdict"] in {"exact", "near"}
         ]
         if match_pairs:
             for comp in match_pairs:
@@ -641,9 +654,11 @@ def run_duplicate_bucketing_poc(
 
         html_lines.append("<details class='subsection'>")
         html_lines.append("<summary>All comparisons</summary>")
-        html_lines.append("<div class='muted'>Includes no-match and missing fingerprint rows.</div>")
-        if payload["comparisons"]:
-            for comp in payload["comparisons"]:
+        html_lines.append(
+            "<div class='muted'>Includes no-match and missing fingerprint rows (bidirectional).</div>"
+        )
+        if payload["expanded_comparisons"]:
+            for comp in payload["expanded_comparisons"]:
                 left = esc(_truncate_path(comp["left"]))
                 right = esc(_truncate_path(comp["right"]))
                 if comp["distance"] is None:
