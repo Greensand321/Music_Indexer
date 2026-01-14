@@ -373,6 +373,17 @@ def _bucket_comparisons(
     return comparisons
 
 
+def _expand_bidirectional(comparisons: Iterable[dict]) -> List[dict]:
+    expanded: List[dict] = []
+    for comp in comparisons:
+        expanded.append(comp)
+        if comp.get("left") != comp.get("right"):
+            mirrored = dict(comp)
+            mirrored["left"], mirrored["right"] = comp.get("right"), comp.get("left")
+            expanded.append(mirrored)
+    return expanded
+
+
 def run_duplicate_bucketing_poc(
     root: str,
     *,
@@ -417,6 +428,7 @@ def run_duplicate_bucketing_poc(
     bucket_payloads: List[dict] = []
     for bucket in buckets:
         comparisons = _bucket_comparisons(bucket, fingerprints, exact_threshold, near_threshold, mixed_boost)
+        expanded_comparisons = _expand_bidirectional(comparisons)
         exact_count = sum(1 for comp in comparisons if comp["verdict"] == "exact")
         near_count = sum(1 for comp in comparisons if comp["verdict"] == "near")
         no_match_count = sum(1 for comp in comparisons if comp["verdict"] == "no match")
@@ -431,6 +443,7 @@ def run_duplicate_bucketing_poc(
             {
                 "bucket": bucket,
                 "comparisons": comparisons,
+                "expanded_comparisons": expanded_comparisons,
                 "exact_count": exact_count,
                 "near_count": near_count,
                 "no_match_count": no_match_count,
@@ -592,11 +605,11 @@ def run_duplicate_bucketing_poc(
         html_lines.append(
             "<div class='compare-header'>"
             "<h3>Matches</h3>"
-            f"<span class='muted'>Showing {payload['exact_count'] + payload['near_count']} near/exact pairs</span>"
+            f"<span class='muted'>Showing {sum(1 for comp in payload['expanded_comparisons'] if comp['verdict'] in {'exact', 'near'})} near/exact pairs (bidirectional)</span>"
             "</div>"
         )
         match_pairs = [
-            comp for comp in payload["comparisons"] if comp["verdict"] in {"exact", "near"}
+            comp for comp in payload["expanded_comparisons"] if comp["verdict"] in {"exact", "near"}
         ]
         if match_pairs:
             for comp in match_pairs:
@@ -641,9 +654,11 @@ def run_duplicate_bucketing_poc(
 
         html_lines.append("<details class='subsection'>")
         html_lines.append("<summary>All comparisons</summary>")
-        html_lines.append("<div class='muted'>Includes no-match and missing fingerprint rows.</div>")
-        if payload["comparisons"]:
-            for comp in payload["comparisons"]:
+        html_lines.append(
+            "<div class='muted'>Includes no-match and missing fingerprint rows (bidirectional).</div>"
+        )
+        if payload["expanded_comparisons"]:
+            for comp in payload["expanded_comparisons"]:
                 left = esc(_truncate_path(comp["left"]))
                 right = esc(_truncate_path(comp["right"]))
                 if comp["distance"] is None:
@@ -697,6 +712,68 @@ def run_duplicate_bucketing_poc(
         html_lines.append("</details>")
 
     elapsed = time.time() - start
+    html_lines.append("<h2>Ambiguous Comparisons</h2>")
+    html_lines.append(
+        "<div class='muted'>No-match or missing-fingerprint pairs, listed separately for review.</div>"
+    )
+    for payload in sorted(
+        bucket_payloads,
+        key=lambda p: (-p["actionability"], -len(p["bucket"].tracks), p["bucket"].id),
+    ):
+        bucket = payload["bucket"]
+        ambiguous_pairs = [
+            comp
+            for comp in payload["expanded_comparisons"]
+            if comp["verdict"] in {"no match", "missing"}
+        ]
+        if not ambiguous_pairs:
+            continue
+        html_lines.append(
+            f"<details class='bucket-card' id='ambiguous-bucket-{bucket.id}'>"
+        )
+        html_lines.append(
+            "<summary>"
+            f"Bucket {bucket.id} • {len(ambiguous_pairs)} ambiguous pairs"
+            "</summary>"
+        )
+        for comp in ambiguous_pairs:
+            left_info = track_infos.get(comp["left"])
+            right_info = track_infos.get(comp["right"])
+            html_lines.append("<div class='compare-grid'>")
+            for label, info in (("Track A", left_info), ("Track B", right_info)):
+                if info and info.artwork_data_uri:
+                    thumb = f"<img class='thumb' src='{info.artwork_data_uri}' alt='artwork' />"
+                else:
+                    thumb = "<div class='thumb placeholder'>no art</div>"
+                path_display = _truncate_path(info.path) if info else "unknown"
+                full_path = info.path if info else ""
+                html_lines.append(
+                    "<div class='track-card'>"
+                    f"{thumb}"
+                    "<div class='track-meta'>"
+                    f"<div><strong>{label}</strong></div>"
+                    f"<div>{esc(os.path.basename(info.path) if info else 'unknown')}</div>"
+                    f"<div class='muted' title='{esc(full_path)}'>{esc(path_display)}</div>"
+                    f"<div class='muted'>{esc(info.codec if info else 'UNKNOWN')} • "
+                    f"{esc(_format_size(info.size_bytes) if info else 'unknown')}</div>"
+                    "</div>"
+                    "</div>"
+                )
+            distance = comp["distance"]
+            effective = comp["effective_near"]
+            detail = "missing fingerprint"
+            if distance is not None and effective is not None:
+                detail = f"distance {distance:.4f} • effective near {effective:.4f}"
+            html_lines.append(
+                "<div class='track-card'>"
+                "<div class='track-meta'>"
+                f"<div class='badge'>{comp['verdict'].upper()}</div>"
+                f"<div class='muted'>{detail}</div>"
+                "</div>"
+                "</div>"
+            )
+            html_lines.append("</div>")
+        html_lines.append("</details>")
     html_lines.append(f"<div>Elapsed: {elapsed:.2f}s</div>")
     html_lines.extend(["</body>", "</html>"])
 
