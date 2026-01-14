@@ -52,6 +52,7 @@ from duplicate_consolidation import (
     _planned_actions,
     build_consolidation_plan,
     build_duplicate_pair_report,
+    ConsolidationPlan,
     consolidation_plan_from_dict,
     export_consolidation_preview,
     export_consolidation_preview_html,
@@ -1974,6 +1975,344 @@ class ProgressDialog(tk.Toplevel):
         self.update_idletasks()
 
 
+@dataclass
+class DuplicatePair:
+    left_path: str
+    right_path: str
+
+
+class DuplicatePairReviewTool(tk.Toplevel):
+    """Review paired duplicate results one-by-one."""
+
+    def __init__(self, parent: tk.Widget, *, library_path: str, plan: ConsolidationPlan):
+        super().__init__(parent)
+        self.title("Duplicate Pair Review")
+        self.transient(parent)
+        self.resizable(True, True)
+
+        self.library_path = library_path
+        self.pairs = self._collect_pairs(plan, library_path)
+        self._pair_index = 0
+        self._left_tags: dict[str, object] = {}
+        self._right_tags: dict[str, object] = {}
+        self._left_cover = None
+        self._right_cover = None
+        self._status_var = tk.StringVar(value="Ready")
+        self._progress_var = tk.StringVar(value="")
+
+        container = ttk.Frame(self)
+        container.pack(fill="both", expand=True, padx=10, pady=10)
+
+        ttk.Label(
+            container,
+            text="Duplicate Pair Review",
+            font=("TkDefaultFont", 12, "bold"),
+        ).pack(anchor="w")
+        ttk.Label(
+            container,
+            text="Review paired duplicates from the Duplicate Finder preview.",
+            foreground="#555",
+            wraplength=600,
+        ).pack(anchor="w", pady=(0, 8))
+
+        ttk.Label(container, textvariable=self._progress_var).pack(anchor="w")
+
+        grid = ttk.Frame(container)
+        grid.pack(fill="both", expand=True, pady=8)
+        grid.columnconfigure((0, 1), weight=1)
+
+        self.left_panel = self._build_track_panel(grid, "Left Track")
+        self.left_panel.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
+        self.right_panel = self._build_track_panel(grid, "Right Track")
+        self.right_panel.grid(row=0, column=1, sticky="nsew", padx=(6, 0))
+
+        status_row = ttk.Frame(container)
+        status_row.pack(fill="x", pady=(0, 8))
+        ttk.Label(status_row, textvariable=self._status_var, foreground="#555").pack(
+            side="left"
+        )
+
+        btns = ttk.Frame(container)
+        btns.pack(fill="x")
+        self.yes_btn = ttk.Button(btns, text="Yes", command=self._handle_yes)
+        self.yes_btn.pack(side="left")
+        self.no_btn = ttk.Button(btns, text="No", command=self._handle_no)
+        self.no_btn.pack(side="left", padx=(6, 0))
+        self.tag_btn = ttk.Button(btns, text="Tag", command=self._handle_tag)
+        self.tag_btn.pack(side="left", padx=(6, 0))
+        ttk.Button(btns, text="Close", command=self.destroy).pack(side="right")
+
+        self.bind("<Return>", lambda _event: self._handle_yes())
+        self.bind("<BackSpace>", lambda _event: self._handle_no())
+
+        self._load_pair()
+
+    def _collect_pairs(
+        self, plan: ConsolidationPlan, library_path: str
+    ) -> list[DuplicatePair]:
+        pairs: list[DuplicatePair] = []
+        seen: set[tuple[str, str]] = set()
+
+        def add_pair(left: str, right: str) -> None:
+            if left == right:
+                return
+            key = tuple(sorted((left, right)))
+            if key in seen:
+                return
+            seen.add(key)
+            pairs.append(DuplicatePair(left, right))
+
+        for group in plan.groups:
+            if not group.losers:
+                continue
+            if len(group.losers) == 1:
+                add_pair(group.winner_path, group.losers[0])
+                continue
+            for loser in group.losers:
+                add_pair(group.winner_path, loser)
+
+        for left, right in self._collect_filename_pairs(library_path):
+            add_pair(left, right)
+
+        return pairs
+
+    def _collect_filename_pairs(self, library_path: str) -> list[tuple[str, str]]:
+        pattern = re.compile(r"\s*\(\d+\)$")
+        candidates: dict[str, list[str]] = {}
+        for dirpath, _dirs, files in os.walk(library_path):
+            for filename in files:
+                ext = os.path.splitext(filename)[1].lower()
+                if ext not in SUPPORTED_EXTS:
+                    continue
+                stem = os.path.splitext(filename)[0].lower()
+                normalized = pattern.sub("", stem).strip()
+                if not normalized:
+                    continue
+                full_path = os.path.join(dirpath, filename)
+                candidates.setdefault(normalized, []).append(full_path)
+
+        pairs: list[tuple[str, str]] = []
+        for items in candidates.values():
+            if len(items) < 2:
+                continue
+            sorted_items = sorted(items, key=str.lower)
+            anchor = sorted_items[0]
+            for other in sorted_items[1:]:
+                pairs.append((anchor, other))
+        return pairs
+
+    def _build_track_panel(self, parent: tk.Widget, title: str) -> ttk.Frame:
+        frame = ttk.LabelFrame(parent, text=title)
+        frame.columnconfigure(0, weight=1)
+        art_label = tk.Label(frame)
+        art_label.grid(row=0, column=0, pady=(6, 4))
+        title_label = ttk.Label(frame, font=("TkDefaultFont", 10, "bold"))
+        title_label.grid(row=1, column=0, sticky="w", padx=6)
+        meta_label = ttk.Label(frame, justify="left")
+        meta_label.grid(row=2, column=0, sticky="w", padx=6, pady=(2, 6))
+        path_label = ttk.Label(frame, foreground="#777", wraplength=300)
+        path_label.grid(row=3, column=0, sticky="w", padx=6, pady=(0, 6))
+        frame.art_label = art_label  # type: ignore[attr-defined]
+        frame.title_label = title_label  # type: ignore[attr-defined]
+        frame.meta_label = meta_label  # type: ignore[attr-defined]
+        frame.path_label = path_label  # type: ignore[attr-defined]
+        return frame
+
+    def _load_cover_image(self, path: str) -> ImageTk.PhotoImage:
+        max_dim = int(load_config().get("preview_artwork_max_dim", PREVIEW_ARTWORK_MAX_DIM))
+        cover = None
+        tags, covers, error, _reader = read_metadata(path, include_cover=True)
+        if error:
+            logger.warning("Failed to read metadata for %s: %s", path, error)
+        if covers:
+            cover = covers[0]
+        if cover:
+            try:
+                image = Image.open(BytesIO(cover))
+            except Exception:
+                image = Image.new("RGB", (max_dim, max_dim), "#333")
+        else:
+            image = Image.new("RGB", (max_dim, max_dim), "#333")
+        image.thumbnail((max_dim, max_dim))
+        return ImageTk.PhotoImage(image)
+
+    def _format_metadata(self, tags: dict[str, object], path: str) -> str:
+        ext = os.path.splitext(path)[1].lower().lstrip(".") or "unknown"
+        lines = [f"Extension: {ext}"]
+        if tags.get("artist"):
+            lines.append(f"Artist: {tags.get('artist')}")
+        if tags.get("title"):
+            lines.append(f"Title: {tags.get('title')}")
+        if tags.get("album"):
+            lines.append(f"Album: {tags.get('album')}")
+        if tags.get("year"):
+            lines.append(f"Year: {tags.get('year')}")
+        if tags.get("track"):
+            lines.append(f"Track: {tags.get('track')}")
+        if tags.get("disc"):
+            lines.append(f"Disc: {tags.get('disc')}")
+        if tags.get("genre"):
+            lines.append(f"Genre: {tags.get('genre')}")
+        return "\n".join(str(line) for line in lines)
+
+    def _display_name(self, tags: dict[str, object], path: str) -> str:
+        artist = tags.get("artist")
+        title = tags.get("title")
+        if artist or title:
+            artist_str = str(artist or "Unknown Artist")
+            title_str = str(title or "Unknown Title")
+            return f"{artist_str} - {title_str}"
+        return os.path.basename(path)
+
+    def _load_track(self, panel: ttk.Frame, path: str) -> dict[str, object]:
+        tags, _covers, _error, _reader = read_metadata(path, include_cover=False)
+        panel.title_label.configure(text=self._display_name(tags, path))
+        panel.meta_label.configure(text=self._format_metadata(tags, path))
+        panel.path_label.configure(text=path)
+        return tags
+
+    def _load_pair(self) -> None:
+        if not self.pairs:
+            self._progress_var.set("No paired duplicates found in the current preview.")
+            self._status_var.set("Idle")
+            self.yes_btn.configure(state="disabled")
+            self.no_btn.configure(state="disabled")
+            self.tag_btn.configure(state="disabled")
+            return
+
+        while self._pair_index < len(self.pairs):
+            pair = self.pairs[self._pair_index]
+            if os.path.exists(pair.left_path) and os.path.exists(pair.right_path):
+                break
+            self._status_var.set("Skipped missing files.")
+            self._pair_index += 1
+
+        if self._pair_index >= len(self.pairs):
+            self._progress_var.set("All pairs reviewed.")
+            self._status_var.set("Done")
+            self.yes_btn.configure(state="disabled")
+            self.no_btn.configure(state="disabled")
+            self.tag_btn.configure(state="disabled")
+            return
+
+        pair = self.pairs[self._pair_index]
+        self._progress_var.set(
+            f"Pair {self._pair_index + 1} of {len(self.pairs)}"
+        )
+        self._status_var.set("Ready")
+
+        self._left_tags = self._load_track(self.left_panel, pair.left_path)
+        self._right_tags = self._load_track(self.right_panel, pair.right_path)
+
+        self._left_cover = self._load_cover_image(pair.left_path)
+        self.left_panel.art_label.configure(image=self._left_cover)
+        self.left_panel.art_label.image = self._left_cover
+        self._right_cover = self._load_cover_image(pair.right_path)
+        self.right_panel.art_label.configure(image=self._right_cover)
+        self.right_panel.art_label.image = self._right_cover
+
+    def _advance(self) -> None:
+        self._pair_index += 1
+        self._load_pair()
+
+    def _delete_inferior(self, left_path: str, right_path: str) -> str | None:
+        left_ext = os.path.splitext(left_path)[1].lower()
+        right_ext = os.path.splitext(right_path)[1].lower()
+        if left_ext == ".flac" and right_ext != ".flac":
+            return right_path
+        if right_ext == ".flac" and left_ext != ".flac":
+            return left_path
+        return None
+
+    def _playlist_contains(self, target_path: str) -> bool:
+        playlists_dir = os.path.join(self.library_path, "Playlists")
+        if not os.path.isdir(playlists_dir):
+            return False
+        normalized_target = os.path.normcase(os.path.normpath(target_path))
+        for dirpath, _dirs, files in os.walk(playlists_dir):
+            for fname in files:
+                if not fname.lower().endswith((".m3u", ".m3u8")):
+                    continue
+                pl_path = os.path.join(dirpath, fname)
+                try:
+                    with open(pl_path, "r", encoding="utf-8") as handle:
+                        lines = [ln.rstrip("\n") for ln in handle]
+                except OSError:
+                    continue
+                for line in lines:
+                    abs_line = os.path.normcase(
+                        os.path.normpath(os.path.join(dirpath, line))
+                    )
+                    if abs_line == normalized_target:
+                        return True
+        return False
+
+    def _update_playlists_for_replacement(self, deleted_path: str, kept_path: str) -> None:
+        if not self._playlist_contains(deleted_path):
+            return
+        playlist_generator.update_playlists({deleted_path: kept_path})
+
+    def _handle_yes(self) -> None:
+        if not self.pairs or self._pair_index >= len(self.pairs):
+            return
+        pair = self.pairs[self._pair_index]
+        if not os.path.exists(pair.left_path) or not os.path.exists(pair.right_path):
+            self._status_var.set("Missing files; skipped.")
+            self._advance()
+            return
+        delete_path = self._delete_inferior(pair.left_path, pair.right_path)
+        if not delete_path:
+            self._status_var.set("No FLAC in pair; nothing deleted.")
+            self._advance()
+            return
+        kept_path = (
+            pair.right_path if delete_path == pair.left_path else pair.left_path
+        )
+        try:
+            os.remove(ensure_long_path(delete_path))
+            self._update_playlists_for_replacement(delete_path, kept_path)
+            self._status_var.set(f"Deleted {os.path.basename(delete_path)}")
+        except OSError as exc:
+            messagebox.showerror("Delete Failed", str(exc))
+            self._status_var.set("Delete failed")
+        self._advance()
+
+    def _handle_no(self) -> None:
+        if not self.pairs or self._pair_index >= len(self.pairs):
+            return
+        pair = self.pairs[self._pair_index]
+        if not os.path.exists(pair.left_path) or not os.path.exists(pair.right_path):
+            self._status_var.set("Missing files; skipped.")
+            self._advance()
+            return
+        self._status_var.set("Skipped")
+        self._advance()
+
+    def _handle_tag(self) -> None:
+        if not self.pairs or self._pair_index >= len(self.pairs):
+            return
+        pair = self.pairs[self._pair_index]
+        if not os.path.exists(pair.left_path) or not os.path.exists(pair.right_path):
+            self._status_var.set("Missing files; skipped.")
+            self._advance()
+            return
+        docs_dir = os.path.join(self.library_path, "Docs")
+        os.makedirs(docs_dir, exist_ok=True)
+        tag_path = os.path.join(docs_dir, "duplicate_pair_tags.txt")
+        left_name = self._display_name(self._left_tags, pair.left_path)
+        right_name = self._display_name(self._right_tags, pair.right_path)
+        line = f"{left_name} | {right_name}"
+        try:
+            with open(tag_path, "a", encoding="utf-8") as handle:
+                handle.write(line + "\n")
+            self._status_var.set("Tagged pair added")
+        except OSError as exc:
+            messagebox.showerror("Tag Failed", str(exc))
+            self._status_var.set("Tag failed")
+            return
+        self._advance()
+
+
 class DuplicateFinderShell(tk.Toplevel):
     """GUI shell for the refreshed Duplicate Finder workflow."""
 
@@ -3304,6 +3643,8 @@ class DuplicateFinderShell(tk.Toplevel):
             self._apply_deletion_mode()
             self.preview_json_path = None
             self.preview_html_path = None
+            if hasattr(self.master, "_set_duplicate_finder_plan"):
+                self.master._set_duplicate_finder_plan(result.plan, path)
             self._set_scan_controls_enabled(True)
 
         def worker() -> None:
@@ -3443,6 +3784,8 @@ class DuplicateFinderShell(tk.Toplevel):
             self._apply_deletion_mode()
             self.preview_json_path = result.preview_json_path
             self.preview_html_path = result.preview_html_path
+            if hasattr(self.master, "_set_duplicate_finder_plan"):
+                self.master._set_duplicate_finder_plan(result.plan, path)
 
             for message in result.log_messages:
                 schedule(self._log_action, message)
@@ -5476,6 +5819,9 @@ class SoundVaultImporterApp(tk.Tk):
 
         # Duplicate Finder state
         self.duplicate_finder_window: DuplicateFinderShell | None = None
+        self.duplicate_pair_review_window: DuplicatePairReviewTool | None = None
+        self.duplicate_finder_plan: ConsolidationPlan | None = None
+        self.duplicate_finder_plan_library: str | None = None
 
         # Shared preview/playback state
         self._preview_thread = None
@@ -5595,6 +5941,10 @@ class SoundVaultImporterApp(tk.Tk):
         tools_menu.add_command(
             label="Duplicate Bucketing POC…",
             command=self._open_duplicate_bucketing_poc_tool,
+        )
+        tools_menu.add_command(
+            label="Duplicate Pair Review…",
+            command=self._open_duplicate_pair_review_tool,
         )
         tools_menu.add_command(label="M4A Tester…", command=self._open_m4a_tester_tool)
         tools_menu.add_command(label="Opus Tester…", command=self._open_opus_tester_tool)
@@ -6535,6 +6885,55 @@ class SoundVaultImporterApp(tk.Tk):
             ),
         )
         self.duplicate_finder_window = win
+
+    def _set_duplicate_finder_plan(self, plan: ConsolidationPlan, library_path: str) -> None:
+        self.duplicate_finder_plan = plan
+        self.duplicate_finder_plan_library = library_path
+
+    def _load_duplicate_plan_from_preview(self, library_path: str) -> ConsolidationPlan | None:
+        preview_path = os.path.join(library_path, "Docs", "duplicate_preview.json")
+        try:
+            with open(preview_path, "r", encoding="utf-8") as handle:
+                payload = json.load(handle)
+        except OSError:
+            return None
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(payload, dict) or "plan" not in payload:
+            return None
+        try:
+            return consolidation_plan_from_dict(payload["plan"])
+        except ValueError:
+            return None
+
+    def _open_duplicate_pair_review_tool(self) -> None:
+        library = self.require_library()
+        if not library:
+            return
+        existing = getattr(self, "duplicate_pair_review_window", None)
+        if existing and existing.winfo_exists():
+            existing.lift()
+            existing.focus_set()
+            return
+        plan = self.duplicate_finder_plan
+        if plan is None or self.duplicate_finder_plan_library != library:
+            plan = self._load_duplicate_plan_from_preview(library)
+        if plan is None:
+            messagebox.showinfo(
+                "Duplicate Pair Review",
+                "Run Duplicate Finder preview first to generate paired results.",
+            )
+            return
+        win = DuplicatePairReviewTool(self, library_path=library, plan=plan)
+        win.bind(
+            "<Destroy>",
+            lambda e: (
+                setattr(self, "duplicate_pair_review_window", None)
+                if e.widget is win
+                else None
+            ),
+        )
+        self.duplicate_pair_review_window = win
 
     def run_indexer(self):
         path = self.require_library()
