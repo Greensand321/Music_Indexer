@@ -712,6 +712,68 @@ def run_duplicate_bucketing_poc(
         html_lines.append("</details>")
 
     elapsed = time.time() - start
+    html_lines.append("<h2>Ambiguous Comparisons</h2>")
+    html_lines.append(
+        "<div class='muted'>No-match or missing-fingerprint pairs, listed separately for review.</div>"
+    )
+    for payload in sorted(
+        bucket_payloads,
+        key=lambda p: (-p["actionability"], -len(p["bucket"].tracks), p["bucket"].id),
+    ):
+        bucket = payload["bucket"]
+        ambiguous_pairs = [
+            comp
+            for comp in payload["expanded_comparisons"]
+            if comp["verdict"] in {"no match", "missing"}
+        ]
+        if not ambiguous_pairs:
+            continue
+        html_lines.append(
+            f"<details class='bucket-card' id='ambiguous-bucket-{bucket.id}'>"
+        )
+        html_lines.append(
+            "<summary>"
+            f"Bucket {bucket.id} • {len(ambiguous_pairs)} ambiguous pairs"
+            "</summary>"
+        )
+        for comp in ambiguous_pairs:
+            left_info = track_infos.get(comp["left"])
+            right_info = track_infos.get(comp["right"])
+            html_lines.append("<div class='compare-grid'>")
+            for label, info in (("Track A", left_info), ("Track B", right_info)):
+                if info and info.artwork_data_uri:
+                    thumb = f"<img class='thumb' src='{info.artwork_data_uri}' alt='artwork' />"
+                else:
+                    thumb = "<div class='thumb placeholder'>no art</div>"
+                path_display = _truncate_path(info.path) if info else "unknown"
+                full_path = info.path if info else ""
+                html_lines.append(
+                    "<div class='track-card'>"
+                    f"{thumb}"
+                    "<div class='track-meta'>"
+                    f"<div><strong>{label}</strong></div>"
+                    f"<div>{esc(os.path.basename(info.path) if info else 'unknown')}</div>"
+                    f"<div class='muted' title='{esc(full_path)}'>{esc(path_display)}</div>"
+                    f"<div class='muted'>{esc(info.codec if info else 'UNKNOWN')} • "
+                    f"{esc(_format_size(info.size_bytes) if info else 'unknown')}</div>"
+                    "</div>"
+                    "</div>"
+                )
+            distance = comp["distance"]
+            effective = comp["effective_near"]
+            detail = "missing fingerprint"
+            if distance is not None and effective is not None:
+                detail = f"distance {distance:.4f} • effective near {effective:.4f}"
+            html_lines.append(
+                "<div class='track-card'>"
+                "<div class='track-meta'>"
+                f"<div class='badge'>{comp['verdict'].upper()}</div>"
+                f"<div class='muted'>{detail}</div>"
+                "</div>"
+                "</div>"
+            )
+            html_lines.append("</div>")
+        html_lines.append("</details>")
     html_lines.append(f"<div>Elapsed: {elapsed:.2f}s</div>")
     html_lines.extend(["</body>", "</html>"])
 
