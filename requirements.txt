@@ -1,3 +1,4 @@
+# Core audio + metadata tooling
 mutagen
 pydub
 simpleaudio
@@ -5,7 +6,8 @@ ffmpeg-python
 pyacoustid
 musicbrainzngs
 python-vlc
-# essentia==2.1b6  # optional alternative audio engine; see README.md for install steps
+
+# Audio analysis + clustering
 librosa
 scipy
 numpy
@@ -13,12 +15,20 @@ scikit-learn
 hdbscan
 matplotlib
 Pillow
+
+# HTTP + typing helpers
 requests
 typing_extensions
-# optional metadata helpers
+
+# Optional metadata helpers
 spotipy
 tidal-dl
-# optional ttk theme packs
-# ttkthemes       # +50 themes
-# ttkbootstrap    # Bootstrap-style light/dark themes
-# sv-ttk          # Windows-11 "Sun Valley" look
+
+# Optional UX helpers
+tqdm
+ttkthemes
+ttkbootstrap
+sv-ttk
+
+# Optional alternative audio engine; see README.md for install steps
+# essentia==2.1b6
