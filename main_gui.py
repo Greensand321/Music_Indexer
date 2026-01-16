@@ -23,7 +23,6 @@ if sys.platform == "win32":
 
 import tkinter as tk
 from tkinter import ttk
-from tkinter import font as tkfont
 
 Style = ttk.Style  # Default built-in themes
 # Optional theme packs:
@@ -6041,11 +6040,6 @@ class SoundVaultImporterApp(tk.Tk):
         self._dup_preview_heartbeat_interval = 0.1
         self._dup_preview_heartbeat_stall_logged = False
 
-        self.linux_font_boost = cfg.get("linux_font_boost", False)
-        self.base_fonts = self._capture_base_fonts()
-        if self.linux_font_boost:
-            self._apply_font_boost()
-
         # Player tab state
         self.player_tracks: list[dict[str, str]] = []
         self.player_tree_paths: dict[str, str] = {}
@@ -6086,46 +6080,6 @@ class SoundVaultImporterApp(tk.Tk):
         """Adjust Treeview row height based on current UI scale."""
         base = 20
         self.style.configure("Treeview", rowheight=int(base * self.current_scale))
-
-    def _capture_base_fonts(self) -> dict[str, dict[str, object]]:
-        fonts: dict[str, dict[str, object]] = {}
-        for name in (
-            "TkDefaultFont",
-            "TkTextFont",
-            "TkMenuFont",
-            "TkHeadingFont",
-            "TkFixedFont",
-            "TkCaptionFont",
-            "TkSmallCaptionFont",
-            "TkIconFont",
-            "TkTooltipFont",
-        ):
-            try:
-                font = tkfont.nametofont(name)
-            except tk.TclError:
-                continue
-            fonts[name] = {
-                "family": font.cget("family"),
-                "size": font.cget("size"),
-                "weight": font.cget("weight"),
-                "slant": font.cget("slant"),
-            }
-        return fonts
-
-    def _apply_font_boost(self, size_delta: int = 2) -> None:
-        for name, base in self.base_fonts.items():
-            font = tkfont.nametofont(name)
-            font.configure(
-                family=base["family"],
-                size=base["size"] + (size_delta if self.linux_font_boost else 0),
-                weight=base["weight"],
-                slant=base["slant"],
-            )
-
-    def _apply_scale(self, scale: float) -> None:
-        self.tk.call("tk", "scaling", scale)
-        self.current_scale = scale
-        self._configure_treeview_style()
 
     def build_ui(self):
         """Create all menus, frames, and widgets."""
@@ -6220,7 +6174,7 @@ class SoundVaultImporterApp(tk.Tk):
         )
         cb.pack(side="right", padx=5)
         cb.bind("<<ComboboxSelected>>", self.on_theme_change)
-        scale_choices = ["1.25", "1.5", "1.75", "2.0", "2.25", "2.5", "2.75", "3.0"]
+        scale_choices = ["1.25", "1.5", "1.75", "2.0", "2.25"]
         cb_scale = ttk.Combobox(
             top,
             textvariable=self.scale_var,
@@ -6230,9 +6184,6 @@ class SoundVaultImporterApp(tk.Tk):
         )
         cb_scale.pack(side="right", padx=5)
         cb_scale.bind("<<ComboboxSelected>>", self.on_scale_change)
-        ttk.Button(top, text="Linux", command=self.on_linux_scale).pack(
-            side="right", padx=(5, 0)
-        )
         tk.Label(self, textvariable=self.library_path_var, anchor="w").pack(
             fill="x", padx=10
         )
@@ -6667,29 +6618,14 @@ class SoundVaultImporterApp(tk.Tk):
         """Rebuild UI under the new scaling factor."""
         try:
             scale = float(self.scale_var.get())
+            self.tk.call("tk", "scaling", scale)
+            self.current_scale = scale
         except ValueError:
             return
-        self.linux_font_boost = False
-        self._apply_font_boost()
-        self._apply_scale(scale)
         cfg = load_config()
         cfg["ui_scale"] = scale
-        cfg["linux_font_boost"] = False
         save_config(cfg)
-        for widget in self.winfo_children():
-            widget.destroy()
-        self.build_ui()
-
-    def on_linux_scale(self):
-        scale = 3.0
-        self.scale_var.set(str(scale))
-        self.linux_font_boost = True
-        self._apply_font_boost()
-        self._apply_scale(scale)
-        cfg = load_config()
-        cfg["ui_scale"] = scale
-        cfg["linux_font_boost"] = True
-        save_config(cfg)
+        self._configure_treeview_style()
         for widget in self.winfo_children():
             widget.destroy()
         self.build_ui()
