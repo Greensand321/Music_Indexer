@@ -13,6 +13,7 @@ execution pipeline is intentionally conservative:
 from __future__ import annotations
 
 import base64
+import concurrent.futures
 import datetime
 import hashlib
 import html
@@ -150,6 +151,8 @@ class ExecutionResult:
 EXECUTION_REPORT_FILENAME = "execution_report.html"
 INTERNAL_TAG_KEYS = {"album_type"}
 _NUMERIC_SUFFIX_RE = re.compile(r"\s*\((\d+)\)$")
+HASH_CACHE_FILENAME = "execution_hash_cache.json"
+HASH_CACHE_VERSION = 1
 
 
 def _timestamped_dir(base: str) -> str:
@@ -196,6 +199,73 @@ def _iter_playlists(playlists_dir: str) -> Iterable[str]:
         for fname in files:
             if fname.lower().endswith(".m3u"):
                 yield os.path.join(dirpath, fname)
+
+
+def _default_max_workers() -> int:
+    cpu_count = os.cpu_count() or 1
+    return min(32, cpu_count + 4)
+
+
+def _load_hash_cache(cache_path: str) -> Dict[str, Dict[str, object]]:
+    if not os.path.exists(cache_path):
+        return {}
+    try:
+        with open(cache_path, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(payload, Mapping):
+        return {}
+    entries = payload.get("entries") if isinstance(payload.get("entries"), Mapping) else {}
+    cache: Dict[str, Dict[str, object]] = {}
+    for path, entry in entries.items():
+        if not isinstance(path, str) or not isinstance(entry, Mapping):
+            continue
+        sha256 = entry.get("sha256")
+        size = entry.get("size")
+        mtime = entry.get("mtime")
+        if isinstance(sha256, str) and isinstance(size, int) and isinstance(mtime, int):
+            cache[path] = {"sha256": sha256, "size": size, "mtime": mtime}
+    return cache
+
+
+def _write_hash_cache(cache_path: str, cache: Mapping[str, Mapping[str, object]]) -> None:
+    payload = {
+        "version": HASH_CACHE_VERSION,
+        "entries": {path: dict(entry) for path, entry in cache.items()},
+    }
+    _atomic_write_json(cache_path, payload)
+
+
+def _capture_state_with_cache(
+    path: str,
+    cache: MutableMapping[str, Dict[str, object]],
+) -> Dict[str, object]:
+    state = _capture_library_state(path, quick=True)
+    if not state.get("exists"):
+        return state
+    size = state.get("size")
+    mtime = state.get("mtime")
+    cached = cache.get(path)
+    if (
+        cached
+        and cached.get("sha256")
+        and cached.get("size") == size
+        and cached.get("mtime") == mtime
+    ):
+        state["sha256"] = cached["sha256"]
+        return state
+    full_state = _capture_library_state(path)
+    if full_state.get("sha256"):
+        cache[path] = {
+            "sha256": full_state["sha256"],
+            "size": full_state.get("size"),
+            "mtime": full_state.get("mtime"),
+        }
+    elif full_state.get("hash_error"):
+        state["hash_error"] = full_state["hash_error"]
+        return state
+    return full_state
 
 
 def _normalize_playlist_entry(entry: str, playlist_dir: str) -> str:
@@ -522,6 +592,7 @@ def _compute_plan_signature(plan: ConsolidationPlan) -> str:
         "snapshot": {k: dict(v) for k, v in plan.source_snapshot.items()},
         "fingerprint_settings": dict(plan.fingerprint_settings),
         "threshold_settings": dict(plan.threshold_settings),
+        "impacted_playlists": list(plan.impacted_playlists or []),
     }
     text = json.dumps(canonical, sort_keys=True)
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
@@ -545,6 +616,9 @@ def _detect_state_drift(expected: Mapping[str, object], actual: Mapping[str, obj
 def _hydrate_snapshot_hashes(
     snapshot: MutableMapping[str, Dict[str, object]],
     log: Callable[[str], None],
+    cache: MutableMapping[str, Dict[str, object]],
+    *,
+    max_workers: int,
 ) -> None:
     missing = [
         (path, state)
@@ -555,15 +629,21 @@ def _hydrate_snapshot_hashes(
         return
     log(f"Deferred hashing: capturing SHA-256 for {len(missing)} tracks in the preview snapshot.")
     updated = 0
-    for path, state in missing:
-        full_state = _capture_library_state(path)
-        if not full_state.get("exists"):
-            continue
-        if "sha256" in full_state:
-            state["sha256"] = full_state["sha256"]
-            updated += 1
-        if "hash_error" in full_state:
-            state["hash_error"] = full_state["hash_error"]
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {
+            executor.submit(_capture_state_with_cache, path, cache): (path, state)
+            for path, state in missing
+        }
+        for future in concurrent.futures.as_completed(futures):
+            path, state = futures[future]
+            full_state = future.result()
+            if not full_state.get("exists"):
+                continue
+            if "sha256" in full_state:
+                state["sha256"] = full_state["sha256"]
+                updated += 1
+            if "hash_error" in full_state:
+                state["hash_error"] = full_state["hash_error"]
     log(f"Deferred hashing completed for {updated} tracks.")
 
 
@@ -628,6 +708,7 @@ def execute_consolidation_plan(
     group_lookup: Dict[str, object] = {}
     plan: ConsolidationPlan | None = None
     computed_signature = ""
+    max_workers = _default_max_workers()
 
     run_root = _timestamped_dir(config.reports_dir)
     reports_dir = os.path.join(run_root, "reports")
@@ -635,6 +716,8 @@ def execute_consolidation_plan(
     validation_playlists_dir = os.path.join(run_root, "playlist_validation")
     os.makedirs(reports_dir, exist_ok=True)
     os.makedirs(backups_dir, exist_ok=True)
+    hash_cache_path = os.path.join(config.reports_dir, HASH_CACHE_FILENAME)
+    hash_cache = _load_hash_cache(hash_cache_path)
 
     playlists_dir = (
         config.playlists_dir
@@ -835,14 +918,22 @@ def execute_consolidation_plan(
             )
             raise RuntimeError("Execution blocked: operation limit exceeded.")
 
-        _hydrate_snapshot_hashes(plan.source_snapshot, log)
+        _hydrate_snapshot_hashes(plan.source_snapshot, log, hash_cache, max_workers=max_workers)
 
         drift: Dict[str, str] = {}
-        for path, expected in plan.source_snapshot.items():
-            actual = _capture_library_state(path)
-            delta = _detect_state_drift(expected, actual)
-            if delta:
-                drift[path] = delta
+        if plan.source_snapshot:
+            work_items = list(plan.source_snapshot.items())
+            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = [
+                    executor.submit(_capture_state_with_cache, path, hash_cache)
+                    for path, _expected in work_items
+                ]
+                for (path, expected), future in zip(work_items, futures):
+                    _check_cancel("preflight")
+                    actual = future.result()
+                    delta = _detect_state_drift(expected, actual)
+                    if delta:
+                        drift[path] = delta
         if drift:
             success = False
             for path, reason in drift.items():
@@ -871,7 +962,11 @@ def execute_consolidation_plan(
         # Step 1: backup playlists that will change
         impacted: List[str] = []
         playlist_groups: Dict[str, set[str]] = {}
-        for playlist in _iter_playlists(playlists_dir):
+        if plan and plan.impacted_playlists:
+            candidate_playlists = list(plan.impacted_playlists)
+        else:
+            candidate_playlists = list(_iter_playlists(playlists_dir))
+        for playlist in candidate_playlists:
             try:
                 with open(playlist, "r", encoding="utf-8") as handle:
                     lines = [ln.rstrip("\n") for ln in handle]
@@ -1534,6 +1629,10 @@ def execute_consolidation_plan(
         success = False
         _record("execution", "execution", "failed", f"Execution failed: {exc}")
     finally:
+        try:
+            _write_hash_cache(hash_cache_path, hash_cache)
+        except Exception:
+            pass
         consolidated_report_path = os.path.join(reports_dir, "execution_report.json")
         html_report_path = os.path.join(reports_dir, EXECUTION_REPORT_FILENAME)
 

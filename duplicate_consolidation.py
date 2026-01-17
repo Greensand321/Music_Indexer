@@ -1332,6 +1332,7 @@ class ConsolidationPlan:
     source_snapshot: Dict[str, Dict[str, object]] = field(default_factory=dict)
     fingerprint_settings: Dict[str, object] = field(default_factory=dict)
     threshold_settings: Dict[str, float] = field(default_factory=dict)
+    impacted_playlists: List[str] = field(default_factory=list)
     plan_signature: str | None = None
 
     def to_dict(self) -> Dict[str, object]:
@@ -1343,6 +1344,7 @@ class ConsolidationPlan:
             "source_snapshot": {k: dict(v) for k, v in self.source_snapshot.items()},
             "fingerprint_settings": dict(self.fingerprint_settings),
             "threshold_settings": dict(self.threshold_settings),
+            "impacted_playlists": list(self.impacted_playlists),
             "plan_signature": self.plan_signature,
         }
 
@@ -1368,6 +1370,8 @@ class ConsolidationPlan:
                 for path, state in group.library_state.items():
                     snapshot[path] = dict(state)
             self.source_snapshot = snapshot
+        if self.impacted_playlists:
+            self.impacted_playlists = sorted({p for p in self.impacted_playlists if p})
         if self.plan_signature is None:
             self.refresh_plan_signature()
 
@@ -1379,6 +1383,7 @@ class ConsolidationPlan:
                 "snapshot": {k: dict(v) for k, v in self.source_snapshot.items()},
                 "fingerprint_settings": dict(self.fingerprint_settings),
                 "threshold_settings": dict(self.threshold_settings),
+                "impacted_playlists": list(self.impacted_playlists),
             },
             sort_keys=True,
         )
@@ -1554,14 +1559,18 @@ def _normalize_playlist_entry(entry: str, playlist_dir: str) -> str:
     return os.path.normpath(os.path.join(playlist_dir, entry))
 
 
-def _playlist_rewrite_losers(playlists_dir: str | None, losers: Iterable[str]) -> tuple[set[str], int]:
+def _playlist_rewrite_losers(
+    playlists_dir: str | None,
+    losers: Iterable[str],
+) -> tuple[set[str], int, set[str]]:
     if not playlists_dir or not os.path.isdir(playlists_dir):
-        return set(), 0
+        return set(), 0, set()
     loser_set = {os.path.normpath(path) for path in losers if path}
     if not loser_set:
-        return set(), 0
+        return set(), 0, set()
     matches: set[str] = set()
     playlists_with_hits = 0
+    impacted_playlists: set[str] = set()
     for playlist in _iter_playlists(playlists_dir):
         try:
             with open(playlist, "r", encoding="utf-8") as handle:
@@ -1574,9 +1583,10 @@ def _playlist_rewrite_losers(playlists_dir: str | None, losers: Iterable[str]) -
         if hit:
             playlists_with_hits += 1
             matches.update(hit)
+            impacted_playlists.add(playlist)
             if len(matches) == len(loser_set):
-                return matches, playlists_with_hits
-    return matches, playlists_with_hits
+                return matches, playlists_with_hits, impacted_playlists
+    return matches, playlists_with_hits, impacted_playlists
 
 
 def _infer_playlists_dir(paths: Sequence[str]) -> str | None:
@@ -1969,6 +1979,7 @@ def consolidation_plan_from_dict(raw: Mapping[str, object]) -> ConsolidationPlan
     source_snapshot = _expect_mapping(raw.get("source_snapshot"), "source_snapshot")
     fingerprint_settings = raw.get("fingerprint_settings") if isinstance(raw, Mapping) else None
     threshold_settings = raw.get("threshold_settings") if isinstance(raw, Mapping) else None
+    impacted_playlists = raw.get("impacted_playlists")
     plan_signature = raw.get("plan_signature")
     if plan_signature is not None and not isinstance(plan_signature, str):
         raise ValueError("plan_signature must be a string or null.")
@@ -1982,6 +1993,7 @@ def consolidation_plan_from_dict(raw: Mapping[str, object]) -> ConsolidationPlan
         source_snapshot=source_snapshot,
         fingerprint_settings=dict(fingerprint_settings or {}),
         threshold_settings={str(k): float(v) for k, v in dict(threshold_settings or {}).items()},
+        impacted_playlists=_expect_str_list(impacted_playlists or [], "impacted_playlists"),
         plan_signature=plan_signature,
     )
 
@@ -2765,6 +2777,7 @@ def build_consolidation_plan(
     log("Grouping phase: building consolidation plan...")
     plans: List[GroupPlan] = []
     plan_placeholders = False
+    plan_impacted_playlists: set[str] = set()
     playlists_dir = _infer_playlists_dir([t.path for t in normalized])
     playlist_index: Dict[str, set[str]] = {}
     if playlists_dir:
@@ -3087,15 +3100,16 @@ def build_consolidation_plan(
                     norm for norm in normalized_losers.keys() if norm in playlist_index
                 }
                 playlist_hits = {normalized_losers[norm] for norm in hit_norms}
-                playlist_count = len(
-                    {
-                        playlist
-                        for norm in hit_norms
-                        for playlist in playlist_index.get(norm, set())
-                    }
-                )
+                impacted_playlists = {
+                    playlist for norm in hit_norms for playlist in playlist_index.get(norm, set())
+                }
+                playlist_count = len(impacted_playlists)
             else:
-                playlist_hits, playlist_count = _playlist_rewrite_losers(playlists_dir, losers)
+                playlist_hits, playlist_count, impacted_playlists = _playlist_rewrite_losers(
+                    playlists_dir,
+                    losers,
+                )
+            plan_impacted_playlists.update(impacted_playlists)
             playlist_map = {loser: winner.path for loser in losers if loser in playlist_hits}
 
             group_id = _stable_group_id([t.path for t in group_tracks])
@@ -3302,6 +3316,7 @@ def build_consolidation_plan(
         placeholders_present=plan_placeholders,
         fingerprint_settings=dict(fingerprint_settings or {}),
         threshold_settings=dict(threshold_settings or {}),
+        impacted_playlists=sorted(plan_impacted_playlists),
     )
 
 
