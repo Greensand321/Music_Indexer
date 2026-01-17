@@ -2000,6 +2000,151 @@ class DuplicatePair:
     manual_winner: str | None = None
 
 
+PAIR_REVIEW_SNAPSHOT_FILENAME = "duplicate_pair_review.json"
+
+
+def _pair_review_snapshot_path(library_root: str) -> str:
+    return os.path.join(library_root, "Docs", PAIR_REVIEW_SNAPSHOT_FILENAME)
+
+
+def _append_duplicate_pair(
+    pairs: list[DuplicatePair],
+    seen: set[tuple[str, str]],
+    left: str,
+    right: str,
+    winner_path: str | None,
+    source: str,
+    manual_winner: str | None = None,
+) -> None:
+    if left == right:
+        return
+    key = tuple(sorted((left, right)))
+    if key in seen:
+        return
+    seen.add(key)
+    pairs.append(
+        DuplicatePair(
+            left_path=left,
+            right_path=right,
+            winner_path=winner_path,
+            source=source,
+            manual_winner=manual_winner,
+        )
+    )
+
+
+def _collect_filename_pairs(library_path: str) -> list[tuple[str, str]]:
+    pattern = re.compile(r"\s*\(\d+\)$")
+    candidates: dict[str, list[str]] = {}
+    for dirpath, _dirs, files in os.walk(library_path):
+        for filename in files:
+            ext = os.path.splitext(filename)[1].lower()
+            if ext not in SUPPORTED_EXTS:
+                continue
+            stem = os.path.splitext(filename)[0].lower()
+            normalized = pattern.sub("", stem).strip()
+            if not normalized:
+                continue
+            full_path = os.path.join(dirpath, filename)
+            candidates.setdefault(normalized, []).append(full_path)
+
+    pairs: list[tuple[str, str]] = []
+    for items in candidates.values():
+        if len(items) < 2:
+            continue
+        sorted_items = sorted(items, key=str.lower)
+        anchor = sorted_items[0]
+        for other in sorted_items[1:]:
+            pairs.append((anchor, other))
+    return pairs
+
+
+def _build_duplicate_pairs(
+    plan: ConsolidationPlan,
+    library_path: str,
+    *,
+    include_filename_pairs: bool = True,
+) -> list[DuplicatePair]:
+    pairs: list[DuplicatePair] = []
+    seen: set[tuple[str, str]] = set()
+
+    for group in plan.groups:
+        if not group.losers:
+            continue
+        if len(group.losers) == 1:
+            _append_duplicate_pair(
+                pairs,
+                seen,
+                group.winner_path,
+                group.losers[0],
+                group.winner_path,
+                "plan",
+            )
+            continue
+        for loser in group.losers:
+            _append_duplicate_pair(
+                pairs,
+                seen,
+                group.winner_path,
+                loser,
+                group.winner_path,
+                "plan",
+            )
+
+    if include_filename_pairs:
+        for left, right in _collect_filename_pairs(library_path):
+            _append_duplicate_pair(pairs, seen, left, right, None, "filename")
+
+    return pairs
+
+
+def _serialize_duplicate_pairs(pairs: list[DuplicatePair]) -> list[dict[str, object]]:
+    return [
+        {
+            "left_path": pair.left_path,
+            "right_path": pair.right_path,
+            "winner_path": pair.winner_path,
+            "source": pair.source,
+            "manual_winner": pair.manual_winner,
+        }
+        for pair in pairs
+    ]
+
+
+def _write_duplicate_pair_snapshot(
+    plan: ConsolidationPlan,
+    library_root: str,
+    *,
+    include_filename_pairs: bool = True,
+    log_callback: Callable[[str], None] | None = None,
+) -> str | None:
+    docs_dir = os.path.join(library_root, "Docs")
+    os.makedirs(docs_dir, exist_ok=True)
+    snapshot_path = _pair_review_snapshot_path(library_root)
+    plan.refresh_plan_signature()
+    pairs = _build_duplicate_pairs(
+        plan,
+        library_root,
+        include_filename_pairs=include_filename_pairs,
+    )
+    payload = {
+        "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "library_root": library_root,
+        "plan_signature": plan.plan_signature,
+        "includes_filename_pairs": include_filename_pairs,
+        "pair_count": len(pairs),
+        "pairs": _serialize_duplicate_pairs(pairs),
+    }
+    try:
+        with open(snapshot_path, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=2)
+    except OSError as exc:
+        if log_callback:
+            log_callback(f"Pair review snapshot could not be written: {exc}")
+        return None
+    return snapshot_path
+
+
 class DuplicatePairReviewTool(tk.Toplevel):
     """Review paired duplicate results one-by-one."""
 
@@ -2090,65 +2235,60 @@ class DuplicatePairReviewTool(tk.Toplevel):
     def _collect_pairs(
         self, plan: ConsolidationPlan, library_path: str
     ) -> list[DuplicatePair]:
+        snapshot = self._load_pair_snapshot(library_path)
+        if snapshot is not None:
+            pairs, includes_filename_pairs = snapshot
+            if pairs:
+                if not includes_filename_pairs:
+                    seen = {tuple(sorted((pair.left_path, pair.right_path))) for pair in pairs}
+                    for left, right in _collect_filename_pairs(library_path):
+                        _append_duplicate_pair(pairs, seen, left, right, None, "filename")
+                return pairs
+        return _build_duplicate_pairs(plan, library_path, include_filename_pairs=True)
+
+    def _load_pair_snapshot(
+        self, library_path: str
+    ) -> tuple[list[DuplicatePair], bool] | None:
+        snapshot_path = _pair_review_snapshot_path(library_path)
+        if not os.path.exists(snapshot_path):
+            return None
+        try:
+            with open(snapshot_path, "r", encoding="utf-8") as handle:
+                payload = json.load(handle)
+        except (OSError, json.JSONDecodeError):
+            return None
+        if not isinstance(payload, dict):
+            return None
+        raw_pairs = payload.get("pairs")
+        if not isinstance(raw_pairs, list):
+            return None
+        includes_filename_pairs = bool(payload.get("includes_filename_pairs"))
         pairs: list[DuplicatePair] = []
         seen: set[tuple[str, str]] = set()
-
-        def add_pair(
-            left: str, right: str, winner_path: str | None, source: str
-        ) -> None:
-            if left == right:
-                return
-            key = tuple(sorted((left, right)))
-            if key in seen:
-                return
-            seen.add(key)
-            pairs.append(
-                DuplicatePair(
-                    left_path=left,
-                    right_path=right,
-                    winner_path=winner_path,
-                    source=source,
-                )
+        for item in raw_pairs:
+            if not isinstance(item, Mapping):
+                continue
+            left = item.get("left_path")
+            right = item.get("right_path")
+            if not isinstance(left, str) or not isinstance(right, str):
+                continue
+            winner = item.get("winner_path")
+            if winner is not None and not isinstance(winner, str):
+                winner = None
+            source = item.get("source") if isinstance(item.get("source"), str) else "snapshot"
+            manual_winner = item.get("manual_winner")
+            if manual_winner is not None and not isinstance(manual_winner, str):
+                manual_winner = None
+            _append_duplicate_pair(
+                pairs,
+                seen,
+                left,
+                right,
+                winner,
+                source,
+                manual_winner=manual_winner,
             )
-
-        for group in plan.groups:
-            if not group.losers:
-                continue
-            if len(group.losers) == 1:
-                add_pair(group.winner_path, group.losers[0], group.winner_path, "plan")
-                continue
-            for loser in group.losers:
-                add_pair(group.winner_path, loser, group.winner_path, "plan")
-
-        for left, right in self._collect_filename_pairs(library_path):
-            add_pair(left, right, None, "filename")
-
-        return pairs
-
-    def _collect_filename_pairs(self, library_path: str) -> list[tuple[str, str]]:
-        pattern = re.compile(r"\s*\(\d+\)$")
-        candidates: dict[str, list[str]] = {}
-        for dirpath, _dirs, files in os.walk(library_path):
-            for filename in files:
-                ext = os.path.splitext(filename)[1].lower()
-                if ext not in SUPPORTED_EXTS:
-                    continue
-                stem = os.path.splitext(filename)[0].lower()
-                normalized = pattern.sub("", stem).strip()
-                if not normalized:
-                    continue
-                full_path = os.path.join(dirpath, filename)
-                candidates.setdefault(normalized, []).append(full_path)
-
-        pairs: list[tuple[str, str]] = []
-        for items in candidates.values():
-            if len(items) < 2:
-                continue
-            sorted_items = sorted(items, key=str.lower)
-            anchor = sorted_items[0]
-            for other in sorted_items[1:]:
-                pairs.append((anchor, other))
-        return pairs
+        return pairs, includes_filename_pairs
 
     def _build_track_panel(self, parent: tk.Widget, title: str) -> ttk.Frame:
         frame = ttk.LabelFrame(parent, text=title)
@@ -3841,6 +3981,15 @@ class DuplicateFinderShell(tk.Toplevel):
                 self._queue_preview_trace("preview-html-write")
                 preview_html_path = html_path
                 log(f"Preview HTML written to {html_path} ({time.monotonic() - html_start:.2f}s)")
+                log("Writing duplicate pair review snapshot…")
+                snapshot_path = _write_duplicate_pair_snapshot(
+                    plan,
+                    library_root,
+                    include_filename_pairs=True,
+                    log_callback=log,
+                )
+                if snapshot_path:
+                    log(f"Duplicate pair snapshot written to {snapshot_path}")
                 report_status("Preview generated", progress=self._weighted_progress("preview", 1))
             else:
                 report_status("Plan ready", progress=100)
@@ -4142,6 +4291,14 @@ class DuplicateFinderShell(tk.Toplevel):
             self.preview_html_path = preview_html_path
             if hasattr(self.master, "_set_duplicate_finder_plan"):
                 self.master._set_duplicate_finder_plan(plan, path)
+            snapshot_path = _write_duplicate_pair_snapshot(
+                plan,
+                path,
+                include_filename_pairs=True,
+                log_callback=self._log_action,
+            )
+            if snapshot_path:
+                self._log_action(f"Duplicate pair snapshot written to {snapshot_path}")
             self._set_fingerprint_status("Preview up to date (cached).")
             self._set_status("Preview cached", self._weighted_progress("preview", 1))
             self._log_action("Preview up to date; using cached preview output.")
