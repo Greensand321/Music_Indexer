@@ -3810,7 +3810,11 @@ class DuplicateFinderShell(tk.Toplevel):
                 report_status("Preview…", progress=self._weighted_progress("preview", 0))
                 json_path = os.path.join(docs_dir, "duplicate_preview.json")
                 json_start = time.monotonic()
-                export_consolidation_preview(plan, json_path)
+                export_consolidation_preview(
+                    plan,
+                    json_path,
+                    preview_settings={"show_artwork_variants": show_artwork_variants},
+                )
                 preview_json_path = json_path
                 log(f"Audit JSON written to {json_path} ({time.monotonic() - json_start:.2f}s)")
                 log("Writing preview HTML…")
@@ -3865,6 +3869,91 @@ class DuplicateFinderShell(tk.Toplevel):
         except ValueError as exc:
             self._log_action(f"Preview plan could not be loaded: {exc}")
             return None
+
+    def _preview_sources_missing(self, plan: ConsolidationPlan) -> bool:
+        for path in plan.source_snapshot.keys():
+            try:
+                if not os.path.exists(ensure_long_path(path)):
+                    return True
+            except OSError:
+                return True
+        return False
+
+    def _library_modified_since(self, library_root: str, since_ts: float) -> bool:
+        excluded_dirs = {"not sorted", "playlists"}
+        for dirpath, _dirs, files in os.walk(library_root):
+            rel = os.path.relpath(dirpath, library_root)
+            parts = {p.lower() for p in rel.split(os.sep)}
+            if excluded_dirs & parts:
+                continue
+            for fname in files:
+                ext = os.path.splitext(fname)[1].lower()
+                if ext not in SUPPORTED_EXTS:
+                    continue
+                file_path = os.path.join(dirpath, fname)
+                try:
+                    if os.path.getmtime(file_path) > since_ts:
+                        return True
+                except OSError:
+                    return True
+        return False
+
+    def _try_reuse_preview(
+        self,
+        library_root: str,
+        *,
+        threshold_settings: Mapping[str, float],
+        fingerprint_settings: Mapping[str, object],
+        show_artwork_variants: bool,
+    ) -> tuple[ConsolidationPlan, str, str] | None:
+        docs_dir = os.path.join(library_root, "Docs")
+        preview_json_path = self.preview_json_path or os.path.join(docs_dir, "duplicate_preview.json")
+        preview_html_path = self.preview_html_path or os.path.join(docs_dir, "duplicate_preview.html")
+        if not os.path.exists(preview_json_path) or not os.path.exists(preview_html_path):
+            return None
+        try:
+            with open(preview_json_path, "r", encoding="utf-8") as handle:
+                payload = json.load(handle)
+        except (OSError, json.JSONDecodeError) as exc:
+            self._log_action(f"Preview cache could not be read: {exc}")
+            return None
+        if not isinstance(payload, dict) or "plan" not in payload:
+            self._log_action("Preview cache is missing plan payload; regenerating preview.")
+            return None
+        preview_settings = payload.get("preview_settings")
+        if isinstance(preview_settings, Mapping):
+            cached_show = preview_settings.get("show_artwork_variants")
+            if isinstance(cached_show, bool) and cached_show != show_artwork_variants:
+                self._log_action("Preview cache uses different artwork-variant setting; regenerating.")
+                return None
+        try:
+            plan = consolidation_plan_from_dict(payload["plan"])
+        except ValueError as exc:
+            self._log_action(f"Preview cache could not be loaded: {exc}")
+            return None
+        if not self._thresholds_match(
+            getattr(plan, "threshold_settings", None),
+            threshold_settings,
+        ):
+            self._log_action("Preview cache thresholds mismatch; regenerating.")
+            return None
+        if not self._fingerprint_settings_match(
+            getattr(plan, "fingerprint_settings", None),
+            fingerprint_settings,
+        ):
+            self._log_action("Preview cache fingerprint settings mismatch; regenerating.")
+            return None
+        try:
+            preview_mtime = os.path.getmtime(preview_json_path)
+        except OSError:
+            return None
+        if self._preview_sources_missing(plan):
+            self._log_action("Preview cache invalidated by missing source files; regenerating.")
+            return None
+        if self._library_modified_since(library_root, preview_mtime):
+            self._log_action("Preview cache invalidated by newer audio files; regenerating.")
+            return None
+        return plan, preview_json_path, preview_html_path
 
     def _handle_scan(self) -> None:
         path = self._validate_library_root()
@@ -4025,6 +4114,28 @@ class DuplicateFinderShell(tk.Toplevel):
             threshold_settings,
             fingerprint_settings,
         )
+        reuse = self._try_reuse_preview(
+            path,
+            threshold_settings=threshold_settings,
+            fingerprint_settings=fingerprint_settings,
+            show_artwork_variants=show_artwork_variants,
+        )
+        if reuse is not None:
+            plan, preview_json_path, preview_html_path = reuse
+            self._plan = plan
+            self.group_disposition_overrides.clear()
+            self._apply_deletion_mode()
+            self.preview_json_path = preview_json_path
+            self.preview_html_path = preview_html_path
+            if hasattr(self.master, "_set_duplicate_finder_plan"):
+                self.master._set_duplicate_finder_plan(plan, path)
+            self._set_fingerprint_status("Preview up to date (cached).")
+            self._set_status("Preview cached", self._weighted_progress("preview", 1))
+            self._log_action("Preview up to date; using cached preview output.")
+            if self.preview_html_path:
+                self._open_preview()
+            self._stop_preview_heartbeat()
+            return
 
         def finalize_preview(trace_emit: bool = False) -> None:
             self._record_preview_trace("preview-finish")
