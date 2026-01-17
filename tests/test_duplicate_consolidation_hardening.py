@@ -1,5 +1,4 @@
 import base64
-import hashlib
 import os
 import threading
 
@@ -19,9 +18,8 @@ from duplicate_consolidation_executor import ExecutionConfig, _apply_artwork, ex
 
 
 def _snapshot(path):
-    data = path.read_bytes()
     stat = path.stat()
-    return {"exists": True, "size": stat.st_size, "mtime": int(stat.st_mtime), "sha256": hashlib.sha256(data).hexdigest()}
+    return {"exists": True, "size": stat.st_size, "mtime": int(stat.st_mtime)}
 
 
 def _config(tmp_path, **overrides):
