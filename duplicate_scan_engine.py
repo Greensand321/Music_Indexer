@@ -112,9 +112,22 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     )
 
 
+EXCLUDED_DIRS = {"not sorted", "playlists"}
+
+
+def _is_excluded_path(path: str, root: str) -> bool:
+    rel_path = os.path.relpath(path, root)
+    parts = {part.lower() for part in rel_path.split(os.sep)}
+    return bool(EXCLUDED_DIRS & parts)
+
+
 def _list_audio_files(root: str) -> list[str]:
     paths: list[str] = []
-    for base, _, files in os.walk(root):
+    for base, dirnames, files in os.walk(root):
+        if _is_excluded_path(base, root):
+            dirnames[:] = []
+            continue
+        dirnames[:] = [d for d in dirnames if d.lower() not in EXCLUDED_DIRS]
         for name in files:
             ext = os.path.splitext(name)[1].lower()
             if ext in SUPPORTED_EXTS:

@@ -90,6 +90,15 @@ def _cover_data_uri(payload: bytes, max_bytes: int = 500_000) -> str | None:
     return f"data:{mime};base64,{encoded}"
 
 
+EXCLUDED_DIRS = {"not sorted", "playlists"}
+
+
+def _is_excluded_path(path: str, root: str) -> bool:
+    rel_path = os.path.relpath(path, root)
+    parts = {part.lower() for part in rel_path.split(os.sep)}
+    return bool(EXCLUDED_DIRS & parts)
+
+
 def _extract_track_info(paths: Iterable[str], log_callback: Callable[[str], None]) -> Dict[str, TrackInfo]:
     info: Dict[str, TrackInfo] = {}
     for path in paths:
@@ -395,7 +404,7 @@ def run_duplicate_bucketing_poc(
 
     start = time.time()
     log_callback(f"Duplicate Bucketing POC: scanning {root}")
-    paths = discover_files(root)
+    paths = [path for path in discover_files(root) if not _is_excluded_path(path, root)]
     track_infos = _extract_track_info(paths, log_callback)
 
     buckets = _build_metadata_buckets(track_infos)
