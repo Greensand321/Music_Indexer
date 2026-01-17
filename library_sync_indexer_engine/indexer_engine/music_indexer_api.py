@@ -1175,6 +1175,16 @@ def apply_indexer_moves(
             canonical = tag_index.get(new_path, {}).get("canonical_primary")
             _update_primary_artist_metadata(new_path, canonical, log_callback)
 
+    if moves:
+        try:
+            from playlist_generator import update_playlists
+            log_callback("   • Updating existing playlists for renamed tracks…")
+            update_playlists(moves)
+        except ImportError:
+            log_callback("! playlist_generator.py missing; skipping playlist updates.")
+        except Exception as e:
+            log_callback(f"! Playlist update error: {e}")
+
     # Phase 6: Handle non-audio leftovers…
     docs_dir = os.path.join(root_path, "Docs")
     trash_dir = os.path.join(root_path, "Trash")
