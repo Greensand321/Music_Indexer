@@ -2237,8 +2237,9 @@ class DuplicatePairReviewTool(tk.Toplevel):
     ) -> list[DuplicatePair]:
         snapshot = self._load_pair_snapshot(library_path)
         if snapshot is not None:
-            pairs, includes_filename_pairs = snapshot
-            if pairs:
+            pairs, includes_filename_pairs, snapshot_signature = snapshot
+            plan_signature = plan.plan_signature or plan.refresh_plan_signature()
+            if pairs and snapshot_signature == plan_signature:
                 if not includes_filename_pairs:
                     seen = {tuple(sorted((pair.left_path, pair.right_path))) for pair in pairs}
                     for left, right in _collect_filename_pairs(library_path):
@@ -2248,7 +2249,7 @@ class DuplicatePairReviewTool(tk.Toplevel):
 
     def _load_pair_snapshot(
         self, library_path: str
-    ) -> tuple[list[DuplicatePair], bool] | None:
+    ) -> tuple[list[DuplicatePair], bool, str | None] | None:
         snapshot_path = _pair_review_snapshot_path(library_path)
         if not os.path.exists(snapshot_path):
             return None
@@ -2263,6 +2264,9 @@ class DuplicatePairReviewTool(tk.Toplevel):
         if not isinstance(raw_pairs, list):
             return None
         includes_filename_pairs = bool(payload.get("includes_filename_pairs"))
+        plan_signature = payload.get("plan_signature")
+        if plan_signature is not None and not isinstance(plan_signature, str):
+            plan_signature = None
         pairs: list[DuplicatePair] = []
         seen: set[tuple[str, str]] = set()
         for item in raw_pairs:
@@ -2288,7 +2292,7 @@ class DuplicatePairReviewTool(tk.Toplevel):
                 source,
                 manual_winner=manual_winner,
             )
-        return pairs, includes_filename_pairs
+        return pairs, includes_filename_pairs, plan_signature
 
     def _build_track_panel(self, parent: tk.Widget, title: str) -> ttk.Frame:
         frame = ttk.LabelFrame(parent, text=title)
@@ -3237,6 +3241,18 @@ class DuplicateFinderShell(tk.Toplevel):
         self._render_group_details(group)
         self._reset_preview_if_needed()
         self._reset_execute_confirmation()
+        library_root = self.library_path_var.get().strip()
+        if library_root:
+            if hasattr(self.master, "_set_duplicate_finder_plan"):
+                self.master._set_duplicate_finder_plan(self._plan, library_root)
+            snapshot_path = _write_duplicate_pair_snapshot(
+                self._plan,
+                library_root,
+                include_filename_pairs=True,
+                log_callback=self._log_action,
+            )
+            if snapshot_path:
+                self._log_action(f"Duplicate pair snapshot written to {snapshot_path}")
 
     def _count_group_dispositions(self) -> dict[str, int]:
         counts = {"retain": 0, "quarantine": 0, "delete": 0}
