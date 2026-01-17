@@ -6632,7 +6632,7 @@ class SoundVaultImporterApp(tk.Tk):
         )
         cb.pack(side="right", padx=5)
         cb.bind("<<ComboboxSelected>>", self.on_theme_change)
-        scale_choices = ["1.25", "1.5", "1.75", "2.0", "2.25", "3.0", "3.5", "4.0", "5.0", "6.0"]
+        scale_choices = ["1.25", "1.5", "1.75", "2.0", "2.25"]
         cb_scale = ttk.Combobox(
             top,
             textvariable=self.scale_var,
