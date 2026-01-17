@@ -1,3 +1,4 @@
+import json
 import os
 import queue
 import sqlite3
@@ -39,6 +40,11 @@ def _initialize_db(conn: sqlite3.Connection) -> None:
             bitrate INT,
             sample_rate INT,
             bit_depth INT,
+            channels INT,
+            codec TEXT,
+            container TEXT,
+            tags_json TEXT,
+            artwork_json TEXT,
             normalized_artist TEXT,
             normalized_title TEXT,
             normalized_album TEXT
@@ -64,6 +70,16 @@ def _initialize_db(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE fingerprints ADD COLUMN sample_rate INT")
     if "bit_depth" not in cols:
         conn.execute("ALTER TABLE fingerprints ADD COLUMN bit_depth INT")
+    if "channels" not in cols:
+        conn.execute("ALTER TABLE fingerprints ADD COLUMN channels INT")
+    if "codec" not in cols:
+        conn.execute("ALTER TABLE fingerprints ADD COLUMN codec TEXT")
+    if "container" not in cols:
+        conn.execute("ALTER TABLE fingerprints ADD COLUMN container TEXT")
+    if "tags_json" not in cols:
+        conn.execute("ALTER TABLE fingerprints ADD COLUMN tags_json TEXT")
+    if "artwork_json" not in cols:
+        conn.execute("ALTER TABLE fingerprints ADD COLUMN artwork_json TEXT")
     if "normalized_artist" not in cols:
         conn.execute("ALTER TABLE fingerprints ADD COLUMN normalized_artist TEXT")
     if "normalized_title" not in cols:
@@ -104,6 +120,11 @@ class FingerprintWriter:
         bitrate: int | None = None,
         sample_rate: int | None = None,
         bit_depth: int | None = None,
+        channels: int | None = None,
+        codec: str | None = None,
+        container: str | None = None,
+        tags_json: str | None = None,
+        artwork_json: str | None = None,
         normalized_artist: str | None = None,
         normalized_title: str | None = None,
         normalized_album: str | None = None,
@@ -121,6 +142,11 @@ class FingerprintWriter:
                     bitrate,
                     sample_rate,
                     bit_depth,
+                    channels,
+                    codec,
+                    container,
+                    tags_json,
+                    artwork_json,
                     normalized_artist,
                     normalized_title,
                     normalized_album,
@@ -155,6 +181,11 @@ class FingerprintWriter:
                     int | None,
                     int | None,
                     int | None,
+                    int | None,
+                    str | None,
+                    str | None,
+                    str | None,
+                    str | None,
                     str | None,
                     str | None,
                     str | None,
@@ -213,6 +244,11 @@ class FingerprintWriter:
                 int | None,
                 int | None,
                 int | None,
+                int | None,
+                str | None,
+                str | None,
+                str | None,
+                str | None,
                 str | None,
                 str | None,
                 str | None,
@@ -235,10 +271,15 @@ class FingerprintWriter:
                         bitrate,
                         sample_rate,
                         bit_depth,
+                        channels,
+                        codec,
+                        container,
+                        tags_json,
+                        artwork_json,
                         normalized_artist,
                         normalized_title,
                         normalized_album
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     pending,
                 )
@@ -262,6 +303,11 @@ class FingerprintWriter:
                 int | None,
                 int | None,
                 int | None,
+                int | None,
+                str | None,
+                str | None,
+                str | None,
+                str | None,
                 str | None,
                 str | None,
                 str | None,
@@ -493,6 +539,14 @@ def get_cached_fingerprint_metadata(
     if trace is None:
         trace = {}
 
+    def _load_json(payload: str | None) -> object | None:
+        if not payload:
+            return None
+        try:
+            return json.loads(payload)
+        except Exception:
+            return None
+
     path = ensure_long_path(path)
     os.makedirs(os.path.dirname(db_path), exist_ok=True)
     for attempt in range(retries):
@@ -521,6 +575,11 @@ def get_cached_fingerprint_metadata(
                     bitrate,
                     sample_rate,
                     bit_depth,
+                    channels,
+                    codec,
+                    container,
+                    tags_json,
+                    artwork_json,
                     normalized_artist,
                     normalized_title,
                     normalized_album
@@ -550,9 +609,14 @@ def get_cached_fingerprint_metadata(
                     "bitrate": row[4],
                     "sample_rate": row[5],
                     "bit_depth": row[6],
-                    "normalized_artist": row[7],
-                    "normalized_title": row[8],
-                    "normalized_album": row[9],
+                    "channels": row[7],
+                    "codec": row[8],
+                    "container": row[9],
+                    "tags": _load_json(row[10]),
+                    "artwork": _load_json(row[11]),
+                    "normalized_artist": row[12],
+                    "normalized_title": row[13],
+                    "normalized_album": row[14],
                 }
                 return fp, metadata
             trace["source"] = "missing"
@@ -582,6 +646,11 @@ def store_fingerprint(
     bitrate: int | None = None,
     sample_rate: int | None = None,
     bit_depth: int | None = None,
+    channels: int | None = None,
+    codec: str | None = None,
+    container: str | None = None,
+    tags: dict[str, object] | None = None,
+    artwork: list[dict[str, object]] | None = None,
     normalized_artist: str | None = None,
     normalized_title: str | None = None,
     normalized_album: str | None = None,
@@ -615,6 +684,11 @@ def store_fingerprint(
                 bitrate=bitrate,
                 sample_rate=sample_rate,
                 bit_depth=bit_depth,
+                channels=channels,
+                codec=codec,
+                container=container,
+                tags_json=json.dumps(tags) if tags is not None else None,
+                artwork_json=json.dumps(artwork) if artwork is not None else None,
                 normalized_artist=normalized_artist,
                 normalized_title=normalized_title,
                 normalized_album=normalized_album,

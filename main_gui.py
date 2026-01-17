@@ -6,6 +6,7 @@ import webbrowser
 import re
 import html
 import shutil
+import hashlib
 from pathlib import Path
 
 if sys.platform == "win32":
@@ -136,6 +137,7 @@ from utils.audio_metadata_reader import (
 )
 from utils.opus_library_mirror import mirror_library, write_mirror_report
 from utils.opus_metadata_reader import read_opus_metadata
+from duplicate_scan_engine import DuplicateScanConfig, run_duplicate_scan
 
 
 @dataclass
@@ -2729,6 +2731,7 @@ class DuplicateFinderShell(tk.Toplevel):
 
         self._log_action("Duplicate Finder initialized")
 
+
     def _clear_plan(self, note: str | None = None) -> None:
         self._plan = None
         self.group_disposition_overrides.clear()
@@ -3427,6 +3430,13 @@ class DuplicateFinderShell(tk.Toplevel):
             bitrate = 0
             sample_rate = 0
             bit_depth = 0
+            channels = 0
+            codec = ""
+            container = ""
+            tags: dict[str, object] = {}
+            artwork: list[dict[str, object]] = []
+            audio = None
+            info = None
             try:
                 audio = MutagenFile(path)
                 info = getattr(audio, "info", None)
@@ -3442,13 +3452,45 @@ class DuplicateFinderShell(tk.Toplevel):
                         or getattr(info, "bitdepth", 0)
                         or 0
                     )
+                    channels = int(
+                        getattr(info, "channels", 0)
+                        or getattr(info, "channel", 0)
+                        or 0
+                    )
+                    codec = str(
+                        getattr(info, "codec_name", "")
+                        or getattr(info, "codec", "")
+                        or ""
+                    )
             except Exception:
                 pass
-            tags: dict[str, object] = {}
             try:
-                tags = read_tags(path)
+                tags, cover_payloads, _error, _reader = read_metadata(
+                    path,
+                    include_cover=True,
+                    audio=audio,
+                )
+                for payload in cover_payloads:
+                    if not payload:
+                        continue
+                    artwork.append(
+                        {
+                            "hash": hashlib.sha256(payload).hexdigest(),
+                            "size": len(payload),
+                        }
+                    )
             except Exception:
                 tags = {}
+                artwork = []
+            if not container:
+                container = ext.replace(".", "").upper()
+            if not codec and getattr(info, "pprint", None):
+                try:
+                    codec = str(info.pprint()).split(",")[0]
+                except Exception:
+                    codec = ""
+            if not codec:
+                codec = container or ext.replace(".", "").upper()
             artist_value = tags.get("artist") or tags.get("albumartist")
             title_value = tags.get("title")
             album_value = tags.get("album")
@@ -3460,6 +3502,11 @@ class DuplicateFinderShell(tk.Toplevel):
                 "bitrate": bitrate,
                 "sample_rate": sample_rate,
                 "bit_depth": bit_depth,
+                "channels": channels,
+                "codec": codec,
+                "container": container,
+                "tags": tags,
+                "artwork": artwork,
                 "normalized_artist": normalized_artist,
                 "normalized_title": normalized_title,
                 "normalized_album": normalized_album,
@@ -3468,7 +3515,16 @@ class DuplicateFinderShell(tk.Toplevel):
         def _needs_metadata_refresh(metadata: dict[str, object] | None) -> bool:
             if metadata is None:
                 return True
-            return any(metadata.get(key) is None for key in ("bitrate", "sample_rate", "bit_depth"))
+            numeric_keys = ("bitrate", "sample_rate", "bit_depth", "channels")
+            if any(int(metadata.get(key) or 0) <= 0 for key in numeric_keys):
+                return True
+            text_keys = ("codec", "container")
+            if any(not metadata.get(key) for key in text_keys):
+                return True
+            for key in ("tags", "artwork"):
+                if key not in metadata or metadata.get(key) is None:
+                    return True
+            return False
 
         def _metadata_for_payload(path: str, metadata: dict[str, object] | None) -> dict[str, object]:
             payload = dict(metadata or {})
@@ -3476,6 +3532,10 @@ class DuplicateFinderShell(tk.Toplevel):
             if isinstance(ext, str) and ext and not ext.startswith("."):
                 ext = f".{ext}"
             payload["ext"] = ext
+            if "tags" in payload and not isinstance(payload.get("tags"), dict):
+                payload["tags"] = {}
+            if "artwork" in payload and not isinstance(payload.get("artwork"), list):
+                payload["artwork"] = []
             return payload
 
         def _track_payload(
@@ -3494,6 +3554,11 @@ class DuplicateFinderShell(tk.Toplevel):
                 "bitrate": int(metadata.get("bitrate") or 0),
                 "sample_rate": int(metadata.get("sample_rate") or 0),
                 "bit_depth": int(metadata.get("bit_depth") or 0),
+                "channels": int(metadata.get("channels") or 0),
+                "codec": str(metadata.get("codec") or ""),
+                "container": str(metadata.get("container") or ""),
+                "tags": dict(metadata.get("tags") or {}),
+                "artwork": list(metadata.get("artwork") or []),
                 "fingerprint_trace": dict(fingerprint_trace),
                 "discovery": {
                     "scan_roots": [library_root],
@@ -3534,6 +3599,11 @@ class DuplicateFinderShell(tk.Toplevel):
                         bitrate=int(metadata.get("bitrate") or 0),
                         sample_rate=int(metadata.get("sample_rate") or 0),
                         bit_depth=int(metadata.get("bit_depth") or 0),
+                        channels=int(metadata.get("channels") or 0),
+                        codec=str(metadata.get("codec") or ""),
+                        container=str(metadata.get("container") or ""),
+                        tags=metadata.get("tags") if isinstance(metadata.get("tags"), dict) else {},
+                        artwork=metadata.get("artwork") if isinstance(metadata.get("artwork"), list) else [],
                         normalized_artist=metadata.get("normalized_artist"),
                         normalized_title=metadata.get("normalized_title"),
                         normalized_album=metadata.get("normalized_album"),
@@ -3627,6 +3697,11 @@ class DuplicateFinderShell(tk.Toplevel):
                         bitrate=int(metadata.get("bitrate") or 0),
                         sample_rate=int(metadata.get("sample_rate") or 0),
                         bit_depth=int(metadata.get("bit_depth") or 0),
+                        channels=int(metadata.get("channels") or 0),
+                        codec=str(metadata.get("codec") or ""),
+                        container=str(metadata.get("container") or ""),
+                        tags=metadata.get("tags") if isinstance(metadata.get("tags"), dict) else {},
+                        artwork=metadata.get("artwork") if isinstance(metadata.get("artwork"), list) else [],
                         normalized_artist=metadata.get("normalized_artist"),
                         normalized_title=metadata.get("normalized_title"),
                         normalized_album=metadata.get("normalized_album"),
@@ -5952,6 +6027,262 @@ class FileCleanupDialog(tk.Toplevel):
                 )
 
 
+class DuplicateScanEngineTool(tk.Toplevel):
+    """GUI wrapper for the staged duplicate scan engine."""
+
+    def __init__(self, parent: tk.Widget, library_path: str):
+        super().__init__(parent)
+        self.title("Duplicate Scan Engine")
+        self.transient(parent)
+        self.resizable(True, True)
+        self._running = False
+
+        self.library_path_var = tk.StringVar(value=library_path or "")
+        default_db_path = self._default_db_path(library_path)
+        self.db_path_var = tk.StringVar(value=default_db_path)
+
+        self.sample_rate_var = tk.StringVar(value="11025")
+        self.max_analysis_sec_var = tk.StringVar(value="120")
+        self.duration_tolerance_ms_var = tk.StringVar(value="2000")
+        self.duration_tolerance_ratio_var = tk.StringVar(value="0.01")
+        self.fp_bands_var = tk.StringVar(value="8")
+        self.min_band_collisions_var = tk.StringVar(value="2")
+        self.fp_distance_threshold_var = tk.StringVar(value="0.2")
+        self.chroma_offset_var = tk.StringVar(value="12")
+        self.chroma_match_threshold_var = tk.StringVar(value="0.82")
+        self.chroma_possible_threshold_var = tk.StringVar(value="0.72")
+
+        container = ttk.Frame(self)
+        container.pack(fill="both", expand=True, padx=10, pady=10)
+
+        ttk.Label(
+            container,
+            text="Duplicate Scan Engine",
+            font=("TkDefaultFont", 12, "bold"),
+        ).pack(anchor="w")
+        ttk.Label(
+            container,
+            text=(
+                "Runs a staged duplicate scan (audio headers → fingerprint LSH → verification) "
+                "and writes results to a SQLite database."
+            ),
+            foreground="#555",
+            wraplength=560,
+        ).pack(anchor="w", pady=(0, 8))
+
+        lib_frame = ttk.LabelFrame(container, text="Paths")
+        lib_frame.pack(fill="x", pady=(0, 10))
+
+        lib_row = ttk.Frame(lib_frame)
+        lib_row.pack(fill="x", padx=8, pady=6)
+        ttk.Label(lib_row, text="Library Root").pack(side="left")
+        ttk.Entry(lib_row, textvariable=self.library_path_var, width=60).pack(
+            side="left", padx=6, fill="x", expand=True
+        )
+        ttk.Button(lib_row, text="Browse…", command=self._browse_library).pack(
+            side="left"
+        )
+
+        db_row = ttk.Frame(lib_frame)
+        db_row.pack(fill="x", padx=8, pady=(0, 8))
+        ttk.Label(db_row, text="Database").pack(side="left")
+        ttk.Entry(db_row, textvariable=self.db_path_var, width=60).pack(
+            side="left", padx=6, fill="x", expand=True
+        )
+        ttk.Button(db_row, text="Browse…", command=self._browse_db).pack(side="left")
+
+        settings = ttk.LabelFrame(container, text="Scan Settings")
+        settings.pack(fill="x", pady=(0, 10))
+        for idx in range(2):
+            settings.columnconfigure(idx * 2, weight=1)
+
+        self._add_setting(
+            settings,
+            0,
+            "Sample rate (Hz)",
+            self.sample_rate_var,
+        )
+        self._add_setting(
+            settings,
+            1,
+            "Max analysis seconds",
+            self.max_analysis_sec_var,
+        )
+        self._add_setting(
+            settings,
+            2,
+            "Duration tolerance (ms)",
+            self.duration_tolerance_ms_var,
+        )
+        self._add_setting(
+            settings,
+            3,
+            "Duration tolerance ratio",
+            self.duration_tolerance_ratio_var,
+        )
+        self._add_setting(
+            settings,
+            4,
+            "FP bands",
+            self.fp_bands_var,
+        )
+        self._add_setting(
+            settings,
+            5,
+            "Min band collisions",
+            self.min_band_collisions_var,
+        )
+        self._add_setting(
+            settings,
+            6,
+            "FP distance threshold",
+            self.fp_distance_threshold_var,
+        )
+        self._add_setting(
+            settings,
+            7,
+            "Chroma offset frames",
+            self.chroma_offset_var,
+        )
+        self._add_setting(
+            settings,
+            8,
+            "Chroma match threshold",
+            self.chroma_match_threshold_var,
+        )
+        self._add_setting(
+            settings,
+            9,
+            "Chroma possible threshold",
+            self.chroma_possible_threshold_var,
+        )
+
+        controls = ttk.Frame(container)
+        controls.pack(fill="x", pady=(0, 10))
+        self.run_btn = ttk.Button(controls, text="Run Scan", command=self._run_scan)
+        self.run_btn.pack(side="left")
+        self.status_var = tk.StringVar(value="Idle")
+        ttk.Label(controls, textvariable=self.status_var, foreground="#555").pack(
+            side="left", padx=(10, 0)
+        )
+
+        log_frame = ttk.LabelFrame(container, text="Log")
+        log_frame.pack(fill="both", expand=True)
+        self.log_text = ScrolledText(log_frame, height=10, state="disabled")
+        self.log_text.pack(fill="both", expand=True, padx=6, pady=6)
+
+    def _default_db_path(self, library_path: str) -> str:
+        if not library_path:
+            return ""
+        docs_dir = os.path.join(library_path, "Docs")
+        os.makedirs(docs_dir, exist_ok=True)
+        return os.path.join(docs_dir, "duplicate_scan.db")
+
+    def _add_setting(
+        self,
+        parent: tk.Widget,
+        row: int,
+        label: str,
+        variable: tk.StringVar,
+    ) -> None:
+        ttk.Label(parent, text=label).grid(
+            row=row, column=0, sticky="w", padx=8, pady=3
+        )
+        ttk.Entry(parent, textvariable=variable, width=14).grid(
+            row=row, column=1, sticky="w", padx=(0, 16), pady=3
+        )
+
+    def _browse_library(self) -> None:
+        path = filedialog.askdirectory(title="Select Library Root")
+        if path:
+            self.library_path_var.set(path)
+            self.db_path_var.set(self._default_db_path(path))
+
+    def _browse_db(self) -> None:
+        path = filedialog.asksaveasfilename(
+            title="Select database path",
+            defaultextension=".db",
+            filetypes=[("SQLite DB", "*.db"), ("All files", "*.*")],
+        )
+        if path:
+            self.db_path_var.set(path)
+
+    def _log(self, message: str) -> None:
+        if not self.winfo_exists():
+            return
+        self.log_text.configure(state="normal")
+        self.log_text.insert("end", message + "\n")
+        self.log_text.see("end")
+        self.log_text.configure(state="disabled")
+
+    def _set_running(self, running: bool) -> None:
+        self._running = running
+        self.run_btn.configure(state="disabled" if running else "normal")
+        self.status_var.set("Running..." if running else "Idle")
+
+    def _run_scan(self) -> None:
+        if self._running:
+            return
+        library_path = self.library_path_var.get().strip()
+        db_path = self.db_path_var.get().strip()
+        if not library_path:
+            messagebox.showwarning("Duplicate Scan Engine", "Select a library first.")
+            return
+        if not db_path:
+            messagebox.showwarning("Duplicate Scan Engine", "Select a database path.")
+            return
+
+        try:
+            config = DuplicateScanConfig(
+                sample_rate=int(self.sample_rate_var.get()),
+                max_analysis_sec=float(self.max_analysis_sec_var.get()),
+                duration_tolerance_ms=int(self.duration_tolerance_ms_var.get()),
+                duration_tolerance_ratio=float(self.duration_tolerance_ratio_var.get()),
+                fp_bands=int(self.fp_bands_var.get()),
+                min_band_collisions=int(self.min_band_collisions_var.get()),
+                fp_distance_threshold=float(self.fp_distance_threshold_var.get()),
+                chroma_max_offset_frames=int(self.chroma_offset_var.get()),
+                chroma_match_threshold=float(self.chroma_match_threshold_var.get()),
+                chroma_possible_threshold=float(
+                    self.chroma_possible_threshold_var.get()
+                ),
+            )
+        except ValueError:
+            messagebox.showerror(
+                "Duplicate Scan Engine",
+                "Invalid settings; please check numeric fields.",
+            )
+            return
+
+        def log_callback(msg: str) -> None:
+            self.after(0, lambda: self._log(msg))
+
+        def run() -> None:
+            try:
+                summary = run_duplicate_scan(
+                    library_path, db_path, config, log_callback=log_callback
+                )
+            except Exception as exc:
+                self.after(0, lambda: self._log(f"Error: {exc}"))
+            else:
+                self.after(
+                    0,
+                    lambda: self._log(
+                        "Summary: "
+                        f"{summary.tracks_total} tracks, "
+                        f"{summary.headers_updated} headers updated, "
+                        f"{summary.fingerprints_updated} fingerprints updated, "
+                        f"{summary.edges_written} edges, "
+                        f"{summary.groups_written} groups."
+                    ),
+                )
+            finally:
+                self.after(0, lambda: self._set_running(False))
+
+        self._set_running(True)
+        threading.Thread(target=run, daemon=True).start()
+
+
 class SoundVaultImporterApp(tk.Tk):
     def __init__(self):
         super().__init__()
@@ -6012,6 +6343,7 @@ class SoundVaultImporterApp(tk.Tk):
         # Duplicate Finder state
         self.duplicate_finder_window: DuplicateFinderShell | None = None
         self.duplicate_pair_review_window: DuplicatePairReviewTool | None = None
+        self.duplicate_scan_engine_window: DuplicateScanEngineTool | None = None
         self.duplicate_finder_plan: ConsolidationPlan | None = None
         self.duplicate_finder_plan_library: str | None = None
 
@@ -6139,8 +6471,8 @@ class SoundVaultImporterApp(tk.Tk):
             command=self._open_duplicate_pair_review_tool,
         )
         tools_menu.add_command(
-            label="Qt Preview Window…",
-            command=self._open_qt_preview_window,
+            label="Duplicate Scan Engine…",
+            command=self._open_duplicate_scan_engine_tool,
         )
         tools_menu.add_command(label="M4A Tester…", command=self._open_m4a_tester_tool)
         tools_menu.add_command(label="Opus Tester…", command=self._open_opus_tester_tool)
@@ -8636,6 +8968,26 @@ class SoundVaultImporterApp(tk.Tk):
 
     def _open_similarity_inspector_tool(self) -> None:
         SimilarityInspectorDialog(self)
+
+    def _open_duplicate_scan_engine_tool(self) -> None:
+        library = self.require_library()
+        if not library:
+            return
+        existing = getattr(self, "duplicate_scan_engine_window", None)
+        if existing and existing.winfo_exists():
+            existing.lift()
+            existing.focus_set()
+            return
+        win = DuplicateScanEngineTool(self, library_path=library)
+        win.bind(
+            "<Destroy>",
+            lambda e: (
+                setattr(self, "duplicate_scan_engine_window", None)
+                if e.widget is win
+                else None
+            ),
+        )
+        self.duplicate_scan_engine_window = win
 
     def _open_file_cleanup_tool(self) -> None:
         FileCleanupDialog(self)

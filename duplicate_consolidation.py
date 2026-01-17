@@ -101,6 +101,8 @@ TITLE_JUNK_TOKENS = {
 COARSE_FP_BAND_SIZE = 8
 COARSE_FP_BANDS = 6
 COARSE_FP_QUANTIZATION = 4
+METADATA_CACHE_VERSION = 1
+METADATA_CACHE_FILENAME = ".duplicate_metadata_cache.json"
 
 
 def _now() -> float:
@@ -207,6 +209,139 @@ def _metadata_payload_complete(
             "artwork_complete": artwork_complete,
         },
     )
+
+
+def _metadata_cache_key(path: str, state: Mapping[str, object]) -> str | None:
+    if not state.get("exists"):
+        return None
+    size = state.get("size")
+    mtime = state.get("mtime")
+    if size is None or mtime is None:
+        return None
+    return f"{path}|{int(size)}|{int(mtime)}"
+
+
+def _metadata_cache_path_for_tracks(tracks: Sequence[Mapping[str, object]]) -> str | None:
+    scan_roots: List[str] = []
+    for raw in tracks:
+        discovery = raw.get("discovery") if isinstance(raw.get("discovery"), Mapping) else {}
+        roots = discovery.get("scan_roots") if isinstance(discovery.get("scan_roots"), list) else []
+        for root in roots:
+            if isinstance(root, str) and root:
+                scan_roots.append(root)
+
+    for root in scan_roots:
+        if os.path.isdir(root):
+            docs_dir = os.path.join(root, "Docs")
+            os.makedirs(docs_dir, exist_ok=True)
+            return os.path.join(docs_dir, METADATA_CACHE_FILENAME)
+
+    paths = [str(raw.get("path")) for raw in tracks if raw.get("path")]
+    if not paths:
+        return None
+    try:
+        common = os.path.commonpath(paths)
+    except ValueError:
+        return None
+    root = common if os.path.isdir(common) else os.path.dirname(common)
+    if not root:
+        return None
+    docs_dir = os.path.join(root, "Docs")
+    os.makedirs(docs_dir, exist_ok=True)
+    return os.path.join(docs_dir, METADATA_CACHE_FILENAME)
+
+
+def _load_metadata_cache(cache_path: str) -> Dict[str, object]:
+    if not cache_path or not os.path.exists(cache_path):
+        return {"version": METADATA_CACHE_VERSION, "entries": {}}
+    try:
+        with open(cache_path, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return {"version": METADATA_CACHE_VERSION, "entries": {}}
+    if not isinstance(payload, Mapping):
+        return {"version": METADATA_CACHE_VERSION, "entries": {}}
+    if payload.get("version") != METADATA_CACHE_VERSION:
+        return {"version": METADATA_CACHE_VERSION, "entries": {}}
+    entries = payload.get("entries") if isinstance(payload.get("entries"), Mapping) else {}
+    return {"version": METADATA_CACHE_VERSION, "entries": dict(entries)}
+
+
+def _save_metadata_cache(cache_path: str, cache: Mapping[str, object]) -> None:
+    if not cache_path:
+        return
+    try:
+        os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+        with open(cache_path, "w", encoding="utf-8") as handle:
+            json.dump(cache, handle, indent=2)
+    except OSError:
+        return
+
+
+def _preload_cached_metadata(
+    raw: Mapping[str, object],
+    cached_entry: Mapping[str, object],
+) -> Dict[str, object]:
+    payload = dict(raw)
+
+    cached_tags = cached_entry.get("tags") if isinstance(cached_entry.get("tags"), Mapping) else None
+    raw_tags = payload.get("tags") if isinstance(payload.get("tags"), Mapping) else {}
+    normalized_raw = _normalize_provided_tags(raw_tags)
+    if cached_tags and not _provided_tags_complete(normalized_raw):
+        payload["tags"] = dict(cached_tags)
+
+    cached_audio = (
+        cached_entry.get("audio_props")
+        if isinstance(cached_entry.get("audio_props"), Mapping)
+        else None
+    )
+    if cached_audio and not _provided_audio_props_complete(payload):
+        for key in ("bitrate", "sample_rate", "bit_depth", "channels"):
+            if _coerce_int(payload.get(key)) is None or int(payload.get(key) or 0) <= 0:
+                payload[key] = cached_audio.get(key)
+        for key in ("codec", "container"):
+            if not payload.get(key) and cached_audio.get(key):
+                payload[key] = cached_audio.get(key)
+
+    if not payload.get("ext") and cached_entry.get("ext"):
+        payload["ext"] = cached_entry.get("ext")
+
+    raw_artwork = payload.get("artwork") if isinstance(payload.get("artwork"), list) else []
+    cached_artwork = (
+        cached_entry.get("artwork") if isinstance(cached_entry.get("artwork"), list) else None
+    )
+    if cached_artwork and not raw_artwork:
+        payload["artwork"] = list(cached_artwork)
+
+    return payload
+
+
+def _metadata_cache_entry(track: "DuplicateTrack") -> Dict[str, object] | None:
+    key = _metadata_cache_key(track.path, track.library_state)
+    if not key:
+        return None
+    tags_source = track.current_tags if isinstance(track.current_tags, Mapping) else track.tags
+    normalized_tags = _normalize_provided_tags(tags_source or {})
+    normalized_tags = _merge_tags(_blank_tags(), normalized_tags)
+    audio_props = {
+        "bitrate": int(track.bitrate or 0),
+        "sample_rate": int(track.sample_rate or 0),
+        "bit_depth": int(track.bit_depth or 0),
+        "channels": int(track.channels or 0),
+        "codec": str(track.codec or ""),
+        "container": str(track.container or ""),
+    }
+    artwork_payloads = [art.to_dict() for art in track.artwork] if track.artwork else []
+    return {
+        "path": track.path,
+        "size": track.library_state.get("size"),
+        "mtime": track.library_state.get("mtime"),
+        "ext": track.ext,
+        "tags": normalized_tags,
+        "audio_props": audio_props,
+        "artwork": artwork_payloads,
+        "key": key,
+    }
 
 
 def _parse_int(value: object) -> int | None:
@@ -1457,6 +1592,26 @@ def _infer_playlists_dir(paths: Sequence[str]) -> str | None:
     return None
 
 
+def _build_playlist_index(playlists_dir: str | None) -> Dict[str, set[str]]:
+    if not playlists_dir or not os.path.isdir(playlists_dir):
+        return {}
+    index: Dict[str, set[str]] = {}
+    for playlist in _iter_playlists(playlists_dir):
+        try:
+            with open(playlist, "r", encoding="utf-8") as handle:
+                lines = [ln.rstrip("\n") for ln in handle]
+        except OSError:
+            continue
+        playlist_dir = os.path.dirname(playlist)
+        for line in lines:
+            normalized = _normalize_playlist_entry(line, playlist_dir)
+            if not normalized or normalized.startswith("#"):
+                continue
+            normalized = os.path.normpath(normalized)
+            index.setdefault(normalized, set()).add(playlist)
+    return index
+
+
 def build_duplicate_pair_report(
     track_a: Mapping[str, object],
     track_b: Mapping[str, object],
@@ -2534,9 +2689,28 @@ def build_consolidation_plan(
         if log_callback:
             log_callback(message)
 
+    raw_tracks = [dict(raw) for raw in tracks]
+    cache_path = _metadata_cache_path_for_tracks(raw_tracks)
+    metadata_cache = _load_metadata_cache(cache_path) if cache_path else {"entries": {}}
+    cache_entries = (
+        metadata_cache.get("entries")
+        if isinstance(metadata_cache.get("entries"), Mapping)
+        else {}
+    )
+    if cache_entries:
+        for idx, raw in enumerate(raw_tracks):
+            path = str(raw.get("path") or "")
+            if not path:
+                continue
+            state = _capture_library_state(path, quick=True)
+            cache_key = _metadata_cache_key(path, state)
+            cached_entry = cache_entries.get(cache_key) if cache_key else None
+            if cached_entry and isinstance(cached_entry, Mapping):
+                raw_tracks[idx] = _preload_cached_metadata(raw, cached_entry)
+
     normalized: List[DuplicateTrack] = []
     log("Grouping phase: normalizing tracks...")
-    for raw in tracks:
+    for raw in raw_tracks:
         if cancel_event.is_set():
             review_flags.append("Cancelled before normalization.")
             break
@@ -2574,10 +2748,27 @@ def build_consolidation_plan(
             _compress_artwork_for_preview(track)
         log("Grouping phase: artwork loading complete.")
 
+    if cache_path:
+        updated_entries: Dict[str, object] = (
+            dict(cache_entries) if isinstance(cache_entries, Mapping) else {}
+        )
+        for track in normalized:
+            entry = _metadata_cache_entry(track)
+            if entry and entry.get("key"):
+                updated_entries[str(entry["key"])] = entry
+        _save_metadata_cache(
+            cache_path,
+            {"version": METADATA_CACHE_VERSION, "entries": updated_entries},
+        )
+
     log("Grouping phase: building consolidation plan...")
     plans: List[GroupPlan] = []
     plan_placeholders = False
     playlists_dir = _infer_playlists_dir([t.path for t in normalized])
+    playlist_index: Dict[str, set[str]] = {}
+    if playlists_dir:
+        log("Grouping phase: indexing playlists...")
+        playlist_index = _build_playlist_index(playlists_dir)
     for cluster in sorted(clusters, key=lambda c: _stable_group_id([t.path for t in c.tracks])):
         cluster_tracks = cluster.tracks
         artwork_hashes = {t.path: _artwork_hash_for_track(t) for t in cluster_tracks}
@@ -2889,7 +3080,21 @@ def build_consolidation_plan(
                     )
 
             dispositions = {loser: "quarantine" for loser in losers}
-            playlist_hits, playlist_count = _playlist_rewrite_losers(playlists_dir, losers)
+            if playlist_index:
+                normalized_losers = {os.path.normpath(loser): loser for loser in losers}
+                hit_norms = {
+                    norm for norm in normalized_losers.keys() if norm in playlist_index
+                }
+                playlist_hits = {normalized_losers[norm] for norm in hit_norms}
+                playlist_count = len(
+                    {
+                        playlist
+                        for norm in hit_norms
+                        for playlist in playlist_index.get(norm, set())
+                    }
+                )
+            else:
+                playlist_hits, playlist_count = _playlist_rewrite_losers(playlists_dir, losers)
             playlist_map = {loser: winner.path for loser in losers if loser in playlist_hits}
 
             group_id = _stable_group_id([t.path for t in group_tracks])
