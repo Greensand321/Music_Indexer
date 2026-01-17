@@ -109,6 +109,23 @@ def _walk_audio_files(
             return
 
 
+def _count_audio_files(root: str, cancel_event: Optional[threading.Event] = None) -> int:
+    count = 0
+    for dirpath, _dirs, files in os.walk(root):
+        rel = os.path.relpath(dirpath, root)
+        parts = {p.lower() for p in rel.split(os.sep)}
+        if {"not sorted", "playlists"} & parts:
+            continue
+        for fname in files:
+            if os.path.splitext(fname)[1].lower() in SUPPORTED_EXTS:
+                count += 1
+            if cancel_event and cancel_event.is_set():
+                return count
+        if cancel_event and cancel_event.is_set():
+            return count
+    return count
+
+
 def find_duplicates(
     root: str,
     threshold: float = 0.03,
@@ -137,6 +154,10 @@ def find_duplicates(
 
     missing_fp = 0
     missing_lock = threading.Lock()
+    started_at = time.monotonic()
+    last_progress_log = started_at
+    fp_done = 0
+    fp_failed = 0
 
     def compute(path: str) -> Tuple[Optional[int], Optional[str]]:
         nonlocal missing_fp
@@ -146,7 +167,7 @@ def find_duplicates(
                 missing_fp += 1
         return duration, fp
 
-    total = 0  # Unknown upfront; progress callbacks receive 0 for total.
+    total = _count_audio_files(root, cancel_event)
     in_flight: Dict[object, Tuple[int, str]] = {}
     cancelled = False
 
@@ -211,6 +232,34 @@ def find_duplicates(
                 ungated_groups.append(g)
             _dlog("GROUP", f"new group for prefix {prefix}")
 
+    def log_progress(force: bool = False) -> None:
+        nonlocal last_progress_log
+        now = time.monotonic()
+        if not force and (now - last_progress_log) < 5:
+            return
+        last_progress_log = now
+        elapsed = now - started_at
+        log_callback(
+            "[PROGRESS] walked={walked} fp_done={fp_done} fp_failed={fp_failed} "
+            "groups={groups} in_flight={in_flight} elapsed={elapsed:.1f}s "
+            "({progress:.1f}%)".format(
+                walked=last_seen_idx,
+                fp_done=fp_done,
+                fp_failed=fp_failed,
+                groups=len(groups),
+                in_flight=len(in_flight),
+                elapsed=elapsed,
+                progress=(last_seen_idx / total * 100.0) if total else 0.0,
+            )
+        )
+
+    log_callback(
+        f"[START] duplicate scan root={root} total={total} "
+        f"threshold={threshold:.4f} prefix_len={prefix_len} "
+        f"workers={max_workers or 'auto'}"
+    )
+    last_seen_idx = 0
+
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         effective_workers = max_workers if max_workers is not None else executor._max_workers
         max_in_flight = max(1, effective_workers * 4)
@@ -227,6 +276,7 @@ def find_duplicates(
             if cancel_event and cancel_event.is_set():
                 cancelled = True
                 break
+            last_seen_idx = idx
             submit_task(idx, p)
             while len(in_flight) >= max_in_flight:
                 fut = next(as_completed(in_flight))
@@ -242,12 +292,15 @@ def find_duplicates(
                 if progress_callback:
                     progress_callback("fp_end", idx, total, p)
                 if fp:
+                    fp_done += 1
                     log_callback(f"\u2713 Fingerprinted {p}")
                     show_pref = fp[:prefix_len] if (prefix_len and prefix_len > 0) else ""
                     _dlog("FP", f"prefix={show_pref} value={fp}")
                     handle_fingerprint(p, fp)
                 else:
+                    fp_failed += 1
                     log_callback(f"\u2717 No fingerprint for {p}")
+                log_progress()
             if cancel_event and cancel_event.is_set():
                 cancelled = True
                 break
@@ -266,12 +319,15 @@ def find_duplicates(
                 if progress_callback:
                     progress_callback("fp_end", idx, total, p)
                 if fp:
+                    fp_done += 1
                     log_callback(f"\u2713 Fingerprinted {p}")
                     show_pref = fp[:prefix_len] if (prefix_len and prefix_len > 0) else ""
                     _dlog("FP", f"prefix={show_pref} value={fp}")
                     handle_fingerprint(p, fp)
                 else:
+                    fp_failed += 1
                     log_callback(f"\u2717 No fingerprint for {p}")
+                log_progress()
 
     if cancel_event and cancel_event.is_set() or cancelled:
         for fut in in_flight:
@@ -295,6 +351,21 @@ def find_duplicates(
             duplicates.append((keep, dup))
     if progress_callback:
         progress_callback("complete", len(duplicates), 0, "")
+    log_progress(force=True)
+    log_callback(
+        "[SUMMARY] walked={walked} fp_done={fp_done} fp_failed={fp_failed} "
+        "total={total} groups={groups} duplicates={duplicates} "
+        "missing_fp={missing_fp} elapsed={elapsed:.1f}s".format(
+            walked=last_seen_idx,
+            fp_done=fp_done,
+            fp_failed=fp_failed,
+            total=total,
+            groups=len(groups),
+            duplicates=len(duplicates),
+            missing_fp=missing_fp,
+            elapsed=time.monotonic() - started_at,
+        )
+    )
     return duplicates, missing_fp
 
 
@@ -308,6 +379,11 @@ def _fingerprint_only_pass(
 ) -> int:
     missing_fp = 0
     missing_lock = threading.Lock()
+    started_at = time.monotonic()
+    last_progress_log = started_at
+    fp_done = 0
+    fp_failed = 0
+    last_seen_idx = 0
 
     def compute(path: str) -> Tuple[Optional[int], Optional[str]]:
         nonlocal missing_fp
@@ -317,9 +393,28 @@ def _fingerprint_only_pass(
                 missing_fp += 1
         return duration, fp
 
-    total = 0
+    total = _count_audio_files(root, cancel_event)
     in_flight: Dict[object, Tuple[int, str]] = {}
     cancelled = False
+
+    def log_progress(force: bool = False) -> None:
+        nonlocal last_progress_log
+        now = time.monotonic()
+        if not force and (now - last_progress_log) < 5:
+            return
+        last_progress_log = now
+        elapsed = now - started_at
+        log_callback(
+            "[PROGRESS] walked={walked} fp_done={fp_done} fp_failed={fp_failed} "
+            "in_flight={in_flight} elapsed={elapsed:.1f}s ({progress:.1f}%)".format(
+                walked=last_seen_idx,
+                fp_done=fp_done,
+                fp_failed=fp_failed,
+                in_flight=len(in_flight),
+                elapsed=elapsed,
+                progress=(last_seen_idx / total * 100.0) if total else 0.0,
+            )
+        )
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         effective_workers = max_workers if max_workers is not None else executor._max_workers
@@ -337,6 +432,7 @@ def _fingerprint_only_pass(
             if cancel_event and cancel_event.is_set():
                 cancelled = True
                 break
+            last_seen_idx = idx
             submit_task(idx, p)
             while len(in_flight) >= max_in_flight:
                 fut = next(as_completed(in_flight))
@@ -352,9 +448,12 @@ def _fingerprint_only_pass(
                 if progress_callback:
                     progress_callback("fp_end", idx, total, p)
                 if fp:
+                    fp_done += 1
                     log_callback(f"\u2713 Fingerprinted {p}")
                 else:
+                    fp_failed += 1
                     log_callback(f"\u2717 No fingerprint for {p}")
+                log_progress()
             if cancel_event and cancel_event.is_set():
                 cancelled = True
                 break
@@ -373,15 +472,31 @@ def _fingerprint_only_pass(
                 if progress_callback:
                     progress_callback("fp_end", idx, total, p)
                 if fp:
+                    fp_done += 1
                     log_callback(f"\u2713 Fingerprinted {p}")
                 else:
+                    fp_failed += 1
                     log_callback(f"\u2717 No fingerprint for {p}")
+                log_progress()
 
     if cancel_event and cancel_event.is_set() or cancelled:
         for fut in in_flight:
             fut.cancel()
 
     flush_fingerprint_writes(db_path)
+    log_progress(force=True)
+    log_callback(
+        "[SUMMARY] fingerprint pass walked={walked} fp_done={fp_done} "
+        "fp_failed={fp_failed} total={total} missing_fp={missing_fp} "
+        "elapsed={elapsed:.1f}s".format(
+            walked=last_seen_idx,
+            fp_done=fp_done,
+            fp_failed=fp_failed,
+            total=total,
+            missing_fp=missing_fp,
+            elapsed=time.monotonic() - started_at,
+        )
+    )
     return missing_fp
 
 
@@ -397,8 +512,13 @@ def _find_duplicates_cached(
 ) -> Tuple[List[Tuple[str, str]], int]:
     missing_fp = 0
     missing_lock = threading.Lock()
+    started_at = time.monotonic()
+    last_progress_log = started_at
+    fp_done = 0
+    fp_failed = 0
+    last_seen_idx = 0
 
-    total = 0
+    total = _count_audio_files(root, cancel_event)
     in_flight: Dict[object, Tuple[int, str]] = {}
     cancelled = False
 
@@ -462,6 +582,27 @@ def _find_duplicates_cached(
             else:
                 ungated_groups.append(g)
             _dlog("GROUP", f"new group for prefix {prefix}")
+
+    def log_progress(force: bool = False) -> None:
+        nonlocal last_progress_log
+        now = time.monotonic()
+        if not force and (now - last_progress_log) < 5:
+            return
+        last_progress_log = now
+        elapsed = now - started_at
+        log_callback(
+            "[PROGRESS] walked={walked} fp_done={fp_done} fp_failed={fp_failed} "
+            "groups={groups} in_flight={in_flight} elapsed={elapsed:.1f}s "
+            "({progress:.1f}%)".format(
+                walked=last_seen_idx,
+                fp_done=fp_done,
+                fp_failed=fp_failed,
+                groups=len(groups),
+                in_flight=len(in_flight),
+                elapsed=elapsed,
+                progress=(last_seen_idx / total * 100.0) if total else 0.0,
+            )
+        )
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         effective_workers = max_workers if max_workers is not None else executor._max_workers
@@ -479,6 +620,7 @@ def _find_duplicates_cached(
             if cancel_event and cancel_event.is_set():
                 cancelled = True
                 break
+            last_seen_idx = idx
             submit_task(idx, p)
             while len(in_flight) >= max_in_flight:
                 fut = next(as_completed(in_flight))
@@ -494,14 +636,17 @@ def _find_duplicates_cached(
                 if progress_callback:
                     progress_callback("fp_end", idx, total, p)
                 if fp:
+                    fp_done += 1
                     log_callback(f"\u2713 Fingerprinted {p}")
                     show_pref = fp[:prefix_len] if (prefix_len and prefix_len > 0) else ""
                     _dlog("FP", f"prefix={show_pref} value={fp}")
                     handle_fingerprint(p, fp)
                 else:
+                    fp_failed += 1
                     with missing_lock:
                         missing_fp += 1
                     log_callback(f"\u2717 No fingerprint for {p}")
+                log_progress()
             if cancel_event and cancel_event.is_set():
                 cancelled = True
                 break
@@ -520,14 +665,17 @@ def _find_duplicates_cached(
                 if progress_callback:
                     progress_callback("fp_end", idx, total, p)
                 if fp:
+                    fp_done += 1
                     log_callback(f"\u2713 Fingerprinted {p}")
                     show_pref = fp[:prefix_len] if (prefix_len and prefix_len > 0) else ""
                     _dlog("FP", f"prefix={show_pref} value={fp}")
                     handle_fingerprint(p, fp)
                 else:
+                    fp_failed += 1
                     with missing_lock:
                         missing_fp += 1
                     log_callback(f"\u2717 No fingerprint for {p}")
+                log_progress()
 
     if cancel_event and cancel_event.is_set() or cancelled:
         for fut in in_flight:
@@ -551,6 +699,21 @@ def _find_duplicates_cached(
             duplicates.append((keep, dup))
     if progress_callback:
         progress_callback("complete", len(duplicates), 0, "")
+    log_progress(force=True)
+    log_callback(
+        "[SUMMARY] cached scan walked={walked} fp_done={fp_done} fp_failed={fp_failed} "
+        "total={total} groups={groups} duplicates={duplicates} "
+        "missing_fp={missing_fp} elapsed={elapsed:.1f}s".format(
+            walked=last_seen_idx,
+            fp_done=fp_done,
+            fp_failed=fp_failed,
+            total=total,
+            groups=len(groups),
+            duplicates=len(duplicates),
+            missing_fp=missing_fp,
+            elapsed=time.monotonic() - started_at,
+        )
+    )
     return duplicates, missing_fp
 
 
@@ -576,6 +739,9 @@ def find_duplicates_two_stage(
     if cancel_event and cancel_event.is_set():
         return [], 0
 
+    log_callback(
+        f"[STAGE 1/2] fingerprint-only pass root={root} workers={max_workers or 'auto'}"
+    )
     _fingerprint_only_pass(
         root,
         db_path,
@@ -586,6 +752,7 @@ def find_duplicates_two_stage(
     )
     if cancel_event and cancel_event.is_set():
         return [], 0
+    log_callback("[STAGE 2/2] cached duplicate scan starting")
     return _find_duplicates_cached(
         root,
         threshold,
