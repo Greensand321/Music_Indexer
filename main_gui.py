@@ -30,6 +30,7 @@ Style = ttk.Style  # Default built-in themes
 # from ttkthemes import ThemedStyle as Style
 # import ttkbootstrap as tb; Style = tb.Style
 import json
+import importlib.util
 import queue
 import subprocess
 from tkinter import filedialog, messagebox, Text, Scrollbar
@@ -8993,6 +8994,29 @@ class SoundVaultImporterApp(tk.Tk):
 
     def _open_duplicate_bucketing_poc_tool(self) -> None:
         DuplicateBucketingPocDialog(self)
+
+    def _open_qt_preview_window(self) -> None:
+        qt_available = any(
+            importlib.util.find_spec(module)
+            for module in ("PySide6", "PyQt6")
+        )
+        if not qt_available:
+            messagebox.showerror(
+                "Qt Preview",
+                "PySide6 or PyQt6 is not installed. Install one of them to launch the Qt preview window.",
+            )
+            return
+
+        try:
+            subprocess.Popen(
+                [sys.executable, "-m", "gui.qt_launcher"],
+                cwd=str(Path(__file__).resolve().parent),
+            )
+        except Exception as exc:
+            messagebox.showerror(
+                "Qt Preview",
+                f"Unable to launch the Qt preview window: {exc}",
+            )
 
     def _open_m4a_tester_tool(self) -> None:
         M4ATesterDialog(self)

@@ -29,6 +29,7 @@ tqdm
 ttkthemes
 ttkbootstrap
 sv-ttk
+PySide6
 
 # Optional alternative audio engine; see README.md for install steps
 # essentia==2.1b6
