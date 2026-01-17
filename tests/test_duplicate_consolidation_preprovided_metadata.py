@@ -173,3 +173,86 @@ def test_duplicate_detection_consistent_with_preprovided_metadata(monkeypatch, t
     assert len(plan_fallback.groups) == 1
     assert plan_preprovided.groups[0].winner_path == plan_fallback.groups[0].winner_path
     assert set(plan_preprovided.groups[0].losers) == set(plan_fallback.groups[0].losers)
+
+
+def test_complete_payload_matches_file_read_baseline(monkeypatch, tmp_path) -> None:
+    calls: list[str] = []
+
+    def fake_read(path: str, _provided_tags):
+        calls.append(path)
+        return (
+            {
+                "artist": "Artist",
+                "albumartist": "Artist",
+                "title": "Title",
+                "album": "Album",
+            },
+            [],
+            None,
+            "deferred",
+            {
+                "bitrate": 320000,
+                "sample_rate": 44100,
+                "bit_depth": 16,
+                "channels": 2,
+                "codec": "FLAC",
+                "container": "FLAC",
+            },
+            {
+                "reader_hint": "fake",
+                "cover_count": None,
+                "mp4_covr_missing": False,
+                "sidecar_used": False,
+                "cover_deferred": True,
+                "source": "file",
+            },
+        )
+
+    monkeypatch.setattr(duplicate_consolidation, "_read_tags_and_artwork", fake_read)
+
+    track_path = tmp_path / "Album" / "Song A.flac"
+    raw_fallback = {
+        "path": str(track_path),
+        "fingerprint": "1 2 3",
+        "ext": ".flac",
+        "bitrate": 320000,
+        "sample_rate": 44100,
+        "channels": 2,
+        "tags": {"title": "Title Only"},
+        "artwork": [{"hash": "abc", "size": 128}],
+    }
+
+    baseline = duplicate_consolidation._normalize_track(raw_fallback, quick_state=True)
+    assert calls == [str(track_path)]
+
+    raw_provided = {
+        "path": str(track_path),
+        "fingerprint": "1 2 3",
+        "ext": ".flac",
+        "bitrate": 320000,
+        "sample_rate": 44100,
+        "channels": 2,
+        "bit_depth": 16,
+        "codec": "FLAC",
+        "container": "FLAC",
+        "tags": {
+            "artist": "Artist",
+            "albumartist": "Artist",
+            "title": "Title",
+            "album": "Album",
+        },
+        "artwork": [{"hash": "abc", "size": 128}],
+    }
+
+    provided = duplicate_consolidation._normalize_track(raw_provided, quick_state=True)
+
+    assert calls == [str(track_path)]
+    assert provided.trace["metadata_read"]["source"] == "provided"
+    for key in ("artist", "albumartist", "title", "album"):
+        assert provided.current_tags.get(key) == baseline.current_tags.get(key)
+    assert provided.bitrate == baseline.bitrate
+    assert provided.sample_rate == baseline.sample_rate
+    assert provided.bit_depth == baseline.bit_depth
+    assert provided.channels == baseline.channels
+    assert provided.codec == baseline.codec
+    assert provided.container == baseline.container
