@@ -6,6 +6,7 @@ import webbrowser
 import re
 import html
 import shutil
+import hashlib
 from pathlib import Path
 
 if sys.platform == "win32":
@@ -3426,6 +3427,13 @@ class DuplicateFinderShell(tk.Toplevel):
             bitrate = 0
             sample_rate = 0
             bit_depth = 0
+            channels = 0
+            codec = ""
+            container = ""
+            tags: dict[str, object] = {}
+            artwork: list[dict[str, object]] = []
+            audio = None
+            info = None
             try:
                 audio = MutagenFile(path)
                 info = getattr(audio, "info", None)
@@ -3441,13 +3449,45 @@ class DuplicateFinderShell(tk.Toplevel):
                         or getattr(info, "bitdepth", 0)
                         or 0
                     )
+                    channels = int(
+                        getattr(info, "channels", 0)
+                        or getattr(info, "channel", 0)
+                        or 0
+                    )
+                    codec = str(
+                        getattr(info, "codec_name", "")
+                        or getattr(info, "codec", "")
+                        or ""
+                    )
             except Exception:
                 pass
-            tags: dict[str, object] = {}
             try:
-                tags = read_tags(path)
+                tags, cover_payloads, _error, _reader = read_metadata(
+                    path,
+                    include_cover=True,
+                    audio=audio,
+                )
+                for payload in cover_payloads:
+                    if not payload:
+                        continue
+                    artwork.append(
+                        {
+                            "hash": hashlib.sha256(payload).hexdigest(),
+                            "size": len(payload),
+                        }
+                    )
             except Exception:
                 tags = {}
+                artwork = []
+            if not container:
+                container = ext.replace(".", "").upper()
+            if not codec and getattr(info, "pprint", None):
+                try:
+                    codec = str(info.pprint()).split(",")[0]
+                except Exception:
+                    codec = ""
+            if not codec:
+                codec = container or ext.replace(".", "").upper()
             artist_value = tags.get("artist") or tags.get("albumartist")
             title_value = tags.get("title")
             album_value = tags.get("album")
@@ -3459,6 +3499,11 @@ class DuplicateFinderShell(tk.Toplevel):
                 "bitrate": bitrate,
                 "sample_rate": sample_rate,
                 "bit_depth": bit_depth,
+                "channels": channels,
+                "codec": codec,
+                "container": container,
+                "tags": tags,
+                "artwork": artwork,
                 "normalized_artist": normalized_artist,
                 "normalized_title": normalized_title,
                 "normalized_album": normalized_album,
@@ -3467,7 +3512,16 @@ class DuplicateFinderShell(tk.Toplevel):
         def _needs_metadata_refresh(metadata: dict[str, object] | None) -> bool:
             if metadata is None:
                 return True
-            return any(metadata.get(key) is None for key in ("bitrate", "sample_rate", "bit_depth"))
+            numeric_keys = ("bitrate", "sample_rate", "bit_depth", "channels")
+            if any(int(metadata.get(key) or 0) <= 0 for key in numeric_keys):
+                return True
+            text_keys = ("codec", "container")
+            if any(not metadata.get(key) for key in text_keys):
+                return True
+            for key in ("tags", "artwork"):
+                if key not in metadata or metadata.get(key) is None:
+                    return True
+            return False
 
         def _metadata_for_payload(path: str, metadata: dict[str, object] | None) -> dict[str, object]:
             payload = dict(metadata or {})
@@ -3475,6 +3529,10 @@ class DuplicateFinderShell(tk.Toplevel):
             if isinstance(ext, str) and ext and not ext.startswith("."):
                 ext = f".{ext}"
             payload["ext"] = ext
+            if "tags" in payload and not isinstance(payload.get("tags"), dict):
+                payload["tags"] = {}
+            if "artwork" in payload and not isinstance(payload.get("artwork"), list):
+                payload["artwork"] = []
             return payload
 
         def _track_payload(
@@ -3493,6 +3551,11 @@ class DuplicateFinderShell(tk.Toplevel):
                 "bitrate": int(metadata.get("bitrate") or 0),
                 "sample_rate": int(metadata.get("sample_rate") or 0),
                 "bit_depth": int(metadata.get("bit_depth") or 0),
+                "channels": int(metadata.get("channels") or 0),
+                "codec": str(metadata.get("codec") or ""),
+                "container": str(metadata.get("container") or ""),
+                "tags": dict(metadata.get("tags") or {}),
+                "artwork": list(metadata.get("artwork") or []),
                 "fingerprint_trace": dict(fingerprint_trace),
                 "discovery": {
                     "scan_roots": [library_root],
@@ -3533,6 +3596,11 @@ class DuplicateFinderShell(tk.Toplevel):
                         bitrate=int(metadata.get("bitrate") or 0),
                         sample_rate=int(metadata.get("sample_rate") or 0),
                         bit_depth=int(metadata.get("bit_depth") or 0),
+                        channels=int(metadata.get("channels") or 0),
+                        codec=str(metadata.get("codec") or ""),
+                        container=str(metadata.get("container") or ""),
+                        tags=metadata.get("tags") if isinstance(metadata.get("tags"), dict) else {},
+                        artwork=metadata.get("artwork") if isinstance(metadata.get("artwork"), list) else [],
                         normalized_artist=metadata.get("normalized_artist"),
                         normalized_title=metadata.get("normalized_title"),
                         normalized_album=metadata.get("normalized_album"),
@@ -3626,6 +3694,11 @@ class DuplicateFinderShell(tk.Toplevel):
                         bitrate=int(metadata.get("bitrate") or 0),
                         sample_rate=int(metadata.get("sample_rate") or 0),
                         bit_depth=int(metadata.get("bit_depth") or 0),
+                        channels=int(metadata.get("channels") or 0),
+                        codec=str(metadata.get("codec") or ""),
+                        container=str(metadata.get("container") or ""),
+                        tags=metadata.get("tags") if isinstance(metadata.get("tags"), dict) else {},
+                        artwork=metadata.get("artwork") if isinstance(metadata.get("artwork"), list) else [],
                         normalized_artist=metadata.get("normalized_artist"),
                         normalized_title=metadata.get("normalized_title"),
                         normalized_album=metadata.get("normalized_album"),
