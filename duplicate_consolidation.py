@@ -3305,7 +3305,12 @@ def build_consolidation_plan(
     )
 
 
-def export_consolidation_preview(plan: ConsolidationPlan, output_json_path: str) -> str:
+def export_consolidation_preview(
+    plan: ConsolidationPlan,
+    output_json_path: str,
+    *,
+    preview_settings: Mapping[str, object] | None = None,
+) -> str:
     """Write a JSON audit of the consolidation plan."""
 
     plan.refresh_plan_signature()
@@ -3320,6 +3325,8 @@ def export_consolidation_preview(plan: ConsolidationPlan, output_json_path: str)
         "summary": summary,
         "plan": plan.to_dict(),
     }
+    if preview_settings:
+        payload["preview_settings"] = dict(preview_settings)
 
     with open(output_json_path, "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2)
