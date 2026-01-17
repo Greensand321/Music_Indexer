@@ -1011,17 +1011,39 @@ def _read_tags_and_artwork(
         base[key] = val
     if read_error and error is None:
         error = read_error
+    sidecar_used = False
+    if not cover_payloads:
+        sidecar_payload = read_sidecar_artwork_bytes(path)
+        if sidecar_payload:
+            cover_payloads = [sidecar_payload]
+            sidecar_used = True
     artwork: List[ArtworkCandidate] = []
     art_error: Optional[str] = "deferred"
+    if cover_payloads:
+        for payload in cover_payloads:
+            width, height = _extract_image_dimensions(payload)
+            artwork.append(
+                ArtworkCandidate(
+                    path=path,
+                    hash=hashlib.sha256(payload).hexdigest(),
+                    size=len(payload),
+                    width=width,
+                    height=height,
+                    status="ok",
+                    bytes=payload,
+                )
+            )
+        art_error = None
     audio_props = _extract_audio_properties(audio, path, provided_tags or {}, os.path.splitext(path)[1])
     ext = os.path.splitext(path)[1].lower()
     metadata_trace = {
         "reader_hint": _reader,
-        "cover_count": None,
+        "cover_count": len(cover_payloads) if cover_payloads else None,
         "mp4_covr_missing": ext in {".m4a", ".mp4"} and not cover_payloads,
-        "sidecar_used": False,
-        "cover_deferred": True,
+        "sidecar_used": sidecar_used,
+        "cover_deferred": not cover_payloads,
         "source": "file",
+        "artwork_source": "sidecar" if sidecar_used else ("embedded" if cover_payloads else None),
     }
     return base, artwork, error, art_error, audio_props, metadata_trace
 
@@ -1055,15 +1077,6 @@ def _capture_library_state(path: str, *, quick: bool = False) -> Dict[str, objec
         state["stat_error"] = str(exc)
         return state
 
-    if not quick:
-        hasher = hashlib.sha256()
-        try:
-            with open(ensure_long_path(path), "rb") as handle:
-                for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-                    hasher.update(chunk)
-            state["sha256"] = hasher.hexdigest()
-        except Exception as exc:  # pragma: no cover - depends on filesystem permissions
-            state["hash_error"] = str(exc)
     return state
 
 

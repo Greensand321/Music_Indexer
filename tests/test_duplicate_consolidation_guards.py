@@ -1,4 +1,3 @@
-import hashlib
 import os
 import threading
 
@@ -7,9 +6,8 @@ from duplicate_consolidation_executor import ExecutionConfig, execute_consolidat
 
 
 def _snapshot(path):
-    data = path.read_bytes()
     stat = path.stat()
-    return {"exists": True, "size": stat.st_size, "mtime": int(stat.st_mtime), "sha256": hashlib.sha256(data).hexdigest()}
+    return {"exists": True, "size": stat.st_size, "mtime": int(stat.st_mtime)}
 
 
 def _make_group(tmp_path, *, review_flags=None, disposition="quarantine"):
