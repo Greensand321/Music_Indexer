@@ -6579,10 +6579,36 @@ class SoundVaultImporterApp(tk.Tk):
             scaled = max(1, int(round(abs(base_size) * self.current_scale)))
             font.configure(size=scaled if base_size >= 0 else -scaled)
 
+    def _configure_top_ribbon_style(self) -> None:
+        base_pad = max(2, int(round(4 * self.current_scale)))
+        self.style.configure(
+            "TopRibbon.TButton",
+            font=_scaled_font(self, 10),
+            padding=(base_pad, base_pad),
+        )
+        self.style.configure(
+            "TopRibbonExit.TButton",
+            font=_scaled_font(self, 12, "bold"),
+            padding=(base_pad + 2, base_pad + 2),
+        )
+        self.style.configure("TopRibbon.TLabel", font=_scaled_font(self, 10))
+        self.style.configure(
+            "TopRibbon.TCombobox",
+            font=_scaled_font(self, 10),
+            padding=(base_pad, base_pad),
+        )
+        self.style.configure(
+            "TCombobox",
+            font=_scaled_font(self, 10),
+            padding=(base_pad, base_pad),
+        )
+
     def build_ui(self):
         """Create all menus, frames, and widgets."""
         # Theme selector setup
         themes = self.style.theme_names()
+
+        self._configure_top_ribbon_style()
 
         # ─── Menu Bar ───────────────────────────────────────────────────────
         menubar = tk.Menu(self)
@@ -6659,20 +6685,27 @@ class SoundVaultImporterApp(tk.Tk):
         menubar.add_cascade(label="Help", menu=help_menu)
 
         # ─── Library Info ───────────────────────────────────────────────────
-        top = tk.Frame(self)
+        top = ttk.Frame(self)
         top.pack(fill="x", padx=10, pady=(10, 0))
-        tk.Button(top, text="Choose Library…", command=self.select_library).pack(
-            side="left"
-        )
-        tk.Label(top, textvariable=self.library_name_var, anchor="w").pack(
-            side="left", padx=(5, 0)
-        )
+        ttk.Button(
+            top,
+            text="Choose Library…",
+            command=self.select_library,
+            style="TopRibbon.TButton",
+        ).pack(side="left")
+        ttk.Label(
+            top,
+            textvariable=self.library_name_var,
+            anchor="w",
+            style="TopRibbon.TLabel",
+        ).pack(side="left", padx=(5, 0))
         cb = ttk.Combobox(
             top,
             textvariable=self.theme_var,
             values=themes,
             state="readonly",
             width=20,
+            style="TopRibbon.TCombobox",
         )
         cb.pack(side="right", padx=5)
         cb.bind("<<ComboboxSelected>>", self.on_theme_change)
@@ -6683,9 +6716,16 @@ class SoundVaultImporterApp(tk.Tk):
             values=scale_choices,
             state="readonly",
             width=5,
+            style="TopRibbon.TCombobox",
         )
         cb_scale.pack(side="right", padx=5)
         cb_scale.bind("<<ComboboxSelected>>", self.on_scale_change)
+        ttk.Button(
+            top,
+            text="Exit",
+            command=self._on_exit,
+            style="TopRibbonExit.TButton",
+        ).pack(side="right", padx=5)
         tk.Label(self, textvariable=self.library_path_var, anchor="w").pack(
             fill="x", padx=10
         )
