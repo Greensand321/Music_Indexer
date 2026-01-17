@@ -3308,7 +3308,6 @@ def export_consolidation_preview(plan: ConsolidationPlan, output_json_path: str)
     """Write a JSON audit of the consolidation plan."""
 
     plan.refresh_plan_signature()
-    start_time = time.monotonic()
     summary = {
         "groups": len(plan.groups),
         "review_required": plan.review_required_count,
@@ -3322,24 +3321,6 @@ def export_consolidation_preview(plan: ConsolidationPlan, output_json_path: str)
 
     with open(output_json_path, "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2)
-    try:
-        output_size = os.path.getsize(output_json_path)
-    except OSError:
-        output_size = None
-    elapsed = time.monotonic() - start_time
-    if output_size is not None:
-        logger.info(
-            "Preview JSON output: size=%d bytes groups=%d elapsed=%.2fs",
-            output_size,
-            len(plan.groups),
-            elapsed,
-        )
-    else:
-        logger.info(
-            "Preview JSON output: groups=%d elapsed=%.2fs",
-            len(plan.groups),
-            elapsed,
-        )
     return output_json_path
 
 
@@ -3507,21 +3488,13 @@ def export_consolidation_preview_html(
 
     plan.refresh_plan_signature()
     embedded_artwork_count = 0
-    data_uri_cache: dict[bytes, str] = {}
-    start_time = time.monotonic()
-
     def esc(value: object) -> str:
         return html.escape(str(value))
 
     def _data_uri(payload: bytes) -> str:
         nonlocal embedded_artwork_count
-        cached = data_uri_cache.get(payload)
-        if cached is not None:
-            return cached
         embedded_artwork_count += 1
-        uri = _image_data_uri(payload)
-        data_uri_cache[payload] = uri
-        return uri
+        return _image_data_uri(payload)
 
     def _basename(value: str) -> str:
         return os.path.basename(value) or value
@@ -4888,20 +4861,17 @@ def export_consolidation_preview_html(
         output_size = os.path.getsize(output_html_path)
     except OSError:
         output_size = None
-    elapsed = time.monotonic() - start_time
     if output_size is not None:
         logger.info(
-            "Preview HTML output: size=%d bytes groups=%d embedded_artwork=%d elapsed=%.2fs",
+            "Preview HTML output: size=%d bytes groups=%d embedded_artwork=%d",
             output_size,
             len(plan.groups),
             embedded_artwork_count,
-            elapsed,
         )
     else:
         logger.info(
-            "Preview HTML output: groups=%d embedded_artwork=%d elapsed=%.2fs",
+            "Preview HTML output: groups=%d embedded_artwork=%d",
             len(plan.groups),
             embedded_artwork_count,
-            elapsed,
         )
     return output_html_path
