@@ -24,6 +24,7 @@ if sys.platform == "win32":
 
 import tkinter as tk
 from tkinter import ttk
+from tkinter import font as tkfont
 
 Style = ttk.Style  # Default built-in themes
 # Optional theme packs:
@@ -138,6 +139,16 @@ from utils.audio_metadata_reader import (
 from utils.opus_library_mirror import mirror_library, write_mirror_report
 from utils.opus_metadata_reader import read_opus_metadata
 from duplicate_scan_engine import DuplicateScanConfig, run_duplicate_scan
+
+
+def _scaled_font(
+    widget: tk.Widget, size: int, weight: str | None = None
+) -> tuple[str, int] | tuple[str, int, str]:
+    scale = float(widget.tk.call("tk", "scaling"))
+    scaled_size = max(1, int(round(size * scale)))
+    if weight:
+        return ("TkDefaultFont", scaled_size, weight)
+    return ("TkDefaultFont", scaled_size)
 
 
 @dataclass
@@ -1888,9 +1899,11 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
             art_lbl.pack(side="left")
             text_frame = ttk.Frame(hover_panel)
             text_frame.pack(side="left", padx=5)
-            title_lbl = ttk.Label(text_frame, font=("TkDefaultFont", 10, "bold"))
+            title_lbl = ttk.Label(
+                text_frame, font=_scaled_font(text_frame, 10, "bold")
+            )
             title_lbl.pack(anchor="w")
-            artist_lbl = ttk.Label(text_frame, font=("TkDefaultFont", 8))
+            artist_lbl = ttk.Label(text_frame, font=_scaled_font(text_frame, 8))
             artist_lbl.pack(anchor="w")
             hover_panel.place(relx=1.0, rely=1.0, anchor="se", x=-10, y=-10)
             hover_panel.place_forget()
@@ -2012,7 +2025,7 @@ class DuplicatePairReviewTool(tk.Toplevel):
         ttk.Label(
             container,
             text="Duplicate Pair Review",
-            font=("TkDefaultFont", 12, "bold"),
+            font=_scaled_font(container, 12, "bold"),
         ).pack(anchor="w")
         ttk.Label(
             container,
@@ -2142,7 +2155,7 @@ class DuplicatePairReviewTool(tk.Toplevel):
         frame.columnconfigure(0, weight=1)
         art_label = tk.Label(frame)
         art_label.grid(row=0, column=0, pady=(6, 4))
-        title_label = ttk.Label(frame, font=("TkDefaultFont", 10, "bold"))
+        title_label = ttk.Label(frame, font=_scaled_font(frame, 10, "bold"))
         title_label.grid(row=1, column=0, sticky="w", padx=6)
         meta_label = ttk.Label(frame, justify="left")
         meta_label.grid(row=2, column=0, sticky="w", padx=6, pady=(2, 6))
@@ -2563,7 +2576,7 @@ class DuplicateFinderShell(tk.Toplevel):
         ttk.Label(
             container,
             text="Duplicate Finder",
-            font=("TkDefaultFont", 12, "bold"),
+            font=_scaled_font(container, 12, "bold"),
         ).pack(anchor="w")
         ttk.Label(
             container,
@@ -5262,7 +5275,7 @@ class LibraryCompressionPanel(ttk.Frame):
         ttk.Label(
             self,
             text="Library Compression",
-            font=("TkDefaultFont", 12, "bold"),
+            font=_scaled_font(self, 12, "bold"),
         ).pack(anchor="w")
         ttk.Label(
             self,
@@ -6014,7 +6027,7 @@ class FileCleanupDialog(tk.Toplevel):
         ttk.Label(
             container,
             text="File Clean Up",
-            font=("TkDefaultFont", 12, "bold"),
+            font=_scaled_font(container, 12, "bold"),
         ).pack(anchor="w")
         ttk.Label(
             container,
@@ -6179,7 +6192,7 @@ class DuplicateScanEngineTool(tk.Toplevel):
         ttk.Label(
             container,
             text="Duplicate Scan Engine",
-            font=("TkDefaultFont", 12, "bold"),
+            font=_scaled_font(container, 12, "bold"),
         ).pack(anchor="w")
         ttk.Label(
             container,
@@ -6524,6 +6537,8 @@ class SoundVaultImporterApp(tk.Tk):
         self.theme_var = tk.StringVar(value=default_theme)
         self.scale_var = tk.StringVar(value=str(self.current_scale))
 
+        self._base_font_sizes = self._capture_base_font_sizes()
+        self._apply_font_scaling()
         self._configure_treeview_style()
 
         # Build initial UI
@@ -6534,6 +6549,35 @@ class SoundVaultImporterApp(tk.Tk):
         """Adjust Treeview row height based on current UI scale."""
         base = 20
         self.style.configure("Treeview", rowheight=int(base * self.current_scale))
+
+    def _capture_base_font_sizes(self) -> dict[str, int]:
+        font_names = (
+            "TkDefaultFont",
+            "TkTextFont",
+            "TkFixedFont",
+            "TkMenuFont",
+            "TkHeadingFont",
+            "TkCaptionFont",
+            "TkSmallCaptionFont",
+            "TkIconFont",
+            "TkTooltipFont",
+        )
+        sizes: dict[str, int] = {}
+        for name in font_names:
+            try:
+                sizes[name] = int(tkfont.nametofont(name).cget("size"))
+            except tk.TclError:
+                continue
+        return sizes
+
+    def _apply_font_scaling(self) -> None:
+        for name, base_size in self._base_font_sizes.items():
+            try:
+                font = tkfont.nametofont(name)
+            except tk.TclError:
+                continue
+            scaled = max(1, int(round(abs(base_size) * self.current_scale)))
+            font.configure(size=scaled if base_size >= 0 else -scaled)
 
     def build_ui(self):
         """Create all menus, frames, and widgets."""
@@ -6632,7 +6676,7 @@ class SoundVaultImporterApp(tk.Tk):
         )
         cb.pack(side="right", padx=5)
         cb.bind("<<ComboboxSelected>>", self.on_theme_change)
-        scale_choices = ["1.25", "1.5", "1.75", "2.0", "2.25"]
+        scale_choices = ["1.25", "1.5", "1.75", "2.0", "2.25", "3.0", "3.5", "4.0", "5.0", "6.0"]
         cb_scale = ttk.Combobox(
             top,
             textvariable=self.scale_var,
@@ -7083,6 +7127,7 @@ class SoundVaultImporterApp(tk.Tk):
         cfg = load_config()
         cfg["ui_scale"] = scale
         save_config(cfg)
+        self._apply_font_scaling()
         self._configure_treeview_style()
         for widget in self.winfo_children():
             widget.destroy()
@@ -7271,7 +7316,7 @@ class SoundVaultImporterApp(tk.Tk):
         ttk.Label(
             header,
             text="Export Artist/Title List",
-            font=("TkDefaultFont", 11, "bold"),
+            font=_scaled_font(header, 11, "bold"),
         ).pack(anchor="w")
         ttk.Label(
             header,
