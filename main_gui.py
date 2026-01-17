@@ -3805,13 +3805,17 @@ class DuplicateFinderShell(tk.Toplevel):
             preview_json_path = None
             preview_html_path = None
             if write_preview:
+                log("Writing preview audit JSON…")
                 report_fingerprint_status("Generating preview…")
                 report_status("Preview…", progress=self._weighted_progress("preview", 0))
                 json_path = os.path.join(docs_dir, "duplicate_preview.json")
+                json_start = time.monotonic()
                 export_consolidation_preview(plan, json_path)
                 preview_json_path = json_path
-                log(f"Audit JSON written to {json_path}")
+                log(f"Audit JSON written to {json_path} ({time.monotonic() - json_start:.2f}s)")
+                log("Writing preview HTML…")
                 html_path = os.path.join(docs_dir, "duplicate_preview.html")
+                html_start = time.monotonic()
                 export_consolidation_preview_html(
                     plan,
                     html_path,
@@ -3819,7 +3823,7 @@ class DuplicateFinderShell(tk.Toplevel):
                 )
                 self._queue_preview_trace("preview-html-write")
                 preview_html_path = html_path
-                log(f"Preview HTML written to {html_path}")
+                log(f"Preview HTML written to {html_path} ({time.monotonic() - html_start:.2f}s)")
                 report_status("Preview generated", progress=self._weighted_progress("preview", 1))
             else:
                 report_status("Plan ready", progress=100)
@@ -4015,6 +4019,12 @@ class DuplicateFinderShell(tk.Toplevel):
         threshold_settings = self._current_threshold_settings()
         fingerprint_settings = self._current_fingerprint_settings()
         show_artwork_variants = self.show_artwork_variants_var.get()
+        logger.info(
+            "Preview settings: show_artwork_variants=%s thresholds=%s fingerprint_settings=%s",
+            show_artwork_variants,
+            threshold_settings,
+            fingerprint_settings,
+        )
 
         def finalize_preview(trace_emit: bool = False) -> None:
             self._record_preview_trace("preview-finish")
