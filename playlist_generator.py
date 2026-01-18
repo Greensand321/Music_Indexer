@@ -11,7 +11,7 @@ from crash_watcher import record_event
 from crash_logger import watcher
 
 # Default extensions for playlist generation
-DEFAULT_EXTS = {".mp3", ".flac", ".wav", ".aac", ".m4a", ".opus"}
+DEFAULT_EXTS = {".mp3", ".flac", ".wav", ".aac", ".m4a", ".ogg", ".opus"}
 
 
 def _sanitize_name(rel_path, existing):
