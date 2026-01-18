@@ -166,21 +166,9 @@ def _sanitize_tag_value(value: object, field: str, log_callback=None) -> str:
     return sanitized
 
 
-def _ensure_unique_destination(
-    path: str,
-    moves: dict,
-    current_path: str | None = None,
-    log_callback=None,
-) -> str:
+def _ensure_unique_destination(path: str, moves: dict, log_callback=None) -> str:
     if path not in moves.values() and not os.path.exists(path):
         return path
-    if current_path and path not in moves.values():
-        try:
-            if os.path.exists(current_path) and os.path.exists(path):
-                if os.path.samefile(path, current_path):
-                    return path
-        except OSError:
-            pass
     base, ext = os.path.splitext(path)
     counter = 1
     candidate = f"{base} ({counter}){ext}"
@@ -192,17 +180,6 @@ def _ensure_unique_destination(
             f"  ! Destination collision detected; renamed to '{os.path.basename(candidate)}'"
         )
     return candidate
-
-
-def _is_same_path(source_path: str, destination_path: str) -> bool:
-    if os.path.abspath(source_path) == os.path.abspath(destination_path):
-        return True
-    try:
-        if os.path.exists(source_path) and os.path.exists(destination_path):
-            return os.path.samefile(source_path, destination_path)
-    except OSError:
-        return False
-    return False
 
 
 def _cleanup_trailing_numeric_suffixes(
@@ -692,11 +669,6 @@ def compute_moves_and_tag_index(
             while os.path.exists(candidate) or candidate in moves.values():
                 candidate = f"{root_c} ({idx_dup}){ext_c}"
                 idx_dup += 1
-            if _is_same_path(old_path, candidate):
-                decision_log.append(
-                    "  → Missing metadata but already in Manual Review; skipping move/rename"
-                )
-                continue
             moves[old_path] = candidate
             tag_index[candidate] = {
                 "leftover_tags": [],
@@ -738,10 +710,7 @@ def compute_moves_and_tag_index(
                 decision_log.append(f"  Renaming to '{new_filename}' (using raw artist)")
 
             new_path = os.path.join(base_folder, new_filename)
-            new_path = _ensure_unique_destination(new_path, moves, old_path, log_callback)
-            if _is_same_path(old_path, new_path):
-                decision_log.append("  → Destination unchanged; skipping move/rename")
-                continue
+            new_path = _ensure_unique_destination(new_path, moves, log_callback)
             moves[old_path] = new_path
             tag_index[new_path] = {
                 "leftover_tags": [],
@@ -796,10 +765,7 @@ def compute_moves_and_tag_index(
                     decision_log.append(f"  Renaming to '{new_filename}' (using raw artist)")
 
                 new_path = os.path.join(base_folder, new_filename)
-                new_path = _ensure_unique_destination(new_path, moves, old_path, log_callback)
-                if _is_same_path(old_path, new_path):
-                    decision_log.append("  → Destination unchanged; skipping move/rename")
-                    continue
+                new_path = _ensure_unique_destination(new_path, moves, log_callback)
                 moves[old_path] = new_path
                 tag_index[new_path] = {
                     "leftover_tags": [],
@@ -882,10 +848,7 @@ def compute_moves_and_tag_index(
             decision_log.append(f"  Renaming to '{new_filename}' (using raw artist)")
 
         new_path = os.path.join(base_folder, new_filename)
-        new_path = _ensure_unique_destination(new_path, moves, old_path, log_callback)
-        if _is_same_path(old_path, new_path):
-            decision_log.append("  → Destination unchanged; skipping move/rename")
-            continue
+        new_path = _ensure_unique_destination(new_path, moves, log_callback)
         moves[old_path] = new_path
         decision_log.append(
             f"  → Final: '{os.path.relpath(new_path, MUSIC_ROOT)}'"
