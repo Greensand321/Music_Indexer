@@ -8,6 +8,7 @@ import html
 import shutil
 import hashlib
 from pathlib import Path
+import urllib.parse
 
 if sys.platform == "win32":
     try:
@@ -6470,7 +6471,7 @@ class OpusTesterDialog(tk.Toplevel):
 
 
 def _normalize_playlist_line(line: str) -> str:
-    return line.rstrip("\n")
+    return line.rstrip("\n").rstrip("\r")
 
 
 def _iter_playlist_tracks(lines: list[str]) -> list[str]:
@@ -6485,9 +6486,10 @@ def _iter_playlist_tracks(lines: list[str]) -> list[str]:
 
 def _build_library_search_index(
     library_root: str, valid_exts: set[str]
-) -> tuple[dict[str, list[str]], dict[str, list[str]]]:
+) -> tuple[dict[str, list[str]], dict[str, list[str]], dict[str, list[str]]]:
     basename_index: dict[str, list[str]] = {}
     stem_index: dict[str, list[str]] = {}
+    normalized_stem_index: dict[str, list[str]] = {}
     for dirpath, dirnames, filenames in os.walk(library_root):
         dirnames.sort()
         filenames.sort()
@@ -6500,7 +6502,9 @@ def _build_library_search_index(
             stem_key = os.path.normcase(os.path.splitext(fname)[0])
             basename_index.setdefault(basename_key, []).append(full_path)
             stem_index.setdefault(stem_key, []).append(full_path)
-    return basename_index, stem_index
+            normalized_key = os.path.normcase(_strip_indexer_suffix(stem_key))
+            normalized_stem_index.setdefault(normalized_key, []).append(full_path)
+    return basename_index, stem_index, normalized_stem_index
 
 
 def _select_library_match(
@@ -6521,6 +6525,7 @@ def _find_library_match(
     target_path: str,
     basename_index: dict[str, list[str]],
     stem_index: dict[str, list[str]],
+    normalized_stem_index: dict[str, list[str]],
     prefer_opus: bool,
 ) -> str | None:
     basename_key = os.path.normcase(os.path.basename(target_path))
@@ -6533,7 +6538,36 @@ def _find_library_match(
         return _select_library_match(candidates, prefer_opus)
     stem_key = os.path.normcase(_strip_indexer_suffix(stem_key))
     candidates = stem_index.get(stem_key)
+    if candidates:
+        return _select_library_match(candidates, prefer_opus)
+    candidates = normalized_stem_index.get(stem_key)
     return _select_library_match(candidates, prefer_opus)
+
+
+def _path_from_file_uri(uri: str) -> str:
+    parsed = urllib.parse.urlparse(uri)
+    path = urllib.parse.unquote(parsed.path or "")
+    if parsed.netloc and parsed.netloc.lower() not in ("", "localhost"):
+        if path.startswith("/"):
+            path = path[1:]
+        return os.path.join(f"//{parsed.netloc}", path)
+    if path.startswith("/") and re.match(r"/[a-zA-Z]:", path):
+        path = path[1:]
+    if not path and parsed.netloc:
+        path = urllib.parse.unquote(parsed.netloc)
+    return path
+
+
+def _clean_playlist_entry(entry: str) -> str:
+    stripped = entry.strip()
+    if not stripped or stripped.startswith("#"):
+        return stripped
+    if len(stripped) > 1 and stripped[0] == stripped[-1] and stripped[0] in {"'", '"'}:
+        stripped = stripped[1:-1].strip()
+    if stripped.lower().startswith("file://"):
+        stripped = _path_from_file_uri(stripped)
+    stripped = os.path.expandvars(os.path.expanduser(stripped))
+    return stripped
 
 
 def _strip_indexer_suffix(name: str) -> str:
@@ -6696,7 +6730,7 @@ class PlaylistRepairDialog(tk.Toplevel):
                 self.after(0, lambda p=path: self._append_log(f"! Failed to read {p}"))
         self.after(0, lambda: self._update_progress(total_entries, 0))
 
-        basename_index, stem_index = _build_library_search_index(
+        basename_index, stem_index, normalized_stem_index = _build_library_search_index(
             self.library_root, valid_exts
         )
         self.after(
@@ -6742,10 +6776,17 @@ class PlaylistRepairDialog(tk.Toplevel):
                     continue
                 entries_scanned += 1
 
-                was_absolute = os.path.isabs(stripped)
-                abs_path = stripped
+                cleaned_entry = _clean_playlist_entry(stripped)
+                if not cleaned_entry:
+                    new_lines.append(raw)
+                    progress_tick()
+                    continue
+                was_absolute = os.path.isabs(cleaned_entry)
+                abs_path = cleaned_entry
                 if not was_absolute:
-                    abs_path = os.path.normpath(os.path.join(playlist_dir, stripped))
+                    abs_path = os.path.normpath(
+                        os.path.join(playlist_dir, cleaned_entry)
+                    )
 
                 safe_path = ensure_long_path(abs_path)
                 if os.path.exists(safe_path):
@@ -6769,7 +6810,11 @@ class PlaylistRepairDialog(tk.Toplevel):
                     continue
 
                 match = _find_library_match(
-                    abs_path, basename_index, stem_index, prefer_opus
+                    abs_path,
+                    basename_index,
+                    stem_index,
+                    normalized_stem_index,
+                    prefer_opus,
                 )
                 if match:
                     new_line = match if was_absolute else os.path.relpath(match, playlist_dir)
@@ -6778,7 +6823,7 @@ class PlaylistRepairDialog(tk.Toplevel):
                     changed = True
                 else:
                     new_lines.append(raw)
-                    missing_entries.append((playlist_path, stripped))
+                    missing_entries.append((playlist_path, cleaned_entry))
                 progress_tick()
 
             if changed:
