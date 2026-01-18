@@ -2333,17 +2333,31 @@ class DuplicatePairReviewTool(tk.Toplevel):
         frame.columnconfigure(0, weight=1)
         art_label = tk.Label(frame)
         art_label.grid(row=0, column=0, pady=(6, 4))
+        winner_label = ttk.Label(frame, font=_scaled_font(frame, 9, "bold"))
+        winner_label.grid(row=1, column=0, sticky="w", padx=6)
         title_label = ttk.Label(frame, font=_scaled_font(frame, 10, "bold"))
-        title_label.grid(row=1, column=0, sticky="w", padx=6)
+        title_label.grid(row=2, column=0, sticky="w", padx=6)
         meta_label = ttk.Label(frame, justify="left")
-        meta_label.grid(row=2, column=0, sticky="w", padx=6, pady=(2, 6))
+        meta_label.grid(row=3, column=0, sticky="w", padx=6, pady=(2, 6))
         path_label = ttk.Label(frame, foreground="#777", wraplength=300)
-        path_label.grid(row=3, column=0, sticky="w", padx=6, pady=(0, 6))
+        path_label.grid(row=4, column=0, sticky="w", padx=6, pady=(0, 6))
         frame.art_label = art_label  # type: ignore[attr-defined]
+        frame.winner_label = winner_label  # type: ignore[attr-defined]
         frame.title_label = title_label  # type: ignore[attr-defined]
         frame.meta_label = meta_label  # type: ignore[attr-defined]
         frame.path_label = path_label  # type: ignore[attr-defined]
         return frame
+
+    def _set_winner_label(
+        self, panel: ttk.Frame, *, is_winner: bool, has_winner: bool
+    ) -> None:
+        if not has_winner:
+            panel.winner_label.configure(text="Winner: not set", foreground="#777")
+            return
+        if is_winner:
+            panel.winner_label.configure(text="Winner (kept)", foreground="#116329")
+        else:
+            panel.winner_label.configure(text="Not winner", foreground="#777")
 
     def _load_cover_image(self, path: str) -> ImageTk.PhotoImage:
         max_dim = int(load_config().get("preview_artwork_max_dim", PREVIEW_ARTWORK_MAX_DIM))
@@ -2505,6 +2519,16 @@ class DuplicatePairReviewTool(tk.Toplevel):
 
         left_mark, right_mark = self._winner_marks(pair)
         winner_path = self._display_winner(pair)
+        self._set_winner_label(
+            self.left_panel,
+            is_winner=winner_path == pair.left_path if winner_path else False,
+            has_winner=bool(winner_path),
+        )
+        self._set_winner_label(
+            self.right_panel,
+            is_winner=winner_path == pair.right_path if winner_path else False,
+            has_winner=bool(winner_path),
+        )
         self._left_tags = self._load_track(
             self.left_panel,
             pair.left_path,
