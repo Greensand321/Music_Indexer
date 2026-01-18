@@ -8120,6 +8120,10 @@ class SoundVaultImporterApp(tk.Tk):
             command=self._export_artist_title_list,
         )
         tools_menu.add_command(
+            label="Export List by Codec…",
+            command=self._export_codec_file_list,
+        )
+        tools_menu.add_command(
             label="Playlist Artwork", command=self.open_playlist_artwork_folder
         )
         tools_menu.add_command(
@@ -9058,6 +9062,329 @@ class SoundVaultImporterApp(tk.Tk):
             dlg.destroy()
 
         dlg.protocol("WM_DELETE_WINDOW", on_close)
+
+    def _export_codec_file_list(self) -> None:
+        library = self.require_library()
+        if not library:
+            return
+
+        docs_dir = os.path.join(library, "Docs")
+        try:
+            os.makedirs(docs_dir, exist_ok=True)
+        except OSError as exc:
+            messagebox.showerror(
+                "Export List by Codec",
+                f"Could not create documentation folder:\n{exc}",
+            )
+            return
+
+        output_path = os.path.join(docs_dir, "codec_file_list.txt")
+        audio_exts = {".m4a", ".aac", ".mp3", ".wav", ".ogg", ".opus", ".flac"}
+        q: queue.Queue[tuple[str, object]] = queue.Queue()
+        running = tk.BooleanVar(value=False)
+        scanning = tk.BooleanVar(value=False)
+
+        dlg = tk.Toplevel(self)
+        dlg.title("Export List by Codec")
+        dlg.resizable(True, False)
+
+        header = ttk.Frame(dlg)
+        header.pack(fill="x", padx=12, pady=(12, 6))
+        ttk.Label(
+            header,
+            text="Export List by Codec",
+            font=_scaled_font(header, 11, "bold"),
+        ).pack(anchor="w")
+        ttk.Label(
+            header,
+            text="Detect audio file extensions in the library and export file lists by codec.",
+            wraplength=560,
+        ).pack(anchor="w", pady=(2, 0))
+
+        info_frame = ttk.LabelFrame(dlg, text="Library Path")
+        info_frame.pack(fill="x", padx=12, pady=(0, 10))
+        ttk.Label(info_frame, text=library, wraplength=560).pack(
+            anchor="w", padx=8, pady=6
+        )
+
+        output_frame = ttk.LabelFrame(dlg, text="Output File")
+        output_frame.pack(fill="x", padx=12, pady=(0, 10))
+        ttk.Label(output_frame, text=output_path, wraplength=560).pack(
+            anchor="w", padx=8, pady=6
+        )
+
+        selection_frame = ttk.LabelFrame(dlg, text="Codec Selection")
+        selection_frame.pack(fill="both", expand=True, padx=12, pady=(0, 10))
+        selection_frame.columnconfigure((0, 2), weight=1)
+
+        available_frame = ttk.Frame(selection_frame)
+        available_frame.grid(row=0, column=0, sticky="nsew", padx=(6, 4), pady=6)
+        ttk.Label(available_frame, text="Detected Extensions").pack(anchor="w")
+        available_list = tk.Listbox(
+            available_frame, height=8, exportselection=False, selectmode="extended"
+        )
+        available_list.pack(fill="both", expand=True, pady=(4, 0))
+
+        controls_frame = ttk.Frame(selection_frame)
+        controls_frame.grid(row=0, column=1, sticky="ns", padx=4, pady=6)
+        add_btn = ttk.Button(controls_frame, text="Add →")
+        add_btn.pack(fill="x")
+        remove_btn = ttk.Button(controls_frame, text="← Remove")
+        remove_btn.pack(fill="x", pady=(6, 0))
+        add_all_btn = ttk.Button(controls_frame, text="Add All")
+        add_all_btn.pack(fill="x", pady=(20, 0))
+        clear_all_btn = ttk.Button(controls_frame, text="Clear All")
+        clear_all_btn.pack(fill="x", pady=(6, 0))
+
+        include_frame = ttk.Frame(selection_frame)
+        include_frame.grid(row=0, column=2, sticky="nsew", padx=(4, 6), pady=6)
+        ttk.Label(include_frame, text="Include List").pack(anchor="w")
+        include_list = tk.Listbox(
+            include_frame, height=8, exportselection=False, selectmode="extended"
+        )
+        include_list.pack(fill="both", expand=True, pady=(4, 0))
+
+        progress_var = tk.StringVar(value="Scanning for audio file extensions…")
+        progress = ttk.Progressbar(dlg, mode="indeterminate")
+        progress.pack(fill="x", padx=12)
+        ttk.Label(dlg, textvariable=progress_var).pack(
+            anchor="w", padx=14, pady=(4, 0)
+        )
+
+        log_group = ttk.LabelFrame(dlg, text="Export Log")
+        log_group.pack(fill="both", expand=True, padx=12, pady=(10, 0))
+        log_box = ScrolledText(log_group, height=8, state="disabled")
+        log_box.pack(fill="both", expand=True, padx=6, pady=6)
+
+        button_frame = ttk.Frame(dlg)
+        button_frame.pack(fill="x", padx=12, pady=12)
+
+        def append_log(message: str) -> None:
+            self._log(message)
+            log_box.configure(state="normal")
+            log_box.insert("end", message + "\n")
+            log_box.see("end")
+            log_box.configure(state="disabled")
+
+        def set_controls(active: bool) -> None:
+            export_btn.config(state="disabled" if active else "normal")
+            rescan_btn.config(state="disabled" if active else "normal")
+            add_state = "disabled" if active else "normal"
+            add_btn.config(state=add_state)
+            remove_btn.config(state=add_state)
+            add_all_btn.config(state=add_state)
+            clear_all_btn.config(state=add_state)
+            open_state = (
+                "normal" if not active and open_btn_enabled.get() else "disabled"
+            )
+            open_btn.config(state=open_state)
+            close_btn.config(state="disabled" if active else "normal")
+
+        def listbox_items(listbox: tk.Listbox) -> list[str]:
+            return list(listbox.get(0, "end"))
+
+        def set_listbox_items(listbox: tk.Listbox, items: list[str]) -> None:
+            listbox.delete(0, "end")
+            for item in items:
+                listbox.insert("end", item)
+
+        def sync_lists(found_exts: list[str]) -> None:
+            include_items = listbox_items(include_list)
+            cleaned_include = [item for item in include_items if item in found_exts]
+            remaining = [item for item in found_exts if item not in cleaned_include]
+            set_listbox_items(include_list, cleaned_include)
+            set_listbox_items(available_list, remaining)
+
+        def scan_extensions() -> None:
+            if scanning.get() or running.get():
+                return
+            scanning.set(True)
+            open_btn_enabled.set(False)
+            progress_var.set("Scanning library for audio file extensions…")
+            progress.config(mode="indeterminate", value=0)
+            progress.start(10)
+            log_box.configure(state="normal")
+            log_box.delete("1.0", "end")
+            log_box.configure(state="disabled")
+            append_log("Scanning library for codecs…")
+            append_log(f"Library: {library}")
+            set_controls(active=True)
+
+            def worker() -> None:
+                try:
+                    found = set()
+                    for dirpath, _, files in os.walk(library):
+                        for filename in files:
+                            ext = os.path.splitext(filename)[1].lower()
+                            if ext in audio_exts:
+                                found.add(ext)
+                    q.put(("scan_done", sorted(found)))
+                except Exception as exc:  # pragma: no cover - UI surface only
+                    q.put(("error", str(exc)))
+
+            threading.Thread(target=worker, daemon=True).start()
+            poll_queue()
+
+        def move_selected(source: tk.Listbox, target: tk.Listbox) -> None:
+            selections = list(source.curselection())
+            if not selections:
+                return
+            items = [source.get(i) for i in selections]
+            target_items = set(listbox_items(target))
+            for item in items:
+                if item not in target_items:
+                    target.insert("end", item)
+            for index in reversed(selections):
+                source.delete(index)
+
+        def add_all() -> None:
+            items = listbox_items(available_list)
+            for item in items:
+                include_list.insert("end", item)
+            available_list.delete(0, "end")
+
+        def clear_all() -> None:
+            items = listbox_items(include_list)
+            for item in items:
+                available_list.insert("end", item)
+            include_list.delete(0, "end")
+
+        def start_export() -> None:
+            if running.get() or scanning.get():
+                return
+            selected_exts = listbox_items(include_list)
+            if not selected_exts:
+                messagebox.showwarning(
+                    "Export List by Codec",
+                    "Select at least one codec extension to include.",
+                )
+                return
+            running.set(True)
+            open_btn_enabled.set(False)
+            progress_var.set("Scanning library for matching files…")
+            progress.config(mode="indeterminate", value=0)
+            progress.start(10)
+            log_box.configure(state="normal")
+            log_box.delete("1.0", "end")
+            log_box.configure(state="disabled")
+            append_log("Starting codec export…")
+            append_log(f"Library: {library}")
+            append_log(f"Included extensions: {', '.join(selected_exts)}")
+            set_controls(active=True)
+
+            def worker() -> None:
+                try:
+                    audio_files: list[str] = []
+                    selected = set(selected_exts)
+                    for dirpath, _, files in os.walk(library):
+                        for filename in files:
+                            ext = os.path.splitext(filename)[1].lower()
+                            if ext in selected:
+                                audio_files.append(os.path.join(dirpath, filename))
+                    q.put(("files", len(audio_files)))
+
+                    entries: list[str] = []
+                    for idx, full_path in enumerate(audio_files, start=1):
+                        rel_path = os.path.relpath(full_path, library)
+                        entries.append(rel_path)
+                        if idx == 1 or idx % 50 == 0 or idx == len(audio_files):
+                            q.put(("progress", idx, len(audio_files)))
+
+                    entries = sorted(set(entries), key=str.lower)
+                    with open(output_path, "w", encoding="utf-8") as handle:
+                        handle.write("\n".join(entries))
+                    q.put(("done", output_path, len(entries)))
+                except Exception as exc:  # pragma: no cover - UI surface only
+                    q.put(("error", str(exc)))
+
+            threading.Thread(target=worker, daemon=True).start()
+            poll_queue()
+
+        def poll_queue() -> None:
+            try:
+                while True:
+                    message = q.get_nowait()
+                    tag = message[0]
+                    if tag == "scan_done":
+                        scanning.set(False)
+                        progress.stop()
+                        found_exts = message[1]
+                        sync_lists(found_exts)
+                        if found_exts:
+                            progress_var.set(
+                                f"Detected {len(found_exts)} codec extension(s)."
+                            )
+                            append_log(
+                                f"Detected extensions: {', '.join(found_exts)}"
+                            )
+                        else:
+                            progress_var.set("No audio extensions found.")
+                            append_log("No audio file extensions detected.")
+                        set_controls(active=False)
+                    elif tag == "files":
+                        total = message[1]
+                        progress.stop()
+                        progress.config(
+                            mode="determinate", maximum=max(1, total), value=0
+                        )
+                        progress_var.set(f"0/{total} processed")
+                        append_log(f"Found {total} audio files to export.")
+                    elif tag == "progress":
+                        value, total = message[1], message[2]
+                        progress["value"] = value
+                        progress_var.set(f"{value}/{total} processed")
+                    elif tag == "done":
+                        _, path, count = message
+                        running.set(False)
+                        open_btn_enabled.set(True)
+                        progress["value"] = progress["maximum"]
+                        progress_var.set(f"Completed – {count} entries")
+                        append_log(f"Export complete: {path}")
+                        set_controls(active=False)
+                    elif tag == "error":
+                        running.set(False)
+                        scanning.set(False)
+                        progress.stop()
+                        progress_var.set("Export failed")
+                        set_controls(active=False)
+                        messagebox.showerror("Export List by Codec", message[1])
+            except queue.Empty:
+                pass
+            if running.get() or scanning.get():
+                dlg.after(200, poll_queue)
+
+        open_btn_enabled = tk.BooleanVar(value=False)
+
+        add_btn.config(command=lambda: move_selected(available_list, include_list))
+        remove_btn.config(command=lambda: move_selected(include_list, available_list))
+        add_all_btn.config(command=add_all)
+        clear_all_btn.config(command=clear_all)
+
+        export_btn = ttk.Button(button_frame, text="Start Export", command=start_export)
+        export_btn.pack(side="left")
+        rescan_btn = ttk.Button(button_frame, text="Rescan", command=scan_extensions)
+        rescan_btn.pack(side="left", padx=(6, 0))
+        open_btn = ttk.Button(
+            button_frame,
+            text="Open List",
+            command=lambda: self._open_path(output_path),
+            state="disabled",
+        )
+        open_btn.pack(side="left", padx=(6, 0))
+        close_btn = ttk.Button(button_frame, text="Close", command=dlg.destroy)
+        close_btn.pack(side="right")
+
+        def on_close() -> None:
+            if running.get() or scanning.get():
+                messagebox.showinfo(
+                    "Export List by Codec",
+                    "Please wait for the scan/export to finish before closing this window.",
+                )
+                return
+            dlg.destroy()
+
+        dlg.protocol("WM_DELETE_WINDOW", on_close)
+        scan_extensions()
 
     def _set_status(self, text: str) -> None:
         self._full_status = text
