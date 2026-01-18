@@ -6910,13 +6910,15 @@ class FileCleanupDialog(tk.Toplevel):
         self._worker = threading.Thread(target=task, daemon=True)
         self._worker.start()
 
-    def _run_cleanup(self, library_root: str) -> dict[str, int | list[str]]:
+    def _run_cleanup(self, library_root: str) -> dict[str, int | list[str] | str | None]:
         total = 0
         renamed = 0
         skipped = 0
         conflicts = 0
         errors = 0
         skipped_files: list[str] = []
+        rename_map: dict[str, str] = {}
+        playlist_error: str | None = None
         pattern = re.compile(r"\s*\(\d+\)$")
 
         for root, _dirs, files in os.walk(library_root):
@@ -6940,8 +6942,16 @@ class FileCleanupDialog(tk.Toplevel):
                 try:
                     os.rename(src, dst)
                     renamed += 1
+                    rename_map[src] = dst
                 except OSError:
                     errors += 1
+
+        if rename_map:
+            try:
+                from playlist_generator import update_playlists
+                update_playlists(rename_map)
+            except Exception as exc:
+                playlist_error = str(exc)
 
         return {
             "total": total,
@@ -6950,9 +6960,10 @@ class FileCleanupDialog(tk.Toplevel):
             "conflicts": conflicts,
             "errors": errors,
             "skipped_files": skipped_files,
+            "playlist_error": playlist_error,
         }
 
-    def _cleanup_finished(self, summary: dict[str, int | list[str]]) -> None:
+    def _cleanup_finished(self, summary: dict[str, int | list[str] | str | None]) -> None:
         self.execute_btn.configure(state="normal")
         self.close_btn.configure(text="Close")
         message = (
@@ -6961,6 +6972,10 @@ class FileCleanupDialog(tk.Toplevel):
             f"Skipped {summary['skipped']}, conflicts {summary['conflicts']}, "
             f"errors {summary['errors']}."
         )
+        if summary.get("playlist_error"):
+            message = f"{message} Playlist update failed."
+        elif summary.get("renamed"):
+            message = f"{message} Playlists updated."
         self.status_var.set(message)
         if hasattr(self.parent, "_log"):
             self.parent._log(
@@ -6969,6 +6984,9 @@ class FileCleanupDialog(tk.Toplevel):
                 f"skipped={summary['skipped']} conflicts={summary['conflicts']} "
                 f"errors={summary['errors']}"
             )
+            playlist_error = summary.get("playlist_error")
+            if playlist_error:
+                self.parent._log(f"File Clean Up: playlist update failed: {playlist_error}")
             skipped_files = summary.get("skipped_files") or []
             if skipped_files:
                 skipped_details = "\n".join(
