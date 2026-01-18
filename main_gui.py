@@ -10835,7 +10835,11 @@ class SoundVaultImporterApp(tk.Tk):
     def _prepare_player_rows(self, tracks: list[str]) -> list[dict[str, str]]:
         rows = []
         for path in tracks:
-            tags = get_tags(path)
+            try:
+                tags = get_tags(path)
+            except Exception as exc:
+                logging.warning("Failed to read tags for %s: %s", path, exc)
+                tags = {}
             title = tags.get("title") or os.path.basename(path)
             artist = tags.get("artist") or "Unknown"
             album = tags.get("album") or ""
