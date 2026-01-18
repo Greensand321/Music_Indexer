@@ -6,7 +6,8 @@ import shutil
 import time
 import logging
 
-from utils.path_helpers import strip_ext_prefix
+from config import FP_SUBPROCESS_TIMEOUT_SEC, load_config
+from utils.path_helpers import ensure_long_path, strip_ext_prefix
 
 verbose: bool = True
 _logger = logging.getLogger(__name__)
@@ -24,6 +25,15 @@ class FingerprintError(Exception):
     """Raised when fingerprint computation fails."""
 
 
+def _tail_stderr(stderr_text: str, max_lines: int = 10) -> str:
+    if not stderr_text:
+        return ""
+    lines = stderr_text.strip().splitlines()
+    if len(lines) > max_lines:
+        lines = lines[-max_lines:]
+    return "\n".join(lines).strip()
+
+
 def ensure_tool(name: str) -> None:
     """Raise RuntimeError if external tool is missing."""
     if shutil.which(name) is None:
@@ -39,6 +49,8 @@ def trim_silence(
     channels: int = 1,
 ) -> str:
     """Use FFmpeg to trim leading and trailing silence."""
+    if not os.path.exists(input_path):
+        raise FingerprintError(f"file missing: {input_path}")
     ensure_tool("ffmpeg")
     tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
     tmp.close()
@@ -53,7 +65,7 @@ def trim_silence(
         "ffmpeg",
         "-y",
         "-i",
-        input_path,
+        ensure_long_path(input_path),
         "-af",
         ffmpeg_filter,
         "-ar",
@@ -62,10 +74,25 @@ def trim_silence(
         str(channels),
         output_path,
     ]
+    start = time.perf_counter()
+    _logger.info("Trim silence ffmpeg start: path=%s cmd=%s", input_path, cmd)
     proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    elapsed = time.perf_counter() - start
+    _logger.info(
+        "Trim silence ffmpeg end: path=%s returncode=%s elapsed=%.2fs",
+        input_path,
+        proc.returncode,
+        elapsed,
+    )
     if proc.returncode != 0:
         os.remove(output_path)
-        msg = proc.stderr.decode(errors="ignore").strip()
+        msg = _tail_stderr(proc.stderr.decode(errors="ignore"))
+        _logger.error(
+            "Trim silence ffmpeg failed: path=%s returncode=%s stderr_tail=%s",
+            input_path,
+            proc.returncode,
+            msg,
+        )
         raise FingerprintError(f"FFmpeg error: {msg}")
     return output_path
 
@@ -80,12 +107,16 @@ def fingerprint_fpcalc(
     min_silence_duration: float = 0.5,
 ) -> str | None:
     """Return fingerprint string computed via fpcalc."""
+    if not os.path.exists(path):
+        raise FingerprintError(f"file missing: {path}")
     ensure_tool("fpcalc")
     ensure_tool("ffmpeg")
     tmp1 = None
     tmp2 = None
     to_process = path
     try:
+        cfg = load_config()
+        timeout_sec = float(cfg.get("fingerprint_subprocess_timeout_sec", FP_SUBPROCESS_TIMEOUT_SEC))
         if trim:
             tmp1 = trim_silence(
                 path,
@@ -105,29 +136,100 @@ def fingerprint_fpcalc(
             "-t",
             str(duration_sec),
             "-i",
-            tmp1,
+            ensure_long_path(tmp1),
             "-ar",
             str(44100),
             "-ac",
             str(1),
             tmp2.name,
         ]
-        subprocess.run(ffmpeg_cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        try:
+            start = time.perf_counter()
+            _logger.info(
+                "Fingerprint ffmpeg start: path=%s cmd=%s timeout=%.2fs",
+                path,
+                ffmpeg_cmd,
+                timeout_sec,
+            )
+            subprocess.run(
+                ffmpeg_cmd,
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=timeout_sec,
+            )
+            elapsed = time.perf_counter() - start
+            _logger.info(
+                "Fingerprint ffmpeg end: path=%s elapsed=%.2fs output=%s",
+                path,
+                elapsed,
+                tmp2.name,
+            )
+        except subprocess.TimeoutExpired as exc:
+            _logger.error(
+                "Fingerprint ffmpeg timeout: path=%s timeout=%.2fs",
+                path,
+                timeout_sec,
+            )
+            raise FingerprintError("Fingerprint timeout") from exc
+        except subprocess.CalledProcessError as exc:
+            msg = _tail_stderr((exc.stderr or b"").decode(errors="ignore"))
+            _logger.error(
+                "Fingerprint ffmpeg failed: path=%s returncode=%s stderr_tail=%s",
+                path,
+                exc.returncode,
+                msg,
+            )
+            raise FingerprintError(f"FFmpeg error: {msg}") from exc
         to_process = tmp2.name
         safe_path = strip_ext_prefix(to_process)
         cmd = ["fpcalc", "-json", safe_path]
+        _logger.info(
+            "Fingerprint fpcalc start: path=%s cmd=%s timeout=%.2fs",
+            path,
+            cmd,
+            timeout_sec,
+        )
         _dlog("FPCLI", f"cmd={cmd}")
-        proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        try:
+            start = time.perf_counter()
+            proc = subprocess.run(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=timeout_sec,
+            )
+        except subprocess.TimeoutExpired as exc:
+            _logger.error(
+                "Fingerprint fpcalc timeout: path=%s timeout=%.2fs",
+                path,
+                timeout_sec,
+            )
+            raise FingerprintError("Fingerprint timeout") from exc
+        elapsed = time.perf_counter() - start
+        _logger.info(
+            "Fingerprint fpcalc end: path=%s returncode=%s elapsed=%.2fs",
+            path,
+            proc.returncode,
+            elapsed,
+        )
         _dlog("FPCLI", f"stdout={proc.stdout.strip()}")
-        _dlog("FPCLI", f"stderr={proc.stderr.strip()}")
+        _dlog("FPCLI", f"stderr={_tail_stderr(proc.stderr)}")
         if proc.returncode != 0:
-            raise FingerprintError(proc.stderr.strip())
+            _logger.error(
+                "Fingerprint fpcalc failed: path=%s returncode=%s stderr_tail=%s",
+                path,
+                proc.returncode,
+                _tail_stderr(proc.stderr),
+            )
+            raise FingerprintError(_tail_stderr(proc.stderr))
         data = json.loads(proc.stdout)
         fp = data.get("fingerprint")
         if not fp:
             return None
         fp_str = " ".join(fp.split(","))
-        _dlog("FP", f"value={fp_str} prefix={fp_str[:16]}")
+        _dlog("FP", f"prefix={fp_str[:16]} len={len(fp_str)}")
         return fp_str
     finally:
         for t in (tmp1 if trim else None, tmp2.name if tmp2 else None):

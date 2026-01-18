@@ -7,6 +7,7 @@ from typing import Iterable, Callable, List, Optional
 import pkgutil
 import importlib
 from mutagen import File as MutagenFile
+from utils.audio_metadata_reader import read_tags
 from utils.path_helpers import ensure_long_path
 
 from plugins.base import MetadataPlugin
@@ -93,14 +94,10 @@ def is_remix(audio_path):
     """Return True if filename or existing title suggests a remix."""
     if "remix" in os.path.basename(audio_path).lower():
         return True
-    try:
-        audio = MutagenFile(ensure_long_path(audio_path), easy=True)
-    except Exception:
-        return False
-    if audio and audio.tags and "title" in audio.tags:
-        title = " ".join(audio.tags["title"]).lower()
-        if "remix" in title:
-            return True
+    tags = read_tags(ensure_long_path(audio_path))
+    title = tags.get("title")
+    if isinstance(title, str) and "remix" in title.lower():
+        return True
     return False
 
 def find_files(root):
@@ -220,17 +217,17 @@ def build_file_records(
 
         log_callback(f"Processing {f}")
 
-        try:
-            audio = MutagenFile(ensure_long_path(f), easy=True)
-        except Exception as e:
-            log_callback(f"Failed to read {f}: {e}")
-            if progress_callback:
-                progress_callback(idx)
-            continue
-        old_artist = (audio.tags.get("artist") or [None])[0] if audio and audio.tags else None
-        old_title = (audio.tags.get("title") or [None])[0] if audio and audio.tags else None
-        old_album = (audio.tags.get("album") or [None])[0] if audio and audio.tags else None
-        old_genres = audio.tags.get("genre", []) if audio and audio.tags else []
+        tags = read_tags(ensure_long_path(f))
+        old_artist = tags.get("artist")
+        old_title = tags.get("title")
+        old_album = tags.get("album")
+        raw_genres = tags.get("genre")
+        if raw_genres in (None, ""):
+            old_genres = []
+        elif isinstance(raw_genres, (list, tuple)):
+            old_genres = [str(v) for v in raw_genres if isinstance(v, str)]
+        else:
+            old_genres = [str(raw_genres)]
 
         rec = FileRecord(
             path=Path(f),

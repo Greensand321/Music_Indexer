@@ -60,35 +60,3 @@ if 'pydub' not in sys.modules:
     sys.modules['pydub'] = pydub
     sys.modules['pydub.generators'] = gens
 
-    # Provide a lightweight audio_norm replacement using the stubs
-    audio_norm = types.ModuleType('audio_norm')
-    audio_norm.SILENCE_THRESH = -50
-
-    def normalize_for_fp(
-        path,
-        fingerprint_offset_ms=0,
-        fingerprint_duration_ms=120_000,
-        allow_mismatched_edits=True,
-        log_callback=None,
-    ):
-        if isinstance(path, (str, bytes, os.PathLike)):
-            with open(path, 'rb') as f:
-                data = f.read()
-        else:
-            data = path.read()
-        try:
-            dur = int(data.decode())
-        except Exception:
-            dur = fingerprint_duration_ms
-        if abs(dur - fingerprint_duration_ms) > 2000 and log_callback:
-            log_callback(
-                f"WARNING: trimmed duration {dur}ms differs from target {fingerprint_duration_ms}ms"
-            )
-        buf = io.BytesIO(str(fingerprint_duration_ms).encode())
-        buf.seek(0)
-        return buf
-
-    audio_norm.normalize_for_fp = normalize_for_fp
-    audio_norm.silence = silence_mod
-    sys.modules['audio_norm'] = audio_norm
-
