@@ -166,21 +166,9 @@ def _sanitize_tag_value(value: object, field: str, log_callback=None) -> str:
     return sanitized
 
 
-def _ensure_unique_destination(
-    path: str,
-    moves: dict,
-    current_path: str | None = None,
-    log_callback=None,
-) -> str:
+def _ensure_unique_destination(path: str, moves: dict, log_callback=None) -> str:
     if path not in moves.values() and not os.path.exists(path):
         return path
-    if current_path and path not in moves.values():
-        try:
-            if os.path.exists(current_path) and os.path.exists(path):
-                if os.path.samefile(path, current_path):
-                    return path
-        except OSError:
-            pass
     base, ext = os.path.splitext(path)
     counter = 1
     candidate = f"{base} ({counter}){ext}"
@@ -722,7 +710,7 @@ def compute_moves_and_tag_index(
                 decision_log.append(f"  Renaming to '{new_filename}' (using raw artist)")
 
             new_path = os.path.join(base_folder, new_filename)
-            new_path = _ensure_unique_destination(new_path, moves, old_path, log_callback)
+            new_path = _ensure_unique_destination(new_path, moves, log_callback)
             moves[old_path] = new_path
             tag_index[new_path] = {
                 "leftover_tags": [],
@@ -777,7 +765,7 @@ def compute_moves_and_tag_index(
                     decision_log.append(f"  Renaming to '{new_filename}' (using raw artist)")
 
                 new_path = os.path.join(base_folder, new_filename)
-                new_path = _ensure_unique_destination(new_path, moves, old_path, log_callback)
+                new_path = _ensure_unique_destination(new_path, moves, log_callback)
                 moves[old_path] = new_path
                 tag_index[new_path] = {
                     "leftover_tags": [],
@@ -860,7 +848,7 @@ def compute_moves_and_tag_index(
             decision_log.append(f"  Renaming to '{new_filename}' (using raw artist)")
 
         new_path = os.path.join(base_folder, new_filename)
-        new_path = _ensure_unique_destination(new_path, moves, old_path, log_callback)
+        new_path = _ensure_unique_destination(new_path, moves, log_callback)
         moves[old_path] = new_path
         decision_log.append(
             f"  → Final: '{os.path.relpath(new_path, MUSIC_ROOT)}'"
