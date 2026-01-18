@@ -2,7 +2,7 @@ import os
 from tkinter import messagebox
 from utils.audio_metadata_reader import read_tags
 
-SUPPORTED_EXTS = {".mp3", ".flac", ".m4a", ".aac", ".wav", ".ogg"}
+SUPPORTED_EXTS = {".mp3", ".flac", ".m4a", ".aac", ".wav", ".ogg", ".opus"}
 
 
 def sanitize(text: str) -> str:

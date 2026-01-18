@@ -8,7 +8,7 @@ from validator import validate_soundvault_structure
 import music_indexer_api as idx
 from utils.audio_metadata_reader import read_metadata
 
-SUPPORTED_EXTS = {".flac", ".m4a", ".aac", ".mp3", ".wav", ".ogg"}
+SUPPORTED_EXTS = {".flac", ".m4a", ".aac", ".mp3", ".wav", ".ogg", ".opus"}
 
 
 def build_import_preview_html(
