@@ -6080,7 +6080,6 @@ class LibraryCompressionPanel(ttk.Frame):
         self.source_var = tk.StringVar(value=default_path)
         self.destination_var = tk.StringVar(value="")
         self.status_var = tk.StringVar(value="Ready to mirror library.")
-        self.progress_var = tk.StringVar(value="Progress: 0 / 0")
         self.overwrite_var = tk.BooleanVar(value=False)
         self._worker: threading.Thread | None = None
         self.report_path: str | None = None
@@ -6129,7 +6128,6 @@ class LibraryCompressionPanel(ttk.Frame):
             mode="determinate",
         )
         self.progress.pack(fill="x", pady=(0, 8))
-        ttk.Label(self, textvariable=self.progress_var).pack(anchor="w", pady=(0, 8))
 
         controls = ttk.Frame(self)
         controls.pack(anchor="e")
@@ -6216,7 +6214,6 @@ class LibraryCompressionPanel(ttk.Frame):
         self.run_btn.configure(state=state)
         if running:
             self.progress.configure(maximum=1, value=0)
-            self.progress_var.set("Progress: 0 / 0")
 
     def _log(self, message: str) -> None:
         if hasattr(self.controller, "_log"):
@@ -6243,7 +6240,6 @@ class LibraryCompressionPanel(ttk.Frame):
                     self.status_var.set("Mirroring library…"),
                     self.progress.configure(maximum=max(t, 1)),
                     self.progress.configure(value=d),
-                    self.progress_var.set(f"Progress: {d} / {t}"),
                 ),
             )
 
