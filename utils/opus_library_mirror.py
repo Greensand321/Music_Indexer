@@ -53,28 +53,19 @@ def mirror_library(
             total_files += 1
             src_path = os.path.join(root, filename)
             ext = os.path.splitext(filename)[1].lower()
-            is_audio = ext in AUDIO_EXTS
             if ext == ".flac":
                 dest_name = f"{os.path.splitext(filename)[0]}.opus"
                 dest_path = os.path.join(dest_root, dest_name)
                 if os.path.exists(dest_path) and not overwrite:
-                    if is_audio:
-                        with lock:
-                            counters["skipped"] += 1
-                            skipped_files.append(
-                                (src_path, "Destination already exists.")
-                            )
+                    counters["skipped"] += 1
+                    skipped_files.append((src_path, "Destination already exists."))
                     continue
                 tasks.append(("convert", src_path, dest_path))
             else:
                 dest_path = os.path.join(dest_root, filename)
                 if os.path.exists(dest_path) and not overwrite:
-                    if is_audio:
-                        with lock:
-                            counters["skipped"] += 1
-                            skipped_files.append(
-                                (src_path, "Destination already exists.")
-                            )
+                    counters["skipped"] += 1
+                    skipped_files.append((src_path, "Destination already exists."))
                     continue
                 tasks.append(("copy", src_path, dest_path))
 
