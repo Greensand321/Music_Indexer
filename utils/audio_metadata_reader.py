@@ -9,6 +9,7 @@ from typing import Dict, Iterable, List, Optional, Tuple
 
 from utils.path_helpers import ensure_long_path
 from utils.year_normalizer import normalize_year
+from utils.opus_metadata_reader import read_opus_metadata
 
 logger = logging.getLogger(__name__)
 
@@ -326,6 +327,14 @@ def read_metadata(
     error: Optional[str] = None
     reader_hint: Optional[str] = None
 
+    ext = os.path.splitext(path)[1].lower()
+    if ext == ".opus":
+        tags, cover_payloads, error = read_opus_metadata(path)
+        if not include_cover:
+            cover_payloads = []
+        reader_hint = "opus metadata"
+        return tags, cover_payloads, error, reader_hint
+
     preloaded = audio is not None
     if audio is None:
         if MutagenFile is None:
@@ -345,7 +354,6 @@ def read_metadata(
     if error is None:
         error = extra_error
 
-    ext = os.path.splitext(path)[1].lower()
     if ext in {".m4a", ".mp4"}:
         logger.debug("M4A metadata reader used: %s for %s", reader_hint, path)
 
