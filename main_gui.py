@@ -7333,8 +7333,8 @@ class FileCleanupDialog(tk.Toplevel):
         ttk.Label(
             container,
             text=(
-                "Remove trailing (numbers) from audio filenames in the library. "
-                "Any collisions with existing filenames are skipped."
+                "Remove trailing (numbers) or 'copy' suffixes from audio filenames "
+                "in the library. Any collisions with existing filenames are skipped."
             ),
             foreground="#555",
             wraplength=420,
@@ -7401,7 +7401,8 @@ class FileCleanupDialog(tk.Toplevel):
         skipped_files: list[str] = []
         rename_map: dict[str, str] = {}
         playlist_error: str | None = None
-        pattern = re.compile(r"\s*\(\d+\)$")
+        numeric_suffix = re.compile(r"\s*\(\d+\)$")
+        copy_suffix = re.compile(r"\s*(?:-\s*)?copy(?:\s*\(\d+\))?$", re.IGNORECASE)
 
         for root, _dirs, files in os.walk(library_root):
             for filename in files:
@@ -7410,7 +7411,8 @@ class FileCleanupDialog(tk.Toplevel):
                     continue
                 total += 1
                 stem = os.path.splitext(filename)[0]
-                new_stem = pattern.sub("", stem)
+                new_stem = copy_suffix.sub("", stem)
+                new_stem = numeric_suffix.sub("", new_stem)
                 if new_stem == stem:
                     skipped += 1
                     continue
