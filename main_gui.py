@@ -6469,6 +6469,435 @@ class OpusTesterDialog(tk.Toplevel):
         self.cover_label.configure(image=self._cover_photo, text="")
 
 
+def _normalize_playlist_line(line: str) -> str:
+    return line.rstrip("\n")
+
+
+def _iter_playlist_tracks(lines: list[str]) -> list[str]:
+    tracks = []
+    for raw in lines:
+        stripped = raw.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        tracks.append(stripped)
+    return tracks
+
+
+def _build_library_search_index(
+    library_root: str, valid_exts: set[str]
+) -> tuple[dict[str, list[str]], dict[str, list[str]]]:
+    basename_index: dict[str, list[str]] = {}
+    stem_index: dict[str, list[str]] = {}
+    for dirpath, dirnames, filenames in os.walk(library_root):
+        dirnames.sort()
+        filenames.sort()
+        for fname in filenames:
+            ext = os.path.splitext(fname)[1].lower()
+            if ext not in valid_exts:
+                continue
+            full_path = os.path.join(dirpath, fname)
+            basename_key = os.path.normcase(fname)
+            stem_key = os.path.normcase(os.path.splitext(fname)[0])
+            basename_index.setdefault(basename_key, []).append(full_path)
+            stem_index.setdefault(stem_key, []).append(full_path)
+    return basename_index, stem_index
+
+
+def _select_library_match(
+    candidates: list[str], prefer_opus: bool
+) -> str | None:
+    if not candidates:
+        return None
+
+    def sort_key(path: str) -> tuple[int, str]:
+        ext = os.path.splitext(path)[1].lower()
+        opus_rank = 0 if prefer_opus and ext == ".opus" else 1
+        return (opus_rank, os.path.normcase(path))
+
+    return sorted(candidates, key=sort_key)[0]
+
+
+def _find_library_match(
+    target_path: str,
+    basename_index: dict[str, list[str]],
+    stem_index: dict[str, list[str]],
+    prefer_opus: bool,
+) -> str | None:
+    basename_key = os.path.normcase(os.path.basename(target_path))
+    candidates = basename_index.get(basename_key)
+    if candidates:
+        return _select_library_match(candidates, prefer_opus)
+    stem_key = os.path.normcase(os.path.splitext(os.path.basename(target_path))[0])
+    candidates = stem_index.get(stem_key)
+    return _select_library_match(candidates, prefer_opus)
+
+
+class PlaylistRepairDialog(tk.Toplevel):
+    """Repair playlist entries by locating missing files in the library."""
+
+    def __init__(self, parent: tk.Widget, library_root: str):
+        super().__init__(parent)
+        self.title("Playlist Repair")
+        self.transient(parent)
+        self.resizable(True, True)
+        self.parent = parent
+        self.library_root = library_root
+
+        self.playlist_paths: list[str] = []
+        self.prefer_opus_var = tk.BooleanVar(value=False)
+        self.status_var = tk.StringVar(value="Ready to repair playlists.")
+        self.progress_var = tk.StringVar(value="Progress: 0 / 0")
+        self.report_path: str | None = None
+        self._worker: threading.Thread | None = None
+
+        container = ttk.Frame(self, padding=12)
+        container.pack(fill="both", expand=True)
+
+        ttk.Label(
+            container,
+            text="Select playlists to repair. Missing tracks will be "
+            "updated using the library search index.",
+            foreground="#555",
+            wraplength=560,
+        ).pack(anchor="w")
+
+        playlist_frame = ttk.LabelFrame(container, text="Playlists")
+        playlist_frame.pack(fill="both", expand=True, pady=(10, 6))
+        playlist_frame.columnconfigure(0, weight=1)
+        playlist_frame.rowconfigure(0, weight=1)
+        self.playlist_list = tk.Listbox(playlist_frame, height=6)
+        self.playlist_list.grid(row=0, column=0, sticky="nsew", padx=6, pady=6)
+        playlist_scroll = ttk.Scrollbar(
+            playlist_frame, orient="vertical", command=self.playlist_list.yview
+        )
+        playlist_scroll.grid(row=0, column=1, sticky="ns", pady=6)
+        self.playlist_list.configure(yscrollcommand=playlist_scroll.set)
+
+        buttons = ttk.Frame(playlist_frame)
+        buttons.grid(row=1, column=0, columnspan=2, sticky="e", padx=6, pady=(0, 6))
+        ttk.Button(buttons, text="Add…", command=self._add_playlists).pack(
+            side="left"
+        )
+        ttk.Button(
+            buttons, text="Remove Selected", command=self._remove_selected
+        ).pack(side="left", padx=(6, 0))
+        ttk.Button(buttons, text="Clear", command=self._clear_playlists).pack(
+            side="left", padx=(6, 0)
+        )
+
+        ttk.Checkbutton(
+            container,
+            text="Prefer Opus when searching for missing FLAC tracks",
+            variable=self.prefer_opus_var,
+        ).pack(anchor="w", pady=(0, 6))
+
+        ttk.Label(container, textvariable=self.status_var).pack(anchor="w")
+        self.progress = ttk.Progressbar(container, mode="determinate")
+        self.progress.pack(fill="x", pady=(2, 6))
+        ttk.Label(container, textvariable=self.progress_var).pack(anchor="w")
+
+        log_frame = ttk.LabelFrame(container, text="Repair Log")
+        log_frame.pack(fill="both", expand=True, pady=(8, 6))
+        self.log_text = ScrolledText(log_frame, height=10, wrap="word", state="disabled")
+        self.log_text.pack(fill="both", expand=True, padx=6, pady=6)
+
+        controls = ttk.Frame(container)
+        controls.pack(fill="x", pady=(6, 0))
+        self.run_btn = ttk.Button(controls, text="Run Repair", command=self._start)
+        self.run_btn.pack(side="right")
+        self.open_report_btn = ttk.Button(
+            controls, text="Open Report", command=self._open_report, state="disabled"
+        )
+        self.open_report_btn.pack(side="right", padx=(0, 6))
+        ttk.Button(controls, text="Close", command=self.destroy).pack(side="left")
+
+    def _add_playlists(self) -> None:
+        initial_dir = os.path.join(self.library_root, "Playlists")
+        if not os.path.isdir(initial_dir):
+            initial_dir = load_last_path() or os.getcwd()
+        chosen = filedialog.askopenfilenames(
+            parent=self,
+            title="Select Playlists",
+            initialdir=initial_dir,
+            filetypes=[("Playlist files", "*.m3u *.m3u8")],
+        )
+        if not chosen:
+            return
+        save_last_path(os.path.dirname(chosen[0]))
+        for path in chosen:
+            if path not in self.playlist_paths:
+                self.playlist_paths.append(path)
+                self.playlist_list.insert("end", path)
+
+    def _remove_selected(self) -> None:
+        selected = list(self.playlist_list.curselection())
+        for idx in reversed(selected):
+            path = self.playlist_list.get(idx)
+            self.playlist_list.delete(idx)
+            if path in self.playlist_paths:
+                self.playlist_paths.remove(path)
+
+    def _clear_playlists(self) -> None:
+        self.playlist_paths.clear()
+        self.playlist_list.delete(0, tk.END)
+
+    def _append_log(self, message: str) -> None:
+        self.log_text.configure(state="normal")
+        self.log_text.insert("end", message + "\n")
+        self.log_text.see("end")
+        self.log_text.configure(state="disabled")
+
+    def _set_running(self, running: bool, status: str) -> None:
+        self.status_var.set(status)
+        state = "disabled" if running else "normal"
+        self.run_btn.configure(state=state)
+
+    def _update_progress(self, total: int, completed: int) -> None:
+        self.progress.configure(maximum=max(total, 1))
+        self.progress.configure(value=completed)
+        self.progress_var.set(f"Progress: {completed} / {total}")
+
+    def _start(self) -> None:
+        if not self.playlist_paths:
+            messagebox.showwarning("Playlists Required", "Select at least one playlist.")
+            return
+        self._set_running(True, "Preparing library index…")
+        self.report_path = None
+        self.open_report_btn.configure(state="disabled")
+
+        def worker() -> None:
+            try:
+                summary = self._repair_playlists()
+                self.after(0, lambda: self._finish(summary))
+            except Exception as exc:  # pragma: no cover - safety net
+                self.after(0, lambda: self._fail(str(exc)))
+
+        self._worker = threading.Thread(target=worker, daemon=True)
+        self._worker.start()
+
+    def _repair_playlists(self) -> dict[str, object]:
+        playlist_paths = list(self.playlist_paths)
+        prefer_opus = self.prefer_opus_var.get()
+        valid_exts = {ext.lower() for ext in playlist_generator.DEFAULT_EXTS}
+        total_entries = 0
+        for path in playlist_paths:
+            try:
+                with open(path, "r", encoding="utf-8-sig") as handle:
+                    total_entries += len(_iter_playlist_tracks(handle.readlines()))
+            except OSError:
+                self.after(0, lambda p=path: self._append_log(f"! Failed to read {p}"))
+        self.after(0, lambda: self._update_progress(total_entries, 0))
+
+        basename_index, stem_index = _build_library_search_index(
+            self.library_root, valid_exts
+        )
+        self.after(
+            0,
+            lambda: self._append_log(
+                f"→ Indexed {sum(len(v) for v in basename_index.values())} tracks."
+            ),
+        )
+
+        missing_entries: list[tuple[str, str]] = []
+        processed = 0
+        fixed_opus = 0
+        fixed_search = 0
+        updated_playlists = 0
+        entries_scanned = 0
+
+        def progress_tick() -> None:
+            nonlocal processed
+            processed += 1
+            if processed % 10 == 0 or processed == total_entries:
+                self.after(0, lambda p=processed: self._update_progress(total_entries, p))
+
+        for playlist_path in playlist_paths:
+            playlist_dir = os.path.dirname(playlist_path)
+            try:
+                with open(playlist_path, "r", encoding="utf-8-sig") as handle:
+                    lines = [_normalize_playlist_line(line) for line in handle.readlines()]
+            except OSError as exc:
+                self.after(
+                    0,
+                    lambda p=playlist_path, e=exc: self._append_log(
+                        f"! Failed to open {p}: {e}"
+                    ),
+                )
+                continue
+
+            changed = False
+            new_lines: list[str] = []
+            for raw in lines:
+                stripped = raw.strip()
+                if not stripped or stripped.startswith("#"):
+                    new_lines.append(raw)
+                    continue
+                entries_scanned += 1
+
+                was_absolute = os.path.isabs(stripped)
+                abs_path = stripped
+                if not was_absolute:
+                    abs_path = os.path.normpath(os.path.join(playlist_dir, stripped))
+
+                safe_path = ensure_long_path(abs_path)
+                if os.path.exists(safe_path):
+                    new_lines.append(raw)
+                    progress_tick()
+                    continue
+
+                opus_swapped = False
+                if prefer_opus and os.path.splitext(abs_path)[1].lower() == ".flac":
+                    opus_candidate = os.path.splitext(abs_path)[0] + ".opus"
+                    if os.path.exists(ensure_long_path(opus_candidate)):
+                        new_line = opus_candidate if was_absolute else os.path.relpath(
+                            opus_candidate, playlist_dir
+                        )
+                        new_lines.append(new_line)
+                        fixed_opus += 1
+                        changed = True
+                        opus_swapped = True
+                if opus_swapped:
+                    progress_tick()
+                    continue
+
+                match = _find_library_match(
+                    abs_path, basename_index, stem_index, prefer_opus
+                )
+                if match:
+                    new_line = match if was_absolute else os.path.relpath(match, playlist_dir)
+                    new_lines.append(new_line)
+                    fixed_search += 1
+                    changed = True
+                else:
+                    new_lines.append(raw)
+                    missing_entries.append((playlist_path, stripped))
+                progress_tick()
+
+            if changed:
+                try:
+                    with open(playlist_path, "w", encoding="utf-8") as handle:
+                        handle.write("\n".join(new_lines) + "\n")
+                    updated_playlists += 1
+                    self.after(
+                        0,
+                        lambda p=playlist_path: self._append_log(
+                            f"✓ Updated {p}"
+                        ),
+                    )
+                except OSError as exc:
+                    self.after(
+                        0,
+                        lambda p=playlist_path, e=exc: self._append_log(
+                            f"! Failed to write {p}: {e}"
+                        ),
+                    )
+            else:
+                self.after(
+                    0,
+                    lambda p=playlist_path: self._append_log(
+                        f"• No changes needed for {p}"
+                    ),
+                )
+
+        summary = {
+            "playlist_count": len(playlist_paths),
+            "entries_scanned": entries_scanned,
+            "updated_playlists": updated_playlists,
+            "fixed_opus": fixed_opus,
+            "fixed_search": fixed_search,
+            "missing": missing_entries,
+            "prefer_opus": prefer_opus,
+        }
+        self._write_report(summary)
+        return summary
+
+    def _write_report(self, summary: dict[str, object]) -> None:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        reports_dir = os.path.join(self.library_root, "Docs", "playlist_repair_reports")
+        os.makedirs(reports_dir, exist_ok=True)
+        report_path = os.path.join(reports_dir, f"playlist_repair_report_{timestamp}.txt")
+
+        missing_entries = summary.get("missing", [])
+        if not isinstance(missing_entries, list):
+            missing_entries = []
+
+        lines = [
+            "Playlist Repair Report",
+            f"Library: {self.library_root}",
+            f"Prefer Opus: {summary.get('prefer_opus')}",
+            f"Playlists processed: {summary.get('playlist_count')}",
+            f"Entries scanned: {summary.get('entries_scanned')}",
+            f"Playlists updated: {summary.get('updated_playlists')}",
+            f"Fixed via Opus swap: {summary.get('fixed_opus')}",
+            f"Fixed via library search: {summary.get('fixed_search')}",
+            f"Missing entries: {len(missing_entries)}",
+            "",
+        ]
+
+        if missing_entries:
+            lines.append("Missing Tracks:")
+            for playlist_path, entry in missing_entries:
+                lines.append(f"- {playlist_path}: {entry}")
+        else:
+            lines.append("All entries were resolved.")
+
+        try:
+            with open(report_path, "w", encoding="utf-8") as handle:
+                handle.write("\n".join(lines))
+        except OSError as exc:
+            self.after(
+                0,
+                lambda e=exc: self._append_log(f"! Failed to write report: {e}"),
+            )
+            self.report_path = None
+            return
+
+        self.report_path = report_path
+        self.after(
+            0,
+            lambda p=report_path: self._append_log(f"→ Report saved to {p}"),
+        )
+
+    def _finish(self, summary: dict[str, object]) -> None:
+        self._set_running(False, "Completed playlist repair.")
+        missing = summary.get("missing", [])
+        missing_count = len(missing) if isinstance(missing, list) else 0
+        message = (
+            "Playlist repair complete.\n\n"
+            f"Playlists processed: {summary.get('playlist_count')}\n"
+            f"Entries scanned: {summary.get('entries_scanned')}\n"
+            f"Playlists updated: {summary.get('updated_playlists')}\n"
+            f"Fixed via Opus swap: {summary.get('fixed_opus')}\n"
+            f"Fixed via library search: {summary.get('fixed_search')}\n"
+            f"Missing entries: {missing_count}"
+        )
+        if self.report_path:
+            self.open_report_btn.configure(state="normal")
+        messagebox.showinfo("Playlist Repair", message)
+
+    def _fail(self, error: str) -> None:
+        self._set_running(False, "Repair failed.")
+        messagebox.showerror("Playlist Repair", f"Repair failed:\n{error}")
+
+    def _open_report(self) -> None:
+        if not self.report_path:
+            messagebox.showinfo("Playlist Repair", "No report is available yet.")
+            return
+        safe_path = ensure_long_path(self.report_path)
+        if not os.path.exists(safe_path):
+            messagebox.showerror(
+                "Report Missing",
+                "The report could not be found. Run the repair again to generate a new report.",
+            )
+            return
+        display_path = strip_ext_prefix(self.report_path)
+        try:
+            uri = Path(display_path).resolve().as_uri()
+        except Exception:
+            uri = display_path
+        webbrowser.open(uri)
+
+
 class OpusLibraryMirrorDialog(tk.Toplevel):
     """Create a mirrored library with FLAC files converted to Opus."""
 
@@ -7315,6 +7744,7 @@ class SoundVaultImporterApp(tk.Tk):
         self.duplicate_finder_window: DuplicateFinderShell | None = None
         self.duplicate_pair_review_window: DuplicatePairReviewTool | None = None
         self.duplicate_scan_engine_window: DuplicateScanEngineTool | None = None
+        self.playlist_repair_window: PlaylistRepairDialog | None = None
         self.duplicate_finder_plan: ConsolidationPlan | None = None
         self.duplicate_finder_plan_library: str | None = None
 
@@ -7488,6 +7918,9 @@ class SoundVaultImporterApp(tk.Tk):
         )
         tools_menu.add_command(
             label="Playlist Artwork", command=self.open_playlist_artwork_folder
+        )
+        tools_menu.add_command(
+            label="Playlist Repair…", command=self._open_playlist_repair_tool
         )
         tools_menu.add_command(label="File Clean Up…", command=self._open_file_cleanup_tool)
         tools_menu.add_command(
@@ -10047,6 +10480,26 @@ class SoundVaultImporterApp(tk.Tk):
 
     def _open_duplicate_bucketing_poc_tool(self) -> None:
         DuplicateBucketingPocDialog(self)
+
+    def _open_playlist_repair_tool(self) -> None:
+        library = self.require_library()
+        if not library:
+            return
+        existing = getattr(self, "playlist_repair_window", None)
+        if existing and existing.winfo_exists():
+            existing.lift()
+            existing.focus_set()
+            return
+        win = PlaylistRepairDialog(self, library_root=library)
+        win.bind(
+            "<Destroy>",
+            lambda e: (
+                setattr(self, "playlist_repair_window", None)
+                if e.widget is win
+                else None
+            ),
+        )
+        self.playlist_repair_window = win
 
     def _open_qt_preview_window(self) -> None:
         qt_available = any(
