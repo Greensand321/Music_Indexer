@@ -102,6 +102,7 @@ def _pick_best_match(
     if best_overlap < 0.4 and best_score < 1.0:
         return None
     return best_path
+DEFAULT_EXTS = {".mp3", ".flac", ".wav", ".aac", ".m4a", ".ogg", ".opus"}
 
 
 def _sanitize_name(rel_path, existing):
