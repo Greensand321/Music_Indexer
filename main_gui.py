@@ -10202,9 +10202,6 @@ class SoundVaultImporterApp(tk.Tk):
         player_item: str | None = None,
     ) -> None:
         """Play an audio preview while serializing concurrent requests."""
-        ext = os.path.splitext(path)[1].lower()
-        if ext == ".opus" and start_ms > 0:
-            start_ms = 0
 
         if not self.preview_backend_available:
             err = self.preview_backend_error or "VLC preview backend unavailable."
