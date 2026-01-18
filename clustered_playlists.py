@@ -1,5 +1,9 @@
 import importlib.util
 import os
+import shutil
+import subprocess
+import tempfile
+from contextlib import contextmanager
 from collections import Counter
 from concurrent.futures import ProcessPoolExecutor, as_completed
 import multiprocessing
@@ -9,6 +13,7 @@ from sklearn.cluster import KMeans
 from sklearn.preprocessing import StandardScaler
 import hdbscan
 
+from utils.path_helpers import ensure_long_path
 
 def _module_available(name: str) -> bool:
     try:
@@ -69,7 +74,16 @@ def _extract_audio_features_librosa(file_path: str, log_callback) -> "np.ndarray
     if librosa is None:
         raise RuntimeError("librosa required for feature extraction (engine='librosa')")
 
-    y, sr = librosa.load(file_path, sr=None, mono=True)
+    try:
+        y, sr = librosa.load(file_path, sr=None, mono=True)
+    except Exception as exc:
+        if os.path.splitext(file_path)[1].lower() != ".opus":
+            raise
+        log_callback(
+            f"! Direct Opus decode failed ({exc}); retrying via FFmpeg for {os.path.basename(file_path)}"
+        )
+        with _decode_opus_as_wav(file_path, log_callback) as audio_path:
+            y, sr = librosa.load(audio_path, sr=None, mono=True)
     mfcc = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=13)
     log_callback(
         f"   \u00b7 MFCC shape for {os.path.basename(file_path)}: {mfcc.shape}"
@@ -96,7 +110,16 @@ def _extract_audio_features_essentia(file_path: str, log_callback) -> "np.ndarra
         rhythmStats=["mean"],
         numberMfccCoefficients=13,
     )
-    features = extractor(file_path)
+    try:
+        features = extractor(file_path)
+    except Exception as exc:
+        if os.path.splitext(file_path)[1].lower() != ".opus":
+            raise
+        log_callback(
+            f"! Direct Opus decode failed ({exc}); retrying via FFmpeg for {os.path.basename(file_path)}"
+        )
+        with _decode_opus_as_wav(file_path, log_callback) as audio_path:
+            features = extractor(audio_path)
 
     mfcc_mean = _ensure_1d(np.asarray(features["lowlevel.mfcc.mean"], dtype=np.float32))
     mfcc_std = _ensure_1d(np.asarray(features["lowlevel.mfcc.stdev"], dtype=np.float32))
@@ -117,6 +140,41 @@ def _assemble_feature_vector(mean_mfcc, std_mfcc, tempo_arr) -> "np.ndarray":
             f"Feature vector has wrong length {vec.shape[0]}, expected 27"
         )
     return vec
+
+
+@contextmanager
+def _decode_opus_as_wav(file_path: str, log_callback):
+    ffmpeg_path = shutil.which("ffmpeg")
+    if not ffmpeg_path:
+        raise RuntimeError("FFmpeg is required to decode Opus files for clustering.")
+
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+        temp_path = tmp.name
+
+    cmd = [
+        ffmpeg_path,
+        "-y",
+        "-loglevel",
+        "error",
+        "-i",
+        ensure_long_path(file_path),
+        "-ac",
+        "1",
+        "-vn",
+        ensure_long_path(temp_path),
+    ]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        if result.returncode != 0:
+            stderr_tail = (result.stderr or "").strip()[-500:]
+            raise RuntimeError(f"FFmpeg failed to decode Opus: {stderr_tail}")
+        log_callback(f"• Decoded Opus via FFmpeg: {os.path.basename(file_path)}")
+        yield temp_path
+    finally:
+        try:
+            os.remove(temp_path)
+        except FileNotFoundError:
+            pass
 
 
 def _extract_worker(path: str, engine: AudioFeatureEngine) -> tuple[str, "np.ndarray", str | None]:
