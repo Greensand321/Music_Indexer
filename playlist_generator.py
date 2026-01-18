@@ -5,13 +5,103 @@ playlists. Existing playlists are overwritten by default; pass
 ``overwrite=False`` to skip files that already exist.
 """
 
-import os, hashlib
+import os, hashlib, difflib, re
 from collections import defaultdict
 from crash_watcher import record_event
 from crash_logger import watcher
 
 # Default extensions for playlist generation
 DEFAULT_EXTS = {".mp3", ".flac", ".wav", ".aac", ".m4a", ".opus"}
+SKIP_SCAN_DIRS = {"trash", "docs", "not sorted", "playlists"}
+
+
+_COPY_SUFFIX_RE = re.compile(r"(?:\s*-\s*copy|\s+copy)(?:\s*\d+)?$", re.IGNORECASE)
+_NUMBER_SUFFIX_RE = re.compile(r"\s*[\(\[\{]\s*\d+\s*[\)\]\}]\s*$")
+
+
+def _normalize_track_name(path: str) -> str:
+    base = os.path.splitext(os.path.basename(path))[0].lower()
+    base = base.replace("_", " ").replace(".", " ")
+    base = _COPY_SUFFIX_RE.sub("", base)
+    base = _NUMBER_SUFFIX_RE.sub("", base)
+    return re.sub(r"\s+", " ", base).strip()
+
+
+def _tokenize_name(name: str) -> list[str]:
+    return [tok for tok in re.split(r"[^a-z0-9]+", name) if tok]
+
+
+def _build_audio_index(root: str, valid_exts: set[str]) -> tuple[dict[str, list[str]], dict[str, set[str]]]:
+    name_index: dict[str, list[str]] = defaultdict(list)
+    token_index: dict[str, set[str]] = defaultdict(set)
+    for dirpath, dirnames, filenames in os.walk(root):
+        rel_parts = set(os.path.relpath(dirpath, root).split(os.sep))
+        if rel_parts & SKIP_SCAN_DIRS:
+            dirnames[:] = []
+            continue
+        dirnames[:] = [d for d in dirnames if d.lower() not in SKIP_SCAN_DIRS]
+        for fname in filenames:
+            ext = os.path.splitext(fname)[1].lower()
+            if ext not in valid_exts:
+                continue
+            full_path = os.path.join(dirpath, fname)
+            norm_name = _normalize_track_name(full_path)
+            if not norm_name:
+                continue
+            name_index[norm_name].append(full_path)
+            for token in _tokenize_name(norm_name):
+                token_index[token].add(full_path)
+    return name_index, token_index
+
+
+def _pick_best_match(
+    missing_path: str,
+    name_index: dict[str, list[str]],
+    token_index: dict[str, set[str]],
+) -> str | None:
+    norm_missing = _normalize_track_name(missing_path)
+    if not norm_missing:
+        return None
+    tokens = set(_tokenize_name(norm_missing))
+    candidates = list(name_index.get(norm_missing, []))
+    if not candidates and tokens:
+        candidate_set: set[str] = set()
+        for token in tokens:
+            candidate_set.update(token_index.get(token, set()))
+        candidates = list(candidate_set)
+    if not candidates:
+        return None
+
+    orig_dir = os.path.dirname(missing_path)
+    orig_ext = os.path.splitext(missing_path)[1].lower()
+
+    def score(path: str) -> tuple[float, float]:
+        cand_norm = _normalize_track_name(path)
+        cand_tokens = set(_tokenize_name(cand_norm))
+        overlap = len(tokens & cand_tokens) / len(tokens) if tokens else 0.0
+        ratio = difflib.SequenceMatcher(None, norm_missing, cand_norm).ratio()
+        bonus = 0.0
+        if os.path.dirname(path) == orig_dir:
+            bonus += 0.2
+        if orig_ext and os.path.splitext(path)[1].lower() == orig_ext:
+            bonus += 0.1
+        return overlap + ratio + bonus, overlap
+
+    best_path = None
+    best_score = 0.0
+    best_overlap = 0.0
+    for path in candidates:
+        total_score, overlap = score(path)
+        if total_score > best_score:
+            best_score = total_score
+            best_overlap = overlap
+            best_path = path
+
+    if best_path is None:
+        return None
+    if best_overlap < 0.4 and best_score < 1.0:
+        return None
+    return best_path
 
 
 def _sanitize_name(rel_path, existing):
@@ -145,6 +235,10 @@ def update_playlists(changes):
         return
     record_event("playlist_generator: updating existing playlists")
 
+    name_index = None
+    token_index = None
+    valid_exts = {e.lower() for e in DEFAULT_EXTS}
+
     for dirpath, _dirs, files in os.walk(playlists_dir):
         for fname in files:
             if not fname.lower().endswith((".m3u", ".m3u8")):
@@ -159,6 +253,9 @@ def update_playlists(changes):
             changed = False
             new_lines = []
             for ln in lines:
+                if ln.startswith("#"):
+                    new_lines.append(ln)
+                    continue
                 abs_line = os.path.normcase(os.path.normpath(os.path.join(dirpath, ln)))
                 if abs_line in normalized_map:
                     new = normalized_map[abs_line]
@@ -170,6 +267,15 @@ def update_playlists(changes):
                         changed = True
                     new_lines.append(rel_new)
                 else:
+                    if not os.path.exists(abs_line):
+                        if name_index is None or token_index is None:
+                            name_index, token_index = _build_audio_index(root, valid_exts)
+                        repaired = _pick_best_match(abs_line, name_index, token_index)
+                        if repaired:
+                            rel_repaired = os.path.relpath(repaired, dirpath)
+                            new_lines.append(rel_repaired)
+                            changed = True
+                            continue
                     new_lines.append(ln)
 
             if changed:
