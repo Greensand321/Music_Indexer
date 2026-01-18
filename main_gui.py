@@ -2430,8 +2430,20 @@ class DuplicatePairReviewTool(tk.Toplevel):
     def _current_winner(self, pair: DuplicatePair) -> str | None:
         return pair.manual_winner or pair.winner_path
 
-    def _winner_marks(self, pair: DuplicatePair) -> tuple[str, str]:
+    def _display_winner(self, pair: DuplicatePair) -> str | None:
         winner_path = self._current_winner(pair)
+        if winner_path:
+            return winner_path
+        left_ext = os.path.splitext(pair.left_path)[1].lower()
+        right_ext = os.path.splitext(pair.right_path)[1].lower()
+        if left_ext == ".flac" and right_ext != ".flac":
+            return pair.left_path
+        if right_ext == ".flac" and left_ext != ".flac":
+            return pair.right_path
+        return None
+
+    def _winner_marks(self, pair: DuplicatePair) -> tuple[str, str]:
+        winner_path = self._display_winner(pair)
         if not winner_path:
             return "", ""
         left_ext = os.path.splitext(pair.left_path)[1].lower()
@@ -2490,7 +2502,7 @@ class DuplicatePairReviewTool(tk.Toplevel):
         self.override_btn.configure(state="normal")
 
         left_mark, right_mark = self._winner_marks(pair)
-        winner_path = self._current_winner(pair)
+        winner_path = self._display_winner(pair)
         self._left_tags = self._load_track(
             self.left_panel,
             pair.left_path,
