@@ -40,9 +40,10 @@ from tkinter.scrolledtext import ScrolledText
 import textwrap
 import time
 from datetime import datetime
-from collections import Counter, deque
+from collections import Counter, deque, defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
+from itertools import combinations
 
 from validator import validate_soundvault_structure
 from music_indexer_api import (
@@ -2143,6 +2144,37 @@ def _write_duplicate_pair_snapshot(
             log_callback(f"Pair review snapshot could not be written: {exc}")
         return None
     return snapshot_path
+
+
+def _write_custom_pair_snapshot(
+    library_root: str,
+    pairs: list[DuplicatePair],
+    *,
+    include_filename_pairs: bool = True,
+    log_callback: Callable[[str], None] | None = None,
+) -> tuple[str | None, str | None]:
+    docs_dir = os.path.join(library_root, "Docs")
+    os.makedirs(docs_dir, exist_ok=True)
+    snapshot_path = _pair_review_snapshot_path(library_root)
+    raw_pairs = _serialize_duplicate_pairs(pairs)
+    signature_payload = json.dumps(raw_pairs, sort_keys=True)
+    plan_signature = hashlib.sha256(signature_payload.encode("utf-8")).hexdigest()
+    payload = {
+        "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "library_root": library_root,
+        "plan_signature": plan_signature,
+        "includes_filename_pairs": include_filename_pairs,
+        "pair_count": len(pairs),
+        "pairs": raw_pairs,
+    }
+    try:
+        with open(snapshot_path, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=2)
+    except OSError as exc:
+        if log_callback:
+            log_callback(f"Pair review snapshot could not be written: {exc}")
+        return None, None
+    return snapshot_path, plan_signature
 
 
 class DuplicatePairReviewTool(tk.Toplevel):
@@ -5254,6 +5286,563 @@ class SimilarityInspectorDialog(tk.Toplevel):
         self._set_results("\n".join(report_lines))
 
 
+class FuzzyDuplicateFinderDialog(tk.Toplevel):
+    """Find fuzzy duplicates using metadata words and fingerprint checks."""
+
+    def __init__(self, parent: tk.Widget):
+        super().__init__(parent)
+        self.title("Metadata Fuzzy Duplicate Finder")
+        self.transient(parent)
+        self.resizable(True, True)
+        self.parent = parent
+        cfg = load_config()
+
+        self.min_word_len_var = tk.StringVar(value="4")
+        self.min_shared_var = tk.StringVar(value="2")
+        self.max_word_freq_var = tk.StringVar(value="200")
+        self.include_title_var = tk.BooleanVar(value=True)
+        self.include_artist_var = tk.BooleanVar(value=True)
+        self.include_album_var = tk.BooleanVar(value=True)
+        self.include_album_artist_var = tk.BooleanVar(value=True)
+        self.include_genre_var = tk.BooleanVar(value=False)
+        self.include_filename_var = tk.BooleanVar(value=False)
+
+        self.exact_var = tk.StringVar(value=str(cfg.get("exact_duplicate_threshold", EXACT_DUPLICATE_THRESHOLD)))
+        self.near_var = tk.StringVar(value=str(cfg.get("near_duplicate_threshold", NEAR_DUPLICATE_THRESHOLD)))
+        self.mixed_var = tk.StringVar(value=str(cfg.get("mixed_codec_threshold_boost", MIXED_CODEC_THRESHOLD_BOOST)))
+        self.include_missing_fp_var = tk.BooleanVar(value=False)
+        self.include_non_matches_var = tk.BooleanVar(value=False)
+
+        self.status_var = tk.StringVar(value="Ready")
+        self.progress_var = tk.StringVar(value="")
+        self.summary_var = tk.StringVar(value="No results yet.")
+
+        self._results: list[dict[str, object]] = []
+        self._scan_thread: threading.Thread | None = None
+        self._cancel_event = threading.Event()
+
+        container = ttk.Frame(self, padding=12)
+        container.pack(fill="both", expand=True)
+
+        ttk.Label(
+            container,
+            text="Find duplicate candidates by matching metadata words, then validate with fingerprints.",
+            foreground="#555",
+            wraplength=760,
+        ).pack(anchor="w")
+
+        settings_frame = ttk.LabelFrame(container, text="Metadata Match Settings")
+        settings_frame.pack(fill="x", pady=(10, 8))
+        settings_frame.columnconfigure(1, weight=1)
+        settings_frame.columnconfigure(3, weight=1)
+
+        ttk.Label(settings_frame, text="Min word length (>3):").grid(row=0, column=0, sticky="w", padx=6, pady=4)
+        ttk.Entry(settings_frame, textvariable=self.min_word_len_var, width=6).grid(
+            row=0, column=1, sticky="w", padx=6, pady=4
+        )
+        ttk.Label(settings_frame, text="Min shared words:").grid(row=0, column=2, sticky="w", padx=6, pady=4)
+        ttk.Entry(settings_frame, textvariable=self.min_shared_var, width=6).grid(
+            row=0, column=3, sticky="w", padx=6, pady=4
+        )
+        ttk.Label(settings_frame, text="Ignore words seen in >N tracks:").grid(
+            row=1, column=0, sticky="w", padx=6, pady=4
+        )
+        ttk.Entry(settings_frame, textvariable=self.max_word_freq_var, width=6).grid(
+            row=1, column=1, sticky="w", padx=6, pady=4
+        )
+
+        field_frame = ttk.Frame(settings_frame)
+        field_frame.grid(row=2, column=0, columnspan=4, sticky="w", padx=6, pady=(4, 6))
+        ttk.Label(field_frame, text="Search fields:").pack(side="left")
+        ttk.Checkbutton(field_frame, text="Title", variable=self.include_title_var).pack(side="left", padx=(6, 0))
+        ttk.Checkbutton(field_frame, text="Artist", variable=self.include_artist_var).pack(side="left", padx=(6, 0))
+        ttk.Checkbutton(field_frame, text="Album", variable=self.include_album_var).pack(side="left", padx=(6, 0))
+        ttk.Checkbutton(field_frame, text="Album Artist", variable=self.include_album_artist_var).pack(
+            side="left", padx=(6, 0)
+        )
+        ttk.Checkbutton(field_frame, text="Genre", variable=self.include_genre_var).pack(side="left", padx=(6, 0))
+        ttk.Checkbutton(field_frame, text="Filename", variable=self.include_filename_var).pack(side="left", padx=(6, 0))
+
+        fp_frame = ttk.LabelFrame(container, text="Fingerprint Filter")
+        fp_frame.pack(fill="x", pady=(0, 8))
+        fp_frame.columnconfigure(1, weight=1)
+        fp_frame.columnconfigure(3, weight=1)
+
+        ttk.Label(fp_frame, text="Exact threshold:").grid(row=0, column=0, sticky="w", padx=6, pady=4)
+        ttk.Entry(fp_frame, textvariable=self.exact_var, width=8).grid(row=0, column=1, sticky="w", padx=6, pady=4)
+        ttk.Label(fp_frame, text="Near threshold:").grid(row=0, column=2, sticky="w", padx=6, pady=4)
+        ttk.Entry(fp_frame, textvariable=self.near_var, width=8).grid(row=0, column=3, sticky="w", padx=6, pady=4)
+        ttk.Label(fp_frame, text="Mixed-codec boost:").grid(row=1, column=0, sticky="w", padx=6, pady=4)
+        ttk.Entry(fp_frame, textvariable=self.mixed_var, width=8).grid(row=1, column=1, sticky="w", padx=6, pady=4)
+        ttk.Checkbutton(
+            fp_frame,
+            text="Include pairs without fingerprints",
+            variable=self.include_missing_fp_var,
+        ).grid(row=1, column=2, columnspan=2, sticky="w", padx=6, pady=4)
+
+        action_row = ttk.Frame(container)
+        action_row.pack(fill="x", pady=(0, 6))
+        self.run_btn = ttk.Button(action_row, text="Run Scan", command=self._start_scan)
+        self.run_btn.pack(side="left")
+        self.cancel_btn = ttk.Button(action_row, text="Cancel", command=self._cancel_scan, state="disabled")
+        self.cancel_btn.pack(side="left", padx=(6, 0))
+        ttk.Checkbutton(
+            action_row,
+            text="Include non-matching fingerprints in review",
+            variable=self.include_non_matches_var,
+        ).pack(side="left", padx=(12, 0))
+        ttk.Button(action_row, text="Close", command=self.destroy).pack(side="right")
+
+        progress_row = ttk.Frame(container)
+        progress_row.pack(fill="x", pady=(0, 6))
+        ttk.Label(progress_row, textvariable=self.progress_var, foreground="#555").pack(side="left")
+        ttk.Label(progress_row, textvariable=self.status_var, foreground="#777").pack(side="right")
+
+        self.progress_bar = ttk.Progressbar(container, mode="determinate")
+        self.progress_bar.pack(fill="x", pady=(0, 8))
+
+        results_frame = ttk.LabelFrame(container, text="Candidate Results")
+        results_frame.pack(fill="both", expand=True)
+        results_frame.rowconfigure(1, weight=1)
+        results_frame.columnconfigure(0, weight=1)
+
+        ttk.Label(results_frame, textvariable=self.summary_var, foreground="#555").grid(
+            row=0, column=0, sticky="w", padx=6, pady=(6, 0)
+        )
+
+        columns = ("verdict", "distance", "shared", "words", "track_a", "track_b")
+        self.results_tree = ttk.Treeview(results_frame, columns=columns, show="headings", height=10)
+        self.results_tree.heading("verdict", text="Verdict")
+        self.results_tree.heading("distance", text="Distance")
+        self.results_tree.heading("shared", text="Shared Words")
+        self.results_tree.heading("words", text="Matched Words")
+        self.results_tree.heading("track_a", text="Track A")
+        self.results_tree.heading("track_b", text="Track B")
+        self.results_tree.column("verdict", width=100, anchor="w")
+        self.results_tree.column("distance", width=80, anchor="center")
+        self.results_tree.column("shared", width=110, anchor="center")
+        self.results_tree.column("words", width=220, anchor="w")
+        self.results_tree.column("track_a", width=260, anchor="w")
+        self.results_tree.column("track_b", width=260, anchor="w")
+        self.results_tree.grid(row=1, column=0, sticky="nsew", padx=6, pady=6)
+        tree_scroll = ttk.Scrollbar(results_frame, orient="vertical", command=self.results_tree.yview)
+        tree_scroll.grid(row=1, column=1, sticky="ns", pady=6)
+        self.results_tree.configure(yscrollcommand=tree_scroll.set)
+        self.results_tree.bind("<<TreeviewSelect>>", self._show_result_details)
+
+        details_frame = ttk.LabelFrame(container, text="Selected Pair Details")
+        details_frame.pack(fill="x", pady=(8, 0))
+        self.details_text = ScrolledText(details_frame, height=6, wrap="word", state="disabled")
+        self.details_text.pack(fill="both", expand=True, padx=6, pady=6)
+
+        review_row = ttk.Frame(container)
+        review_row.pack(fill="x", pady=(6, 0))
+        self.review_btn = ttk.Button(
+            review_row,
+            text="Send Matches to Duplicate Pair Review",
+            command=self._send_to_pair_review,
+            state="disabled",
+        )
+        self.review_btn.pack(side="left")
+
+    def _log_details(self, text: str) -> None:
+        self.details_text.configure(state="normal")
+        self.details_text.delete("1.0", "end")
+        self.details_text.insert("end", text)
+        self.details_text.configure(state="disabled")
+
+    def _show_result_details(self, _event: tk.Event | None = None) -> None:  # type: ignore[name-defined]
+        selected = self.results_tree.selection()
+        if not selected:
+            return
+        item_id = selected[0]
+        try:
+            idx = int(self.results_tree.item(item_id, "tags")[0])
+        except (ValueError, IndexError):
+            return
+        if idx < 0 or idx >= len(self._results):
+            return
+        result = self._results[idx]
+        lines = [
+            f"Verdict: {result.get('verdict')}",
+            f"Fingerprint distance: {result.get('distance')}",
+            f"Shared words ({result.get('shared_count')}): {', '.join(result.get('words', []))}",
+            "",
+            f"Track A: {result.get('left_path')}",
+            f"Track B: {result.get('right_path')}",
+        ]
+        self._log_details("\n".join(lines))
+
+    def _parse_int(self, raw: str, label: str, *, min_value: int | None = None) -> int | None:
+        try:
+            value = int(float(raw))
+        except ValueError:
+            messagebox.showwarning("Invalid Value", f"{label} must be a whole number.")
+            return None
+        if min_value is not None and value < min_value:
+            messagebox.showwarning("Invalid Value", f"{label} must be at least {min_value}.")
+            return None
+        return value
+
+    def _parse_float(self, raw: str, label: str, *, min_value: float | None = None) -> float | None:
+        try:
+            value = float(raw)
+        except ValueError:
+            messagebox.showwarning("Invalid Value", f"{label} must be a number.")
+            return None
+        if min_value is not None and value < min_value:
+            messagebox.showwarning("Invalid Value", f"{label} must be at least {min_value}.")
+            return None
+        return value
+
+    def _collect_settings(self) -> dict[str, object] | None:
+        min_word_len = self._parse_int(self.min_word_len_var.get().strip(), "Min word length", min_value=4)
+        if min_word_len is None:
+            return None
+        min_shared = self._parse_int(self.min_shared_var.get().strip(), "Min shared words", min_value=1)
+        if min_shared is None:
+            return None
+        max_word_freq = self._parse_int(
+            self.max_word_freq_var.get().strip() or "0", "Max word frequency", min_value=0
+        )
+        if max_word_freq is None:
+            return None
+        exact = self._parse_float(self.exact_var.get().strip(), "Exact threshold", min_value=0.0)
+        if exact is None:
+            return None
+        near = self._parse_float(self.near_var.get().strip(), "Near threshold", min_value=0.0)
+        if near is None:
+            return None
+        if near < exact:
+            messagebox.showwarning(
+                "Invalid Value",
+                "Near threshold must be greater than or equal to the exact threshold.",
+            )
+            return None
+        mixed = self._parse_float(self.mixed_var.get().strip(), "Mixed-codec boost", min_value=0.0)
+        if mixed is None:
+            return None
+        fields = {
+            "title": bool(self.include_title_var.get()),
+            "artist": bool(self.include_artist_var.get()),
+            "album": bool(self.include_album_var.get()),
+            "albumartist": bool(self.include_album_artist_var.get()),
+            "genre": bool(self.include_genre_var.get()),
+            "filename": bool(self.include_filename_var.get()),
+        }
+        if not any(fields.values()):
+            messagebox.showwarning("Missing Fields", "Select at least one metadata field to match.")
+            return None
+        return {
+            "min_word_len": min_word_len,
+            "min_shared": min_shared,
+            "max_word_freq": max_word_freq,
+            "fields": fields,
+            "exact_threshold": exact,
+            "near_threshold": near,
+            "mixed_boost": mixed,
+            "include_missing_fp": bool(self.include_missing_fp_var.get()),
+        }
+
+    def _tokenize(self, text: str, min_len: int) -> set[str]:
+        tokens = re.findall(r"[a-z0-9]+", text.lower())
+        return {tok for tok in tokens if len(tok) >= min_len and not tok.isdigit()}
+
+    def _metadata_words(self, path: str, tags: dict[str, object], fields: dict[str, bool], min_len: int) -> set[str]:
+        words: set[str] = set()
+        if fields.get("title") and tags.get("title"):
+            words |= self._tokenize(str(tags.get("title")), min_len)
+        if fields.get("artist") and tags.get("artist"):
+            words |= self._tokenize(str(tags.get("artist")), min_len)
+        if fields.get("album") and tags.get("album"):
+            words |= self._tokenize(str(tags.get("album")), min_len)
+        if fields.get("albumartist") and tags.get("albumartist"):
+            words |= self._tokenize(str(tags.get("albumartist")), min_len)
+        if fields.get("genre") and tags.get("genre"):
+            words |= self._tokenize(str(tags.get("genre")), min_len)
+        if fields.get("filename"):
+            stem = os.path.splitext(os.path.basename(path))[0]
+            words |= self._tokenize(stem, min_len)
+        return words
+
+    def _walk_library_files(self, library_root: str) -> list[str]:
+        paths: list[str] = []
+        for dirpath, _dirs, files in os.walk(library_root):
+            rel = os.path.relpath(dirpath, library_root)
+            parts = {p.lower() for p in rel.split(os.sep)}
+            if {"not sorted", "playlists"} & parts:
+                continue
+            for fname in files:
+                if os.path.splitext(fname)[1].lower() in SUPPORTED_EXTS:
+                    paths.append(os.path.join(dirpath, fname))
+        return paths
+
+    def _is_lossless(self, path: str) -> bool:
+        return os.path.splitext(path)[1].lower() in LOSSLESS_EXTS
+
+    def _start_scan(self) -> None:
+        if self._scan_thread and self._scan_thread.is_alive():
+            return
+        settings = self._collect_settings()
+        if settings is None:
+            return
+        library = None
+        if hasattr(self.parent, "require_library"):
+            library = self.parent.require_library()
+        if not library:
+            return
+        self._cancel_event.clear()
+        self._results = []
+        self.results_tree.delete(*self.results_tree.get_children())
+        self.summary_var.set("Scanning…")
+        self.progress_var.set("")
+        self.status_var.set("Running")
+        self.run_btn.configure(state="disabled")
+        self.cancel_btn.configure(state="normal")
+        self.review_btn.configure(state="disabled")
+        self._log_details("")
+        self._scan_thread = threading.Thread(
+            target=self._scan_worker,
+            args=(library, settings),
+            daemon=True,
+        )
+        self._scan_thread.start()
+
+    def _cancel_scan(self) -> None:
+        self._cancel_event.set()
+        self.status_var.set("Cancelling…")
+
+    def _scan_worker(self, library_root: str, settings: dict[str, object]) -> None:
+        def schedule(fn: Callable, *args, **kwargs) -> None:
+            self.after(0, lambda: fn(*args, **kwargs))
+
+        try:
+            schedule(self.progress_var.set, "Collecting audio files…")
+            paths = self._walk_library_files(library_root)
+            if self._cancel_event.is_set():
+                schedule(self._finish_scan, "Cancelled")
+                return
+            total = len(paths)
+            schedule(self.progress_bar.configure, maximum=max(total, 1), value=0)
+            schedule(self.progress_var.set, f"Reading metadata (0/{total})…")
+
+            fields = settings["fields"]
+            min_len = int(settings["min_word_len"])
+            max_word_freq = int(settings["max_word_freq"])
+
+            word_index: dict[str, set[int]] = defaultdict(set)
+            for idx, path in enumerate(paths):
+                if self._cancel_event.is_set():
+                    schedule(self._finish_scan, "Cancelled")
+                    return
+                tags, _covers, _error, _reader = read_metadata(path, include_cover=False)
+                words = self._metadata_words(path, tags, fields, min_len)
+                if words:
+                    for word in words:
+                        word_index[word].add(idx)
+                schedule(self.progress_bar.configure, value=idx + 1)
+                schedule(self.progress_var.set, f"Reading metadata ({idx + 1}/{total})…")
+
+            if self._cancel_event.is_set():
+                schedule(self._finish_scan, "Cancelled")
+                return
+
+            schedule(self.progress_var.set, "Building candidate pairs…")
+            pair_words: dict[tuple[int, int], set[str]] = defaultdict(set)
+            for word, idxs in word_index.items():
+                if max_word_freq and len(idxs) > max_word_freq:
+                    continue
+                if len(idxs) < 2:
+                    continue
+                for left, right in combinations(sorted(idxs), 2):
+                    pair_words[(left, right)].add(word)
+
+            min_shared = int(settings["min_shared"])
+            candidates: list[tuple[int, int, list[str]]] = []
+            for (left, right), words in pair_words.items():
+                if len(words) >= min_shared:
+                    candidates.append((left, right, sorted(words)))
+
+            if not candidates:
+                schedule(self._finish_scan, "No candidates found.")
+                return
+
+            candidates.sort(key=lambda item: len(item[2]), reverse=True)
+
+            schedule(self.progress_var.set, "Computing fingerprints…")
+            unique_paths = {paths[left] for left, _right, _words in candidates}
+            unique_paths |= {paths[right] for _left, right, _words in candidates}
+
+            db_path = os.path.join(library_root, "Docs", ".simple_fps.db")
+            ensure_fingerprint_cache(db_path)
+
+            fp_map: dict[str, str | None] = {}
+            total_fps = len(unique_paths)
+            schedule(self.progress_bar.configure, maximum=max(total_fps, 1), value=0)
+            with ThreadPoolExecutor(max_workers=min(6, (os.cpu_count() or 4))) as executor:
+                futures = {executor.submit(get_fingerprint, path, db_path, _compute_fp): path for path in unique_paths}
+                completed = 0
+                for future in as_completed(futures):
+                    if self._cancel_event.is_set():
+                        schedule(self._finish_scan, "Cancelled")
+                        return
+                    path = futures[future]
+                    try:
+                        fp_map[path] = future.result()
+                    except Exception:
+                        fp_map[path] = None
+                    completed += 1
+                    schedule(self.progress_bar.configure, value=completed)
+                    schedule(self.progress_var.set, f"Computing fingerprints ({completed}/{total_fps})…")
+
+            exact_threshold = float(settings["exact_threshold"])
+            near_threshold = float(settings["near_threshold"])
+            mixed_boost = float(settings["mixed_boost"])
+            include_missing_fp = bool(settings["include_missing_fp"])
+
+            results: list[dict[str, object]] = []
+            matches = 0
+            for left_idx, right_idx, words in candidates:
+                left_path = paths[left_idx]
+                right_path = paths[right_idx]
+                fp_left = fp_map.get(left_path)
+                fp_right = fp_map.get(right_path)
+                distance = fingerprint_distance(fp_left, fp_right)
+                verdict = "No Match"
+                effective_near = near_threshold
+                mixed_codec = self._is_lossless(left_path) != self._is_lossless(right_path)
+                if mixed_codec:
+                    effective_near += mixed_boost
+                if fp_left and fp_right:
+                    if distance <= exact_threshold:
+                        verdict = "Exact"
+                    elif distance <= effective_near:
+                        verdict = "Near"
+                elif include_missing_fp:
+                    verdict = "No Fingerprint"
+
+                if verdict in {"Exact", "Near"}:
+                    matches += 1
+                results.append(
+                    {
+                        "left_path": left_path,
+                        "right_path": right_path,
+                        "distance": distance,
+                        "verdict": verdict,
+                        "shared_count": len(words),
+                        "words": words,
+                    }
+                )
+
+            schedule(self._finish_scan, "Complete", results, matches)
+        except Exception as exc:
+            schedule(self._finish_scan, f"Failed: {exc}")
+
+    def _finish_scan(
+        self,
+        status: str,
+        results: list[dict[str, object]] | None = None,
+        matches: int = 0,
+    ) -> None:
+        if status == "Cancelled":
+            self.summary_var.set("Scan cancelled.")
+        elif status.startswith("Failed"):
+            self.summary_var.set(status)
+        elif status == "No candidates found.":
+            self.summary_var.set("No metadata candidates found.")
+        else:
+            result_count = len(results or [])
+            self.summary_var.set(f"{result_count} candidate pairs, {matches} fingerprint matches.")
+        self.status_var.set(status)
+        self.progress_var.set("")
+        self.run_btn.configure(state="normal")
+        self.cancel_btn.configure(state="disabled")
+        self.progress_bar.configure(value=0)
+
+        if results is not None:
+            self._results = results
+            self._render_results(results)
+            self.review_btn.configure(state="normal" if matches > 0 else "disabled")
+
+    def _render_results(self, results: list[dict[str, object]]) -> None:
+        self.results_tree.delete(*self.results_tree.get_children())
+        for idx, result in enumerate(results):
+            distance = result.get("distance")
+            distance_str = f"{distance:.4f}" if isinstance(distance, (int, float)) else "n/a"
+            shared = result.get("shared_count", 0)
+            words = ", ".join(result.get("words", [])[:6])
+            if len(result.get("words", [])) > 6:
+                words = f"{words}…"
+            left_name = os.path.basename(str(result.get("left_path", "")))
+            right_name = os.path.basename(str(result.get("right_path", "")))
+            self.results_tree.insert(
+                "",
+                "end",
+                values=(
+                    result.get("verdict"),
+                    distance_str,
+                    shared,
+                    words,
+                    left_name,
+                    right_name,
+                ),
+                tags=(str(idx),),
+            )
+
+    def _send_to_pair_review(self) -> None:
+        if not self._results:
+            messagebox.showinfo("Duplicate Pair Review", "Run a scan and select matches first.")
+            return
+        library = None
+        if hasattr(self.parent, "require_library"):
+            library = self.parent.require_library()
+        if not library:
+            return
+        include_non_matches = bool(self.include_non_matches_var.get())
+        selected_pairs: list[DuplicatePair] = []
+        seen: set[tuple[str, str]] = set()
+        for result in self._results:
+            verdict = result.get("verdict")
+            if verdict not in {"Exact", "Near"} and not include_non_matches:
+                continue
+            left_path = str(result.get("left_path"))
+            right_path = str(result.get("right_path"))
+            _append_duplicate_pair(
+                selected_pairs,
+                seen,
+                left_path,
+                right_path,
+                None,
+                "metadata_fuzzy",
+            )
+        if not selected_pairs:
+            messagebox.showinfo("Duplicate Pair Review", "No matching pairs are available for review.")
+            return
+        snapshot_path, signature = _write_custom_pair_snapshot(
+            library,
+            selected_pairs,
+            include_filename_pairs=True,
+        )
+        if not snapshot_path or not signature:
+            messagebox.showerror("Duplicate Pair Review", "Failed to write the review snapshot.")
+            return
+        existing = getattr(self.parent, "duplicate_pair_review_window", None)
+        if existing and existing.winfo_exists():
+            existing.destroy()
+            setattr(self.parent, "duplicate_pair_review_window", None)
+        plan = ConsolidationPlan(plan_signature=signature)
+        win = DuplicatePairReviewTool(self.parent, library_path=library, plan=plan)
+        win.bind(
+            "<Destroy>",
+            lambda e: (
+                setattr(self.parent, "duplicate_pair_review_window", None)
+                if e.widget is win
+                else None
+            ),
+        )
+        setattr(self.parent, "duplicate_pair_review_window", win)
+
+
 class M4ATesterDialog(tk.Toplevel):
     """Standalone UI for validating M4A metadata/album art parsing."""
 
@@ -6828,6 +7417,10 @@ class SoundVaultImporterApp(tk.Tk):
         tools_menu.add_command(label="File Clean Up…", command=self._open_file_cleanup_tool)
         tools_menu.add_command(
             label="Similarity Inspector…", command=self._open_similarity_inspector_tool
+        )
+        tools_menu.add_command(
+            label="Metadata Fuzzy Duplicate Finder…",
+            command=self._open_fuzzy_duplicate_finder_tool,
         )
         tools_menu.add_command(
             label="Duplicate Bucketing POC…",
@@ -9350,6 +9943,9 @@ class SoundVaultImporterApp(tk.Tk):
 
     def _open_similarity_inspector_tool(self) -> None:
         SimilarityInspectorDialog(self)
+
+    def _open_fuzzy_duplicate_finder_tool(self) -> None:
+        FuzzyDuplicateFinderDialog(self)
 
     def _open_duplicate_scan_engine_tool(self) -> None:
         library = self.require_library()
