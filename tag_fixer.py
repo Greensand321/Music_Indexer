@@ -53,7 +53,7 @@ def init_db(path: str):
 ACOUSTID_API_KEY       = "eBOqCZhyAx"
 ACOUSTID_APP_NAME      = "SoundVaultTagFixer"
 ACOUSTID_APP_VERSION   = "1.0.0"
-SUPPORTED_EXTS         = {".mp3", ".flac", ".m4a", ".aac", ".ogg", ".wav"}
+SUPPORTED_EXTS         = {".mp3", ".flac", ".m4a", ".aac", ".ogg", ".wav", ".opus"}
 
 # ─── Plugin Discovery ─────────────────────────────────────────────────────
 PLUGINS: List[MetadataPlugin] = []
