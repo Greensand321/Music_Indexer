@@ -6485,10 +6485,9 @@ def _iter_playlist_tracks(lines: list[str]) -> list[str]:
 
 def _build_library_search_index(
     library_root: str, valid_exts: set[str]
-) -> tuple[dict[str, list[str]], dict[str, list[str]], dict[str, list[str]]]:
+) -> tuple[dict[str, list[str]], dict[str, list[str]]]:
     basename_index: dict[str, list[str]] = {}
     stem_index: dict[str, list[str]] = {}
-    normalized_index: dict[str, list[str]] = {}
     for dirpath, dirnames, filenames in os.walk(library_root):
         dirnames.sort()
         filenames.sort()
@@ -6499,12 +6498,9 @@ def _build_library_search_index(
             full_path = os.path.join(dirpath, fname)
             basename_key = os.path.normcase(fname)
             stem_key = os.path.normcase(os.path.splitext(fname)[0])
-            normalized_key = os.path.normcase(_normalize_stem_for_match(stem_key))
             basename_index.setdefault(basename_key, []).append(full_path)
             stem_index.setdefault(stem_key, []).append(full_path)
-            if normalized_key:
-                normalized_index.setdefault(normalized_key, []).append(full_path)
-    return basename_index, stem_index, normalized_index
+    return basename_index, stem_index
 
 
 def _select_library_match(
@@ -6525,7 +6521,6 @@ def _find_library_match(
     target_path: str,
     basename_index: dict[str, list[str]],
     stem_index: dict[str, list[str]],
-    normalized_index: dict[str, list[str]],
     prefer_opus: bool,
 ) -> str | None:
     basename_key = os.path.normcase(os.path.basename(target_path))
@@ -6538,32 +6533,11 @@ def _find_library_match(
         return _select_library_match(candidates, prefer_opus)
     stem_key = os.path.normcase(_strip_indexer_suffix(stem_key))
     candidates = stem_index.get(stem_key)
-    if candidates:
-        return _select_library_match(candidates, prefer_opus)
-    normalized_key = os.path.normcase(_normalize_stem_for_match(stem_key))
-    candidates = normalized_index.get(normalized_key)
     return _select_library_match(candidates, prefer_opus)
 
 
 def _strip_indexer_suffix(name: str) -> str:
     return re.sub(r"\s*\(\d+\)$", "", name).strip()
-
-
-def _normalize_stem_for_match(name: str) -> str:
-    cleaned = _strip_indexer_suffix(name)
-    cleaned = cleaned.replace("_", " ")
-    cleaned = re.sub(r"\s+", " ", cleaned)
-    return cleaned.strip()
-
-
-def _is_absolute_playlist_path(path: str) -> bool:
-    if os.path.isabs(path):
-        return True
-    if re.match(r"^[A-Za-z]:[\\/]", path):
-        return True
-    if path.startswith(("\\\\", "//")):
-        return True
-    return False
 
 
 class PlaylistRepairDialog(tk.Toplevel):
@@ -6722,7 +6696,7 @@ class PlaylistRepairDialog(tk.Toplevel):
                 self.after(0, lambda p=path: self._append_log(f"! Failed to read {p}"))
         self.after(0, lambda: self._update_progress(total_entries, 0))
 
-        basename_index, stem_index, normalized_index = _build_library_search_index(
+        basename_index, stem_index = _build_library_search_index(
             self.library_root, valid_exts
         )
         self.after(
@@ -6768,7 +6742,7 @@ class PlaylistRepairDialog(tk.Toplevel):
                     continue
                 entries_scanned += 1
 
-                was_absolute = _is_absolute_playlist_path(stripped)
+                was_absolute = os.path.isabs(stripped)
                 abs_path = stripped
                 if not was_absolute:
                     abs_path = os.path.normpath(os.path.join(playlist_dir, stripped))
@@ -6795,7 +6769,7 @@ class PlaylistRepairDialog(tk.Toplevel):
                     continue
 
                 match = _find_library_match(
-                    abs_path, basename_index, stem_index, normalized_index, prefer_opus
+                    abs_path, basename_index, stem_index, prefer_opus
                 )
                 if match:
                     new_line = match if was_absolute else os.path.relpath(match, playlist_dir)

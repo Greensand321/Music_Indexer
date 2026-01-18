@@ -13,8 +13,16 @@ from near_duplicate_detector import fingerprint_distance, _coarse_fingerprint_ke
 import chromaprint_utils
 from config import load_config, FP_DURATION_MS, FP_OFFSET_MS, FP_SILENCE_MIN_LEN_MS, FP_SILENCE_THRESHOLD_DB
 
-SUPPORTED_EXTS = {".flac", ".m4a", ".aac", ".mp3", ".wav", ".ogg"}
-EXT_PRIORITY = {".flac": 0, ".m4a": 1, ".aac": 1, ".mp3": 2, ".wav": 3, ".ogg": 4}
+SUPPORTED_EXTS = {".flac", ".m4a", ".aac", ".mp3", ".wav", ".ogg", ".opus"}
+EXT_PRIORITY = {
+    ".flac": 0,
+    ".m4a": 1,
+    ".aac": 1,
+    ".mp3": 2,
+    ".wav": 3,
+    ".ogg": 4,
+    ".opus": 4,
+}
 FP_PREFIX_LEN = 16
 PREFIX_THRESHOLD = 2
 
