@@ -7,6 +7,7 @@ import re
 import html
 import shutil
 import hashlib
+import difflib
 from pathlib import Path
 import urllib.parse
 
@@ -6474,6 +6475,27 @@ def _normalize_playlist_line(line: str) -> str:
     return line.rstrip("\n").rstrip("\r")
 
 
+_COPY_SUFFIX_RE = re.compile(r"(?:\s*-\s*copy|\s+copy)(?:\s*\d+)?$", re.IGNORECASE)
+_NUMBER_SUFFIX_RE = re.compile(r"\s*[\(\[\{]\s*\d+\s*[\)\]\}]\s*$")
+_TRACK_NUMBER_PREFIX_RE = re.compile(r"^\s*\d{1,3}\s*[-._ ]*")
+_SHORT_NUMBER_TOKEN_RE = re.compile(r"\b\d{1,3}\b")
+
+
+def _normalize_track_name(name: str) -> str:
+    base = name.lower()
+    base = base.replace("_", " ").replace(".", " ")
+    base = _COPY_SUFFIX_RE.sub("", base)
+    base = _NUMBER_SUFFIX_RE.sub("", base)
+    base = _TRACK_NUMBER_PREFIX_RE.sub("", base)
+    base = _SHORT_NUMBER_TOKEN_RE.sub("", base)
+    return re.sub(r"\s+", " ", base).strip()
+
+
+def _tokenize_track_name(name: str) -> list[str]:
+    tokens = [tok for tok in re.split(r"[^a-z0-9]+", name.lower()) if tok]
+    return [tok for tok in tokens if not tok.isdigit()]
+
+
 def _iter_playlist_tracks(lines: list[str]) -> list[str]:
     tracks = []
     for raw in lines:
@@ -6486,10 +6508,18 @@ def _iter_playlist_tracks(lines: list[str]) -> list[str]:
 
 def _build_library_search_index(
     library_root: str, valid_exts: set[str]
-) -> tuple[dict[str, list[str]], dict[str, list[str]], dict[str, list[str]]]:
+) -> tuple[
+    dict[str, list[str]],
+    dict[str, list[str]],
+    dict[str, list[str]],
+    dict[str, list[str]],
+    dict[str, set[str]],
+]:
     basename_index: dict[str, list[str]] = {}
     stem_index: dict[str, list[str]] = {}
     normalized_stem_index: dict[str, list[str]] = {}
+    normalized_name_index: dict[str, list[str]] = {}
+    token_index: dict[str, set[str]] = {}
     for dirpath, dirnames, filenames in os.walk(library_root):
         dirnames.sort()
         filenames.sort()
@@ -6504,7 +6534,18 @@ def _build_library_search_index(
             stem_index.setdefault(stem_key, []).append(full_path)
             normalized_key = os.path.normcase(_strip_indexer_suffix(stem_key))
             normalized_stem_index.setdefault(normalized_key, []).append(full_path)
-    return basename_index, stem_index, normalized_stem_index
+            normalized_name = _normalize_track_name(stem_key)
+            if normalized_name:
+                normalized_name_index.setdefault(normalized_name, []).append(full_path)
+                for token in _tokenize_track_name(normalized_name):
+                    token_index.setdefault(token, set()).add(full_path)
+    return (
+        basename_index,
+        stem_index,
+        normalized_stem_index,
+        normalized_name_index,
+        token_index,
+    )
 
 
 def _select_library_match(
@@ -6527,6 +6568,8 @@ def _find_library_match(
     basename_index: dict[str, list[str]],
     stem_index: dict[str, list[str]],
     normalized_stem_index: dict[str, list[str]],
+    normalized_name_index: dict[str, list[str]],
+    token_index: dict[str, set[str]],
     prefer_opus: bool,
 ) -> str | None:
     target_ext = os.path.splitext(target_path)[1].lower() or None
@@ -6543,7 +6586,51 @@ def _find_library_match(
     if candidates:
         return _select_library_match(candidates, prefer_opus, target_ext)
     candidates = normalized_stem_index.get(stem_key)
-    return _select_library_match(candidates, prefer_opus, target_ext)
+    if candidates:
+        return _select_library_match(candidates, prefer_opus, target_ext)
+
+    normalized_target = _normalize_track_name(os.path.splitext(basename_key)[0])
+    if not normalized_target:
+        return None
+    tokens = set(_tokenize_track_name(normalized_target))
+    candidates = normalized_name_index.get(normalized_target, [])
+    if not candidates:
+        if tokens:
+            candidate_set: set[str] = set()
+            for token in tokens:
+                candidate_set.update(token_index.get(token, set()))
+            candidates = list(candidate_set)
+    if not candidates:
+        return None
+
+    def score(path: str) -> tuple[float, float]:
+        cand_name = _normalize_track_name(os.path.splitext(os.path.basename(path))[0])
+        cand_tokens = set(_tokenize_track_name(cand_name))
+        overlap = len(tokens & cand_tokens) / len(tokens) if tokens else 0.0
+        ratio = difflib.SequenceMatcher(None, normalized_target, cand_name).ratio()
+        bonus = 0.0
+        cand_ext = os.path.splitext(path)[1].lower()
+        if target_ext and cand_ext == target_ext:
+            bonus += 0.1
+        if prefer_opus and cand_ext == ".opus":
+            bonus += 0.1
+        return overlap + ratio + bonus, overlap
+
+    best_path = None
+    best_score = 0.0
+    best_overlap = 0.0
+    for path in candidates:
+        total_score, overlap = score(path)
+        if total_score > best_score:
+            best_score = total_score
+            best_overlap = overlap
+            best_path = path
+
+    if best_path is None:
+        return None
+    if best_overlap < 0.4 and best_score < 1.0:
+        return None
+    return best_path
 
 
 def _path_from_file_uri(uri: str) -> str:
@@ -6746,9 +6833,13 @@ class PlaylistRepairDialog(tk.Toplevel):
                 self.after(0, lambda p=path: self._append_log(f"! Failed to read {p}"))
         self.after(0, lambda: self._update_progress(total_entries, 0))
 
-        basename_index, stem_index, normalized_stem_index = _build_library_search_index(
-            self.library_root, valid_exts
-        )
+        (
+            basename_index,
+            stem_index,
+            normalized_stem_index,
+            normalized_name_index,
+            token_index,
+        ) = _build_library_search_index(self.library_root, valid_exts)
         self.after(
             0,
             lambda: self._append_log(
@@ -6845,6 +6936,8 @@ class PlaylistRepairDialog(tk.Toplevel):
                     basename_index,
                     stem_index,
                     normalized_stem_index,
+                    normalized_name_index,
+                    token_index,
                     prefer_opus,
                 )
                 if match:
