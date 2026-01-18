@@ -28,7 +28,8 @@ def _normalize_track_name(path: str) -> str:
 
 
 def _tokenize_name(name: str) -> list[str]:
-    return [tok for tok in re.split(r"[^a-z0-9]+", name) if tok]
+    tokens = [tok for tok in re.split(r"[^a-z0-9]+", name) if tok]
+    return [tok for tok in tokens if not tok.isdigit()]
 
 
 def _build_audio_index(root: str, valid_exts: set[str]) -> tuple[dict[str, list[str]], dict[str, set[str]]]:
