@@ -4392,6 +4392,33 @@ def export_consolidation_preview_html(
             html_lines.append(f"<div class='v tiny'>{esc(_format_setting(value))}</div>")
         html_lines.extend(["</div>", "</div>"])
 
+    actionable_groups = 0
+    show_ready_default = False
+    show_no_ops_default = False
+    if plan.groups:
+        for group in plan.groups:
+            actions = _planned_actions(group)
+            visible_losers = list(group.losers)
+            hidden_losers: set[str] = set()
+            if not show_artwork_variants:
+                hidden_losers = {
+                    loser for loser in group.losers if _is_artwork_variant(group, loser, art_threshold)
+                }
+                if hidden_losers:
+                    visible_losers = [loser for loser in group.losers if loser not in hidden_losers]
+                    actions = [
+                        act
+                        for act in actions
+                        if not (act["step"] == "loser_cleanup" and act["target"] in hidden_losers)
+                    ]
+            if not show_artwork_variants and not actions and not visible_losers:
+                continue
+            if not _is_noop_group(actions):
+                actionable_groups += 1
+        if actionable_groups == 0:
+            show_ready_default = True
+            show_no_ops_default = True
+
     html_lines.extend(
         [
             "</section>",
@@ -4405,9 +4432,11 @@ def export_consolidation_preview_html(
             "<option value='failed'>Any failures</option>",
             "</select>",
             "<label class='toggle tiny' title='When unchecked, hides groups marked ready.'>"
-            "<input type='checkbox' id='showReady' /> Show ready groups</label>",
+            f"<input type='checkbox' id='showReady' {'checked' if show_ready_default else ''} /> "
+            "Show ready groups</label>",
             "<label class='toggle tiny' title='When unchecked, hides groups with no planned operations.'>"
-            "<input type='checkbox' id='showNoOps' /> Show no-op groups</label>",
+            f"<input type='checkbox' id='showNoOps' {'checked' if show_no_ops_default else ''} /> "
+            "Show no-op groups</label>",
             "<span class='tiny muted'>Hides groups with no planned operations when off.</span>",
             "</div>",
             "<div class='right'>",
@@ -4421,7 +4450,6 @@ def export_consolidation_preview_html(
     )
 
     all_actions: List[Dict[str, object]] = []
-    actionable_groups = 0
     for group in plan.groups:
         actions = _planned_actions(group)
         visible_losers = list(group.losers)
@@ -4441,8 +4469,6 @@ def export_consolidation_preview_html(
             continue
         is_noop = _is_noop_group(actions)
         all_actions.extend(actions)
-        if not is_noop:
-            actionable_groups += 1
         state = "review" if group.review_flags else "ready"
         badges = _action_badges(group, actions)
         group_disposition_count = sum(
@@ -4745,8 +4771,12 @@ def export_consolidation_preview_html(
         html_lines.append("</div>")
         html_lines.append("</details>")
 
-    if actionable_groups == 0:
-        html_lines.append("<div class='empty'>No changes needed.</div>")
+    if not plan.groups:
+        html_lines.append("<div class='empty'>No duplicate groups found.</div>")
+    elif actionable_groups == 0:
+        html_lines.append(
+            "<div class='empty'>No planned changes. All groups are ready or no-op.</div>"
+        )
     html_lines.append("</main>")
     html_lines.append("<details class='quarantine' id='quarantineIndex'>")
     html_lines.append("<summary class='quarantine-summary'>")
