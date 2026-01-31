@@ -1,16 +1,38 @@
-# SoundVault Music Indexer
+<img width="1024" height="432" alt="AlphaDEX" src="https://github.com/user-attachments/assets/d8eb11c2-6a50-47d1-8932-77a53cee9b17" />
 
-SoundVault organizes large music libraries. It deduplicates tracks, fixes tags via AcoustID, normalizes genres, and generates playlists while keeping your folder structure intact.
+# AlphaDEX (formerly SoundVault) a Music Indexer
+
+Welcome to AlphaDEX (formerly SoundVault)! If you have a library of songs with mixed codecs, duplicates, messy metadata, and disorganized folders, AlphaDEX is built to fix all of it. It is designed for casual users and enthusiasts alike, and the tools inside are the result of years of frustration born from too many songs, too little space, and no desire to manually sort thousands of files. The current feature set represents 500+ hours of focused work over roughly six months, with the original vision first outlined more than five years ago when the music collection began. The advent of AI made it possible to extend those ideas and ship the program you see here.
+
+This README mirrors the project documentation and provides:
+- A friendly overview of the core programs.
+- A quick path to get running.
+- Supporting tools and configuration details for deeper work.
+
+## Core programs (start here)
+
+These are the main workflows described in the documentation:
+
+1. **Music Indexer**: preview-first workflows to organize, move, and rename your library with a full HTML report before committing changes.
+2. **Duplicate Finder (Redesigned)**: review-first deduplication with fingerprinting, group-by-group decisions, and safety-focused execution reports.
+3. **Similarity Inspector**: a diagnostic tool to understand why two tracks match (or do not match) during duplicate detection.
+4. **Library Sync Review**: compare two libraries, build a plan, and preview or execute copy/move actions.
+
+## Supporting tools (roughly simple → advanced)
+
+1. **Tag Fixer**: repair metadata using AcoustID and other services.
+2. **Genre Normalizer**: batch-update genres for consistent tagging.
+3. **Playlist Generator**: build `.m3u` playlists and Auto‑DJ flows.
+4. **Clustered Playlists**: run K-Means/HDBSCAN clustering and visualize the results.
+5. **Visual Music Graph**: an interactive scatter plot for clustered playlists that lets you explore your library as a map.
 
 ## Prerequisites
 
 - **Python 3.11+** (use [conda](https://docs.conda.io/en/latest/miniconda.html) or `venv`)
-- **Git** command line
-  ```bash
-  git clone --recurse-submodules https://example.com/yourrepo.git
-  ```
-- **FFmpeg** installed and on your `PATH`
-- **llama.exe** command line for LLM features
+- **Git** command line for cloning the repo
+- **FFmpeg** installed and on your `PATH` (required for audio analysis)
+- **VLC / libVLC** for in-app playback (recommended; required for audio preview features)
+- **Optional LLM helper**: `third_party/llama/llama-run.exe` (Windows binaries included) plus a GGUF model (place it at `models/your-model.gguf` or update `plugins/assistant_plugin.py`).
 
 ## Installation
 
@@ -25,33 +47,55 @@ pip install -r requirements.txt
 The indexer will exit with an error if the real `mutagen` package is missing,
 so ensure all dependencies are installed before running.
 
-The **Quality Checker** now imports the indexer's `fingerprint_generator`
-module. Make sure the Music Indexer package itself is installed (e.g.
-`pip install .`) so this dependency is available when running the Quality
-Checker.
+The **Duplicate Finder** tab opens the redesigned shell for spotting duplicates.
+If you run from source, keep this repo on your Python path (run `python
+main_gui.py` from the repo root or install an editable package) so the backend
+modules remain importable.
 
-## Quickstart
+### Optional: Essentia audio engine
+
+Essentia can be used instead of `librosa` for tempo and feature extraction. It
+is optional—stick with `librosa` if you don't need it—but enables faster C++
+implementations when available.
+
+- **Prerequisites** (Linux builds compile C++ code and can take several
+  minutes):
+  - Debian/Ubuntu: `sudo apt-get install build-essential libfftw3-dev liblapack-dev libblas-dev libyaml-dev libtag1-dev libchromaprint-dev libsamplerate0-dev libavcodec-dev libavformat-dev libavutil-dev libavresample-dev`
+  - macOS: `brew install essentia` (installs prebuilt formula with dependencies)
+  - Windows: no official wheel; use WSL/Linux if you need Essentia.
+- **Install** (after prerequisites):
+  ```bash
+  pip install essentia==2.1b6
+  ```
+
+Expect longer build times on Linux the first time you install Essentia. If you
+prefer the pure-Python stack, you can continue using `librosa` without this
+extra dependency.
+
+## Quickstart (basic flow)
 
 ```bash
 python main_gui.py
 ```
 
-1. **Open** your library folder
-2. Use the **Indexer** tab to dedupe, detect near duplicates, and move files
-3. **Fix Tags** via the AcoustID menu (now supports multiple metadata services)
-4. **Generate Playlists** from your folder structure
-5. **Clustered Playlists** (interactive K-Means/HDBSCAN) via the Tools ▸ Clustered Playlists menu
-6. **Smart Playlist Engine** with tempo/energy buckets and “More Like This” suggestions
-7. **Auto‑DJ** mode builds seamless playlists starting from any song
-8. **Tidal-dl Sync** can upgrade low-quality files to FLAC
-9. **Library Duplicate Scan** finds duplicate tracks after you drop new songs directly into your library
-10. **Cross-Album Scan** optionally finds duplicates appearing on multiple albums
-11. Use the **Theme** dropdown and **Help** tab for assistance
-12. Adjust the **Distance Threshold** in the Quality Checker tab to fine‑tune duplicate detection and view detailed fingerprint distance logs
+1. **Open** your library folder.
+2. Run the **Indexer** tab in preview mode to review the HTML plan.
+3. Execute the Indexer to apply moves/renames after the preview looks right.
+4. Open **Duplicate Finder** to scan, preview, and execute dedupe groups.
+5. Use **Tools → Similarity Inspector** to understand tricky duplicate matches.
+6. Explore **Playlists** (folder playlists, Auto‑DJ, clustered playlists) once the library is cleaned.
+7. Use **Library Sync** to compare/merge two libraries when needed.
+
+### Where to find things
+
+- **File organization / rename:** Indexer tab
+- **Duplicates:** Duplicate Finder tab (Cross-Album Scan is a reserved toggle in the Indexer UI)
+- **Playlist tools:** Tools ▸ Playlist Generator / Clustered Playlists
+- **Playback + diagnostics:** Tools ▸ Similarity Inspector, Log tab
 
 ### Playlist generator feedback
 
-When you start a playlist job (tempo/energy buckets, *More Like This*, Auto‑DJ, or auto‑creating clustered playlists), the app automatically switches to the **Log** tab. The tab shows timestamped messages from the playlist helpers (feature gathering, similarity calculations, and playlist writes) so you can see that background work is running without waiting for a popup.
+When you start a playlist job (tempo/energy buckets, Auto‑DJ, or auto‑creating clustered playlists), the app automatically switches to the **Log** tab. The tab shows timestamped messages from the playlist helpers (feature gathering, similarity calculations, and playlist writes) so you can see that background work is running without waiting for a popup.
 
 Cluster generation writes progress into `<method>_log.txt` inside your library so you can review the steps later.
 
@@ -59,18 +103,27 @@ Cluster generation writes progress into `<method>_log.txt` inside your library s
 
 The indexer automatically prefixes file paths with `\\?\` on Windows, allowing it to work with directories deeper than the classic 260-character limit.
 
+### Indexer outputs and behavior
+
+- **Preview output:** Every run writes `Docs/MusicIndex.html` under the selected library root; dry runs open the preview automatically.
+- **Decision log:** A detailed `Docs/indexer_log.txt` captures routing decisions and metadata fallbacks.
+- **Missing metadata:** Tracks missing core tags land in `Manual Review/` so you can fix them before re-running.
+- **Excluded folders:** `Not Sorted/` and `Playlists/` are skipped during scans, letting you stash exceptions safely.
+- **Leftover files:** Non-audio leftovers are moved into `Docs/` (`.txt`, `.html`, `.db`) or `Trash/` for everything else.
+- **Playlists:** Full runs generate playlists in `Playlists/` by default; uncheck **Create Playlists** to skip.
+
 ## Threading
 
 Long running actions such as indexing, tag fixing and library sync operations are executed in daemon threads. GUI updates from these background tasks are scheduled using Tkinter's `after` method so message boxes and progress indicators always run on the main thread.
 
 ## Configuration
 
-User settings are stored in `~/.soundvault_config.json`. To tweak the fuzzy fingerprint
-threshold used during deduplication, add a value like:
+User settings are stored in `~/.soundvault_config.json` (legacy filename from SoundVault). To tweak the near-duplicate
+fingerprint threshold used during deduplication, add a value like:
 
 ```json
 {
-  "fuzzy_fp_threshold": 0.1
+  "near_duplicate_threshold": 0.1
 }
 ```
 
@@ -84,8 +137,9 @@ configured. Add a `format_fp_thresholds` section with extension keys:
   "format_fp_thresholds": {
     "default": 0.3,
     ".flac": 0.3,
-    ".mp3": 0.2,
-    ".aac": 0.25
+    ".mp3": 0.35,
+    ".m4a": 0.35,
+    ".aac": 0.35
   }
 }
 ```
@@ -119,13 +173,44 @@ Testing the connection or saving will persist your selections for future runs.
 MusicBrainz requests require a valid User-Agent string containing your
 application name, version and contact email.
 
+## Duplicate Finder (Redesigned)
+
+The Duplicate Finder has been rebuilt into a review-first workflow that makes it
+easy to preview and execute deduplication safely.
+
+- **Scan Library** builds a fingerprint plan and summarizes duplicate groups.
+- **Preview** writes `Docs/duplicate_preview.json` and
+  `Docs/duplicate_preview.html` so you can review every group before changes.
+- **Execute** applies the plan, writes a detailed HTML report under
+  `Docs/duplicate_execution_reports/`, and updates playlists when enabled.
+- **Group dispositions** let you retain, quarantine, or delete losers per group
+  while keeping global defaults for everything else.
+- **Review-required groups** block execution until resolved or overridden.
+- **Thresholds** controls let you tune exact/near matching as well as
+  fingerprint windowing and silence trimming for tough cases.
+
+Duplicates are quarantined into `Quarantine/` by default; you can switch to
+retain-in-place or delete (with confirmation) from the main controls.
+
+## Similarity Inspector
+
+The Similarity Inspector is a targeted tool for understanding why two tracks
+match (or do not match) during duplicate detection.
+
+- Launch from **Tools → Similarity Inspector…**.
+- Select two files, optionally override fingerprint offsets, trimming, and
+  thresholds, then run the inspection.
+- The report shows codec, duration, raw fingerprint distance, the effective
+  near-duplicate threshold (including mixed-codec adjustments), and the verdict.
+- Every run writes a timestamped report to `Docs/` inside the selected library.
+
 ## File Overview
 
 The codebase is organized into a handful of key modules:
 
 ```
 main_gui.py               - Tkinter entry point for the desktop app
-music_indexer_api.py      - Core scanning, dedupe and relocation logic
+music_indexer_api.py      - Core scanning and relocation logic (dedupe handled elsewhere)
 playlist_generator.py     - `.m3u` playlist creation helpers
 clustered_playlists.py    - Feature extraction and clustering algorithms
 cluster_graph_panel.py    - Interactive scatter plot for clustered playlists
@@ -134,8 +219,10 @@ fingerprint_cache.py      - Persistent fingerprint cache
 near_duplicate_detector.py - Fuzzy near-duplicate detection helpers
 tag_fixer.py              - Tag fixing engine using plugin metadata
 update_genres.py          - Batch genre tag updater via MusicBrainz
-validator.py              - Verify SoundVault folder layout
+validator.py              - Verify AlphaDEX folder layout
 config.py                 - Read/write persistent configuration
+library_sync_review.py    - Library Sync review UI with plan/preview/execute controls
+library_sync.py           - Library Sync scan/compare logic and plan execution helpers
 mutagen_stub/             - Minimal fallback used by the tests
 
 controllers/
@@ -146,7 +233,6 @@ controllers/
   cluster_controller.py        - Gather tracks and run clustering
   library_index_controller.py  - Build HTML index of your library
   highlight_controller.py      - Play short audio snippets
-  genre_list_controller.py     - Scan library for unique genres
   playlist_controller.py       - Playlist export placeholder
 
 plugins/
@@ -167,6 +253,13 @@ third_party/ - Prebuilt llama executables
 
 These items are currently under development and not yet part of the stable release.
 
-- Metadata Plugins (Discogs, Spotify)
+- Expanded metadata plugins beyond AcoustID/Last.fm (Discogs, Spotify)
 
 See [`docs/project_documentation.html`](docs/project_documentation.html) for technical details.
+
+## Known gaps
+
+- **Tidal-dl sync**: `tidal-dl` is listed in `requirements.txt`, but there is no UI or workflow wired up yet.
+- **Metadata provider breadth**: only AcoustID + Last.fm are wired end-to-end; Discogs/Spotify stubs exist but are not production-ready.
+- **LLM assistant models**: no GGUF model ships with the repo; you must provide one and update `plugins/assistant_plugin.py` if you want to use the helper.
+- **Theme packs**: optional ttk theme packs are listed in `requirements.txt`, but you must install and select them manually.

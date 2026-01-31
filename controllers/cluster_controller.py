@@ -48,11 +48,16 @@ def cluster_library(
     cluster_params: dict,
     log_callback,
     folder_filter: dict | None = None,
+    engine: str = "serial",
+    feature_engine: str = "librosa",
+    use_max_workers: bool = False,
 ) -> tuple[list[str], list]:
     """Generate clustered playlists for ``library_path`` and return features."""
 
     tracks = gather_tracks(library_path, folder_filter)
-    log_path = os.path.join(library_path, f"{method}_log.txt")
+    docs_dir = os.path.join(library_path, "Docs")
+    os.makedirs(docs_dir, exist_ok=True)
+    log_path = os.path.join(docs_dir, f"{method}_log.txt")
 
     def log(msg: str) -> None:
         log_callback(msg)
@@ -69,5 +74,8 @@ def cluster_library(
         method,
         cluster_params,
         log,
+        engine=engine,
+        feature_engine=feature_engine,
+        use_max_workers=use_max_workers,
     )
     return tracks, feats

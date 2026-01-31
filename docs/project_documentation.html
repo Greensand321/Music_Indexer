@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>SoundVault Project Documentation</title>
+  <title>AlphaDEX (formerly SoundVault) Project Documentation</title>
   <style>
     body { font-family: Arial, sans-serif; margin: 20px; background: #f7f7f7; color: #333; }
     h1 { color: #2c3e50; }
@@ -15,10 +15,10 @@
 </head>
 <body>
 
-<h1>SoundVault Project Documentation</h1>
+<h1>AlphaDEX (formerly SoundVault) Project Documentation</h1>
 
 <h2>1. Introduction</h2>
-<p>This document compiles all work done so far on the SoundVault project, including:</p>
+<p>This document compiles all work done so far on the AlphaDEX (formerly SoundVault) project, including:</p>
 <ul>
   <li>Detailed descriptions of each program created.</li>
   <li>Current progress and status of the system.</li>
@@ -34,8 +34,11 @@
 <ul>
   <li>Scans folders recursively for audio files.</li>
   <li>Reads metadata: artist, title, album, year, track number, embedded cover art.</li>
-  <li>Deduplicates tracks by fingerprint, preferring FLAC &gt; M4A &gt; MP3.</li>
+  <li>Separates workflow into deterministic phases: vault pre-scan (artist counts), metadata aggregation, destination routing, and preview generation.</li>
+  <li>Surfaces every routing decision in <code>decision_log</code> and a tag index to drive consistent HTML previews and downstream plan rendering.</li>
   <li><strong>Phase 0</strong>: Pre-scan the vault under MUSIC_ROOT to build a global artist-count map via <code>build_primary_counts()</code>.</li>
+  <li>Skips <code>Not Sorted/</code> and <code>Playlists/</code> directories during scans so you can exclude files from indexing.</li>
+  <li>Routes missing-metadata tracks into <code>Manual Review/</code> for later cleanup.</li>
   <li>Implements grouping rules:
     <ul>
       <li>Common artist threshold (≥ 10 tracks) → <code>By Artist/&lt;Artist&gt;</code>.</li>
@@ -44,9 +47,10 @@
       <li>“(Remixes)” folder if an album has ≥ 3 remixes.</li>
     </ul>
   </li>
-  <li>Generates a “dry-run” HTML preview of the proposed reorganization (color-coded).</li>
-  <li>Applies the final moves: creates new folders, renames/moves audio files, archives docs into <code>Docs/</code> and other leftovers into <code>Trash/</code>, then deletes empty folders (two passes to also remove now-empty parents).</li>
-  <li>Writes <code>Docs/indexer_log.txt</code> detailing exactly how each file was classified and moved.</li>
+  <li>Generates a “dry-run” HTML preview of the proposed reorganization (color-coded) at <code>Docs/MusicIndex.html</code>.</li>
+  <li>Applies the final moves: creates new folders, renames/moves audio files, updates canonical primary-artist metadata, and archives leftovers into <code>Docs/</code> or <code>Trash/</code>, then deletes empty folders (two passes to also remove now-empty parents).</li>
+  <li>Writes <code>Docs/indexer_log.txt</code> detailing exactly how each file was classified and routed.</li>
+  <li><strong>Note:</strong> the indexer does not deduplicate; duplicate review lives in the Duplicate Finder workflow.</li>
 </ul>
 
 <p><strong>Skeleton of <code>music_indexer_api.py</code> (comments only):</strong></p>
@@ -77,21 +81,17 @@ def extract_primary_and_collabs(raw_artist: str):
 def compute_moves_and_tag_index(root_path, log_callback=None):
     # 0. Pre-scan entire vault under MUSIC_ROOT -> build_primary_counts()
     # 1. Decide music_root (either root_path or root_path/Music).
-    # 2. Walk recursively, collect supported audio files.
-    # 3. Deduplicate by (artist, title, album), choose highest-quality format.
-    # 4. Read metadata for each kept track; build counts:
-    #    • primary_counts: number of tracks per artist
+    # 2. Walk recursively, collect supported audio files (skip Not Sorted/Playlists).
+    # 3. Read metadata for each track; build counts:
     #    • album_counts: number of tracks per (artist, album)
-    #    • remix_counts: number of remixed tracks per (artist, album)
-    #    • cover_counts: number of identical embedded-cover hashes
-    # 5. For each file, decide destination:
-    #    • If "(Remixes)" and remix_count ≥ REMIX_FOLDER_THRESHOLD → create "<Album> (Remixes)" folder
-    #    • Else if remix in title but remix_count < threshold → treat as single
-    #    • Else if album_count ≥ 5 → create album folder
-    #    • Else if primary_count ≥ COMMON_ARTIST_THRESHOLD → create "<Artist>/Album" or "<Artist> – Singles"
-    #    • Else → <Year>/ ...
-    # 6. Build a moves dict mapping old_path → new_path, plus a tag_index for HTML preview.
-    # 7. Return (moves, tag_index, decision_log).
+    #    • remix_counts: number of remix-tagged tracks per (artist, album)
+    #    • album_disc_values: disc values per (artist, album)
+    # 4. For each file, decide destination:
+    #    • If missing core tags → Manual Review/
+    #    • If rare artist → By Year/<Year>
+    #    • Else apply album/singles/remix grouping rules
+    # 5. Build a moves dict mapping old_path → new_path, plus a tag_index for HTML preview.
+    # 6. Return (moves, tag_index, decision_log).
     pass
 
 def build_dry_run_html(root_path, output_html_path, log_callback=None):
@@ -103,10 +103,10 @@ def apply_indexer_moves(root_path, log_callback=None):
     # Actually performs the file moves:
     # 1. Creates new directories as needed.
     # 2. Moves and renames audio files.
-    # 3. Moves docs (*.txt, *.html, *.db) into "Docs/" and other leftovers into "Trash/".
-    # 4. Deletes empty source folders in two passes so parent directories left
+    # 3. Updates canonical primary-artist metadata where possible.
+    # 4. Moves docs (*.txt, *.html, *.db) into "Docs/" and other leftovers into "Trash/".
+    # 5. Deletes empty source folders in two passes so parent directories left
     #    empty after their children are removed are also deleted.
-    # 5. Writes Docs/indexer_log.txt summarizing each file’s action.
     pass
 
 def run_full_indexer(root_path, output_html_path, dry_run_only=False, log_callback=None):
@@ -115,8 +115,46 @@ def run_full_indexer(root_path, output_html_path, dry_run_only=False, log_callba
     #   2. Write Docs/indexer_log.txt
     #   3. build_dry_run_html(...)
     #   4. If not dry_run_only, call apply_indexer_moves(...)
+    #   5. Optionally generate playlists under Playlists/
     pass
 </code></pre>
+
+<hr>
+
+<h3>2.2 Duplicate Finder (Redesigned)</h3>
+<p>A review-first duplicate consolidation workflow launched from the <strong>Duplicate Finder</strong> tab:</p>
+<ul>
+  <li>Scans the library, fingerprints tracks, and groups exact/near duplicates using configurable thresholds.</li>
+  <li>Generates preview artifacts (<code>Docs/duplicate_preview.json</code> and <code>Docs/duplicate_preview.html</code>) so users can inspect every group before execution.</li>
+  <li>Allows per-group dispositions (retain, quarantine, delete) while keeping a global default for most groups.</li>
+  <li>Supports playlist rewrites during execution, with all changes logged in <code>Docs/duplicate_execution_reports/</code>.</li>
+  <li>Blocks execution when review-required groups are present unless the override is explicitly enabled.</li>
+  <li>Exposes threshold tuning for fingerprint offsets, durations, silence trimming, and mixed-codec matching.</li>
+</ul>
+
+<h3>2.3 Similarity Inspector</h3>
+<p>Diagnostic tool under <strong>Tools → Similarity Inspector…</strong> for analyzing two audio files with the Duplicate Finder fingerprint pipeline:</p>
+<ul>
+  <li>Compares two selected tracks and reports codec metadata, raw fingerprint distance, and match verdicts.</li>
+  <li>Allows advanced overrides for fingerprint windows, silence trimming, and duplicate thresholds.</li>
+  <li>Applies mixed-codec threshold boosts to explain borderline comparisons.</li>
+  <li>Writes timestamped text reports to <code>Docs/</code> in the selected library.</li>
+</ul>
+
+<hr>
+
+<h3>2.5 Library Sync Review Tool (<code>library_sync_review.py</code> / <code>library_sync.py</code>)</h3>
+<p>Review-first workflow with a two-list UI plus optional plan/preview/execute actions:</p>
+<ul>
+  <li>Runs independent scans for Library and Incoming folders, reusing cached fingerprints when size/mtime match and computing new prints in parallel when needed.</li>
+  <li>Builds normalized <code>TrackRecord</code> entries (path, ext, bitrate, size, mtime, duration, fingerprint, tags) and matches via indexed shortlists: fingerprint signature → extension cohort → fallback pool.</li>
+  <li>Classifies each incoming track as <em>New</em>, <em>Collision</em>, <em>Exact Match</em>, or <em>Low Confidence</em>, and attaches quality labels (<em>Potential Upgrade</em> / <em>Keep Existing</em>) using format priority and bitrate.</li>
+  <li>Exposes full <code>MatchResult</code> payloads with shortlist distances, thresholds used, near-miss margins, and confidence scores so the UI can render detailed inspectors without extra computation.</li>
+  <li>The UI provides Incoming/Existing lists, a text inspector, log export, and plan controls (Build Plan, Preview, Execute) with a transfer-mode toggle and optional playlist output.</li>
+  <li>Optional profiling (<code>PerformanceProfile</code>) tracks cache hits, fingerprints computed, shortlist sizes, and scan/match timings for troubleshooting.</li>
+  <li>Opt-in execution path: <code>compute_library_sync_plan()</code> remaps indexer-derived destinations under the chosen library root and emits deterministic plan items (<em>COPY</em> / <em>REPLACE</em> / <em>SKIP</em> with reasons). <code>build_library_sync_preview()</code> renders the HTML preview, and <code>execute_library_sync_plan()</code> writes JSON audits + executed HTML reports, creates a playlist of transferred files, and backs up any replaced destination before writing.</li>
+  <li><strong>Current gaps:</strong> per-item copy/replace flags and report-export helpers exist in code, but the UI does not expose them yet.</li>
+</ul>
 
 <hr>
 
@@ -150,94 +188,7 @@ faster. Schema upgrades are handled automatically.</p>
 
 <hr>
 
-<h3>2.4 Unique Genre Lister (<code>genre_list_controller.py</code>)</h3>
-<p>Scans a folder for audio files and builds a deduplicated, sorted list of all <code>genre</code> tags found. Writes <code>genres.html</code> so you can review every raw genre:</p>
-
-<pre><code>
-#!/usr/bin/env python3
-"""
-genre_list_controller.py
-
-Scan audio files, extract their genre tags, deduplicate them and output genres.html.
-"""
-
-import os
-import sys
-import tkinter as tk
-from tkinter import filedialog
-from mutagen import File as MutagenFile
-
-SUPPORTED_EXTS = {".flac", ".m4a", ".aac", ".mp3", ".wav", ".ogg"}
-
-def sanitize(text: str) -> str:
-    # Escape HTML: &lt;, &gt;, &amp;
-    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-
-def extract_genre(filepath: str) -> str:
-    """
-    Return the first 'genre' tag (string) from the audio file, or None.
-    """
-    try:
-        audio = MutagenFile(filepath, easy=True)
-        if not audio or not audio.tags:
-            return None
-        raw = audio.tags.get("genre", [None])[0]
-        if raw:
-            return raw.strip()
-        return None
-    except Exception:
-        return None
-
-def gather_unique_genres(root_path: str) -> set:
-    unique = set()
-    for dirpath, _, filenames in os.walk(root_path):
-        for fname in filenames:
-            ext = os.path.splitext(fname)[1].lower()
-            if ext in SUPPORTED_EXTS:
-                fullpath = os.path.join(dirpath, fname)
-                genre = extract_genre(fullpath)
-                if genre:
-                    unique.add(genre)
-    return unique
-
-def write_genres_html(root_path: str, genres: set, output_filename: str = "genres.html"):
-    sorted_genres = sorted(genres, key=lambda s: s.lower())
-    lines = []
-    lines.append("<!DOCTYPE html>")
-    lines.append("<html lang='en'>")
-    lines.append("<head><meta charset='UTF-8'><title>Unique Genres</title>")
-    lines.append("<style>body { font-family: Arial, sans-serif; background: #f7f7f7; color: #333; } ul { list-style: none; padding-left: 0; } li { margin: 4px 0; }</style>")
-    lines.append("</head><body>")
-    lines.append(f"<h1>Unique Genres in “{sanitize(os.path.basename(root_path) or root_path)}”</h1>")
-    lines.append("<ul>")
-    if sorted_genres:
-        for genre in sorted_genres:
-            lines.append(f"<li>{sanitize(genre)}</li>")
-    else:
-        lines.append("<li><em>No genre tags found</em></li>")
-    lines.append("</ul>")
-    lines.append("</body></html>")
-
-    out_path = os.path.join(root_path, output_filename)
-    with open(out_path, "w", encoding="utf-8") as f:
-        f.write("\n".join(lines))
-
-def main():
-    root = tk.Tk()
-    root.withdraw()
-    folder = filedialog.askdirectory(title="Select Folder to Scan for Genres")
-    if not folder:
-        sys.exit(0)
-    genres = gather_unique_genres(folder)
-    write_genres_html(folder, genres)
-
-if __name__ == "__main__":
-    main()
-</code></pre>
-
-<hr>
-
-<h3>2.5 Genre Updater via MusicBrainz (<code>update_genres.py</code>)</h3>
+<h3>2.4 Genre Updater via MusicBrainz (<code>update_genres.py</code>)</h3>
 <p>Walks your music folder, reads each file’s <code>artist</code> and <code>title</code>, queries MusicBrainz for a matching recording, grabs the top 3 tags by popularity, and writes them back into each file’s <code>genre</code> field. Logs all actions into <code>genre_update_log.txt</code>. Rate-limited at 1 request/second.</p>
 
 <pre><code>
@@ -273,7 +224,7 @@ from mutagen.flac import FLAC
 
 # Configuration
 musicbrainzngs.set_useragent(
-    "SoundVaultGenreUpdater",
+    "AlphaDEXGenreUpdater",
     "1.0",
     "youremail@example.com"
 )
@@ -584,12 +535,27 @@ if __name__ == "__main__":
 
 <h3>2.9 Playlist Engine</h3>
 <p>Advanced playlist features now include:</p>
+  <ul>
+    <li><strong>Tempo/Energy Buckets</strong>: group tracks by BPM and RMS energy.</li>
+    <li><strong>Auto-DJ</strong>: chain similar songs for seamless playback.</li>
+    <li><strong>Clustering Approaches</strong>: K-Means and HDBSCAN based sets.</li>
+    <li>Wireframe: <code>playlist_wireframe.png</code></li>
+</ul>
+
+<h3>2.10 Optional Essentia Audio Engine</h3>
+<p>Essentia can replace <code>librosa</code> for tempo analysis and audio feature extraction. It is optional—<code>librosa</code> remains supported—but Essentia offers faster C++ implementations when installed.</p>
 <ul>
-  <li><strong>Tempo/Energy Buckets</strong>: group tracks by BPM and RMS energy.</li>
-  <li><strong>Nearest-Neighbor Playlists</strong>: “More Like This” suggestions.</li>
-  <li><strong>Auto-DJ</strong>: chain similar songs for seamless playback.</li>
-  <li><strong>Clustering Approaches</strong>: K-Means and HDBSCAN based sets.</li>
-  <li>Wireframe: <code>playlist_wireframe.png</code></li>
+  <li><strong>Prerequisites</strong> (Linux builds compile C++ code and may take several minutes):
+    <ul>
+      <li><strong>Debian/Ubuntu</strong>: <code>sudo apt-get install build-essential libfftw3-dev liblapack-dev libblas-dev libyaml-dev libtag1-dev libchromaprint-dev libsamplerate0-dev libavcodec-dev libavformat-dev libavutil-dev libavresample-dev</code></li>
+      <li><strong>macOS</strong>: <code>brew install essentia</code> (installs the formula and dependencies)</li>
+      <li><strong>Windows</strong>: no official wheel; use WSL/Linux if you need Essentia.</li>
+    </ul>
+  </li>
+  <li><strong>Installation</strong> (after prerequisites):
+    <pre><code>pip install essentia==2.1b6</code></pre>
+  </li>
+  <li>Expect longer build times on Linux the first time you install Essentia. If you prefer the pure-Python stack, keep using <code>librosa</code> without this extra dependency.</li>
 </ul>
 
 <h3>2.y GUI Front-end (<code>main_gui.py</code>)</h3>
@@ -606,17 +572,17 @@ if __name__ == "__main__":
 
 <h2>3. Current Progress</h2>
 <ul>
-  <li><strong>Indexer</strong>: Fully implemented as <code>music_indexer_api.py</code>, tested on sample folders. It correctly reorganizes by artist, year, album, singles, and remixes, preserving cover-art groups.</li>
+  <li><strong>Indexer</strong>: Implemented as <code>music_indexer_api.py</code>. It reorganizes by artist, year, album, singles, and remixes, writes HTML previews/logs, and leaves deduplication to the Duplicate Finder workflow.</li>
   <li><strong>Fingerprint Generator</strong>: <code>fingerprint_generator.py</code> stores AcoustID hashes for each track.</li>
   <li><strong>Fingerprint Cache</strong>: <code>fingerprint_cache.py</code> keeps computed fingerprints in SQLite.</li>
-  <li><strong>Unique Genre Lister</strong>: <code>genre_list_controller.py</code> creates <code>genres.html</code> showing all distinct raw genre tags in one place.</li>
   <li><strong>Genre Updater</strong>: <code>update_genres.py</code> connects to MusicBrainz, pulls top 3 tags per track, and writes them into files—skipping files that already have ≥ 2 genres.</li>
+  <li><strong>Genre Normalizer</strong>: <code>normalize_controller.py</code> scans raw genre tags, suggests clean mappings, and writes normalized genres back to your files.</li>
   <li><strong>Library Index</strong>: <code>library_index_controller.py</code> builds <code>library_index.html</code>, a table listing path, artist, title, album, year, track, and genre(s) for every audio file. Useful for quick review.</li>
-  <li><strong>Near-Duplicate Detector</strong>: integrated into <code>music_indexer_api.py</code> to remove fuzzy duplicates.</li>
+  <li><strong>Near-Duplicate Detector</strong>: available via the Duplicate Finder workflow for review-first deduplication.</li>
   <li><strong>Clustered Playlists</strong>: interactive K-Means and HDBSCAN clustering with a graph-based panel.</li>
   <li><strong>UI Enhancements</strong>: theme selector and automatic DPI scaling.</li>
-  <li><strong>Playlist Engine</strong>: tempo/energy buckets, “More Like This” suggestions and Auto-DJ mode.</li>
-</ul>
+    <li><strong>Playlist Engine</strong>: tempo/energy buckets and Auto-DJ mode.</li>
+  </ul>
 
 <hr>
 
@@ -650,7 +616,7 @@ if __name__ == "__main__":
       <li>Before running the indexer or genre updater, snapshot the current state:
         <ul>
           <li>Copy <code>library_index.html</code> and <code>genre_update_log.txt</code> to an “__archive” folder.</li>
-          <li>Allow a “dry‐run” option for both indexer and genre updater to preview changes.</li>
+          <li>Add a “dry‐run” option for the genre updater; the indexer already supports preview-only runs.</li>
         </ul>
       </li>
       <li>Implement a simple “undo” by storing the moves log and reversing the file operations if needed.</li>
@@ -667,10 +633,10 @@ pydub
 pyacoustid   # provides the acoustid module
 librosa      # optional, for BPM estimation</code></pre>
           FFmpeg and Chromaprint's fpcalc must be installed and on PATH.
-      <li>Create a single-entry point (e.g. <code>soundvault.py</code>) that imports modules:
+      <li>Create a single-entry point (e.g. <code>alphadex.py</code>) that imports modules:
         <ul>
           <li><code>indexer</code>, <code>genre_updater</code>, <code>library_indexer</code>, <code>playlist_generator</code>, and <code>html_utils</code>.</li>
-          <li>Publish as a pip-installable package (<code>pip install soundvault</code>).</li>
+          <li>Publish as a pip-installable package (<code>pip install alphadex</code>).</li>
       </li>
       <li>Create a Windows MSI or PyInstaller build so users can double-click without installing Python.</li>
     </ul>
@@ -698,13 +664,12 @@ librosa      # optional, for BPM estimation</code></pre>
   <li><strong>Splitting into Parts:</strong> If this file feels too large, you can save Part 1 (Introduction, Programs 2.1–2.4) and Part 2 (Programs 2.5–2.9, Current Progress, Future Roadmap) separately. Just cut at the &lt;em&gt;“Continue to Part 2”&lt;/em&gt; line.</li>
   <li><strong>Using Git:</strong> Keep each Python script in its own file, commit to Git. When requesting edits from ChatGPT, refer to specific function names or file paths, not the entire content.</li>
   <li><strong>Incremental Patches:</strong> In VS Code, install the ChatGPT extension. Select only the function you want to change and ask “Please update this function to do X,” which avoids reposting the entire file.</li>
-  <li><strong>Deployment:</strong> After finalizing, bundle everything into a <code>soundvault</code> folder structure:
+  <li><strong>Deployment:</strong> After finalizing, bundle everything into a <code>alphadex</code> folder structure:
     <pre><code>
-soundvault/
+alphadex/
   gui/
     main_gui.py
   controllers/
-    genre_list_controller.py
     library_index_controller.py
     import_controller.py
     tagfix_controller.py
@@ -727,7 +692,7 @@ soundvault/
   </li>
 </ul>
 
-<p>With this HTML in hand, you can paste it into a new chat session or repository; future edits will be far lighter since you only need to update the small section that changes. Good luck completing your SoundVault system!</p>
+<p>With this HTML in hand, you can paste it into a new chat session or repository; future edits will be far lighter since you only need to update the small section that changes. Good luck completing your AlphaDEX (formerly SoundVault) system!</p>
 
 </body>
 </html>

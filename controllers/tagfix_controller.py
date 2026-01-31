@@ -17,7 +17,7 @@ def prepare_library(folder: str) -> tuple[str, dict]:
     db_path = os.path.join(docs_dir, ".soundvault.db")
     init_db(db_path)
 
-    mapping_path = os.path.join(folder, ".genre_mapping.json")
+    mapping_path = os.path.join(docs_dir, ".genre_mapping.json")
     mapping = {}
     if os.path.isfile(mapping_path):
         try:

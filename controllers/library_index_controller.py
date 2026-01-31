@@ -1,27 +1,8 @@
 import os
 from tkinter import messagebox
-try:
-    from mutagen import File as MutagenFile
-    from mutagen.easyid3 import EasyID3
-    from mutagen.flac import FLAC
-except Exception:  # pragma: no cover - optional dependency
-    class _DummyAudio:
-        def __init__(self, *a, **k):
-            self.tags = {}
+from utils.audio_metadata_reader import read_tags
 
-        def get(self, key, default=None):
-            return self.tags.get(key, default)
-
-    def MutagenFile(*_a, **_k):
-        return _DummyAudio()
-
-    class EasyID3(_DummyAudio):
-        pass
-
-    class FLAC(_DummyAudio):
-        pass
-
-SUPPORTED_EXTS = {".mp3", ".flac", ".m4a", ".aac", ".wav", ".ogg"}
+SUPPORTED_EXTS = {".mp3", ".flac", ".m4a", ".aac", ".wav", ".ogg", ".opus"}
 
 
 def sanitize(text: str) -> str:
@@ -37,50 +18,28 @@ def sanitize(text: str) -> str:
 
 def extract_tags(path: str) -> dict:
     """Return basic metadata for an audio file."""
-    ext = os.path.splitext(path)[1].lower()
-    artist = title = album = year = track = None
-    genres: list[str] = []
-    try:
-        if ext == ".mp3":
-            audio = EasyID3(path)
-            artist = audio.get("artist", [None])[0]
-            title = audio.get("title", [None])[0]
-            album = audio.get("album", [None])[0]
-            year = audio.get("date", [None])[0] or audio.get("year", [None])[0]
-            track = audio.get("tracknumber", [None])[0] or audio.get("track", [None])[0]
-            genres = audio.get("genre", [])
-        elif ext == ".flac":
-            audio = FLAC(path)
-            artist = audio.get("artist", [None])[0]
-            title = audio.get("title", [None])[0]
-            album = audio.get("album", [None])[0]
-            year = audio.get("date", [None])[0] or audio.get("year", [None])[0]
-            track = audio.get("tracknumber", [None])[0] or audio.get("track", [None])[0]
-            genres = audio.get("genre", [])
-        else:
-            audio = MutagenFile(path, easy=True)
-            if audio and audio.tags:
-                artist = audio.tags.get("artist", [None])[0]
-                title = audio.tags.get("title", [None])[0]
-                album = audio.tags.get("album", [None])[0]
-                year = audio.tags.get("date", [None])[0] or audio.tags.get("year", [None])[0]
-                track = audio.tags.get("tracknumber", [None])[0] or audio.tags.get("track", [None])[0]
-                genres = audio.tags.get("genre", [])
-    except Exception:
-        pass
+    tags = read_tags(path)
+    artist = tags.get("artist")
+    title = tags.get("title")
+    album = tags.get("album")
+    year = tags.get("year")
+    track = tags.get("track")
+    raw_genres = tags.get("genre")
 
     artist = artist.strip() if isinstance(artist, str) else ""
     title = title.strip() if isinstance(title, str) else ""
     album = album.strip() if isinstance(album, str) else ""
-    year = year.strip() if isinstance(year, str) else ""
-    if track:
-        try:
-            track = str(int(track.split("/")[0]))
-        except Exception:
-            track = track.strip()
+    year = str(year).strip() if year is not None else ""
+    if track is not None:
+        track = str(track).strip()
     else:
         track = ""
-    genres = [g.strip() for g in genres if isinstance(g, str) and g.strip()]
+    if raw_genres in (None, ""):
+        genres = []
+    elif isinstance(raw_genres, (list, tuple)):
+        genres = [g.strip() for g in raw_genres if isinstance(g, str) and g.strip()]
+    else:
+        genres = [str(raw_genres).strip()] if str(raw_genres).strip() else []
     return {
         "artist": artist,
         "title": title,
@@ -93,6 +52,8 @@ def extract_tags(path: str) -> dict:
 
 def generate_index(folder_path: str) -> str:
     """Generate library_index.html for ``folder_path`` and return its path."""
+    docs_dir = os.path.join(folder_path, "Docs")
+    os.makedirs(docs_dir, exist_ok=True)
     entries = []
     for dirpath, _, files in os.walk(folder_path):
         for fname in files:
@@ -134,7 +95,7 @@ def generate_index(folder_path: str) -> str:
     html_lines.append("</table>")
     html_lines.append("</body></html>")
 
-    out_path = os.path.join(folder_path, "library_index.html")
+    out_path = os.path.join(docs_dir, "library_index.html")
     with open(out_path, "w", encoding="utf-8") as f:
         f.write("\n".join(html_lines))
     messagebox.showinfo(

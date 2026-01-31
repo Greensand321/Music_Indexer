@@ -22,10 +22,13 @@ Follow these guidelines:
 • Ask clarifying questions if any terms are ambiguous.
 """
 
+_SKIP = object()
+
 
 def load_mapping(folder: str) -> tuple[Dict[str, str], str]:
     """Return genre mapping dict and path."""
-    path = os.path.join(folder, ".genre_mapping.json")
+    docs_dir = os.path.join(folder, "Docs")
+    path = os.path.join(docs_dir, ".genre_mapping.json")
     mapping: Dict[str, str] = {}
     if os.path.isfile(path):
         try:
@@ -38,16 +41,83 @@ def load_mapping(folder: str) -> tuple[Dict[str, str], str]:
 
 def save_mapping(folder: str, mapping: Dict[str, str]) -> str:
     """Save mapping JSON and return path."""
-    path = os.path.join(folder, ".genre_mapping.json")
-    os.makedirs(folder, exist_ok=True)
+    docs_dir = os.path.join(folder, "Docs")
+    path = os.path.join(docs_dir, ".genre_mapping.json")
+    os.makedirs(docs_dir, exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(mapping, f, indent=2)
     return path
 
 
-def normalize_genres(genres: list[str], mapping: Dict[str, str]) -> list[str]:
-    """Return list of genres normalized via mapping."""
-    return [mapping.get(g, g) for g in genres]
+def _split_and_clean(raw: str) -> list[str]:
+    """Split a raw genre string on common delimiters and return cleaned parts."""
+
+    if not isinstance(raw, str):
+        return []
+
+    parts = re.split(r"[;,/]+", raw)
+    cleaned = []
+    for part in parts:
+        part = part.strip()
+        if part:
+            cleaned.append(part)
+    return cleaned
+
+
+def _prepare_mapping(mapping: Dict[str, str | list[str] | None]) -> Dict[str, list[str] | None | object]:
+    """Return a cleaned, case-insensitive mapping ready for normalization."""
+
+    prepared: Dict[str, list[str] | None] = {}
+    for raw_key, raw_value in mapping.items():
+        if not isinstance(raw_key, str):
+            continue
+
+        key = raw_key.strip().casefold()
+        if not key:
+            continue
+
+        if raw_value is None:
+            prepared[key] = _SKIP
+            continue
+
+        values: list[str] = []
+        raw_values = raw_value if isinstance(raw_value, list) else [raw_value]
+        for value in raw_values:
+            values.extend(_split_and_clean(value))
+
+        prepared[key] = values or _SKIP
+    return prepared
+
+
+def normalize_genres(genres: list[str], mapping: Dict[str, str | list[str] | None]) -> list[str]:
+    """Return list of genres normalized via mapping with sensible defaults."""
+
+    normalized: list[str] = []
+    seen: set[str] = set()
+    prepared_mapping = _prepare_mapping(mapping)
+
+    for raw in genres:
+        if not isinstance(raw, str):
+            continue
+
+        cleaned = raw.strip()
+        if not cleaned:
+            continue
+
+        lookup_key = cleaned.casefold()
+        mapped = prepared_mapping.get(lookup_key)
+        if mapped is _SKIP:
+            continue
+
+        values = mapped if mapped is not None else _split_and_clean(cleaned)
+
+        for value in values:
+            key = value.casefold()
+            if value and key not in seen:
+                normalized.append(value)
+                seen.add(key)
+
+    return normalized
 
 
 def get_raw_genres(records):
@@ -72,7 +142,7 @@ def scan_raw_genres(folder: str, progress_callback):
     """
     # discover_files comes from your tagfix controller
     from controllers.tagfix_controller import discover_files
-    from mutagen import File as MutagenFile
+    from utils.audio_metadata_reader import read_tags
 
     files = discover_files(folder)
     total = len(files)
@@ -80,8 +150,13 @@ def scan_raw_genres(folder: str, progress_callback):
     progress_callback(0, total)
     for idx, path in enumerate(files, start=1):
         progress_callback(idx, total)
-        audio = MutagenFile(path, easy=True)
-        genres = audio.get("genre", []) or []
+        raw = read_tags(path).get("genre")
+        if raw in (None, ""):
+            continue
+        if isinstance(raw, (list, tuple)):
+            genres = [str(v) for v in raw if isinstance(v, str)]
+        else:
+            genres = [str(raw)]
         for entry in genres:
             # split on semicolon, comma or slash
             parts = re.split(r'[;,/]', entry)

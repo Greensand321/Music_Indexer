@@ -2,6 +2,14 @@ import os
 import threading
 import sys
 import logging
+import webbrowser
+import re
+import html
+import shutil
+import hashlib
+import difflib
+from pathlib import Path
+import urllib.parse
 
 if sys.platform == "win32":
     try:
@@ -18,12 +26,14 @@ if sys.platform == "win32":
 
 import tkinter as tk
 from tkinter import ttk
+from tkinter import font as tkfont
 
 Style = ttk.Style  # Default built-in themes
 # Optional theme packs:
 # from ttkthemes import ThemedStyle as Style
 # import ttkbootstrap as tb; Style = tb.Style
 import json
+import importlib.util
 import queue
 import subprocess
 from tkinter import filedialog, messagebox, Text, Scrollbar
@@ -31,6 +41,11 @@ from unsorted_popup import UnsortedPopup
 from tkinter.scrolledtext import ScrolledText
 import textwrap
 import time
+from datetime import datetime
+from collections import Counter, deque, defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
+from itertools import combinations
 
 from validator import validate_soundvault_structure
 from music_indexer_api import (
@@ -38,22 +53,56 @@ from music_indexer_api import (
     find_duplicates as api_find_duplicates,
     get_tags,
 )
-import simple_duplicate_finder as sdf_mod
-import fingerprint_cache
-import chromaprint_utils
+from duplicate_consolidation import (
+    _is_noop_group,
+    _planned_actions,
+    build_consolidation_plan,
+    build_duplicate_pair_report,
+    ConsolidationPlan,
+    consolidation_plan_from_dict,
+    export_consolidation_preview,
+    export_consolidation_preview_html,
+    export_duplicate_pair_report_html,
+    LOSSLESS_EXTS,
+)
+from duplicate_consolidation_executor import ExecutionConfig, execute_consolidation_plan
+from duplicate_bucketing_poc import run_duplicate_bucketing_poc
 from controllers.library_index_controller import generate_index
-from controllers.import_controller import import_new_files
-from controllers.genre_list_controller import list_unique_genres
-from controllers.highlight_controller import play_snippet, PYDUB_AVAILABLE
-from controllers.scan_progress_controller import ScanProgressController
-from gui.audio_preview import PreviewPlayer
+from gui.audio_preview import PlaybackError, VlcPreviewPlayer
 from io import BytesIO
 from PIL import Image, ImageTk
 from mutagen import File as MutagenFile
+from near_duplicate_detector import fingerprint_distance
+import chromaprint_utils
+from config import (
+    ARTWORK_VASTLY_DIFFERENT_THRESHOLD,
+    EXACT_DUPLICATE_THRESHOLD,
+    FP_DURATION_MS,
+    FP_OFFSET_MS,
+    FP_SILENCE_MIN_LEN_MS,
+    FP_SILENCE_THRESHOLD_DB,
+    FP_TRIM_LEAD_MAX_MS,
+    FP_TRIM_PADDING_MS,
+    FP_TRIM_TRAIL_MAX_MS,
+    FP_TRIM_SILENCE,
+    ALLOW_MISMATCHED_EDITS,
+    MIXED_CODEC_THRESHOLD_BOOST,
+    NEAR_DUPLICATE_THRESHOLD,
+    PREVIEW_ARTWORK_MAX_DIM,
+    PREVIEW_ARTWORK_QUALITY,
+    load_config,
+)
+from fingerprint_cache import (
+    ensure_fingerprint_cache,
+    get_fingerprint,
+    get_cached_fingerprint_metadata,
+    store_fingerprint,
+)
+from simple_duplicate_finder import SUPPORTED_EXTS, _compute_fp
 from tag_fixer import MIN_INTERACTIVE_SCORE, FileRecord
-from typing import Callable, List
+from typing import Any, Callable, List, Mapping
 from indexer_control import cancel_event, IndexCancelled
-import library_sync
+import library_sync_review
 import playlist_generator
 import crash_watcher
 
@@ -76,13 +125,66 @@ from controllers.normalize_controller import (
     scan_raw_genres,
 )
 from plugins.assistant_plugin import AssistantPlugin
+from plugins.acoustid_plugin import AcoustIDService, MusicBrainzService
 from controllers.cluster_controller import cluster_library
-from config import load_config, save_config, DEFAULT_FP_THRESHOLDS
-from playlist_engine import bucket_by_tempo_energy, more_like_this, autodj_playlist
+from controllers.cluster_view_controller import ClusterComputationManager
+from config import load_config, save_config
+import playlist_engine
+from playlist_engine import bucket_by_tempo_energy, autodj_playlist
 from controllers.cluster_controller import gather_tracks
+from playlist_generator import write_playlist
+from utils.path_helpers import ensure_long_path, strip_ext_prefix
+from utils.audio_metadata_reader import (
+    read_metadata,
+    read_tags,
+    read_sidecar_artwork_bytes,
+)
+from utils.opus_library_mirror import mirror_library, write_mirror_report
+from utils.opus_metadata_reader import read_opus_metadata
+from duplicate_scan_engine import DuplicateScanConfig, run_duplicate_scan
+
+
+def _scaled_font(
+    widget: tk.Widget, size: int, weight: str | None = None
+) -> tuple[str, int] | tuple[str, int, str]:
+    scale = float(widget.tk.call("tk", "scaling"))
+    scaled_size = max(1, int(round(size * scale)))
+    if weight:
+        return ("TkDefaultFont", scaled_size, weight)
+    return ("TkDefaultFont", scaled_size)
+
+
+@dataclass
+class PlanGenerationResult:
+    plan: Any | None
+    preview_json_path: str | None
+    preview_html_path: str | None
+    log_messages: list[str]
+    review_required_count: int
+    group_count: int
+    had_tracks: bool
 
 FilterFn = Callable[[FileRecord], bool]
 _cached_filters = None
+
+logger = logging.getLogger(__name__)
+
+YEAR_ASSISTANT_PROMPT = """
+You will be given a list of music tracks in the format `Artist - Title` (one per line).
+For each line, use web search to determine the most likely original release year of the recording
+(prefer the earliest official release of the song, not a later remaster unless that is the only
+identifiable version). Return ONLY valid JSON in the following exact format:
+
+[
+  {"query":"Artist - Title","year":"YYYY" | null,"confidence":"high|medium|low|unknown","notes":"short source hint"},
+  ...
+]
+
+Rules:
+- Include one JSON object for every input line and preserve the input order.
+- Do not add commentary outside JSON.
+- If uncertain or multiple versions exist, set year to null or confidence low and explain in notes.
+"""
 
 
 def make_filters(ex_no_diff: bool, ex_skipped: bool, show_all: bool) -> List[FilterFn]:
@@ -131,92 +233,1204 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
 
     cluster_data = getattr(app, "cluster_data", None)
     cluster_cfg = getattr(app, "cluster_params", None)
+    cluster_manager = getattr(app, "cluster_manager", None)
     if cluster_data is None:
         tracks = features = None
     else:
         tracks, features = cluster_data
+        if cluster_manager is None or getattr(cluster_manager, "tracks", None) != tracks:
+            app.cluster_manager = ClusterComputationManager(tracks, features, app._log)
+            cluster_manager = app.cluster_manager
+
+    requires_clustering = name in {"Interactive – KMeans", "Interactive – HDBSCAN"}
 
     if name == "Interactive – KMeans":
         from sklearn.cluster import KMeans
 
         def km_func(X, p):
-            return KMeans(n_clusters=p["n_clusters"]).fit_predict(X)
+            requested = max(1, int(p["n_clusters"]))
+            effective = min(requested, len(X))
+            if effective != requested:
+                logger.info(
+                    "Adjusting kmeans clusters from %s to %s due to dataset size",
+                    requested,
+                    effective,
+                )
+            return KMeans(n_clusters=effective).fit_predict(X)
 
         n_clusters = 5
         if cluster_cfg and cluster_cfg.get("method") == "kmeans":
-            n_clusters = int(cluster_cfg.get("num", 5))
-        params = {"n_clusters": n_clusters, "method": "kmeans"}
+            n_clusters = int(cluster_cfg.get("n_clusters", 5))
+        engine = "serial"
+        if cluster_cfg and "engine" in cluster_cfg:
+            engine = "serial" if cluster_cfg["engine"] == "librosa" else cluster_cfg["engine"]
+        params = {"n_clusters": n_clusters, "method": "kmeans", "engine": engine}
+        algo_key = "kmeans"
     elif name == "Interactive – HDBSCAN":
         from hdbscan import HDBSCAN
 
         def km_func(X, p):
-            kwargs = {"min_cluster_size": p["min_cluster_size"]}
+            min_cluster_size = max(2, int(p["min_cluster_size"]))
+            if min_cluster_size > len(X):
+                logger.info(
+                    "Adjusting min_cluster_size from %s to %s due to dataset size",
+                    min_cluster_size,
+                    len(X),
+                )
+                min_cluster_size = len(X)
+
+            kwargs = {"min_cluster_size": min_cluster_size}
             if "min_samples" in p:
-                kwargs["min_samples"] = p["min_samples"]
+                min_samples = max(1, int(p["min_samples"]))
+                if min_samples > len(X):
+                    logger.info(
+                        "Adjusting min_samples from %s to %s due to dataset size",
+                        min_samples,
+                        len(X),
+                    )
+                    min_samples = len(X)
+                kwargs["min_samples"] = min_samples
             if "cluster_selection_epsilon" in p:
-                kwargs["cluster_selection_epsilon"] = p["cluster_selection_epsilon"]
+                kwargs["cluster_selection_epsilon"] = float(
+                    p["cluster_selection_epsilon"]
+                )
             return HDBSCAN(**kwargs).fit_predict(X)
 
         min_cs = 5
         extras = {}
         if cluster_cfg and cluster_cfg.get("method") == "hdbscan":
-            min_cs = int(cluster_cfg.get("min_cluster_size", cluster_cfg.get("num", 5)))
+            min_cs = int(
+                cluster_cfg.get("min_cluster_size", cluster_cfg.get("n_clusters", 5))
+            )
             if "min_samples" in cluster_cfg:
                 extras["min_samples"] = int(cluster_cfg["min_samples"])
             if "cluster_selection_epsilon" in cluster_cfg:
                 extras["cluster_selection_epsilon"] = float(
                     cluster_cfg["cluster_selection_epsilon"]
                 )
-        params = {"min_cluster_size": min_cs, "method": "hdbscan", **extras}
+        engine = "serial"
+        if cluster_cfg and "engine" in cluster_cfg:
+            engine = "serial" if cluster_cfg["engine"] == "librosa" else cluster_cfg["engine"]
+        params = {
+            "min_cluster_size": min_cs,
+            "method": "hdbscan",
+            "engine": engine,
+            **extras,
+        }
+        algo_key = "hdbscan"
+    elif name == "Genre Normalizer":
+        lib_var = tk.StringVar(value=app.library_path or "No library selected")
+        norm_status = tk.StringVar(value="Select a library to enable normalization.")
+        scan_status = tk.StringVar(value="Scan genres to populate the assistant.")
+        scanning = tk.BooleanVar(value=False)
+
+        def update_controls():
+            lib_var.set(app.library_path or "No library selected")
+            norm_status.set(
+                os.path.join(app.library_path, "Docs", ".genre_mapping.json")
+                if app.library_path
+                else "Select a library to enable normalization."
+            )
+            scan_btn.config(state="normal" if app.library_path else "disabled")
+            save_btn.config(state="normal" if app.library_path else "disabled")
+            apply_btn.config(state="normal" if app.library_path else "disabled")
+
+        intro = ttk.Frame(frame)
+        intro.pack(fill="x", padx=10, pady=10)
+
+        ttk.Label(
+            intro,
+            text=(
+                "Normalize genre labels across your library by generating or "
+                "updating the Docs/.genre_mapping.json file."
+            ),
+            wraplength=480,
+            justify="left",
+        ).pack(anchor="w", pady=(0, 10))
+
+        status_row = ttk.Frame(intro)
+        status_row.pack(fill="x", pady=(0, 6))
+        ttk.Label(status_row, text="Library:", width=12).pack(side="left")
+        ttk.Label(status_row, textvariable=lib_var).pack(
+            side="left", fill="x", expand=True
+        )
+
+        map_row = ttk.Frame(intro)
+        map_row.pack(fill="x", pady=(0, 6))
+        ttk.Label(map_row, text="Mapping file:", width=12).pack(side="left")
+        ttk.Label(map_row, textvariable=norm_status, wraplength=360).pack(
+            side="left", fill="x", expand=True
+        )
+
+        init_status = tk.StringVar(
+            value="Paste JSON and initialize to rewrite library genres."
+        )
+        apply_status = tk.StringVar(
+            value="Apply a saved or pasted mapping to embedded genres."
+        )
+
+        action_bar = ttk.Frame(frame)
+        action_bar.pack(fill="x", padx=10, pady=(6, 6))
+        init_btn = ttk.Button(action_bar, text="Initialize Normalizer")
+        init_btn.pack(side="left")
+        save_btn = ttk.Button(action_bar, text="Save Mapping", command=app.apply_mapping)
+        save_btn.pack(side="left", padx=(6, 0))
+        apply_btn = ttk.Button(action_bar, text="Apply To Songs")
+        apply_btn.pack(side="left", padx=(6, 0))
+
+        status_col = ttk.Frame(action_bar)
+        status_col.pack(side="left", padx=12, expand=True, fill="x")
+        ttk.Label(status_col, textvariable=init_status).pack(anchor="w")
+        ttk.Label(status_col, textvariable=apply_status).pack(anchor="w")
+
+        control_row = ttk.Frame(intro)
+        control_row.pack(fill="x", pady=(4, 0))
+        scan_btn = ttk.Button(control_row, text="Scan Genres")
+        scan_btn.pack(side="left")
+        ttk.Label(control_row, textvariable=scan_status).pack(
+            side="left", padx=(8, 0)
+        )
+        prog = ttk.Progressbar(
+            control_row, orient="horizontal", length=160, mode="determinate"
+        )
+        prog.pack(side="right")
+
+        prompt_box = ttk.LabelFrame(frame, text="LLM Prompt Template")
+        prompt_box.pack(fill="both", expand=False, padx=10, pady=(0, 10))
+        app.text_prompt = ScrolledText(prompt_box, height=8, wrap="word")
+        app.text_prompt.pack(fill="both", expand=True, padx=8, pady=6)
+        app.text_prompt.insert("1.0", PROMPT_TEMPLATE.strip())
+        app.text_prompt.configure(state="disabled")
+        ttk.Button(
+            prompt_box,
+            text="Copy Prompt",
+            command=lambda: app.clipboard_append(PROMPT_TEMPLATE.strip()),
+        ).pack(anchor="e", padx=8, pady=(0, 6))
+
+        raw_box = ttk.LabelFrame(frame, text="Raw Genre List")
+        raw_box.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+        app.text_raw = ScrolledText(raw_box, width=50, height=12)
+        app.text_raw.pack(fill="both", expand=True, padx=8, pady=6)
+        app.text_raw.insert("1.0", "Scan the library to populate raw genres.")
+        app.text_raw.configure(state="disabled")
+        ttk.Button(
+            raw_box,
+            text="Copy Raw List",
+            command=lambda: app.clipboard_append("\n".join(getattr(app, "raw_genre_list", []))),
+        ).pack(anchor="e", padx=8, pady=(0, 6))
+
+        map_box = ttk.LabelFrame(frame, text="Paste JSON Mapping Here")
+        map_box.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+        app.text_map = ScrolledText(map_box, width=50, height=10)
+        app.text_map.pack(fill="both", expand=True, padx=8, pady=6)
+
+        def populate_raw_genres(genres: list[str]):
+            app.text_raw.configure(state="normal")
+            app.text_raw.delete("1.0", "end")
+            if genres:
+                app.text_raw.insert("1.0", "\n".join(genres))
+            else:
+                app.text_raw.insert("1.0", "No genres found.")
+            app.text_raw.configure(state="disabled")
+
+        def load_existing_mapping():
+            if not app.library_path:
+                app.text_map.delete("1.0", "end")
+                return
+            try:
+                with open(norm_status.get(), "r", encoding="utf-8") as f:
+                    existing = json.load(f)
+            except Exception:
+                existing = {}
+            app.text_map.delete("1.0", "end")
+            app.text_map.insert("1.0", json.dumps(existing, indent=2))
+
+        def on_progress(idx, total):
+            try:
+                prog["value"] = idx
+                prog["maximum"] = max(total, 1)
+            except Exception:
+                pass
+
+        def scan_task(folder: str):
+            try:
+                app.raw_genre_list = scan_raw_genres(folder, on_progress)
+            finally:
+                app.after(0, lambda: finish_scan(folder))
+
+        def finish_scan(folder: str):
+            scanning.set(False)
+            scan_btn.config(state="normal")
+            scan_status.set(f"Found {len(getattr(app, 'raw_genre_list', []))} genres.")
+            populate_raw_genres(getattr(app, "raw_genre_list", []))
+            prog["value"] = prog["maximum"]
+            app.mapping_path = os.path.join(folder, "Docs", ".genre_mapping.json")
+
+        def start_scan():
+            folder = app.require_library()
+            if not folder or scanning.get():
+                return
+            files = discover_files(folder)
+            if not files:
+                messagebox.showinfo("No audio files", "No supported audio found.")
+                return
+            scanning.set(True)
+            scan_status.set("Scanning genres…")
+            prog["value"] = 0
+            prog["maximum"] = len(files)
+            scan_btn.config(state="disabled")
+            threading.Thread(target=scan_task, args=(folder,), daemon=True).start()
+
+        def finish_init(changed: int, total: int):
+            init_status.set(f"Rewrote genres for {changed} of {total} files.")
+            init_btn.config(state="normal")
+            save_btn.config(state="normal" if app.library_path else "disabled")
+            apply_btn.config(state="normal" if app.library_path else "disabled")
+            scan_btn.config(state="normal" if app.library_path else "disabled")
+            if getattr(app, "raw_genre_list", None):
+                populate_raw_genres(app.raw_genre_list)
+
+        def start_init():
+            if not app.library_path:
+                messagebox.showwarning("No Library", "Select a library to initialize.")
+                return
+            raw_json = app.text_map.get("1.0", "end").strip()
+            if not raw_json:
+                messagebox.showwarning(
+                    "No JSON Provided", "Paste JSON mapping from the assistant first."
+                )
+                return
+            try:
+                mapping = json.loads(raw_json)
+            except json.JSONDecodeError as exc:
+                messagebox.showerror("Invalid JSON", str(exc))
+                return
+
+            init_status.set("Initializing and rewriting genres…")
+            init_btn.config(state="disabled")
+            save_btn.config(state="disabled")
+            apply_btn.config(state="disabled")
+            scan_btn.config(state="disabled")
+            prog["value"] = 0
+
+            def worker():
+                try:
+                    changed, total = app.initialize_genre_normalizer(
+                        mapping, on_progress
+                    )
+                except Exception as exc:
+                    app.after(
+                        0,
+                        lambda: messagebox.showerror(
+                            "Initialization Failed", str(exc)
+                        ),
+                    )
+                    app.after(0, lambda: finish_init(0, 0))
+                    return
+                app.after(0, lambda: finish_init(changed, total))
+
+            threading.Thread(target=worker, daemon=True).start()
+
+        scan_btn.config(command=start_scan)
+        init_btn.config(command=start_init)
+
+        def finish_apply(changed: int, total: int):
+            apply_status.set(f"Applied mapping to {changed} of {total} files.")
+            init_btn.config(state="normal" if app.library_path else "disabled")
+            save_btn.config(state="normal" if app.library_path else "disabled")
+            apply_btn.config(state="normal" if app.library_path else "disabled")
+            scan_btn.config(state="normal" if app.library_path else "disabled")
+            if getattr(app, "raw_genre_list", None):
+                populate_raw_genres(app.raw_genre_list)
+
+        def start_apply():
+            if not app.library_path:
+                messagebox.showwarning("No Library", "Select a library to apply mappings.")
+                return
+            raw_json = app.text_map.get("1.0", "end").strip()
+            if not raw_json:
+                messagebox.showwarning(
+                    "No JSON Provided", "Paste JSON mapping from the assistant first."
+                )
+                return
+            try:
+                mapping = json.loads(raw_json)
+            except json.JSONDecodeError as exc:
+                messagebox.showerror("Invalid JSON", str(exc))
+                return
+
+            apply_status.set("Applying mapping to songs…")
+            init_btn.config(state="disabled")
+            save_btn.config(state="disabled")
+            apply_btn.config(state="disabled")
+            scan_btn.config(state="disabled")
+            prog["value"] = 0
+
+            def worker():
+                try:
+                    changed, total = app.initialize_genre_normalizer(
+                        mapping, on_progress
+                    )
+                except Exception as exc:
+                    app.after(
+                        0,
+                        lambda: messagebox.showerror("Apply Failed", str(exc)),
+                    )
+                    app.after(0, lambda: finish_apply(0, 0))
+                    return
+                app.after(0, lambda: finish_apply(changed, total))
+
+            threading.Thread(target=worker, daemon=True).start()
+
+        apply_btn.config(command=start_apply)
+
+        def refresh_panel():
+            update_controls()
+            if getattr(app, "raw_genre_list", None):
+                populate_raw_genres(app.raw_genre_list)
+            load_existing_mapping()
+
+        frame.refresh_cluster_panel = refresh_panel
+        refresh_panel()
+        return frame
+    elif name == "Year Assistant":
+        lib_var = tk.StringVar(value=app.library_path or "No library selected")
+        status_var = tk.StringVar(value="Paste AI results and parse to review changes.")
+        dry_run_var = tk.BooleanVar(value=True)
+        app.year_assistant_dry_run_var = dry_run_var
+
+        expected_queries: list[str] = []
+        query_to_paths: dict[str, list[str]] = {}
+        results_by_iid: dict[str, dict[str, Any]] = {}
+
+        def update_controls():
+            lib_var.set(app.library_path or "No library selected")
+            apply_selected_btn.config(
+                state="normal" if app.library_path else "disabled"
+            )
+            apply_high_btn.config(
+                state="normal" if app.library_path else "disabled"
+            )
+
+        def coerce_entry(item: Any) -> dict[str, str | None] | None:
+            if isinstance(item, str):
+                return {"query": item.strip(), "path": None}
+            if isinstance(item, (list, tuple)):
+                if len(item) >= 2:
+                    artist = str(item[0]).strip()
+                    title = str(item[1]).strip()
+                    query = f"{artist} - {title}".strip(" -")
+                    path = str(item[2]).strip() if len(item) > 2 and item[2] else None
+                    return {"query": query, "path": path}
+            if isinstance(item, dict):
+                query = item.get("query")
+                artist = item.get("artist") or item.get("Artist")
+                title = item.get("title") or item.get("Title")
+                path = (
+                    item.get("path")
+                    or item.get("filepath")
+                    or item.get("file")
+                    or item.get("filename")
+                )
+                if not query and (artist or title):
+                    artist_str = str(artist or "").strip()
+                    title_str = str(title or "").strip()
+                    query = f"{artist_str} - {title_str}".strip(" -")
+                if query:
+                    return {"query": str(query).strip(), "path": str(path).strip() if path else None}
+            return None
+
+        def load_missing_year_entries() -> list[dict[str, str | None]]:
+            raw_sources = None
+            for attr in (
+                "missing_year_records",
+                "missing_year_list",
+                "missing_year_tracks",
+                "missing_year_entries",
+            ):
+                raw_sources = getattr(app, attr, None)
+                if raw_sources:
+                    break
+            if isinstance(raw_sources, dict):
+                raw_sources = list(raw_sources.values())
+            if not isinstance(raw_sources, (list, tuple)):
+                return []
+            entries: list[dict[str, str | None]] = []
+            for item in raw_sources:
+                entry = coerce_entry(item)
+                if entry and entry["query"]:
+                    entries.append(entry)
+            return entries
+
+        def dedupe_and_sort(lines: list[str]) -> list[str]:
+            unique: dict[str, None] = {}
+            for line in lines:
+                cleaned = line.strip()
+                if cleaned and cleaned not in unique:
+                    unique[cleaned] = None
+            return sorted(unique.keys(), key=lambda s: s.casefold())
+
+        def refresh_track_list():
+            nonlocal expected_queries, query_to_paths
+            entries = load_missing_year_entries()
+            query_to_paths = {}
+            for entry in entries:
+                query = entry["query"]
+                if not query:
+                    continue
+                query_to_paths.setdefault(query, [])
+                if entry.get("path"):
+                    query_to_paths[query].append(str(entry["path"]))
+
+            expected_queries = dedupe_and_sort(list(query_to_paths.keys()))
+            track_list_box.configure(state="normal")
+            track_list_box.delete("1.0", "end")
+            if expected_queries:
+                track_list_box.insert("1.0", "\n".join(expected_queries))
+            else:
+                track_list_box.insert(
+                    "1.0",
+                    "No missing-year entries available yet.",
+                )
+            track_list_box.configure(state="disabled")
+
+        def copy_instructions():
+            app.clipboard_clear()
+            app.clipboard_append(YEAR_ASSISTANT_PROMPT.strip())
+
+        def copy_track_list():
+            app.clipboard_clear()
+            app.clipboard_append("\n".join(expected_queries))
+
+        def set_status(message: str):
+            status_var.set(message)
+
+        def normalize_year_value(raw_year: Any) -> str | None:
+            if raw_year is None:
+                return None
+            if isinstance(raw_year, int):
+                raw_year = str(raw_year)
+            if isinstance(raw_year, str):
+                cleaned = raw_year.strip()
+                if re.fullmatch(r"\d{4}", cleaned):
+                    return cleaned
+            return None
+
+        def parse_results():
+            raw_json = results_box.get("1.0", "end").strip()
+            if not raw_json:
+                messagebox.showwarning("No Results", "Paste the AI JSON output first.")
+                return
+            try:
+                data = json.loads(raw_json)
+            except json.JSONDecodeError as exc:
+                messagebox.showerror("Invalid JSON", str(exc))
+                return
+            if not isinstance(data, list):
+                messagebox.showerror("Invalid JSON", "Expected a JSON array.")
+                return
+
+            allowed_confidence = {"high", "medium", "low", "unknown"}
+            parsed: dict[str, dict[str, Any]] = {}
+            errors: list[str] = []
+            for idx, entry in enumerate(data, start=1):
+                if not isinstance(entry, dict):
+                    errors.append(f"Entry {idx} must be an object.")
+                    continue
+                query = entry.get("query")
+                confidence = entry.get("confidence")
+                notes = entry.get("notes", "")
+                year_value = normalize_year_value(entry.get("year"))
+
+                if not isinstance(query, str) or not query.strip():
+                    errors.append(f"Entry {idx} missing valid query.")
+                    continue
+                query = query.strip()
+                if query in parsed:
+                    errors.append(f"Duplicate query found: {query}")
+                    continue
+                if confidence not in allowed_confidence:
+                    errors.append(f"Entry {idx} has invalid confidence '{confidence}'.")
+                    continue
+                if not isinstance(notes, str):
+                    notes = str(notes)
+
+                parsed[query] = {
+                    "query": query,
+                    "year": year_value,
+                    "confidence": confidence,
+                    "notes": notes,
+                }
+
+            if errors:
+                messagebox.showerror("Parse Errors", "\n".join(errors))
+                return
+
+            missing = [q for q in expected_queries if q not in parsed]
+            extra = [q for q in parsed.keys() if q not in expected_queries]
+
+            results_tree.delete(*results_tree.get_children())
+            results_by_iid.clear()
+
+            def add_row(result: dict[str, Any], status: str, notes_suffix: str | None = None):
+                notes_text = result.get("notes") or ""
+                if notes_suffix:
+                    notes_text = f"{notes_text} ({notes_suffix})" if notes_text else notes_suffix
+                values = (
+                    result.get("query", ""),
+                    result.get("year") or "",
+                    result.get("confidence") or "unknown",
+                    notes_text,
+                    status,
+                )
+                iid = results_tree.insert("", "end", values=values)
+                results_by_iid[iid] = {
+                    **result,
+                    "status": status,
+                    "notes": notes_text,
+                }
+
+            for query in expected_queries:
+                result = parsed.get(
+                    query,
+                    {
+                        "query": query,
+                        "year": None,
+                        "confidence": "unknown",
+                        "notes": "Missing from AI output.",
+                    },
+                )
+                paths = query_to_paths.get(query, [])
+                status = "Ready" if result.get("year") else "Unresolved"
+                notes_suffix = None
+                if not paths:
+                    status = "Unresolved"
+                    notes_suffix = "No matching files."
+                elif len(paths) > 1:
+                    notes_suffix = f"Matches {len(paths)} files."
+                add_row(result, status, notes_suffix)
+
+            for query in extra:
+                result = parsed[query]
+                add_row(result, "Skipped", "Query not in input list.")
+
+            message = "Parsed results."
+            if missing:
+                message += f" Missing {len(missing)} queries from AI output."
+            if extra:
+                message += f" {len(extra)} extra entries skipped."
+            set_status(message)
+
+        def update_row_status(iid: str, status: str, notes: str | None = None):
+            row = results_tree.item(iid)
+            values = list(row.get("values", []))
+            if len(values) < 5:
+                return
+            values[4] = status
+            if notes is not None:
+                values[3] = notes
+            results_tree.item(iid, values=values)
+            if iid in results_by_iid:
+                results_by_iid[iid]["status"] = status
+                if notes is not None:
+                    results_by_iid[iid]["notes"] = notes
+
+        def write_year_tag(path: str, year: str) -> tuple[bool, str | None, bool]:
+            try:
+                audio = MutagenFile(ensure_long_path(path), easy=True)
+            except Exception as exc:
+                return False, f"Failed to read {path}: {exc}", False
+            if audio is None:
+                return False, f"Unsupported file: {path}", False
+            old_tags = read_tags(path)
+            old_year = str(old_tags.get("year") or old_tags.get("date") or "").strip()
+            if old_year == year:
+                return True, old_year, False
+            changed = False
+            for key in ("date", "year"):
+                try:
+                    audio[key] = [year]
+                    changed = True
+                except Exception:
+                    continue
+            if not changed:
+                return False, f"Could not write year tags for {path}", False
+            try:
+                audio.save()
+            except Exception as exc:
+                return False, f"Failed to save {path}: {exc}", False
+            return True, old_year, True
+
+        def log_audit_entry(path: str, old_year: str | None, new_year: str):
+            docs_dir = os.path.join(app.library_path, "Docs")
+            os.makedirs(docs_dir, exist_ok=True)
+            audit_path = os.path.join(docs_dir, "year_assistant_audit.log")
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            with open(audit_path, "a", encoding="utf-8") as handle:
+                handle.write(
+                    f"{timestamp} | {path} | old_year={old_year or ''} | new_year={new_year}\n"
+                )
+
+        def apply_entries(iids: list[str], *, label: str):
+            if not app.library_path:
+                messagebox.showwarning("No Library", "Select a library before applying.")
+                return
+            if not iids:
+                messagebox.showinfo("Apply", "No rows selected.")
+                return
+
+            dry_run = dry_run_var.get()
+            applied = 0
+            skipped = 0
+            errors: list[str] = []
+
+            for iid in iids:
+                result = results_by_iid.get(iid)
+                if not result:
+                    continue
+                query = result.get("query")
+                year = result.get("year")
+                if result.get("status") != "Ready" or not query or not year:
+                    skipped += 1
+                    update_row_status(iid, "Skipped")
+                    continue
+                paths = query_to_paths.get(query, [])
+                if not paths:
+                    skipped += 1
+                    update_row_status(iid, "Unresolved", "No matching files.")
+                    continue
+                if dry_run:
+                    applied += len(paths)
+                    continue
+                for path in paths:
+                    success, info, changed = write_year_tag(path, year)
+                    if not success:
+                        errors.append(info or f"Failed to update {path}")
+                        continue
+                    if not changed:
+                        skipped += 1
+                        continue
+                    log_audit_entry(path, info, year)
+                    applied += 1
+
+            summary = f"{label}: updated {applied} files, skipped {skipped}."
+            if dry_run:
+                summary = f"{label} (Dry Run): would update {applied} files."
+            set_status(summary)
+            if errors:
+                messagebox.showerror("Apply Errors", "\n".join(errors))
+            else:
+                messagebox.showinfo("Apply Results", summary)
+
+        def apply_selected():
+            apply_entries(list(results_tree.selection()), label="Apply Selected")
+
+        def apply_high_confidence():
+            high_iids = [
+                iid
+                for iid, result in results_by_iid.items()
+                if result.get("status") == "Ready"
+                and result.get("confidence") == "high"
+            ]
+            apply_entries(high_iids, label="Apply High Confidence")
+
+        intro = ttk.Frame(frame)
+        intro.pack(fill="x", padx=10, pady=10)
+        ttk.Label(
+            intro,
+            text=(
+                "Use the Year Assistant to generate AI instructions for missing year tags, "
+                "then import AI results to apply release years."
+            ),
+            wraplength=520,
+            justify="left",
+        ).pack(anchor="w")
+
+        status_row = ttk.Frame(intro)
+        status_row.pack(fill="x", pady=(6, 0))
+        ttk.Label(status_row, text="Library:", width=12).pack(side="left")
+        ttk.Label(status_row, textvariable=lib_var).pack(
+            side="left", fill="x", expand=True
+        )
+
+        step1_box = ttk.LabelFrame(frame, text="Step 1: Generate AI Instructions")
+        step1_box.pack(fill="both", expand=False, padx=10, pady=(0, 10))
+
+        prompt_box = ttk.LabelFrame(step1_box, text="Instructions to paste into the AI")
+        prompt_box.pack(fill="both", expand=False, padx=8, pady=(8, 6))
+        prompt_text = ScrolledText(prompt_box, height=8, wrap="word")
+        prompt_text.pack(fill="both", expand=True, padx=6, pady=6)
+        prompt_text.insert("1.0", YEAR_ASSISTANT_PROMPT.strip())
+        prompt_text.configure(state="disabled")
+        ttk.Button(prompt_box, text="Copy AI Instructions", command=copy_instructions).pack(
+            anchor="e", padx=6, pady=(0, 6)
+        )
+
+        track_box = ttk.LabelFrame(step1_box, text="Tracks missing year")
+        track_box.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+        track_list_box = ScrolledText(track_box, height=10, wrap="word")
+        track_list_box.pack(fill="both", expand=True, padx=6, pady=6)
+        track_list_box.configure(state="disabled")
+        ttk.Button(track_box, text="Copy Track List", command=copy_track_list).pack(
+            anchor="e", padx=6, pady=(0, 6)
+        )
+
+        step2_box = ttk.LabelFrame(frame, text="Step 2: Import Results + Apply")
+        step2_box.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+
+        ttk.Label(
+            step2_box,
+            text="Paste the AI JSON output below and import to review the proposed years.",
+            wraplength=520,
+            justify="left",
+        ).pack(anchor="w", padx=8, pady=(6, 0))
+
+        results_box = ScrolledText(step2_box, height=8, wrap="word")
+        results_box.pack(fill="x", expand=False, padx=8, pady=(6, 6))
+
+        action_bar = ttk.Frame(step2_box)
+        action_bar.pack(fill="x", padx=8, pady=(0, 6))
+        ttk.Button(action_bar, text="Import Results", command=parse_results).pack(
+            side="left"
+        )
+        ttk.Checkbutton(action_bar, text="Dry Run", variable=dry_run_var).pack(
+            side="left", padx=(10, 0)
+        )
+        apply_selected_btn = ttk.Button(
+            action_bar, text="Apply Selected", command=apply_selected
+        )
+        apply_selected_btn.pack(side="right")
+        apply_high_btn = ttk.Button(
+            action_bar, text="Apply All High Confidence", command=apply_high_confidence
+        )
+        apply_high_btn.pack(side="right", padx=(0, 6))
+
+        table_frame = ttk.Frame(step2_box)
+        table_frame.pack(fill="both", expand=True, padx=8, pady=(0, 6))
+        results_scroll = ttk.Scrollbar(table_frame, orient="vertical")
+        results_scroll.pack(side="right", fill="y")
+        results_columns = ("Track", "Year", "Confidence", "Notes", "Status")
+        results_tree = ttk.Treeview(
+            table_frame,
+            columns=results_columns,
+            show="headings",
+            yscrollcommand=results_scroll.set,
+            selectmode="extended",
+        )
+        results_scroll.config(command=results_tree.yview)
+        results_tree.pack(fill="both", expand=True)
+
+        for col in results_columns:
+            results_tree.heading(col, text=col)
+            width = 120
+            if col == "Track":
+                width = 240
+            elif col == "Notes":
+                width = 200
+            results_tree.column(col, width=width, anchor="w")
+
+        status_label = ttk.Label(step2_box, textvariable=status_var)
+        status_label.pack(anchor="w", padx=8, pady=(0, 6))
+
+        def refresh_panel():
+            update_controls()
+            refresh_track_list()
+            set_status("Ready to import AI results.")
+
+        frame.refresh_cluster_panel = refresh_panel
+        refresh_panel()
+        return frame
     elif name == "Tempo/Energy Buckets":
-        def _run():
+        lib_var = tk.StringVar(value=app.library_path or "No library selected")
+        dep_status = tk.StringVar()
+        progress_var = tk.StringVar(value="Waiting to start")
+        running = tk.BooleanVar(value=False)
+        total_tracks = 0
+        playlists_dir: str | None = None
+        bucket_result: dict | None = None
+        bucket_tracks: dict[tuple[str, str], list[str]] = {}
+        q: queue.Queue = queue.Queue()
+        cancel_event = threading.Event()
+        engine_var = getattr(app, "feature_engine_var", tk.StringVar(value="librosa"))
+        app.feature_engine_var = engine_var
+
+        def open_path(path: str) -> None:
+            if not path:
+                return
+            try:
+                if sys.platform == "win32":
+                    os.startfile(path)  # type: ignore[attr-defined]
+                elif sys.platform == "darwin":
+                    subprocess.run(["open", path], check=False)
+                else:
+                    subprocess.run(["xdg-open", path], check=False)
+            except Exception as exc:  # pragma: no cover - OS interaction
+                messagebox.showerror("Open File", f"Could not open {path}: {exc}")
+
+        def open_instructions(_evt=None):
+            readme = os.path.abspath("README.md")
+            webbrowser.open_new(f"file://{readme}")
+
+        def dependencies_ok() -> bool:
+            engine = engine_var.get() or "librosa"
+            missing = []
+            if playlist_engine.np is None:
+                missing.append("numpy")
+            if engine == "librosa" and playlist_engine.librosa is None:
+                missing.append("librosa")
+            if engine == "essentia" and playlist_engine.essentia is None:
+                missing.append("Essentia")
+
+            essentia_note = (
+                "Essentia unavailable; install Essentia to enable the Essentia engine."
+                if playlist_engine.essentia is None
+                else "Essentia available."
+            )
+
+            if missing:
+                dep_status.set(
+                    f"Missing dependencies for {engine}: "
+                    + ", ".join(missing)
+                    + f". {essentia_note}"
+                )
+                return False
+
+            deps = ["numpy", "Essentia" if engine == "essentia" else "librosa"]
+            dep_status.set(
+                f"Dependencies ready ({', '.join(deps)}). {essentia_note}"
+            )
+            return True
+
+        def append_log(msg: str) -> None:
+            log_box.configure(state="normal")
+            log_box.insert("end", msg + "\n")
+            log_box.see("end")
+            log_box.configure(state="disabled")
+
+        def prompt_save_bucket(bucket_key: tuple[str, str]):
+            tracks = bucket_tracks.get(bucket_key)
+            if not tracks:
+                messagebox.showinfo(
+                    "Save Playlist",
+                    "No tracks available for this bucket yet.",
+                )
+                return
+
+            playlists_root = playlists_dir or app.library_path or os.getcwd()
+            os.makedirs(playlists_root, exist_ok=True)
+            default_name = f"{bucket_key[0]}_{bucket_key[1]}.m3u"
+            chosen = filedialog.asksaveasfilename(
+                parent=frame,
+                title="Save Bucket Playlist As",
+                defaultextension=".m3u",
+                initialdir=playlists_root,
+                initialfile=default_name,
+                filetypes=[("M3U Playlist", "*.m3u"), ("All Files", "*.*")],
+            )
+            if not chosen:
+                return
+
+            try:
+                write_playlist(tracks, chosen)
+            except Exception as exc:
+                messagebox.showerror("Save Playlist", f"Could not save playlist: {exc}")
+                return
+
+            messagebox.showinfo("Playlist Saved", f"Playlist saved to {chosen}")
+            open_path(os.path.dirname(chosen))
+
+        def preview_bucket(bucket_key: tuple[str, str]) -> None:
+            tracks = bucket_tracks.get(bucket_key)
+            if not tracks:
+                messagebox.showinfo(
+                    "Playlist Preview", "No tracks available for this bucket yet."
+                )
+                return
+
+            app.preview_tracks_in_player(
+                tracks, f"{bucket_key[0].title()} / {bucket_key[1].title()}"
+            )
+
+        def render_stats(result: dict | None):
+            nonlocal bucket_result, bucket_tracks
+            bucket_result = result
+            bucket_tracks = (result or {}).get("buckets", {}) if isinstance(result, dict) else {}
+            stats = (result or {}).get("stats") if isinstance(result, dict) else None
+            for child in stats_rows.winfo_children():
+                child.destroy()
+            if not stats:
+                ttk.Label(stats_rows, text="No playlists generated yet.").pack(
+                    anchor="w", padx=5, pady=5
+                )
+                return
+            header = ttk.Frame(stats_rows)
+            header.pack(fill="x", padx=5, pady=(0, 4))
+            ttk.Label(header, text="Tempo", width=10).pack(side="left")
+            ttk.Label(header, text="Energy", width=10).pack(side="left")
+            ttk.Label(header, text="Tracks", width=8).pack(side="left")
+            ttk.Label(header, text="Playlist").pack(side="left", padx=(10, 0))
+            for (tb, eb), info in sorted(stats.items()):
+                row = ttk.Frame(stats_rows)
+                row.pack(fill="x", padx=5, pady=2)
+                ttk.Label(row, text=tb.title(), width=10).pack(side="left")
+                ttk.Label(row, text=eb.title(), width=10).pack(side="left")
+                ttk.Label(row, text=str(info.get("count", 0)), width=8).pack(side="left")
+                playlist_path = info.get("playlist", "")
+                ttk.Label(row, text=os.path.basename(playlist_path)).pack(
+                    side="left", padx=(10, 5)
+                )
+                ttk.Button(
+                    row,
+                    text="Open",
+                    command=lambda key=(tb, eb): preview_bucket(key),
+                ).pack(side="left", padx=(0, 5))
+                ttk.Button(
+                    row,
+                    text="Save As…",
+                    command=lambda key=(tb, eb): prompt_save_bucket(key),
+                ).pack(side="left")
+
+        def update_controls():
+            lib_var.set(app.library_path or "No library selected")
+            ready = bool(app.library_path) and dependencies_ok() and not running.get()
+            run_btn.config(state="normal" if ready else "disabled")
+            cancel_btn.config(state="normal" if running.get() else "disabled")
+
+        engine_var.trace_add("write", lambda *_: update_controls())
+
+        def start_run():
+            nonlocal total_tracks, playlists_dir
+            if running.get():
+                return
             path = app.require_library()
             if not path:
                 return
-            app.show_log_tab()
-            tracks = gather_tracks(path)
-            try:
-                bucket_by_tempo_energy(tracks, path, app._log)
-                messagebox.showinfo("Buckets", "Tempo/Energy playlists written")
-            except Exception as e:
-                messagebox.showerror("Error", str(e))
-
-        ttk.Button(frame, text="Generate Buckets", command=_run).pack(padx=10, pady=10)
-        return frame
-    elif name == "More Like This":
-        sel = tk.StringVar()
-
-        def browse():
-            f = filedialog.askopenfilename()
-            if f:
-                sel.set(f)
-
-        def generate():
-            path = app.require_library()
-            if not path or not sel.get():
-                messagebox.showerror("Error", "Select a library and track")
+            if not dependencies_ok():
+                messagebox.showerror("Missing Dependencies", dep_status.get())
                 return
-            app.show_log_tab()
-            tracks = gather_tracks(path)
-            res = more_like_this(sel.get(), tracks, 10, log_callback=app._log)
-            outfile = os.path.join(path, "Playlists", "more_like_this.m3u")
-            write_playlist(res, outfile)
-            messagebox.showinfo("Playlist", f"Written to {outfile}")
+            engine = engine_var.get() or "librosa"
+            tracks = gather_tracks(path, getattr(app, "folder_filter", None))
+            if not tracks:
+                messagebox.showinfo("No Tracks", "No audio files found in the library.")
+                return
+            total_tracks = len(tracks)
+            playlists_dir = os.path.join(path, "Playlists")
+            cancel_event.clear()
+            running.set(True)
+            progress["value"] = 0
+            progress["maximum"] = total_tracks
+            progress_var.set(f"0/{total_tracks} processed")
+            log_box.configure(state="normal")
+            log_box.delete("1.0", "end")
+            log_box.configure(state="disabled")
+            append_log(f"Found {total_tracks} tracks. Generating tempo/energy buckets…")
+            render_stats(None)
+            update_controls()
 
-        tk.Entry(frame, textvariable=sel, width=40).pack(side="left", padx=5, pady=5)
-        ttk.Button(frame, text="Browse", command=browse).pack(side="left")
-        ttk.Button(frame, text="Generate", command=generate).pack(side="left", padx=5)
+            def worker():
+                try:
+                    result = bucket_by_tempo_energy(
+                        tracks,
+                        path,
+                        log_callback=lambda m: q.put(("log", m)),
+                        progress_callback=lambda c: q.put(("progress", c)),
+                        cancel_event=cancel_event,
+                        engine=engine,
+                    )
+                    q.put(("done", result))
+                except Exception as exc:  # pragma: no cover - UI surface only
+                    q.put(("error", str(exc)))
+
+            threading.Thread(target=worker, daemon=True).start()
+            poll_queue()
+
+        def poll_queue():
+            try:
+                while True:
+                    tag, payload = q.get_nowait()
+                    if tag == "log":
+                        append_log(payload)
+                    elif tag == "progress":
+                        progress["value"] = payload
+                        progress_var.set(f"{payload}/{total_tracks} processed")
+                    elif tag == "done":
+                        running.set(False)
+                        render_stats(payload)
+                        status = (
+                            "Cancelled"
+                            if payload.get("cancelled")
+                            else "Completed"
+                        )
+                        progress_var.set(
+                            f"{status} – processed {payload.get('processed')} of {payload.get('total')} tracks"
+                        )
+                        update_controls()
+                    elif tag == "error":
+                        running.set(False)
+                        update_controls()
+                        progress_var.set("Error during bucket generation")
+                        messagebox.showerror("Bucket Error", payload)
+            except queue.Empty:
+                pass
+            if running.get():
+                frame.after(200, poll_queue)
+
+        canvas = tk.Canvas(frame)
+        scrollbar = ttk.Scrollbar(frame, orient="vertical", command=canvas.yview)
+        content = ttk.Frame(canvas)
+
+        content.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all")),
+        )
+        content_window = canvas.create_window((0, 0), window=content, anchor="nw")
+        canvas.bind(
+            "<Configure>",
+            lambda e: canvas.itemconfigure(content_window, width=e.width),
+        )
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        info = ttk.LabelFrame(content, text="Tempo/Energy Buckets")
+        info.pack(fill="x", padx=10, pady=(5, 10))
+        ttk.Label(info, textvariable=lib_var).pack(anchor="w", padx=5, pady=(5, 0))
+        ttk.Label(info, textvariable=dep_status, wraplength=360).pack(
+            anchor="w", padx=5, pady=2
+        )
+        engine_frame = ttk.LabelFrame(info, text="Tempo Engine")
+        engine_frame.pack(fill="x", padx=5, pady=(2, 5))
+        ttk.Radiobutton(
+            engine_frame,
+            text="Librosa (default)",
+            variable=engine_var,
+            value="librosa",
+            command=update_controls,
+        ).pack(anchor="w", padx=5, pady=(2, 0))
+        ttk.Radiobutton(
+            engine_frame,
+            text="Essentia",
+            variable=engine_var,
+            value="essentia",
+            command=update_controls,
+        ).pack(anchor="w", padx=5, pady=(0, 2))
+        link = ttk.Label(
+            info,
+            text="View installation instructions",
+            foreground="blue",
+            cursor="hand2",
+        )
+        link.pack(anchor="w", padx=5, pady=(0, 5))
+        link.bind("<Button-1>", open_instructions)
+
+        controls = ttk.Frame(content)
+        controls.pack(fill="x", padx=10)
+        run_btn = ttk.Button(controls, text="Generate Buckets", command=start_run)
+        run_btn.pack(side="left")
+        cancel_btn = ttk.Button(
+            controls, text="Cancel", command=cancel_event.set, state="disabled"
+        )
+        cancel_btn.pack(side="left", padx=(5, 0))
+        ttk.Button(
+            controls,
+            text="Refresh Library Path",
+            command=update_controls,
+        ).pack(side="right")
+
+        progress = ttk.Progressbar(content, mode="determinate")
+        progress.pack(fill="x", padx=10, pady=(10, 0))
+        ttk.Label(content, textvariable=progress_var).pack(anchor="w", padx=12)
+
+        log_group = ttk.LabelFrame(content, text="Run Log")
+        log_group.pack(fill="both", expand=False, padx=10, pady=(10, 0))
+        log_box = ScrolledText(log_group, height=8, state="disabled")
+        log_box.pack(fill="both", expand=True, padx=5, pady=5)
+
+        stats_group = ttk.LabelFrame(content, text="Bucket Summary")
+        stats_group.pack(fill="both", expand=True, padx=10, pady=(10, 10))
+        stats_rows = ttk.Frame(stats_group)
+        stats_rows.pack(fill="both", expand=True)
+
+        update_controls()
+        render_stats(None)
         return frame
     elif name == "Auto-DJ":
         sel = tk.StringVar()
         count_var = tk.StringVar(value="20")
+        engine_var = getattr(app, "feature_engine_var", tk.StringVar(value="librosa"))
+        app.feature_engine_var = engine_var
+        playlist_name_var = tk.StringVar(value="Auto DJ Mix")
+        playlist_file_var = tk.StringVar(value="autodj.m3u")
+        progress_var = tk.StringVar(value="Waiting to start")
+        running = tk.BooleanVar(value=False)
+        cancel_event = threading.Event()
+
+        def resolve_engine() -> str:
+            engine = engine_var.get()
+            cluster_cfg = getattr(app, "cluster_params", {}) or {}
+            if not engine:
+                engine = cluster_cfg.get("feature_engine") or cluster_cfg.get("engine")
+            if engine in (None, "", "serial", "parallel"):
+                engine = "librosa"
+            return engine
+
+        def open_path(path: str) -> None:
+            if not path:
+                return
+            try:
+                if sys.platform == "win32":
+                    os.startfile(path)  # type: ignore[attr-defined]
+                elif sys.platform == "darwin":
+                    subprocess.run(["open", path], check=False)
+                else:
+                    subprocess.run(["xdg-open", path], check=False)
+            except Exception as exc:  # pragma: no cover - OS interaction
+                messagebox.showerror("Open File", f"Could not open {path}: {exc}")
 
         def browse():
-            f = filedialog.askopenfilename()
+            initial_dir = load_last_path() or os.getcwd()
+            f = filedialog.askopenfilename(initialdir=initial_dir)
             if f:
                 sel.set(f)
+                save_last_path(os.path.dirname(f))
+
+        def append_log(msg: str) -> None:
+            def _append() -> None:
+                app._log(msg)
+                log_box.configure(state="normal")
+                log_box.insert("end", msg + "\n")
+                log_box.see("end")
+                log_box.configure(state="disabled")
+
+            app.after(0, _append)
+
+        def set_progress(value: int, maximum: int, message: str | None = None) -> None:
+            def _update() -> None:
+                progress["maximum"] = max(1, maximum)
+                progress["value"] = value
+                if message:
+                    progress_var.set(message)
+
+            app.after(0, _update)
+
+        def reset_ui(status: str) -> None:
+            running.set(False)
+            cancel_event.clear()
+            progress["value"] = 0
+            progress_var.set(status)
+            generate_btn.config(state="normal")
+            cancel_btn.config(state="disabled")
+
+        def cancel_generation() -> None:
+            cancel_event.set()
+            append_log("⚠ Cancelling Auto-DJ run…")
+            progress_var.set("Cancelling…")
+            cancel_btn.config(state="disabled")
 
         def generate():
+            if running.get():
+                return
             path = app.require_library()
             if not path or not sel.get():
                 messagebox.showerror("Error", "Select a library and track")
@@ -226,34 +1440,126 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
             except ValueError:
                 messagebox.showerror("Error", "Invalid count")
                 return
-            app.show_log_tab()
-            tracks = gather_tracks(path)
-            order = autodj_playlist(sel.get(), tracks, n, log_callback=app._log)
-            outfile = os.path.join(path, "Playlists", "autodj.m3u")
-            write_playlist(order, outfile)
-            messagebox.showinfo("Playlist", f"Written to {outfile}")
 
-        row = ttk.Frame(frame)
-        row.pack(padx=10, pady=10)
-        tk.Entry(row, textvariable=sel, width=40).pack(side="left")
-        ttk.Button(row, text="Browse", command=browse).pack(side="left", padx=5)
-        ttk.Entry(row, textvariable=count_var, width=5).pack(side="left")
-        ttk.Label(row, text="songs").pack(side="left")
-        ttk.Button(row, text="Generate", command=generate).pack(side="left", padx=5)
+            playlist_name = playlist_name_var.get().strip() or "Auto DJ Mix"
+            filename = playlist_file_var.get().strip() or "autodj.m3u"
+            if not filename.lower().endswith(".m3u"):
+                filename += ".m3u"
+
+            app.show_log_tab()
+            running.set(True)
+            cancel_event.clear()
+            generate_btn.config(state="disabled")
+            cancel_btn.config(state="normal")
+            progress_var.set("Gathering tracks…")
+            log_box.configure(state="normal")
+            log_box.delete("1.0", "end")
+            log_box.configure(state="disabled")
+
+            def worker() -> None:
+                try:
+                    append_log("→ Gathering tracks from library…")
+                    tracks = gather_tracks(path)
+                    if cancel_event.is_set():
+                        raise IndexCancelled()
+                    if not tracks:
+                        raise RuntimeError("No tracks found in library")
+                    if sel.get() not in tracks:
+                        raise RuntimeError("Selected start track is not in the library")
+
+                    engine = resolve_engine()
+
+                    def progress_cb(current: int, total: int, message: str | None = None):
+                        set_progress(current, total, message)
+
+                    append_log(
+                        f"→ Generating {playlist_name} with {n} songs using {engine} features"
+                    )
+                    order = autodj_playlist(
+                        sel.get(),
+                        tracks,
+                        n,
+                        log_callback=append_log,
+                        engine=engine,
+                        progress_callback=progress_cb,
+                        cancel_event=cancel_event,
+                    )
+                    if cancel_event.is_set():
+                        raise IndexCancelled()
+
+                    outfile = os.path.join(path, "Playlists", filename)
+                    write_playlist(order, outfile)
+                    append_log(f"✓ {playlist_name} written to {outfile}")
+                    set_progress(len(order), max(len(order), 1), "Complete")
+                    app.after(
+                        0,
+                        lambda: messagebox.showinfo(
+                            "Playlist", f"{playlist_name} written to {outfile}"
+                        ),
+                    )
+                    app.after(0, lambda: open_path(os.path.dirname(outfile)))
+                except IndexCancelled:
+                    append_log("✖ Auto-DJ cancelled.")
+                    app.after(0, lambda: progress_var.set("Cancelled"))
+                except Exception as exc:
+                    append_log(f"✖ Error during Auto-DJ: {exc}")
+                    app.after(0, lambda: messagebox.showerror("Playlist", str(exc)))
+                finally:
+                    app.after(0, lambda: reset_ui("Ready"))
+
+            threading.Thread(target=worker, daemon=True).start()
+
+        row = ttk.LabelFrame(frame, text="Auto-DJ Settings")
+        row.pack(fill="x", padx=10, pady=(10, 5))
+        path_row = ttk.Frame(row)
+        path_row.pack(fill="x", pady=5)
+        ttk.Label(path_row, text="Start track:").pack(side="left")
+        tk.Entry(path_row, textvariable=sel, width=40).pack(side="left", padx=(5, 0))
+        ttk.Button(path_row, text="Browse", command=browse).pack(side="left", padx=5)
+
+        controls_row = ttk.Frame(row)
+        controls_row.pack(fill="x", pady=5)
+        ttk.Label(controls_row, text="Songs:").pack(side="left")
+        ttk.Entry(controls_row, textvariable=count_var, width=5).pack(side="left", padx=(5, 10))
+        ttk.Label(controls_row, text="Playlist name:").pack(side="left")
+        ttk.Entry(controls_row, textvariable=playlist_name_var, width=20).pack(
+            side="left", padx=(5, 10)
+        )
+        ttk.Label(controls_row, text="File name:").pack(side="left")
+        ttk.Entry(controls_row, textvariable=playlist_file_var, width=18).pack(
+            side="left", padx=(5, 10)
+        )
+        ttk.Label(controls_row, text="Engine:").pack(side="left")
+        ttk.Combobox(
+            controls_row,
+            textvariable=engine_var,
+            values=["librosa", "essentia"],
+            width=10,
+            state="readonly",
+        ).pack(side="left")
+
+        action_row = ttk.Frame(row)
+        action_row.pack(fill="x", pady=(5, 0))
+        generate_btn = ttk.Button(action_row, text="Generate", command=generate)
+        generate_btn.pack(side="left")
+        cancel_btn = ttk.Button(
+            action_row, text="Cancel", command=cancel_generation, state="disabled"
+        )
+        cancel_btn.pack(side="left", padx=5)
+
+        progress = ttk.Progressbar(frame, mode="determinate")
+        progress.pack(fill="x", padx=10, pady=(5, 0))
+        ttk.Label(frame, textvariable=progress_var).pack(anchor="w", padx=12)
+
+        log_group = ttk.LabelFrame(frame, text="Auto-DJ Log")
+        log_group.pack(fill="both", expand=True, padx=10, pady=(5, 10))
+        log_box = ScrolledText(log_group, height=8, state="disabled")
+        log_box.pack(fill="both", expand=True, padx=5, pady=5)
+
+        reset_ui("Ready")
         return frame
     else:
         ttk.Label(frame, text=f"{name} panel coming soon…").pack(padx=10, pady=10)
-        return frame
-
-    if tracks is None:
-        msg = ttk.Frame(frame)
-        msg.pack(padx=10, pady=10)
-        ttk.Label(msg, text="Run clustering once first").pack()
-        ttk.Button(
-            msg,
-            text="Run Clustering",
-            command=lambda: app.cluster_playlists_dialog(params["method"]),
-        ).pack(pady=(5, 0))
         return frame
 
     # Container ensures the graph resizes while keeping controls visible
@@ -261,85 +1567,375 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
     container.pack(fill="both", expand=True)
     container.rowconfigure(0, weight=1)
     container.columnconfigure(0, weight=1)
+    container.columnconfigure(1, weight=0)
 
-    panel = ClusterGraphPanel(
-        container,
-        tracks,
-        features,
-        cluster_func=km_func,
-        cluster_params=params,
-        library_path=app.library_path,
-        log_callback=app._log,
+    graph_area = ttk.Frame(container)
+    graph_area.grid(row=0, column=0, sticky="nsew")
+    graph_area.rowconfigure(0, weight=1)
+    graph_area.columnconfigure(0, weight=1)
+
+    # Keep the controls outside the graph container so they remain visible
+    # while the graph refreshes.
+    graph_stack = ttk.Frame(graph_area)
+    graph_stack.grid(row=0, column=0, sticky="nsew")
+    graph_stack.rowconfigure(0, weight=1)
+    graph_stack.columnconfigure(0, weight=1)
+
+    panel: ClusterGraphPanel | None = None
+
+    message_var = tk.StringVar(value="")
+    banner_var = tk.StringVar(value="")
+    press_counter = 0
+
+    def _set_message(text: str) -> None:
+        message_var.set(text)
+
+    def _clear_message(event: tk.Event | None = None) -> None:  # type: ignore[name-defined]
+        message_var.set("")
+
+    def _message_action(text: str, action: Callable[[], Any]) -> Callable[[], Any]:
+        def wrapped() -> Any:
+            _set_message(text)
+            return action()
+
+        return wrapped
+
+    def _right_panel_action(action: Callable[[], Any] | None) -> Callable[[], Any]:
+        def wrapped() -> Any:
+            nonlocal press_counter
+            press_counter += 1
+            banner_var.set(str(press_counter))
+            if action is not None:
+                return action()
+
+        return wrapped
+
+    frame.bind_all("<Escape>", _clear_message)
+
+    side_tools = ttk.Frame(container)
+    side_tools.grid(row=0, column=1, rowspan=3, sticky="ns", padx=(10, 0))
+    side_tools.columnconfigure(0, weight=1)
+    side_tools.rowconfigure(3, weight=1)
+
+    # Keep the control column stable while the graph updates
+    side_tools.update_idletasks()
+    container.columnconfigure(1, minsize=side_tools.winfo_reqwidth())
+
+    control_banner = ttk.Frame(side_tools)
+    control_banner.grid(row=0, column=0, sticky="ew", pady=(0, 10))
+    control_banner.columnconfigure(1, weight=1)
+
+    run_btn = ttk.Button(
+        control_banner,
+        text="Run Clusters",
+        command=_right_panel_action(
+            _message_action(
+                "Running clustering will refresh your groups based on the current settings.",
+                lambda: app.cluster_playlists_dialog(params["method"]),
+            )
+        ),
     )
-    panel.grid(row=0, column=0, sticky="nsew", pady=(0, 5))
+    run_btn.grid(row=0, column=0, padx=5, pady=5, sticky="ew")
+
+    status = ttk.Label(control_banner)
+    status.grid(row=0, column=1, padx=5, pady=5, sticky="w")
+
+    playlist_btn = ttk.Button(
+        side_tools,
+        text="Current Playlists",
+        command=_right_panel_action(
+            _message_action(
+                "Listing the playlists you already have for quick review.",
+                lambda: panel and panel.show_current_playlists(),
+            )
+        ),
+    )
+    playlist_btn.grid(row=1, column=0, sticky="ew", pady=(0, 10))
+
+    cluster_box = ttk.LabelFrame(side_tools, text="Cluster Loader")
+    cluster_box.grid(row=2, column=0, sticky="nsew", pady=(0, 10))
+    cluster_box.columnconfigure(1, weight=1)
+
+    ttk.Label(cluster_box, text="Pick cluster:").grid(
+        row=0, column=0, sticky="w", padx=5, pady=(5, 2)
+    )
+    cluster_select_var = tk.StringVar()
+    cluster_combo = ttk.Combobox(
+        cluster_box,
+        textvariable=cluster_select_var,
+        width=10,
+    )
+    cluster_combo.grid(row=0, column=1, sticky="ew", padx=5, pady=(5, 2))
+
+    ttk.Label(cluster_box, text="Or enter #:").grid(
+        row=1, column=0, sticky="w", padx=5, pady=(0, 2)
+    )
+    manual_cluster_var = tk.StringVar()
+    manual_entry = ttk.Entry(
+        cluster_box,
+        textvariable=manual_cluster_var,
+        width=10,
+    )
+    manual_entry.grid(row=1, column=1, sticky="ew", padx=5, pady=(0, 2))
+
+    def _load_cluster():
+        _set_message("Loading the selected cluster and preparing lasso controls.")
+        if panel is None:
+            return
+        choice = manual_cluster_var.get().strip() or cluster_select_var.get().strip()
+        if not choice:
+            messagebox.showinfo("Clusters", "Choose a cluster first.")
+            return
+        try:
+            cid = int(choice)
+        except ValueError:
+            messagebox.showinfo("Clusters", f"{choice} is not a valid number")
+            return
+        panel.load_cluster(cid)
+
+    load_btn = ttk.Button(
+        cluster_box,
+        text="Load Cluster",
+        command=_right_panel_action(_load_cluster),
+    )
+    load_btn.grid(row=2, column=0, columnspan=2, sticky="ew", padx=5, pady=(0, 5))
+
+    temp_status_var = tk.StringVar(value="Clusters available: 0")
+    ttk.Label(cluster_box, textvariable=temp_status_var).grid(
+        row=3, column=0, columnspan=2, sticky="w", padx=5, pady=(0, 5)
+    )
+
+    temp_box = ttk.LabelFrame(side_tools, text="Temporary Playlist")
+    temp_box.grid(row=3, column=0, sticky="nsew")
+    temp_box.columnconfigure(0, weight=1)
+    temp_box.rowconfigure(0, weight=1)
+
+    list_frame = ttk.Frame(temp_box)
+    list_frame.grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
+    list_frame.columnconfigure(0, weight=1)
+
+    temp_scroll = ttk.Scrollbar(list_frame, orient="vertical")
+    temp_listbox = tk.Listbox(
+        list_frame,
+        height=12,
+        selectmode="extended",
+        yscrollcommand=temp_scroll.set,
+    )
+    temp_listbox.pack(side="left", fill="both", expand=True)
+    temp_scroll.config(command=temp_listbox.yview)
+    temp_scroll.pack(side="right", fill="y")
+
+    show_all_btn = ttk.Button(
+        temp_box,
+        text="Show All",
+        command=_right_panel_action(
+            _message_action(
+                "Highlighting all songs currently in the temporary playlist.",
+                lambda: panel and panel.highlight_temp_playlist(),
+            )
+        ),
+    )
+    show_all_btn.grid(row=1, column=0, sticky="ew", padx=5, pady=(0, 5))
+
+    add_highlight_btn = ttk.Button(
+        temp_box,
+        text="Add Highlighted Songs",
+        command=_right_panel_action(
+            _message_action(
+                "Enable lasso mode to add the highlighted graph selection to the temp playlist.",
+                lambda: panel and panel.begin_add_highlight_flow(),
+            )
+        ),
+    )
+    add_highlight_btn.grid(row=2, column=0, sticky="ew", padx=5, pady=(0, 5))
+
+    temp_remove_btn = ttk.Button(
+        temp_box,
+        text="Remove Selected",
+        command=_right_panel_action(
+            _message_action(
+                "Removing the selected songs from the temporary playlist.",
+                lambda: panel and panel.remove_selected_from_temp(),
+            )
+        ),
+    )
+    temp_remove_btn.grid(row=3, column=0, sticky="ew", padx=5, pady=(0, 5))
+
+    create_playlist_btn = ttk.Button(
+        temp_box,
+        text="Create Playlist",
+        command=_right_panel_action(
+            _message_action(
+                "Saving the current temporary playlist as a new playlist.",
+                lambda: panel and panel.create_temp_playlist(),
+            )
+        ),
+    )
+    create_playlist_btn.grid(row=4, column=0, sticky="ew", padx=5, pady=(0, 5))
 
     ttk.Separator(container, orient="horizontal").grid(row=1, column=0, sticky="ew")
 
     btn_frame = ttk.Frame(container)
     btn_frame.grid(row=2, column=0, sticky="ew", pady=5)
 
-    panel.lasso_var = tk.BooleanVar(value=False)
+    lasso_var = tk.BooleanVar(value=False)
 
     lasso_btn = ttk.Checkbutton(
         btn_frame,
-        text="Lasso Mode",
-        variable=panel.lasso_var,
-        command=panel.toggle_lasso,
+        text=(
+            "To begin, press the \"Run Clusters\" button, select library folders, "
+            "and run. You'll then see the music visually."
+        ),
+        variable=lasso_var,
+        command=_message_action(
+            "Toggling lasso mode for manual graph selection.",
+            lambda: panel and panel.toggle_lasso(),
+        ),
     )
     lasso_btn.pack(side="left")
-    panel.lasso_btn = lasso_btn
 
-    panel.ok_btn = ttk.Button(
-        btn_frame,
-        text="OK",
-        command=panel.finalize_lasso,
-        state="disabled",
-    )
-    panel.ok_btn.pack(side="left", padx=(5, 0))
+    placeholder: ttk.Label | None = None
 
-    panel.gen_btn = ttk.Button(
-        btn_frame,
-        text="Generate Playlist",
-        command=panel.create_playlist,
-        state="disabled",
-    )
-    panel.gen_btn.pack(side="left", padx=(5, 0))
+    def _sync_cluster_controls(cluster_ready: bool, running: bool) -> None:
+        ready = cluster_ready and panel is not None
+        state = "normal" if ready and not running else "disabled"
 
-    def _auto_create_all():
-        method = panel.cluster_params.get("method")
-        params = {k: v for k, v in panel.cluster_params.items() if k != "method"}
-        if not params:
+        for widget in (
+            playlist_btn,
+            cluster_combo,
+            manual_entry,
+            load_btn,
+            temp_listbox,
+            show_all_btn,
+            add_highlight_btn,
+            temp_remove_btn,
+            create_playlist_btn,
+            lasso_btn,
+        ):
+            widget.config(state=state)
+
+        run_btn.state(["disabled"] if running else ["!disabled"])
+
+        if running:
+            status.config(text="Clustering in progress…")
+        elif not ready:
+            status.config(text="Run clustering once first")
+        else:
+            status.config(text="Clusters loaded")
+
+    def _ensure_placeholder(message: str) -> ttk.Label:
+        nonlocal placeholder
+
+        if placeholder is None:
+            placeholder = ttk.Label(graph_stack, anchor="center")
+            placeholder.grid(row=0, column=0, sticky="nsew")
+        placeholder.configure(text=message)
+        placeholder.lift()
+        return placeholder
+
+    def refresh_cluster_panel():
+        nonlocal panel, cluster_manager, cluster_data
+
+        cluster_data = getattr(app, "cluster_data", None)
+        cluster_manager = getattr(app, "cluster_manager", None)
+        if cluster_data is None:
+            tracks_local = features_local = None
+        else:
+            tracks_local, features_local = cluster_data
+            if cluster_manager is None or getattr(cluster_manager, "tracks", None) != tracks_local:
+                app.cluster_manager = ClusterComputationManager(
+                    tracks_local, features_local, app._log
+                )
+                cluster_manager = app.cluster_manager
+
+        cluster_generation_running = getattr(app, "cluster_generation_running", False)
+        cluster_ready = cluster_manager is not None and cluster_data is not None
+
+        if panel is not None and cluster_manager is not None and panel.cluster_manager != cluster_manager:
+            panel.destroy()
+            panel = None
+
+        if cluster_generation_running:
+            _ensure_placeholder("Clustering in progress…")
+            if panel is not None:
+                panel.grid()
+            _sync_cluster_controls(False, True)
             return
-        app.show_log_tab()
-        threading.Thread(
-            target=app._run_cluster_generation,
-            args=(app.library_path, method, params),
-            daemon=True,
-        ).start()
 
-    auto_btn = ttk.Button(btn_frame, text="Auto-Create", command=_auto_create_all)
-    auto_btn.pack(side="left", padx=(5, 0))
+        if not cluster_ready:
+            _ensure_placeholder("Run clustering once first")
+            if panel is not None:
+                panel.grid()
+            _sync_cluster_controls(False, False)
+            return
 
-    if name == "Interactive – HDBSCAN":
-        redo_btn = ttk.Button(
-            btn_frame, text="Redo Values", command=panel.open_param_dialog
-        )
-        redo_btn.pack(side="left", padx=(5, 0))
+        if placeholder is not None:
+            placeholder.grid_remove()
 
-    # ─── Hover Metadata Panel ────────────────────────────────────────────
-    hover_panel = ttk.Frame(panel, relief="solid", borderwidth=1)
-    art_lbl = tk.Label(hover_panel)
-    art_lbl.pack(side="left")
-    text_frame = ttk.Frame(hover_panel)
-    text_frame.pack(side="left", padx=5)
-    title_lbl = ttk.Label(text_frame, font=("TkDefaultFont", 10, "bold"))
-    title_lbl.pack(anchor="w")
-    artist_lbl = ttk.Label(text_frame, font=("TkDefaultFont", 8))
-    artist_lbl.pack(anchor="w")
-    hover_panel.place(relx=1.0, rely=1.0, anchor="se", x=-10, y=-10)
-    hover_panel.place_forget()
+        if panel is None:
+            X, X2 = cluster_manager.get_projection()
 
-    panel.setup_hover(hover_panel, art_lbl, title_lbl, artist_lbl)
+            panel = ClusterGraphPanel(
+                graph_stack,
+                tracks_local,
+                X,
+                X2,
+                cluster_func=km_func,
+                cluster_params=params,
+                cluster_manager=cluster_manager,
+                algo_key=algo_key,
+                library_path=app.library_path,
+                log_callback=app._log,
+            )
+
+            panel.cluster_select_var = cluster_select_var
+            panel.cluster_combo = cluster_combo
+            panel.manual_cluster_var = manual_cluster_var
+            panel.temp_status_var = temp_status_var
+            panel.temp_listbox = temp_listbox
+            panel.temp_remove_btn = temp_remove_btn
+            panel.lasso_var = lasso_var
+            panel.lasso_btn = lasso_btn
+
+            hover_panel = ttk.Frame(panel, relief="solid", borderwidth=1)
+            art_lbl = tk.Label(hover_panel)
+            art_lbl.pack(side="left")
+            text_frame = ttk.Frame(hover_panel)
+            text_frame.pack(side="left", padx=5)
+            title_lbl = ttk.Label(
+                text_frame, font=_scaled_font(text_frame, 10, "bold")
+            )
+            title_lbl.pack(anchor="w")
+            artist_lbl = ttk.Label(text_frame, font=_scaled_font(text_frame, 8))
+            artist_lbl.pack(anchor="w")
+            hover_panel.place(relx=1.0, rely=1.0, anchor="se", x=-10, y=-10)
+            hover_panel.place_forget()
+
+            panel.setup_hover(hover_panel, art_lbl, title_lbl, artist_lbl)
+
+            def _handle_resize(event):
+                if panel is not None:
+                    panel.on_resize(event.width, event.height)
+
+            graph_stack.bind("<Configure>", _handle_resize, add="+")
+            panel.grid(row=0, column=0, sticky="nsew", pady=(0, 5))
+            graph_stack.after_idle(
+                lambda: panel.on_resize(graph_stack.winfo_width(), graph_stack.winfo_height())
+            )
+        else:
+            panel.grid()
+
+        # Keep panel state in sync with the latest clustering run
+        panel.cluster_params = params
+        panel.cluster_manager = cluster_manager
+
+        panel.refresh_control_states()
+        panel._refresh_cluster_options()
+        _sync_cluster_controls(True, False)
+
+    refresh_cluster_panel()
+
+    frame.refresh_cluster_panel = refresh_cluster_panel  # type: ignore[attr-defined]
 
     return frame
 
@@ -398,62 +1994,5897 @@ class ProgressDialog(tk.Toplevel):
         self.update_idletasks()
 
 
-class ScanProgressWindow(tk.Toplevel):
-    """Non-modal window showing scan progress and logs."""
+@dataclass
+class DuplicatePair:
+    left_path: str
+    right_path: str
+    winner_path: str | None = None
+    source: str = "plan"
+    manual_winner: str | None = None
 
-    def __init__(self, parent: tk.Widget, cancel_event: threading.Event):
+
+PAIR_REVIEW_SNAPSHOT_FILENAME = "duplicate_pair_review.json"
+
+
+def _pair_review_snapshot_path(library_root: str) -> str:
+    return os.path.join(library_root, "Docs", PAIR_REVIEW_SNAPSHOT_FILENAME)
+
+
+def _append_duplicate_pair(
+    pairs: list[DuplicatePair],
+    seen: set[tuple[str, str]],
+    left: str,
+    right: str,
+    winner_path: str | None,
+    source: str,
+    manual_winner: str | None = None,
+) -> None:
+    if left == right:
+        return
+    key = tuple(sorted((left, right)))
+    if key in seen:
+        return
+    seen.add(key)
+    pairs.append(
+        DuplicatePair(
+            left_path=left,
+            right_path=right,
+            winner_path=winner_path,
+            source=source,
+            manual_winner=manual_winner,
+        )
+    )
+
+
+def _collect_filename_pairs(library_path: str) -> list[tuple[str, str]]:
+    pattern = re.compile(r"\s*\(\d+\)$")
+    candidates: dict[str, list[str]] = {}
+    for dirpath, _dirs, files in os.walk(library_path):
+        for filename in files:
+            ext = os.path.splitext(filename)[1].lower()
+            if ext not in SUPPORTED_EXTS:
+                continue
+            stem = os.path.splitext(filename)[0].lower()
+            normalized = pattern.sub("", stem).strip()
+            if not normalized:
+                continue
+            full_path = os.path.join(dirpath, filename)
+            candidates.setdefault(normalized, []).append(full_path)
+
+    pairs: list[tuple[str, str]] = []
+    for items in candidates.values():
+        if len(items) < 2:
+            continue
+        sorted_items = sorted(items, key=str.lower)
+        anchor = sorted_items[0]
+        for other in sorted_items[1:]:
+            pairs.append((anchor, other))
+    return pairs
+
+
+def _build_duplicate_pairs(
+    plan: ConsolidationPlan,
+    library_path: str,
+    *,
+    include_filename_pairs: bool = True,
+) -> list[DuplicatePair]:
+    pairs: list[DuplicatePair] = []
+    seen: set[tuple[str, str]] = set()
+
+    for group in plan.groups:
+        if not group.losers:
+            continue
+        if len(group.losers) == 1:
+            _append_duplicate_pair(
+                pairs,
+                seen,
+                group.winner_path,
+                group.losers[0],
+                group.winner_path,
+                "plan",
+            )
+            continue
+        for loser in group.losers:
+            _append_duplicate_pair(
+                pairs,
+                seen,
+                group.winner_path,
+                loser,
+                group.winner_path,
+                "plan",
+            )
+
+    if include_filename_pairs:
+        for left, right in _collect_filename_pairs(library_path):
+            _append_duplicate_pair(pairs, seen, left, right, None, "filename")
+
+    return pairs
+
+
+def _serialize_duplicate_pairs(pairs: list[DuplicatePair]) -> list[dict[str, object]]:
+    return [
+        {
+            "left_path": pair.left_path,
+            "right_path": pair.right_path,
+            "winner_path": pair.winner_path,
+            "source": pair.source,
+            "manual_winner": pair.manual_winner,
+        }
+        for pair in pairs
+    ]
+
+
+def _write_duplicate_pair_snapshot(
+    plan: ConsolidationPlan,
+    library_root: str,
+    *,
+    include_filename_pairs: bool = True,
+    log_callback: Callable[[str], None] | None = None,
+) -> str | None:
+    docs_dir = os.path.join(library_root, "Docs")
+    os.makedirs(docs_dir, exist_ok=True)
+    snapshot_path = _pair_review_snapshot_path(library_root)
+    plan.refresh_plan_signature()
+    pairs = _build_duplicate_pairs(
+        plan,
+        library_root,
+        include_filename_pairs=include_filename_pairs,
+    )
+    payload = {
+        "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "library_root": library_root,
+        "plan_signature": plan.plan_signature,
+        "includes_filename_pairs": include_filename_pairs,
+        "pair_count": len(pairs),
+        "pairs": _serialize_duplicate_pairs(pairs),
+    }
+    try:
+        with open(snapshot_path, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=2)
+    except OSError as exc:
+        if log_callback:
+            log_callback(f"Pair review snapshot could not be written: {exc}")
+        return None
+    return snapshot_path
+
+
+def _write_custom_pair_snapshot(
+    library_root: str,
+    pairs: list[DuplicatePair],
+    *,
+    include_filename_pairs: bool = True,
+    log_callback: Callable[[str], None] | None = None,
+) -> tuple[str | None, str | None]:
+    docs_dir = os.path.join(library_root, "Docs")
+    os.makedirs(docs_dir, exist_ok=True)
+    snapshot_path = _pair_review_snapshot_path(library_root)
+    raw_pairs = _serialize_duplicate_pairs(pairs)
+    signature_payload = json.dumps(raw_pairs, sort_keys=True)
+    plan_signature = hashlib.sha256(signature_payload.encode("utf-8")).hexdigest()
+    payload = {
+        "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "library_root": library_root,
+        "plan_signature": plan_signature,
+        "includes_filename_pairs": include_filename_pairs,
+        "pair_count": len(pairs),
+        "pairs": raw_pairs,
+    }
+    try:
+        with open(snapshot_path, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=2)
+    except OSError as exc:
+        if log_callback:
+            log_callback(f"Pair review snapshot could not be written: {exc}")
+        return None, None
+    return snapshot_path, plan_signature
+
+
+class DuplicatePairReviewTool(tk.Toplevel):
+    """Review paired duplicate results one-by-one."""
+
+    def __init__(self, parent: tk.Widget, *, library_path: str, plan: ConsolidationPlan):
         super().__init__(parent)
-        self.title("Scanning…")
-        self.cancel_event = cancel_event
-        self.resizable(True, True)
+        self.title("Duplicate Pair Review")
         self.transient(parent)
+        self.resizable(True, True)
 
-        self.progress = ttk.Progressbar(self, mode="indeterminate")
-        self.progress.pack(fill="x", padx=10, pady=(10, 0))
-        self.progress.start()
+        self.library_path = library_path
+        self.pairs = self._collect_pairs(plan, library_path)
+        self._pair_index = 0
+        self._left_tags: dict[str, object] = {}
+        self._right_tags: dict[str, object] = {}
+        self._left_cover = None
+        self._right_cover = None
+        self._status_var = tk.StringVar(value="Ready")
+        self._progress_var = tk.StringVar(value="")
 
-        self.log_widget = ScrolledText(self, width=60, height=15, state="disabled")
-        self.log_widget.pack(padx=10, pady=10, fill="both", expand=True)
+        container = ttk.Frame(self)
+        container.pack(fill="both", expand=True, padx=10, pady=10)
 
-        btn = ttk.Button(self, text="Cancel", command=self._on_cancel)
-        btn.pack(pady=(0, 10))
-        self.protocol("WM_DELETE_WINDOW", self._on_cancel)
+        ttk.Label(
+            container,
+            text="Duplicate Pair Review",
+            font=_scaled_font(container, 12, "bold"),
+        ).pack(anchor="w")
+        ttk.Label(
+            container,
+            text="Review paired duplicates from the Duplicate Finder preview.",
+            foreground="#555",
+            wraplength=600,
+        ).pack(anchor="w", pady=(0, 8))
 
-    def _on_cancel(self) -> None:
-        if messagebox.askyesno("Cancel Scan", "Stop scanning?"):
-            self.cancel_event.set()
+        ttk.Label(container, textvariable=self._progress_var).pack(anchor="w")
 
-    # Public method used by background threads
-    def update_progress(self, kind: str, current: int, total: int, msg: str) -> None:
-        self.after(0, lambda: self._do_update(kind, current, total, msg))
+        grid = ttk.Frame(container)
+        grid.pack(fill="both", expand=True, pady=8)
+        grid.columnconfigure((0, 1), weight=1)
 
-    # Actual UI updates executed on main thread
-    def _do_update(self, kind: str, current: int, total: int, msg: str) -> None:
-        if kind == "walk":
-            if self.progress["mode"] != "indeterminate":
-                self.progress.config(mode="indeterminate")
-                self.progress.start()
-            if msg:
-                self._append(f"Scanning: {msg}")
-        elif kind == "fp_start":
-            if self.progress["mode"] != "determinate":
-                self.progress.stop()
-                self.progress.config(mode="determinate", maximum=total, value=current - 1)
-            self._append(f"Fingerprinting file {current} of {total}\n{msg}")
-        elif kind == "fp_end":
-            if self.progress["mode"] == "determinate":
-                self.progress["value"] = current
-        elif kind == "log":
-            self._append(msg)
-        elif kind == "complete":
-            self.progress.stop()
-            self._append(f"Completed: {current} duplicate pairs found")
+        self.left_panel = self._build_track_panel(grid, "Left Track")
+        self.left_panel.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
+        self.right_panel = self._build_track_panel(grid, "Right Track")
+        self.right_panel.grid(row=0, column=1, sticky="nsew", padx=(6, 0))
 
-    def _append(self, text: str) -> None:
-        self.log_widget.configure(state="normal")
-        self.log_widget.insert("end", text + "\n")
-        self.log_widget.see("end")
-        self.log_widget.configure(state="disabled")
+        status_row = ttk.Frame(container)
+        status_row.pack(fill="x", pady=(0, 8))
+        ttk.Label(status_row, textvariable=self._status_var, foreground="#555").pack(
+            side="left"
+        )
+        nav_row = ttk.Frame(container)
+        nav_row.pack(fill="x", pady=(0, 8))
+        self.prev_btn = ttk.Button(nav_row, text="◀ Prev", command=self._go_previous)
+        self.prev_btn.pack(side="left")
+        self.next_btn = ttk.Button(nav_row, text="Next ▶", command=self._go_next)
+        self.next_btn.pack(side="left", padx=(6, 0))
+        self.switch_btn = ttk.Button(nav_row, text="Switch", command=self._handle_switch)
+        self.switch_btn.pack(side="left", padx=(6, 0))
+        self.override_btn = ttk.Button(
+            nav_row, text="Prefer MP3", command=self._handle_prefer_mp3
+        )
+        self.override_btn.pack(side="left", padx=(6, 0))
+        ttk.Label(nav_row, text="Jump to:").pack(side="left", padx=(12, 4))
+        self.jump_var = tk.StringVar(value="")
+        jump_entry = ttk.Entry(nav_row, textvariable=self.jump_var, width=6)
+        jump_entry.pack(side="left")
+        ttk.Button(nav_row, text="Go", command=self._jump_to_pair).pack(
+            side="left", padx=(4, 0)
+        )
+
+        btns = ttk.Frame(container)
+        btns.pack(fill="x")
+        self.yes_btn = ttk.Button(btns, text="Yes", command=self._handle_yes)
+        self.yes_btn.pack(side="left")
+        self.no_btn = ttk.Button(btns, text="No", command=self._handle_no)
+        self.no_btn.pack(side="left", padx=(6, 0))
+        self.tag_btn = ttk.Button(btns, text="Tag", command=self._handle_tag)
+        self.tag_btn.pack(side="left", padx=(6, 0))
+        ttk.Button(btns, text="Close", command=self.destroy).pack(side="right")
+
+        self.bind("<Return>", lambda _event: self._handle_yes())
+        self.bind("<BackSpace>", lambda _event: self._handle_no())
+        self.bind("<Left>", lambda _event: self._go_previous())
+        self.bind("<Right>", lambda _event: self._go_next())
+
+        self._load_pair()
+
+    def _collect_pairs(
+        self, plan: ConsolidationPlan, library_path: str
+    ) -> list[DuplicatePair]:
+        snapshot = self._load_pair_snapshot(library_path)
+        if snapshot is not None:
+            pairs, includes_filename_pairs, snapshot_signature = snapshot
+            plan_signature = plan.plan_signature or plan.refresh_plan_signature()
+            if pairs and snapshot_signature == plan_signature:
+                if not includes_filename_pairs:
+                    seen = {tuple(sorted((pair.left_path, pair.right_path))) for pair in pairs}
+                    for left, right in _collect_filename_pairs(library_path):
+                        _append_duplicate_pair(pairs, seen, left, right, None, "filename")
+                return pairs
+        return _build_duplicate_pairs(plan, library_path, include_filename_pairs=True)
+
+    def _load_pair_snapshot(
+        self, library_path: str
+    ) -> tuple[list[DuplicatePair], bool, str | None] | None:
+        snapshot_path = _pair_review_snapshot_path(library_path)
+        if not os.path.exists(snapshot_path):
+            return None
+        try:
+            with open(snapshot_path, "r", encoding="utf-8") as handle:
+                payload = json.load(handle)
+        except (OSError, json.JSONDecodeError):
+            return None
+        if not isinstance(payload, dict):
+            return None
+        raw_pairs = payload.get("pairs")
+        if not isinstance(raw_pairs, list):
+            return None
+        includes_filename_pairs = bool(payload.get("includes_filename_pairs"))
+        plan_signature = payload.get("plan_signature")
+        if plan_signature is not None and not isinstance(plan_signature, str):
+            plan_signature = None
+        pairs: list[DuplicatePair] = []
+        seen: set[tuple[str, str]] = set()
+        for item in raw_pairs:
+            if not isinstance(item, Mapping):
+                continue
+            left = item.get("left_path")
+            right = item.get("right_path")
+            if not isinstance(left, str) or not isinstance(right, str):
+                continue
+            winner = item.get("winner_path")
+            if winner is not None and not isinstance(winner, str):
+                winner = None
+            source = item.get("source") if isinstance(item.get("source"), str) else "snapshot"
+            manual_winner = item.get("manual_winner")
+            if manual_winner is not None and not isinstance(manual_winner, str):
+                manual_winner = None
+            _append_duplicate_pair(
+                pairs,
+                seen,
+                left,
+                right,
+                winner,
+                source,
+                manual_winner=manual_winner,
+            )
+        return pairs, includes_filename_pairs, plan_signature
+
+    def _build_track_panel(self, parent: tk.Widget, title: str) -> ttk.Frame:
+        frame = ttk.LabelFrame(parent, text=title)
+        frame.columnconfigure(0, weight=1)
+        art_label = tk.Label(frame)
+        art_label.grid(row=0, column=0, pady=(6, 4))
+        winner_label = ttk.Label(frame, font=_scaled_font(frame, 9, "bold"))
+        winner_label.grid(row=1, column=0, sticky="w", padx=6)
+        title_label = ttk.Label(frame, font=_scaled_font(frame, 10, "bold"))
+        title_label.grid(row=2, column=0, sticky="w", padx=6)
+        meta_label = ttk.Label(frame, justify="left")
+        meta_label.grid(row=3, column=0, sticky="w", padx=6, pady=(2, 6))
+        path_label = ttk.Label(frame, foreground="#777", wraplength=300)
+        path_label.grid(row=4, column=0, sticky="w", padx=6, pady=(0, 6))
+        frame.art_label = art_label  # type: ignore[attr-defined]
+        frame.winner_label = winner_label  # type: ignore[attr-defined]
+        frame.title_label = title_label  # type: ignore[attr-defined]
+        frame.meta_label = meta_label  # type: ignore[attr-defined]
+        frame.path_label = path_label  # type: ignore[attr-defined]
+        return frame
+
+    def _set_winner_label(
+        self, panel: ttk.Frame, *, is_winner: bool, has_winner: bool
+    ) -> None:
+        if not has_winner:
+            panel.winner_label.configure(text="Winner: not set", foreground="#777")
+            return
+        if is_winner:
+            panel.winner_label.configure(text="Winner (kept)", foreground="#116329")
+        else:
+            panel.winner_label.configure(text="Not winner", foreground="#777")
+
+    def _load_cover_image(self, path: str) -> ImageTk.PhotoImage:
+        max_dim = int(load_config().get("preview_artwork_max_dim", PREVIEW_ARTWORK_MAX_DIM))
+        cover = None
+        tags, covers, error, _reader = read_metadata(path, include_cover=True)
+        if error:
+            logger.warning("Failed to read metadata for %s: %s", path, error)
+        if covers:
+            cover = covers[0]
+        if cover:
+            try:
+                image = Image.open(BytesIO(cover))
+            except Exception:
+                image = Image.new("RGB", (max_dim, max_dim), "#333")
+        else:
+            image = Image.new("RGB", (max_dim, max_dim), "#333")
+        image.thumbnail((max_dim, max_dim))
+        return ImageTk.PhotoImage(image)
+
+    def _format_metadata(
+        self,
+        tags: dict[str, object],
+        path: str,
+        *,
+        winner_path: str | None = None,
+        other_path: str | None = None,
+    ) -> str:
+        ext = os.path.splitext(path)[1].lower().lstrip(".") or "unknown"
+        ext_line = f"Extension: {ext}"
+        if (
+            winner_path
+            and other_path
+            and path == winner_path
+            and ext == "flac"
+            and os.path.splitext(other_path)[1].lower() != ".flac"
+        ):
+            ext_line = f"{ext_line} ✅"
+        lines = [ext_line]
+        if tags.get("artist"):
+            lines.append(f"Artist: {tags.get('artist')}")
+        if tags.get("title"):
+            lines.append(f"Title: {tags.get('title')}")
+        if tags.get("album"):
+            lines.append(f"Album: {tags.get('album')}")
+        if tags.get("year"):
+            lines.append(f"Year: {tags.get('year')}")
+        if tags.get("track"):
+            lines.append(f"Track: {tags.get('track')}")
+        if tags.get("disc"):
+            lines.append(f"Disc: {tags.get('disc')}")
+        if tags.get("genre"):
+            lines.append(f"Genre: {tags.get('genre')}")
+        return "\n".join(str(line) for line in lines)
+
+    def _display_name(self, tags: dict[str, object], path: str) -> str:
+        artist = tags.get("artist")
+        title = tags.get("title")
+        if artist or title:
+            artist_str = str(artist or "Unknown Artist")
+            title_str = str(title or "Unknown Title")
+            return f"{artist_str} - {title_str}"
+        return os.path.basename(path)
+
+    def _load_track(
+        self,
+        panel: ttk.Frame,
+        path: str,
+        *,
+        winner_mark: str = "",
+        winner_path: str | None = None,
+        other_path: str | None = None,
+    ) -> dict[str, object]:
+        tags, _covers, _error, _reader = read_metadata(path, include_cover=False)
+        title = self._display_name(tags, path)
+        if winner_mark:
+            title = f"{title} {winner_mark}"
+        panel.title_label.configure(text=title)
+        panel.meta_label.configure(
+            text=self._format_metadata(
+                tags, path, winner_path=winner_path, other_path=other_path
+            )
+        )
+        panel.path_label.configure(text=path)
+        return tags
+
+    def _current_winner(self, pair: DuplicatePair) -> str | None:
+        return pair.manual_winner or pair.winner_path
+
+    def _display_winner(self, pair: DuplicatePair) -> str | None:
+        winner_path = self._current_winner(pair)
+        if winner_path:
+            return winner_path
+        left_ext = os.path.splitext(pair.left_path)[1].lower()
+        right_ext = os.path.splitext(pair.right_path)[1].lower()
+        if left_ext == ".flac" and right_ext != ".flac":
+            return pair.left_path
+        if right_ext == ".flac" and left_ext != ".flac":
+            return pair.right_path
+        return None
+
+    def _winner_marks(self, pair: DuplicatePair) -> tuple[str, str]:
+        winner_path = self._display_winner(pair)
+        if not winner_path:
+            return "", ""
+        left_ext = os.path.splitext(pair.left_path)[1].lower()
+        right_ext = os.path.splitext(pair.right_path)[1].lower()
+        if winner_path == pair.left_path:
+            if left_ext == ".flac" and right_ext != ".flac":
+                return "✅", ""
+            return "", ""
+        if winner_path == pair.right_path:
+            if right_ext == ".flac" and left_ext != ".flac":
+                return "", "✅"
+        return "", ""
+
+    def _load_pair(self) -> None:
+        if not self.pairs:
+            self._progress_var.set("No paired duplicates found in the current preview.")
+            self._status_var.set("Idle")
+            self.yes_btn.configure(state="disabled")
+            self.no_btn.configure(state="disabled")
+            self.tag_btn.configure(state="disabled")
+            self.prev_btn.configure(state="disabled")
+            self.next_btn.configure(state="disabled")
+            self.switch_btn.configure(state="disabled")
+            self.override_btn.configure(state="disabled")
+            return
+
+        while self._pair_index < len(self.pairs):
+            pair = self.pairs[self._pair_index]
+            if os.path.exists(pair.left_path) and os.path.exists(pair.right_path):
+                break
+            self._status_var.set("Skipped missing files.")
+            self._pair_index += 1
+
+        if self._pair_index >= len(self.pairs):
+            self._progress_var.set("All pairs reviewed.")
+            self._status_var.set("Done")
+            self.yes_btn.configure(state="disabled")
+            self.no_btn.configure(state="disabled")
+            self.tag_btn.configure(state="disabled")
+            self.prev_btn.configure(state="disabled")
+            self.next_btn.configure(state="disabled")
+            self.switch_btn.configure(state="disabled")
+            self.override_btn.configure(state="disabled")
+            return
+
+        pair = self.pairs[self._pair_index]
+        self._progress_var.set(
+            f"Pair {self._pair_index + 1} of {len(self.pairs)}"
+        )
+        self._status_var.set("Ready")
+        self.prev_btn.configure(state="normal" if self._pair_index > 0 else "disabled")
+        self.next_btn.configure(
+            state="normal" if self._pair_index < len(self.pairs) - 1 else "disabled"
+        )
+        self.switch_btn.configure(state="normal")
+        self.override_btn.configure(state="normal")
+
+        left_mark, right_mark = self._winner_marks(pair)
+        winner_path = self._display_winner(pair)
+        self._set_winner_label(
+            self.left_panel,
+            is_winner=winner_path == pair.left_path if winner_path else False,
+            has_winner=bool(winner_path),
+        )
+        self._set_winner_label(
+            self.right_panel,
+            is_winner=winner_path == pair.right_path if winner_path else False,
+            has_winner=bool(winner_path),
+        )
+        self._left_tags = self._load_track(
+            self.left_panel,
+            pair.left_path,
+            winner_mark=left_mark,
+            winner_path=winner_path,
+            other_path=pair.right_path,
+        )
+        self._right_tags = self._load_track(
+            self.right_panel,
+            pair.right_path,
+            winner_mark=right_mark,
+            winner_path=winner_path,
+            other_path=pair.left_path,
+        )
+
+        self._left_cover = self._load_cover_image(pair.left_path)
+        self.left_panel.art_label.configure(image=self._left_cover)
+        self.left_panel.art_label.image = self._left_cover
+        self._right_cover = self._load_cover_image(pair.right_path)
+        self.right_panel.art_label.configure(image=self._right_cover)
+        self.right_panel.art_label.image = self._right_cover
+
+    def _advance(self) -> None:
+        self._pair_index += 1
+        self._load_pair()
+
+    def _go_previous(self) -> None:
+        if not self.pairs:
+            return
+        if self._pair_index <= 0:
+            return
+        self._pair_index -= 1
+        self._load_pair()
+
+    def _go_next(self) -> None:
+        if not self.pairs:
+            return
+        if self._pair_index >= len(self.pairs) - 1:
+            return
+        self._pair_index += 1
+        self._load_pair()
+
+    def _jump_to_pair(self) -> None:
+        if not self.pairs:
+            return
+        raw = self.jump_var.get().strip()
+        if not raw:
+            return
+        try:
+            value = int(raw)
+        except ValueError:
+            self._status_var.set("Invalid jump value.")
+            return
+        index = value - 1
+        if index < 0 or index >= len(self.pairs):
+            self._status_var.set("Jump out of range.")
+            return
+        self._pair_index = index
+        self._load_pair()
+
+    def _handle_switch(self) -> None:
+        if not self.pairs or self._pair_index >= len(self.pairs):
+            return
+        pair = self.pairs[self._pair_index]
+        pre_winner = self._current_winner(pair)
+        left_path = pair.left_path
+        right_path = pair.right_path
+        pair.left_path, pair.right_path = right_path, left_path
+        if pre_winner == left_path:
+            pair.manual_winner = right_path
+        elif pre_winner == right_path:
+            pair.manual_winner = left_path
+        else:
+            pair.manual_winner = pair.left_path
+        self._load_pair()
+
+    def _handle_prefer_mp3(self) -> None:
+        if not self.pairs or self._pair_index >= len(self.pairs):
+            return
+        pair = self.pairs[self._pair_index]
+        left_ext = os.path.splitext(pair.left_path)[1].lower()
+        right_ext = os.path.splitext(pair.right_path)[1].lower()
+        if {left_ext, right_ext} != {".m4a", ".mp3"}:
+            self._status_var.set("No MP3/M4A pair to override.")
+            return
+        if left_ext == ".mp3":
+            pair.manual_winner = pair.left_path
+        else:
+            pair.manual_winner = pair.right_path
+        self._status_var.set("MP3 preferred over M4A.")
+        self._load_pair()
+
+    def _delete_inferior(
+        self, left_path: str, right_path: str, winner_path: str | None
+    ) -> str | None:
+        if winner_path:
+            if winner_path == left_path:
+                return right_path
+            if winner_path == right_path:
+                return left_path
+        left_ext = os.path.splitext(left_path)[1].lower()
+        right_ext = os.path.splitext(right_path)[1].lower()
+        if left_ext == ".flac" and right_ext != ".flac":
+            return right_path
+        if right_ext == ".flac" and left_ext != ".flac":
+            return left_path
+        return None
+
+    def _playlist_contains(self, target_path: str) -> bool:
+        playlists_dir = os.path.join(self.library_path, "Playlists")
+        if not os.path.isdir(playlists_dir):
+            return False
+        normalized_target = os.path.normcase(os.path.normpath(target_path))
+        for dirpath, _dirs, files in os.walk(playlists_dir):
+            for fname in files:
+                if not fname.lower().endswith((".m3u", ".m3u8")):
+                    continue
+                pl_path = os.path.join(dirpath, fname)
+                try:
+                    with open(pl_path, "r", encoding="utf-8") as handle:
+                        lines = [ln.rstrip("\n") for ln in handle]
+                except OSError:
+                    continue
+                for line in lines:
+                    abs_line = os.path.normcase(
+                        os.path.normpath(os.path.join(dirpath, line))
+                    )
+                    if abs_line == normalized_target:
+                        return True
+        return False
+
+    def _update_playlists_for_replacement(self, deleted_path: str, kept_path: str) -> None:
+        if not self._playlist_contains(deleted_path):
+            return
+        playlist_generator.update_playlists({deleted_path: kept_path})
+
+    def _handle_yes(self) -> None:
+        if not self.pairs or self._pair_index >= len(self.pairs):
+            return
+        pair = self.pairs[self._pair_index]
+        if not os.path.exists(pair.left_path) or not os.path.exists(pair.right_path):
+            self._status_var.set("Missing files; skipped.")
+            self._advance()
+            return
+        delete_path = self._delete_inferior(
+            pair.left_path, pair.right_path, self._current_winner(pair)
+        )
+        if not delete_path:
+            self._status_var.set("No FLAC in pair; nothing deleted.")
+            self._advance()
+            return
+        kept_path = (
+            pair.right_path if delete_path == pair.left_path else pair.left_path
+        )
+        try:
+            if not os.path.exists(delete_path):
+                self._status_var.set("Already removed.")
+                self._advance()
+                return
+            os.remove(ensure_long_path(delete_path))
+            if os.path.exists(delete_path):
+                raise OSError(f"File still exists after delete: {delete_path}")
+            self._update_playlists_for_replacement(delete_path, kept_path)
+            self._status_var.set(f"Deleted {os.path.basename(delete_path)}")
+        except OSError as exc:
+            messagebox.showerror("Delete Failed", str(exc))
+            self._status_var.set("Delete failed")
+        self._advance()
+
+    def _handle_no(self) -> None:
+        if not self.pairs or self._pair_index >= len(self.pairs):
+            return
+        pair = self.pairs[self._pair_index]
+        if not os.path.exists(pair.left_path) or not os.path.exists(pair.right_path):
+            self._status_var.set("Missing files; skipped.")
+            self._advance()
+            return
+        self._status_var.set("Skipped")
+        self._advance()
+
+    def _handle_tag(self) -> None:
+        if not self.pairs or self._pair_index >= len(self.pairs):
+            return
+        pair = self.pairs[self._pair_index]
+        if not os.path.exists(pair.left_path) or not os.path.exists(pair.right_path):
+            self._status_var.set("Missing files; skipped.")
+            self._advance()
+            return
+        docs_dir = os.path.join(self.library_path, "Docs")
+        os.makedirs(docs_dir, exist_ok=True)
+        tag_path = os.path.join(docs_dir, "duplicate_pair_tags.txt")
+        left_name = self._display_name(self._left_tags, pair.left_path)
+        right_name = self._display_name(self._right_tags, pair.right_path)
+        line = f"{left_name} | {right_name}"
+        try:
+            with open(tag_path, "a", encoding="utf-8") as handle:
+                handle.write(line + "\n")
+            self._status_var.set("Tagged pair added")
+        except OSError as exc:
+            messagebox.showerror("Tag Failed", str(exc))
+            self._status_var.set("Tag failed")
+            return
+        self._advance()
+
+
+class DuplicateFinderShell(tk.Toplevel):
+    """GUI shell for the refreshed Duplicate Finder workflow."""
+
+    def __init__(self, parent: tk.Widget, library_path: str):
+        super().__init__(parent)
+        self.title("Duplicate Finder")
+        self.transient(parent)
+        self.resizable(True, True)
+
+        self.status_var = tk.StringVar(value="Idle")
+        self.fingerprint_status_var = tk.StringVar(value="Ready.")
+        self.progress_var = tk.DoubleVar(value=0)
+        self.library_path_var = tk.StringVar(value=library_path or "")
+        self.playlist_path_var = tk.StringVar(
+            value=self._default_playlist_folder(library_path)
+        )
+        self.update_playlists_var = tk.BooleanVar(value=False)
+        self.quarantine_var = tk.BooleanVar(value=True)
+        self.delete_losers_var = tk.BooleanVar(value=False)
+        self._execute_confirmation_pending = False
+        self.execute_label_var = tk.StringVar(value="Execute")
+        cfg = load_config()
+        self.show_artwork_variants_var = tk.BooleanVar(
+            value=cfg.get("duplicate_finder_show_artwork_variants", True)
+        )
+        self._preview_trace_enabled = bool(cfg.get("duplicate_finder_debug_trace", False))
+        self._preview_trace = deque(maxlen=50) if self._preview_trace_enabled else None
+        self.show_noop_groups_var = tk.BooleanVar(value=False)
+        self.group_disposition_var = tk.StringVar(value="")
+        self.group_disposition_overrides: dict[str, str] = {}
+        self._selected_group_id: str | None = None
+        self.preview_json_path: str | None = None
+        self.preview_html_path: str | None = None
+        self.execution_report_path: str | None = None
+        self._plan = None
+        self._progress_weights = {
+            "fingerprinting": 0.7,
+            "grouping": 0.2,
+            "preview": 0.1,
+        }
+        self._dup_preview_heartbeat_running = False
+        self._dup_preview_heartbeat_start: float | None = None
+        self._dup_preview_heartbeat_last_tick: float | None = None
+        self._dup_preview_heartbeat_count = 0
+        self._dup_preview_heartbeat_interval = 0.1
+        self._dup_preview_heartbeat_stall_logged = False
+        self._groups_view_update_id = 0
+        self._after_ids: set[str] = set()
+        self._closing = False
+
+        container = ttk.Frame(self)
+        container.pack(fill="both", expand=True, padx=10, pady=10)
+
+        ttk.Label(
+            container,
+            text="Duplicate Finder",
+            font=_scaled_font(container, 12, "bold"),
+        ).pack(anchor="w")
+        ttk.Label(
+            container,
+            text=(
+                "Generate a preview of duplicate groups and execute the consolidation plan. "
+                "Execution writes backups and reports under the library Docs folder."
+            ),
+            foreground="#555",
+            wraplength=520,
+        ).pack(anchor="w", pady=(0, 8))
+
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
+        self.bind("<Destroy>", self._on_destroy)
+
+        # Library selection
+        lib_frame = ttk.LabelFrame(container, text="Library Selection")
+        lib_frame.pack(fill="x", pady=(0, 10))
+
+        lib_row = ttk.Frame(lib_frame)
+        lib_row.pack(fill="x", padx=8, pady=6)
+        ttk.Label(lib_row, text="Library Root").pack(side="left")
+        lib_entry = ttk.Entry(lib_row, textvariable=self.library_path_var, width=60)
+        lib_entry.pack(side="left", padx=6, expand=True, fill="x")
+        ttk.Button(lib_row, text="Browse…", command=self._browse_library).pack(
+            side="left"
+        )
+
+        playlist_row = ttk.Frame(lib_frame)
+        playlist_row.pack(fill="x", padx=8, pady=(0, 8))
+        ttk.Label(playlist_row, text="Playlist Folder").pack(side="left")
+        playlist_entry = ttk.Entry(
+            playlist_row, textvariable=self.playlist_path_var, width=60
+        )
+        playlist_entry.pack(side="left", padx=6, expand=True, fill="x")
+        ttk.Button(playlist_row, text="Browse…", command=self._browse_playlist).pack(
+            side="left"
+        )
+
+        # Controls
+        controls = ttk.Frame(container)
+        controls.pack(fill="x", pady=(0, 10))
+        self.scan_btn = ttk.Button(controls, text="Scan Library", command=self._handle_scan)
+        self.scan_btn.pack(side="left", padx=(0, 6))
+        self.preview_btn = ttk.Button(controls, text="Preview", command=self._handle_preview)
+        self.preview_btn.pack(side="left", padx=(0, 6))
+        self.open_report_btn = ttk.Button(
+            controls, text="Open Report", command=self._open_execution_report, state="disabled"
+        )
+        self.open_report_btn.pack(side="left", padx=(0, 6))
+        self.execute_btn = ttk.Button(
+            controls,
+            textvariable=self.execute_label_var,
+            command=self._handle_execute,
+        )
+        self.execute_btn.pack(
+            side="left", padx=(0, 12)
+        )
+        ttk.Button(controls, text="⚙️ Thresholds", command=self._open_threshold_settings).pack(
+            side="left", padx=(0, 12)
+        )
+        ttk.Checkbutton(
+            controls,
+            text="Show different artwork variants",
+            variable=self.show_artwork_variants_var,
+            command=self._toggle_show_artwork_variants,
+        ).pack(side="left", padx=(0, 10))
+        show_noop_toggle = ttk.Checkbutton(
+            controls,
+            text="Show no-op groups",
+            variable=self.show_noop_groups_var,
+            command=self._toggle_show_noop_groups,
+        )
+        show_noop_toggle.pack(side="left", padx=(0, 10))
+        Tooltip(
+            show_noop_toggle,
+            lambda: "When unchecked, hides groups with no planned operations.",
+        )
+        ttk.Checkbutton(
+            controls,
+            text="Update Playlists",
+            variable=self.update_playlists_var,
+            command=self._toggle_update_playlists,
+        ).pack(side="left", padx=(0, 10))
+        ttk.Checkbutton(
+            controls,
+            text="Quarantine Duplicates",
+            variable=self.quarantine_var,
+            command=self._toggle_quarantine,
+        ).pack(side="left")
+        ttk.Checkbutton(
+            controls,
+            text="Delete losers (permanent)",
+            variable=self.delete_losers_var,
+            command=self._toggle_delete_losers,
+        ).pack(side="left", padx=(10, 0))
+
+        # Progress + status
+        status_frame = ttk.Frame(container)
+        status_frame.pack(fill="x", pady=(0, 10))
+        ttk.Progressbar(
+            status_frame,
+            maximum=100,
+            variable=self.progress_var,
+        ).pack(fill="x", padx=(0, 10), side="left", expand=True)
+        ttk.Label(status_frame, textvariable=self.status_var, width=18).pack(
+            side="left"
+        )
+
+        # Log box
+        log_box = ttk.LabelFrame(container, text="Log")
+        log_box.pack(fill="both", expand=True, pady=(0, 10))
+        self.log_text = ScrolledText(log_box, height=6, state="disabled")
+        self.log_text.pack(fill="both", expand=True, padx=6, pady=6)
+        if self._preview_trace_enabled:
+            self._log_action("Debug trace enabled")
+
+        # Results area
+        results = ttk.LabelFrame(container, text="Results")
+        results.pack(fill="both", expand=True)
+        results.columnconfigure(0, weight=1)
+        results.columnconfigure(1, weight=1)
+
+        groups_frame = ttk.LabelFrame(results, text="Duplicate Groups")
+        groups_frame.grid(row=0, column=0, sticky="nsew", padx=(6, 3), pady=6)
+        groups_frame.configure(height=320)
+        groups_frame.grid_propagate(False)
+        ttk.Label(
+            groups_frame,
+            textvariable=self.fingerprint_status_var,
+            anchor="w",
+            foreground="#555",
+        ).pack(fill="x", padx=6, pady=(6, 0))
+        cols = ("group", "title", "count", "status")
+        self.groups_tree = ttk.Treeview(
+            groups_frame,
+            columns=cols,
+            show="headings",
+            height=8,
+        )
+        for cid, heading in zip(
+            cols, ("Group ID", "Track Title", "Count", "Status")
+        ):
+            self.groups_tree.heading(cid, text=heading)
+            width = 90 if cid in ("group", "count") else 160
+            self.groups_tree.column(cid, width=width, anchor="w")
+        self.groups_tree.pack(fill="both", expand=True, padx=6, pady=6)
+        self.groups_tree.bind("<<TreeviewSelect>>", self._on_group_select)
+
+        inspector = ttk.LabelFrame(results, text="Group Details")
+        inspector.grid(row=0, column=1, sticky="nsew", padx=(3, 6), pady=6)
+        disposition_row = ttk.Frame(inspector)
+        disposition_row.pack(fill="x", padx=8, pady=(8, 4))
+        ttk.Label(disposition_row, text="Group disposition").pack(side="left")
+        self.group_disposition_menu = ttk.Combobox(
+            disposition_row,
+            textvariable=self.group_disposition_var,
+            state="disabled",
+            width=22,
+            values=("Default (global)", "Retain", "Quarantine", "Delete"),
+        )
+        self.group_disposition_menu.pack(side="left", padx=(6, 0))
+        self.group_disposition_menu.bind("<<ComboboxSelected>>", self._on_group_disposition_change)
+        self.group_details = ScrolledText(inspector, height=12, state="disabled", wrap="word")
+        self.group_details.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+
+        self._log_action("Duplicate Finder initialized")
+
+
+    def _clear_plan(self, note: str | None = None) -> None:
+        self._plan = None
+        self.group_disposition_overrides.clear()
+        self.groups_tree.delete(*self.groups_tree.get_children())
+        self.group_details.configure(state="normal")
+        self.group_details.delete("1.0", "end")
+        self.group_details.insert("end", "Generate a plan to view duplicate groups.")
+        self.group_details.configure(state="disabled")
+        self._reset_group_selection()
+        self._set_fingerprint_status("Ready.")
+        self._reset_execute_confirmation()
+        if note:
+            self._log_action(note)
+
+    def _reset_execute_confirmation(self) -> None:
+        self._execute_confirmation_pending = False
+        self.execute_label_var.set("Execute")
+
+    def _set_scan_controls_enabled(self, enabled: bool) -> None:
+        state = "normal" if enabled else "disabled"
+        if hasattr(self, "scan_btn"):
+            self.scan_btn.config(state=state)
+        if hasattr(self, "preview_btn"):
+            self.preview_btn.config(state=state)
+        self.execute_btn.config(state=state)
+
+    def _default_playlist_folder(self, library_path: str) -> str:
+        if library_path:
+            candidate = os.path.join(library_path, "Playlists")
+            if os.path.isdir(candidate):
+                return candidate
+            return library_path
+        return ""
+
+    def _schedule_after(self, delay_ms: int, callable_obj, *args) -> str | None:
+        if self._closing:
+            return None
+        after_id: str | None = None
+
+        def _run() -> None:
+            if after_id is not None:
+                self._after_ids.discard(after_id)
+            if self._closing:
+                return
+            callable_obj(*args)
+
+        after_id = self.after(delay_ms, _run)
+        self._after_ids.add(after_id)
+        return after_id
+
+    def _cancel_scheduled_callbacks(self) -> None:
+        for after_id in list(self._after_ids):
+            try:
+                self.after_cancel(after_id)
+            except tk.TclError:
+                pass
+            self._after_ids.discard(after_id)
+
+    def _prepare_close(self) -> None:
+        if self._closing:
+            return
+        self._closing = True
+        self._stop_preview_heartbeat()
+        self._cancel_scheduled_callbacks()
+
+    def _on_close(self) -> None:
+        self._prepare_close()
+        self.destroy()
+
+    def _on_destroy(self, event) -> None:
+        if event.widget is self:
+            self._prepare_close()
+
+    def destroy(self) -> None:
+        self._prepare_close()
+        super().destroy()
+
+    def _widget_alive(self, widget: tk.Widget | None) -> bool:
+        if self._closing or widget is None:
+            return False
+        try:
+            return bool(self.winfo_exists()) and bool(widget.winfo_exists())
+        except tk.TclError:
+            return False
+
+    def _log_action(self, message: str) -> None:
+        if not self._widget_alive(self.log_text):
+            return
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        line = f"{timestamp} {message}"
+        self.log_text.configure(state="normal")
+        self.log_text.insert("end", line + "\n")
+        self.log_text.see("end")
+        self.log_text.configure(state="disabled")
+
+    def _record_preview_trace(self, label: str) -> None:
+        if not self._preview_trace_enabled or self._preview_trace is None:
+            return
+        timestamp = datetime.now().isoformat(timespec="seconds")
+        self._preview_trace.append((timestamp, label))
+
+    def _queue_preview_trace(self, label: str) -> None:
+        if not self._preview_trace_enabled or self._preview_trace is None:
+            return
+        self._schedule_after(0, self._record_preview_trace, label)
+
+    def _emit_preview_trace(self, header: str = "Duplicate Finder preview trace") -> None:
+        if not self._preview_trace_enabled or not self._preview_trace:
+            return
+        entries = "\n".join(f"{ts} {label}" for ts, label in self._preview_trace)
+        logger.error("%s\n%s", header, entries)
+
+    def _current_threshold_settings(self) -> dict[str, float]:
+        cfg = load_config()
+        return {
+            "exact_duplicate_threshold": float(cfg.get("exact_duplicate_threshold", EXACT_DUPLICATE_THRESHOLD)),
+            "near_duplicate_threshold": float(cfg.get("near_duplicate_threshold", NEAR_DUPLICATE_THRESHOLD)),
+            "mixed_codec_threshold_boost": float(cfg.get("mixed_codec_threshold_boost", MIXED_CODEC_THRESHOLD_BOOST)),
+            "artwork_vastly_different_threshold": float(
+                cfg.get("artwork_vastly_different_threshold", ARTWORK_VASTLY_DIFFERENT_THRESHOLD)
+            ),
+            "preview_artwork_max_dim": float(cfg.get("preview_artwork_max_dim", PREVIEW_ARTWORK_MAX_DIM)),
+            "preview_artwork_quality": float(cfg.get("preview_artwork_quality", PREVIEW_ARTWORK_QUALITY)),
+        }
+
+    def _current_fingerprint_settings(self) -> dict[str, float | int | bool]:
+        cfg = load_config()
+        return {
+            "trim_silence": bool(cfg.get("trim_silence", FP_TRIM_SILENCE)),
+            "fingerprint_offset_ms": int(cfg.get("fingerprint_offset_ms", FP_OFFSET_MS)),
+            "fingerprint_duration_ms": int(cfg.get("fingerprint_duration_ms", FP_DURATION_MS)),
+            "fingerprint_silence_threshold_db": float(cfg.get("fingerprint_silence_threshold_db", FP_SILENCE_THRESHOLD_DB)),
+            "fingerprint_silence_min_len_ms": int(cfg.get("fingerprint_silence_min_len_ms", FP_SILENCE_MIN_LEN_MS)),
+            "fingerprint_trim_lead_max_ms": int(cfg.get("fingerprint_trim_lead_max_ms", FP_TRIM_LEAD_MAX_MS)),
+            "fingerprint_trim_trail_max_ms": int(cfg.get("fingerprint_trim_trail_max_ms", FP_TRIM_TRAIL_MAX_MS)),
+            "fingerprint_trim_padding_ms": int(cfg.get("fingerprint_trim_padding_ms", FP_TRIM_PADDING_MS)),
+            "allow_mismatched_edits": bool(cfg.get("allow_mismatched_edits", ALLOW_MISMATCHED_EDITS)),
+        }
+
+    def _thresholds_match(
+        self,
+        plan_settings: Mapping[str, float] | None,
+        current_settings: Mapping[str, float],
+        *,
+        tolerance: float = 1e-6,
+    ) -> bool:
+        if not plan_settings:
+            return False
+        for key, value in current_settings.items():
+            if key not in plan_settings:
+                return False
+            try:
+                if abs(float(plan_settings[key]) - float(value)) > tolerance:
+                    return False
+            except (TypeError, ValueError):
+                return False
+        return True
+
+    def _fingerprint_settings_match(
+        self,
+        plan_settings: Mapping[str, float | int | bool] | None,
+        current_settings: Mapping[str, float | int | bool],
+        *,
+        tolerance: float = 1e-6,
+    ) -> bool:
+        if not plan_settings:
+            return False
+        for key, value in current_settings.items():
+            if key not in plan_settings:
+                return False
+            try:
+                plan_value = plan_settings[key]
+                if isinstance(value, bool) or isinstance(plan_value, bool):
+                    if bool(plan_value) != bool(value):
+                        return False
+                else:
+                    if abs(float(plan_value) - float(value)) > tolerance:
+                        return False
+            except (TypeError, ValueError):
+                return False
+        return True
+
+    def _default_group_disposition(self) -> str:
+        if not self.quarantine_var.get():
+            return "retain"
+        if self.delete_losers_var.get():
+            return "delete"
+        return "quarantine"
+
+    def _reset_group_selection(self) -> None:
+        self._selected_group_id = None
+        self.group_disposition_var.set("Default (global)")
+        self.group_disposition_menu.configure(state="disabled")
+
+    def _update_groups_view(self, plan) -> None:
+        if not self._widget_alive(self.groups_tree):
+            return
+        self.groups_tree.delete(*self.groups_tree.get_children())
+        groups_batch_size = 150
+        self._groups_view_update_id += 1
+        update_id = self._groups_view_update_id
+        prior_fingerprint_status = self.fingerprint_status_var.get()
+        show_noop_groups = self.show_noop_groups_var.get()
+        group_rows = []
+        for group in plan.groups:
+            actions = _planned_actions(group)
+            if _is_noop_group(actions) and not show_noop_groups:
+                continue
+            title = plan and group.planned_winner_tags.get("title") if hasattr(group, "planned_winner_tags") else None
+            status = "Review" if group.review_flags else "Ready"
+            group_rows.append(
+                {
+                    "iid": group.group_id,
+                    "values": (
+                        group.group_id,
+                        title or os.path.basename(group.winner_path),
+                        len(group.losers) + 1,
+                        status,
+                    ),
+                    "tags": ("review",) if group.review_flags else (),
+                }
+            )
+
+        total_rows = len(group_rows)
+
+        def insert_chunk(start_index: int = 0) -> None:
+            if update_id != self._groups_view_update_id:
+                return
+            if not self._widget_alive(self.groups_tree):
+                return
+            end_index = min(start_index + groups_batch_size, total_rows)
+            for row in group_rows[start_index:end_index]:
+                self.groups_tree.insert(
+                    "",
+                    "end",
+                    iid=row["iid"],
+                    values=row["values"],
+                    tags=row["tags"],
+                )
+            if total_rows:
+                self.fingerprint_status_var.set(f"Loading groups {end_index}/{total_rows}…")
+            if end_index < total_rows:
+                self._schedule_after(0, insert_chunk, end_index)
+                return
+            self.groups_tree.tag_configure("review", background="#fff3cd")
+            self.group_details.configure(state="normal")
+            self.group_details.delete("1.0", "end")
+            self.group_details.insert("end", "Select a group to view details.")
+            self.group_details.configure(state="disabled")
+            self._reset_group_selection()
+            self.fingerprint_status_var.set(prior_fingerprint_status)
+
+        self._schedule_after(0, insert_chunk)
+
+    def _toggle_show_noop_groups(self) -> None:
+        state = "enabled" if self.show_noop_groups_var.get() else "disabled"
+        self._log_action(f"Show no-op groups {state}")
+        if self._plan:
+            self._update_groups_view(self._plan)
+
+    def _on_group_select(self, event=None) -> None:
+        sel = self.groups_tree.selection()
+        if not sel or not self._plan:
+            return
+        group_id = sel[0]
+        group = next((g for g in self._plan.groups if g.group_id == group_id), None)
+        if group:
+            self._selected_group_id = group.group_id
+            self.group_disposition_menu.configure(state="readonly")
+            override = self.group_disposition_overrides.get(group.group_id)
+            if override == "retain":
+                self.group_disposition_var.set("Retain")
+            elif override == "quarantine":
+                self.group_disposition_var.set("Quarantine")
+            elif override == "delete":
+                self.group_disposition_var.set("Delete")
+            else:
+                self.group_disposition_var.set("Default (global)")
+            self._render_group_details(group)
+
+    def _render_group_details(self, group) -> None:
+        default_disp = self._default_group_disposition()
+        override = self.group_disposition_overrides.get(group.group_id)
+        disposition_label = f"{override} (override)" if override else f"{default_disp} (default)"
+        lines = [
+            f"Winner: {group.winner_path}",
+            f"Losers: {len(group.losers)}",
+            f"Group disposition: {disposition_label}",
+            "Dispositions:",
+        ]
+        for loser in group.losers:
+            disp = group.loser_disposition.get(loser, default_disp)
+            playlist = group.playlist_rewrites.get(loser, "n/a")
+            lines.append(f"  - {loser} → {disp} (playlist → {playlist})")
+
+        lines.append("Quality rationale:")
+        for reason in group.winner_quality.get("reasons") or []:
+            lines.append(f"  • {reason}")
+
+        if group.review_flags:
+            lines.append("Review flags:")
+            for flag in group.review_flags:
+                lines.append(f"  ! {flag}")
+
+        lines.append("Tag changes:")
+        if not group.metadata_changes:
+            lines.append("  (none)")
+        else:
+            for key, diff in sorted(group.metadata_changes.items()):
+                lines.append(f"  {key}: {diff.get('from')} → {diff.get('to')}")
+
+        lines.append(
+            f"Playlist impact: {group.playlist_impact.playlists} playlists, {group.playlist_impact.entries} entries"
+        )
+
+        self.group_details.configure(state="normal")
+        self.group_details.delete("1.0", "end")
+        self.group_details.insert("end", "\n".join(lines))
+        self.group_details.configure(state="disabled")
+
+    def _on_group_disposition_change(self, event=None) -> None:
+        if not self._plan or not self._selected_group_id:
+            return
+        group = next(
+            (g for g in self._plan.groups if g.group_id == self._selected_group_id),
+            None,
+        )
+        if not group:
+            return
+        selection = self.group_disposition_var.get()
+        choice_map = {
+            "Default (global)": None,
+            "Retain": "retain",
+            "Quarantine": "quarantine",
+            "Delete": "delete",
+        }
+        disposition = choice_map.get(selection)
+        if disposition is None:
+            self.group_disposition_overrides.pop(group.group_id, None)
+            disposition = self._default_group_disposition()
+            self._log_action(f"Group {group.group_id} disposition reset to default ({disposition}).")
+        else:
+            self.group_disposition_overrides[group.group_id] = disposition
+            self._log_action(f"Group {group.group_id} disposition override set to {disposition}.")
+
+        for loser in group.losers:
+            group.loser_disposition[loser] = disposition
+
+        self._plan.refresh_plan_signature()
+        self._render_group_details(group)
+        self._reset_preview_if_needed()
+        self._reset_execute_confirmation()
+        library_root = self.library_path_var.get().strip()
+        if library_root:
+            if hasattr(self.master, "_set_duplicate_finder_plan"):
+                self.master._set_duplicate_finder_plan(self._plan, library_root)
+            snapshot_path = _write_duplicate_pair_snapshot(
+                self._plan,
+                library_root,
+                include_filename_pairs=True,
+                log_callback=self._log_action,
+            )
+            if snapshot_path:
+                self._log_action(f"Duplicate pair snapshot written to {snapshot_path}")
+
+    def _count_group_dispositions(self) -> dict[str, int]:
+        counts = {"retain": 0, "quarantine": 0, "delete": 0}
+        if not self._plan:
+            return counts
+        default_disposition = self._default_group_disposition()
+        for group in self._plan.groups:
+            for loser in group.losers:
+                disp = group.loser_disposition.get(loser, default_disposition)
+                if disp in counts:
+                    counts[disp] += 1
+        return counts
+
+    def _set_status(self, status: str, progress: float | None = None) -> None:
+        self.status_var.set(status)
+        if progress is not None:
+            self.progress_var.set(progress)
+
+    def _set_fingerprint_status(self, status: str) -> None:
+        self.fingerprint_status_var.set(status)
+
+    def _weighted_progress(self, phase: str, ratio: float) -> float:
+        order = ("fingerprinting", "grouping", "preview")
+        total = 0.0
+        for step in order:
+            weight = self._progress_weights.get(step, 0.0)
+            if step == phase:
+                clamped = max(0.0, min(1.0, ratio))
+                total += weight * clamped
+                break
+            total += weight
+        return max(0.0, min(100.0, total * 100.0))
+
+    def _format_track_label(self, path: str, audio: object | None) -> str:
+        if not audio:
+            return os.path.basename(path)
+        tags = getattr(audio, "tags", None) or {}
+
+        def _get_tag(keys: tuple[str, ...]) -> str | None:
+            for key in keys:
+                if key in tags:
+                    raw = tags[key]
+                    if hasattr(raw, "text"):
+                        raw = raw.text
+                    if isinstance(raw, (list, tuple)):
+                        if raw:
+                            return str(raw[0])
+                    elif raw is not None:
+                        return str(raw)
+            return None
+
+        title = _get_tag(("title", "TIT2", "\xa9nam"))
+        artist = _get_tag(("artist", "TPE1", "\xa9ART"))
+        if artist and title:
+            return f"{artist} - {title}"
+        if title:
+            return title
+        return os.path.basename(path)
+
+    def _validate_library_root(self) -> str | None:
+        path = self.library_path_var.get().strip()
+        if not path:
+            messagebox.showwarning(
+                "Library Required", "Please select a library root before continuing."
+            )
+            self._log_action("Library validation failed: no library selected")
+            self._set_status("Idle", progress=0)
+            return None
+        if not os.path.isdir(path):
+            messagebox.showwarning(
+                "Library Missing", f"The selected library path does not exist:\n{path}"
+            )
+            self._log_action(f"Library validation failed: path not found ({path})")
+            self._set_status("Idle", progress=0)
+            return None
+        return path
+
+    def _browse_library(self) -> None:
+        initial_dir = self.library_path_var.get().strip() or load_last_path() or os.getcwd()
+        chosen = filedialog.askdirectory(
+            title="Select Library Root",
+            initialdir=initial_dir,
+        )
+        if not chosen:
+            return
+        self.library_path_var.set(chosen)
+        self.playlist_path_var.set(self._default_playlist_folder(chosen))
+        self._log_action(f"Library path updated to {chosen}")
+        save_last_path(chosen)
+
+    def _browse_playlist(self) -> None:
+        initial_dir = self.playlist_path_var.get().strip() or load_last_path() or os.getcwd()
+        chosen = filedialog.askdirectory(
+            title="Select Playlist Folder",
+            initialdir=initial_dir,
+        )
+        if not chosen:
+            return
+        self.playlist_path_var.set(chosen)
+        self._log_action(f"Playlist folder updated to {chosen}")
+        save_last_path(chosen)
+
+    def _open_threshold_settings(self) -> None:
+        dlg = tk.Toplevel(self)
+        dlg.title("Threshold Settings")
+        dlg.transient(self)
+        dlg.grab_set()
+        dlg.resizable(False, False)
+
+        cfg = load_config()
+
+        exact_var = tk.StringVar(value=str(cfg.get("exact_duplicate_threshold", EXACT_DUPLICATE_THRESHOLD)))
+        near_var = tk.StringVar(value=str(cfg.get("near_duplicate_threshold", NEAR_DUPLICATE_THRESHOLD)))
+        mixed_var = tk.StringVar(value=str(cfg.get("mixed_codec_threshold_boost", MIXED_CODEC_THRESHOLD_BOOST)))
+        offset_var = tk.StringVar(value=str(cfg.get("fingerprint_offset_ms", FP_OFFSET_MS)))
+        duration_var = tk.StringVar(value=str(cfg.get("fingerprint_duration_ms", FP_DURATION_MS)))
+        silence_db_var = tk.StringVar(value=str(cfg.get("fingerprint_silence_threshold_db", FP_SILENCE_THRESHOLD_DB)))
+        silence_len_var = tk.StringVar(value=str(cfg.get("fingerprint_silence_min_len_ms", FP_SILENCE_MIN_LEN_MS)))
+        trim_lead_var = tk.StringVar(value=str(cfg.get("fingerprint_trim_lead_max_ms", FP_TRIM_LEAD_MAX_MS)))
+        trim_trail_var = tk.StringVar(value=str(cfg.get("fingerprint_trim_trail_max_ms", FP_TRIM_TRAIL_MAX_MS)))
+        trim_padding_var = tk.StringVar(value=str(cfg.get("fingerprint_trim_padding_ms", FP_TRIM_PADDING_MS)))
+
+        frame = ttk.Frame(dlg, padding=12)
+        frame.pack(fill="both", expand=True)
+
+        ttk.Label(
+            frame,
+            text="Tune duplicate matching and fingerprint windowing thresholds.",
+            foreground="#555",
+        ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 8))
+
+        def _row(label: str, var: tk.StringVar, row: int) -> None:
+            ttk.Label(frame, text=label).grid(row=row, column=0, sticky="w", pady=2)
+            ttk.Entry(frame, textvariable=var, width=16).grid(row=row, column=1, sticky="ew", pady=2)
+
+        row_idx = 1
+        _row("Exact duplicate threshold", exact_var, row_idx)
+        row_idx += 1
+        _row("Near duplicate threshold", near_var, row_idx)
+        row_idx += 1
+        _row("Mixed-codec boost", mixed_var, row_idx)
+        row_idx += 1
+        _row("Fingerprint offset (ms)", offset_var, row_idx)
+        row_idx += 1
+        _row("Fingerprint duration (ms)", duration_var, row_idx)
+        row_idx += 1
+        _row("Silence threshold (dB)", silence_db_var, row_idx)
+        row_idx += 1
+        _row("Silence min length (ms)", silence_len_var, row_idx)
+        row_idx += 1
+        _row("Trim lead max (ms)", trim_lead_var, row_idx)
+        row_idx += 1
+        _row("Trim trail max (ms)", trim_trail_var, row_idx)
+        row_idx += 1
+        _row("Trim padding (ms)", trim_padding_var, row_idx)
+        row_idx += 1
+
+        frame.columnconfigure(1, weight=1)
+
+        def _parse_float(raw: str, label: str, *, min_value: float | None = None, max_value: float | None = None) -> float | None:
+            try:
+                value = float(raw)
+            except ValueError:
+                messagebox.showwarning("Invalid Value", f"{label} must be a number.")
+                return None
+            if min_value is not None and value < min_value:
+                messagebox.showwarning(
+                    "Invalid Value", f"{label} must be at least {min_value}."
+                )
+                return None
+            if max_value is not None and value > max_value:
+                messagebox.showwarning(
+                    "Invalid Value", f"{label} must be at most {max_value}."
+                )
+                return None
+            return value
+
+        def _parse_int(raw: str, label: str, *, min_value: int | None = None) -> int | None:
+            try:
+                value = int(float(raw))
+            except ValueError:
+                messagebox.showwarning("Invalid Value", f"{label} must be a whole number.")
+                return None
+            if min_value is not None and value < min_value:
+                messagebox.showwarning(
+                    "Invalid Value", f"{label} must be at least {min_value}."
+                )
+                return None
+            return value
+
+        def _save() -> None:
+            exact = _parse_float(exact_var.get().strip(), "Exact duplicate threshold", min_value=0.0)
+            if exact is None:
+                return
+            near = _parse_float(near_var.get().strip(), "Near duplicate threshold", min_value=0.0)
+            if near is None:
+                return
+            if near < exact:
+                messagebox.showwarning(
+                    "Invalid Value",
+                    "Near duplicate threshold must be greater than or equal to the exact threshold.",
+                )
+                return
+            mixed = _parse_float(mixed_var.get().strip(), "Mixed-codec boost", min_value=0.0)
+            if mixed is None:
+                return
+            offset = _parse_int(offset_var.get().strip(), "Fingerprint offset (ms)", min_value=0)
+            if offset is None:
+                return
+            duration = _parse_int(duration_var.get().strip(), "Fingerprint duration (ms)", min_value=0)
+            if duration is None:
+                return
+            silence_db = _parse_float(
+                silence_db_var.get().strip(),
+                "Silence threshold (dB)",
+                min_value=-120.0,
+                max_value=0.0,
+            )
+            if silence_db is None:
+                return
+            silence_len = _parse_int(
+                silence_len_var.get().strip(),
+                "Silence min length (ms)",
+                min_value=0,
+            )
+            if silence_len is None:
+                return
+            trim_lead = _parse_int(
+                trim_lead_var.get().strip(),
+                "Trim lead max (ms)",
+                min_value=0,
+            )
+            if trim_lead is None:
+                return
+            trim_trail = _parse_int(
+                trim_trail_var.get().strip(),
+                "Trim trail max (ms)",
+                min_value=0,
+            )
+            if trim_trail is None:
+                return
+            trim_padding = _parse_int(
+                trim_padding_var.get().strip(),
+                "Trim padding (ms)",
+                min_value=0,
+            )
+            if trim_padding is None:
+                return
+
+            cfg["exact_duplicate_threshold"] = exact
+            cfg["near_duplicate_threshold"] = near
+            cfg["mixed_codec_threshold_boost"] = mixed
+            cfg["fingerprint_offset_ms"] = offset
+            cfg["fingerprint_duration_ms"] = duration
+            cfg["fingerprint_silence_threshold_db"] = silence_db
+            cfg["fingerprint_silence_min_len_ms"] = silence_len
+            cfg["fingerprint_trim_lead_max_ms"] = trim_lead
+            cfg["fingerprint_trim_trail_max_ms"] = trim_trail
+            cfg["fingerprint_trim_padding_ms"] = trim_padding
+            save_config(cfg)
+
+            self.preview_json_path = None
+            self.preview_html_path = None
+            self.execution_report_path = None
+            self.open_report_btn.config(state="disabled")
+            self._reset_execute_confirmation()
+            library_root = self.library_path_var.get().strip()
+            if library_root:
+                docs_dir = os.path.join(library_root, "Docs")
+                preview_json = os.path.join(docs_dir, "duplicate_preview.json")
+                preview_html = os.path.join(docs_dir, "duplicate_preview.html")
+                for preview_path in (preview_json, preview_html):
+                    try:
+                        if os.path.exists(preview_path):
+                            os.remove(preview_path)
+                    except OSError:
+                        pass
+            self._clear_plan("Threshold settings updated; regenerate preview or scan to apply changes.")
+            dlg.destroy()
+
+        btn_frame = ttk.Frame(frame)
+        btn_frame.grid(row=row_idx, column=0, columnspan=2, pady=(10, 0))
+        ttk.Button(btn_frame, text="OK", command=_save).pack()
+        dlg.wait_window()
+
+    def _gather_tracks(
+        self,
+        library_root: str,
+        *,
+        log_callback: Callable[[str], None] | None = None,
+        status_callback: Callable[[str, float], None] | None = None,
+        fingerprint_status_callback: Callable[[str], None] | None = None,
+        idle_callback: Callable[[], None] | None = None,
+    ) -> tuple[list[dict[str, object]], int, int]:
+        if not library_root:
+            return [], 0, 0
+        docs_dir = os.path.join(library_root, "Docs")
+        os.makedirs(docs_dir, exist_ok=True)
+        db_path = os.path.join(docs_dir, ".duplicate_fingerprints.db")
+        ensure_fingerprint_cache(db_path)
+        excluded_dirs = {"not sorted", "playlists"}
+
+        audio_paths: list[str] = []
+        for dirpath, _dirs, files in os.walk(library_root):
+            rel = os.path.relpath(dirpath, library_root)
+            parts = {p.lower() for p in rel.split(os.sep)}
+            if excluded_dirs & parts:
+                continue
+            for fname in files:
+                ext = os.path.splitext(fname)[1].lower()
+                if ext in SUPPORTED_EXTS:
+                    audio_paths.append(os.path.join(dirpath, fname))
+
+        tracks: list[dict[str, object]] = []
+        total = len(audio_paths)
+        if total == 0:
+            if fingerprint_status_callback:
+                fingerprint_status_callback("No eligible audio files found.")
+            if status_callback:
+                status_callback("Idle", progress=0)
+            return tracks, 0, 0
+        if fingerprint_status_callback:
+            fingerprint_status_callback(f"Fingerprinting 0/{total}")
+        if status_callback:
+            status_callback("Fingerprinting…", progress=self._weighted_progress("fingerprinting", 0))
+        if idle_callback:
+            idle_callback()
+        last_update = time.monotonic()
+        update_interval = 0.2
+        def _fingerprint_worker(target_path: str) -> tuple[str, int | None, str | None, str | None]:
+            try:
+                duration, fp = _compute_fp(target_path)
+                return target_path, duration, fp, None
+            except Exception as exc:  # pragma: no cover - depends on external files
+                return target_path, None, None, str(exc)
+
+        def _normalized_key(text: str | None) -> str | None:
+            if not text:
+                return None
+            return " ".join(re.findall(r"[a-z0-9]+", text.lower()))
+
+        def _extract_metadata(path: str) -> dict[str, object]:
+            ext = os.path.splitext(path)[1].lower()
+            bitrate = 0
+            sample_rate = 0
+            bit_depth = 0
+            channels = 0
+            codec = ""
+            container = ""
+            tags: dict[str, object] = {}
+            artwork: list[dict[str, object]] = []
+            audio = None
+            info = None
+            try:
+                audio = MutagenFile(path)
+                info = getattr(audio, "info", None)
+                if info:
+                    bitrate = int(getattr(info, "bitrate", 0) or 0)
+                    sample_rate = int(
+                        getattr(info, "sample_rate", 0)
+                        or getattr(info, "samplerate", 0)
+                        or 0
+                    )
+                    bit_depth = int(
+                        getattr(info, "bits_per_sample", 0)
+                        or getattr(info, "bitdepth", 0)
+                        or 0
+                    )
+                    channels = int(
+                        getattr(info, "channels", 0)
+                        or getattr(info, "channel", 0)
+                        or 0
+                    )
+                    codec = str(
+                        getattr(info, "codec_name", "")
+                        or getattr(info, "codec", "")
+                        or ""
+                    )
+            except Exception:
+                pass
+            try:
+                tags, cover_payloads, _error, _reader = read_metadata(
+                    path,
+                    include_cover=True,
+                    audio=audio,
+                )
+                for payload in cover_payloads:
+                    if not payload:
+                        continue
+                    artwork.append(
+                        {
+                            "hash": hashlib.sha256(payload).hexdigest(),
+                            "size": len(payload),
+                        }
+                    )
+            except Exception:
+                tags = {}
+                artwork = []
+            if not container:
+                container = ext.replace(".", "").upper()
+            if not codec and getattr(info, "pprint", None):
+                try:
+                    codec = str(info.pprint()).split(",")[0]
+                except Exception:
+                    codec = ""
+            if not codec:
+                codec = container or ext.replace(".", "").upper()
+            artist_value = tags.get("artist") or tags.get("albumartist")
+            title_value = tags.get("title")
+            album_value = tags.get("album")
+            normalized_artist = _normalized_key(artist_value if isinstance(artist_value, str) else None)
+            normalized_title = _normalized_key(title_value if isinstance(title_value, str) else None)
+            normalized_album = _normalized_key(album_value if isinstance(album_value, str) else None)
+            return {
+                "ext": ext,
+                "bitrate": bitrate,
+                "sample_rate": sample_rate,
+                "bit_depth": bit_depth,
+                "channels": channels,
+                "codec": codec,
+                "container": container,
+                "tags": tags,
+                "artwork": artwork,
+                "normalized_artist": normalized_artist,
+                "normalized_title": normalized_title,
+                "normalized_album": normalized_album,
+            }
+
+        def _needs_metadata_refresh(metadata: dict[str, object] | None) -> bool:
+            if metadata is None:
+                return True
+            numeric_keys = ("bitrate", "sample_rate", "bit_depth", "channels")
+            if any(int(metadata.get(key) or 0) <= 0 for key in numeric_keys):
+                return True
+            text_keys = ("codec", "container")
+            if any(not metadata.get(key) for key in text_keys):
+                return True
+            for key in ("tags", "artwork"):
+                if key not in metadata or metadata.get(key) is None:
+                    return True
+            return False
+
+        def _metadata_for_payload(path: str, metadata: dict[str, object] | None) -> dict[str, object]:
+            payload = dict(metadata or {})
+            ext = payload.get("ext") or os.path.splitext(path)[1].lower()
+            if isinstance(ext, str) and ext and not ext.startswith("."):
+                ext = f".{ext}"
+            payload["ext"] = ext
+            if "tags" in payload and not isinstance(payload.get("tags"), dict):
+                payload["tags"] = {}
+            if "artwork" in payload and not isinstance(payload.get("artwork"), list):
+                payload["artwork"] = []
+            return payload
+
+        def _track_payload(
+            path: str,
+            fp: str,
+            fingerprint_trace: dict[str, object],
+            metadata: dict[str, object],
+        ) -> dict[str, object]:
+            ext = metadata.get("ext") or os.path.splitext(path)[1].lower()
+            if isinstance(ext, str) and ext and not ext.startswith("."):
+                ext = f".{ext}"
+            return {
+                "path": path,
+                "fingerprint": fp,
+                "ext": ext,
+                "bitrate": int(metadata.get("bitrate") or 0),
+                "sample_rate": int(metadata.get("sample_rate") or 0),
+                "bit_depth": int(metadata.get("bit_depth") or 0),
+                "channels": int(metadata.get("channels") or 0),
+                "codec": str(metadata.get("codec") or ""),
+                "container": str(metadata.get("container") or ""),
+                "tags": dict(metadata.get("tags") or {}),
+                "artwork": list(metadata.get("artwork") or []),
+                "fingerprint_trace": dict(fingerprint_trace),
+                "discovery": {
+                    "scan_roots": [library_root],
+                    "excluded_dirs": sorted(excluded_dirs),
+                    "skipped_by_filter": False,
+                },
+            }
+
+        tracks_map: dict[str, dict[str, object]] = {}
+        pending_paths: list[str] = []
+        completed = 0
+        cached_count = 0
+        computed_count = 0
+        failure_count = 0
+        missing_count = 0
+        metadata_refresh_count = 0
+        sorted_paths = sorted(audio_paths)
+        for path in sorted_paths:
+            fingerprint_trace: dict[str, object] = {}
+            fp, cached_metadata = get_cached_fingerprint_metadata(
+                path,
+                db_path,
+                log_callback=log_callback,
+                trace=fingerprint_trace,
+            )
+            if fp:
+                metadata = _metadata_for_payload(path, cached_metadata)
+                if _needs_metadata_refresh(cached_metadata):
+                    metadata = _extract_metadata(path)
+                    metadata_refresh_count += 1
+                    if not store_fingerprint(
+                        path,
+                        db_path,
+                        None,
+                        fp,
+                        log_callback=log_callback,
+                        ext=str(metadata.get("ext") or ""),
+                        bitrate=int(metadata.get("bitrate") or 0),
+                        sample_rate=int(metadata.get("sample_rate") or 0),
+                        bit_depth=int(metadata.get("bit_depth") or 0),
+                        channels=int(metadata.get("channels") or 0),
+                        codec=str(metadata.get("codec") or ""),
+                        container=str(metadata.get("container") or ""),
+                        tags=metadata.get("tags") if isinstance(metadata.get("tags"), dict) else {},
+                        artwork=metadata.get("artwork") if isinstance(metadata.get("artwork"), list) else [],
+                        normalized_artist=metadata.get("normalized_artist"),
+                        normalized_title=metadata.get("normalized_title"),
+                        normalized_album=metadata.get("normalized_album"),
+                    ):
+                        failure_count += 1
+                tracks_map[path] = _track_payload(path, fp, fingerprint_trace, metadata)
+                completed += 1
+                cached_count += 1
+            else:
+                source = fingerprint_trace.get("source")
+                if source in {"stat_error", "cache_error"}:
+                    failure_count += 1
+                    completed += 1
+                else:
+                    pending_paths.append(path)
+            now = time.monotonic()
+            if completed == total or now - last_update >= update_interval:
+                if fingerprint_status_callback:
+                    fingerprint_status_callback(f"Fingerprinting {completed}/{total}")
+                if status_callback:
+                    status_callback(
+                        "Fingerprinting…",
+                        progress=self._weighted_progress("fingerprinting", completed / total),
+                    )
+                if idle_callback:
+                    idle_callback()
+                last_update = now
+
+        if not pending_paths and metadata_refresh_count == 0 and failure_count == 0:
+            refresh_message = "Catalog up to date; using cached metadata."
+            if log_callback:
+                log_callback(refresh_message)
+            if fingerprint_status_callback:
+                fingerprint_status_callback(refresh_message)
+        elif log_callback:
+            log_callback(
+                "Fingerprint cache scan complete: "
+                f"{cached_count} cached, {len(pending_paths)} pending, "
+                f"{metadata_refresh_count} metadata refresh, {failure_count} failures."
+            )
+
+        max_workers = min(8, os.cpu_count() or 4)
+        if pending_paths:
+            if log_callback:
+                log_callback(f"Computing {len(pending_paths)} missing fingerprints…")
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = {executor.submit(_fingerprint_worker, path): path for path in pending_paths}
+                for fut in as_completed(futures):
+                    path = futures[fut]
+                    error = None
+                    try:
+                        path, duration, fp, error = fut.result()
+                    except Exception as exc:
+                        duration = None
+                        fp = None
+                        error = str(exc)
+                    completed += 1
+                    now = time.monotonic()
+                    if completed == total or now - last_update >= update_interval:
+                        if fingerprint_status_callback:
+                            fingerprint_status_callback(f"Fingerprinting {completed}/{total}")
+                        if status_callback:
+                            status_callback(
+                                "Fingerprinting…",
+                                progress=self._weighted_progress("fingerprinting", completed / total),
+                            )
+                        if idle_callback:
+                            idle_callback()
+                        last_update = now
+                    if error:
+                        failure_count += 1
+                        if log_callback:
+                            log_callback(f"! Fingerprint failed for {path}: {error}")
+                        continue
+                    if not fp:
+                        missing_count += 1
+                        if log_callback:
+                            log_callback(f"! Missing fingerprint for {path}")
+                        continue
+                    computed_count += 1
+                    fingerprint_trace = {"source": "computed", "error": ""}
+                    metadata = _extract_metadata(path)
+                    tracks_map[path] = _track_payload(path, fp, fingerprint_trace, metadata)
+                    if not store_fingerprint(
+                        path,
+                        db_path,
+                        duration,
+                        fp,
+                        log_callback=log_callback,
+                        ext=str(metadata.get("ext") or ""),
+                        bitrate=int(metadata.get("bitrate") or 0),
+                        sample_rate=int(metadata.get("sample_rate") or 0),
+                        bit_depth=int(metadata.get("bit_depth") or 0),
+                        channels=int(metadata.get("channels") or 0),
+                        codec=str(metadata.get("codec") or ""),
+                        container=str(metadata.get("container") or ""),
+                        tags=metadata.get("tags") if isinstance(metadata.get("tags"), dict) else {},
+                        artwork=metadata.get("artwork") if isinstance(metadata.get("artwork"), list) else [],
+                        normalized_artist=metadata.get("normalized_artist"),
+                        normalized_title=metadata.get("normalized_title"),
+                        normalized_album=metadata.get("normalized_album"),
+                        ):
+                            failure_count += 1
+
+        tracks = [tracks_map[path] for path in sorted_paths if path in tracks_map]
+        if log_callback:
+            log_callback(
+                "Fingerprinting summary: "
+                f"{cached_count} cached, {computed_count} computed, "
+                f"{missing_count} missing, {failure_count} failures."
+            )
+        return tracks, missing_count, failure_count
+
+    def _generate_plan(
+        self,
+        library_root: str,
+        *,
+        write_preview: bool,
+        threshold_settings: Mapping[str, float],
+        fingerprint_settings: Mapping[str, object],
+        show_artwork_variants: bool,
+        log_callback: Callable[[str], None] | None = None,
+        status_callback: Callable[[str, float], None] | None = None,
+        fingerprint_status_callback: Callable[[str], None] | None = None,
+        idle_callback: Callable[[], None] | None = None,
+    ) -> PlanGenerationResult:
+        timing_enabled = write_preview
+        log_messages: list[str] = []
+
+        def log(msg: str) -> None:
+            log_messages.append(msg)
+            if log_callback:
+                log_callback(msg)
+
+        def report_status(label: str, progress: float) -> None:
+            if status_callback:
+                status_callback(label, progress=progress)
+
+        def report_fingerprint_status(message: str) -> None:
+            if fingerprint_status_callback:
+                fingerprint_status_callback(message)
+
+        if timing_enabled:
+            plan_start_ts = datetime.now().isoformat(timespec="seconds")
+            plan_start_time = time.monotonic()
+            logger.info("Preview plan timing start: %s", plan_start_ts)
+        try:
+            tracks, missing_count, failure_count = self._gather_tracks(
+                library_root,
+                log_callback=log,
+                status_callback=status_callback,
+                fingerprint_status_callback=fingerprint_status_callback,
+                idle_callback=idle_callback,
+            )
+            if not tracks:
+                return PlanGenerationResult(
+                    plan=None,
+                    preview_json_path=None,
+                    preview_html_path=None,
+                    log_messages=log_messages,
+                    review_required_count=0,
+                    group_count=0,
+                    had_tracks=False,
+                )
+            if missing_count or failure_count:
+                log(
+                    f"Fingerprinting complete with {missing_count} missing fingerprints and "
+                    f"{failure_count} failures."
+                )
+            log(f"Fingerprinting complete: {len(tracks)} tracks ready for grouping.")
+            log("Beginning duplicate grouping…")
+            report_fingerprint_status("Grouping duplicates…")
+            report_status("Grouping…", progress=self._weighted_progress("grouping", 0))
+            exact_threshold = threshold_settings["exact_duplicate_threshold"]
+            near_threshold = threshold_settings["near_duplicate_threshold"]
+            mixed_codec_boost = threshold_settings["mixed_codec_threshold_boost"]
+            log(
+                "Duplicate scan thresholds: "
+                f"exact={exact_threshold:.3f}, near={near_threshold:.3f}, mixed_codec_boost={mixed_codec_boost:.3f}"
+            )
+            log(f"Fingerprint settings: {fingerprint_settings}")
+            plan = build_consolidation_plan(
+                tracks,
+                exact_duplicate_threshold=exact_threshold,
+                near_duplicate_threshold=near_threshold,
+                mixed_codec_threshold_boost=mixed_codec_boost,
+                fingerprint_settings=fingerprint_settings,
+                threshold_settings=threshold_settings,
+                log_callback=log,
+            )
+            if write_preview:
+                self._queue_preview_trace("metadata-read")
+                self._queue_preview_trace("artwork-read")
+                self._queue_preview_trace("artwork-compress")
+            report_status("Grouping…", progress=self._weighted_progress("grouping", 1))
+
+            docs_dir = os.path.join(library_root, "Docs")
+            os.makedirs(docs_dir, exist_ok=True)
+            preview_json_path = None
+            preview_html_path = None
+            if write_preview:
+                log("Writing preview audit JSON…")
+                report_fingerprint_status("Generating preview…")
+                report_status("Preview…", progress=self._weighted_progress("preview", 0))
+                json_path = os.path.join(docs_dir, "duplicate_preview.json")
+                json_start = time.monotonic()
+                export_consolidation_preview(
+                    plan,
+                    json_path,
+                    preview_settings={"show_artwork_variants": show_artwork_variants},
+                )
+                preview_json_path = json_path
+                log(f"Audit JSON written to {json_path} ({time.monotonic() - json_start:.2f}s)")
+                log("Writing preview HTML…")
+                html_path = os.path.join(docs_dir, "duplicate_preview.html")
+                html_start = time.monotonic()
+                export_consolidation_preview_html(
+                    plan,
+                    html_path,
+                    show_artwork_variants=show_artwork_variants,
+                )
+                self._queue_preview_trace("preview-html-write")
+                preview_html_path = html_path
+                log(f"Preview HTML written to {html_path} ({time.monotonic() - html_start:.2f}s)")
+                log("Writing duplicate pair review snapshot…")
+                snapshot_path = _write_duplicate_pair_snapshot(
+                    plan,
+                    library_root,
+                    include_filename_pairs=True,
+                    log_callback=log,
+                )
+                if snapshot_path:
+                    log(f"Duplicate pair snapshot written to {snapshot_path}")
+                report_status("Preview generated", progress=self._weighted_progress("preview", 1))
+            else:
+                report_status("Plan ready", progress=100)
+
+            log(f"Plan: {len(plan.groups)} groups, review required={plan.review_required_count}")
+            if plan.review_required_count:
+                log("Review required groups will block execution unless overridden.")
+            return PlanGenerationResult(
+                plan=plan,
+                preview_json_path=preview_json_path,
+                preview_html_path=preview_html_path,
+                log_messages=log_messages,
+                review_required_count=plan.review_required_count,
+                group_count=len(plan.groups),
+                had_tracks=True,
+            )
+        finally:
+            if timing_enabled:
+                plan_elapsed = time.monotonic() - plan_start_time
+                plan_end_ts = datetime.now().isoformat(timespec="seconds")
+                logger.info(
+                    "Preview plan timing end: %s (elapsed %.2fs)",
+                    plan_end_ts,
+                    plan_elapsed,
+                )
+
+    def _load_preview_plan(self, preview_path: str):
+        try:
+            with open(preview_path, "r", encoding="utf-8") as handle:
+                payload = json.load(handle)
+        except (OSError, json.JSONDecodeError) as exc:
+            self._log_action(f"Preview plan could not be loaded: {exc}")
+            return None
+        if not isinstance(payload, dict) or "plan" not in payload:
+            self._log_action("Preview plan could not be loaded: missing plan payload.")
+            return None
+        try:
+            return consolidation_plan_from_dict(payload["plan"])
+        except ValueError as exc:
+            self._log_action(f"Preview plan could not be loaded: {exc}")
+            return None
+
+    def _preview_sources_missing(self, plan: ConsolidationPlan) -> bool:
+        for path in plan.source_snapshot.keys():
+            try:
+                if not os.path.exists(ensure_long_path(path)):
+                    return True
+            except OSError:
+                return True
+        return False
+
+    def _library_modified_since(self, library_root: str, since_ts: float) -> bool:
+        excluded_dirs = {"not sorted", "playlists"}
+        for dirpath, _dirs, files in os.walk(library_root):
+            rel = os.path.relpath(dirpath, library_root)
+            parts = {p.lower() for p in rel.split(os.sep)}
+            if excluded_dirs & parts:
+                continue
+            for fname in files:
+                ext = os.path.splitext(fname)[1].lower()
+                if ext not in SUPPORTED_EXTS:
+                    continue
+                file_path = os.path.join(dirpath, fname)
+                try:
+                    if os.path.getmtime(file_path) > since_ts:
+                        return True
+                except OSError:
+                    return True
+        return False
+
+    def _try_reuse_preview(
+        self,
+        library_root: str,
+        *,
+        threshold_settings: Mapping[str, float],
+        fingerprint_settings: Mapping[str, object],
+        show_artwork_variants: bool,
+    ) -> tuple[ConsolidationPlan, str, str] | None:
+        docs_dir = os.path.join(library_root, "Docs")
+        preview_json_path = self.preview_json_path or os.path.join(docs_dir, "duplicate_preview.json")
+        preview_html_path = self.preview_html_path or os.path.join(docs_dir, "duplicate_preview.html")
+        if not os.path.exists(preview_json_path) or not os.path.exists(preview_html_path):
+            return None
+        try:
+            with open(preview_json_path, "r", encoding="utf-8") as handle:
+                payload = json.load(handle)
+        except (OSError, json.JSONDecodeError) as exc:
+            self._log_action(f"Preview cache could not be read: {exc}")
+            return None
+        if not isinstance(payload, dict) or "plan" not in payload:
+            self._log_action("Preview cache is missing plan payload; regenerating preview.")
+            return None
+        preview_settings = payload.get("preview_settings")
+        if isinstance(preview_settings, Mapping):
+            cached_show = preview_settings.get("show_artwork_variants")
+            if isinstance(cached_show, bool) and cached_show != show_artwork_variants:
+                self._log_action("Preview cache uses different artwork-variant setting; regenerating.")
+                return None
+        try:
+            plan = consolidation_plan_from_dict(payload["plan"])
+        except ValueError as exc:
+            self._log_action(f"Preview cache could not be loaded: {exc}")
+            return None
+        if not self._thresholds_match(
+            getattr(plan, "threshold_settings", None),
+            threshold_settings,
+        ):
+            self._log_action("Preview cache thresholds mismatch; regenerating.")
+            return None
+        if not self._fingerprint_settings_match(
+            getattr(plan, "fingerprint_settings", None),
+            fingerprint_settings,
+        ):
+            self._log_action("Preview cache fingerprint settings mismatch; regenerating.")
+            return None
+        try:
+            preview_mtime = os.path.getmtime(preview_json_path)
+        except OSError:
+            return None
+        if self._preview_sources_missing(plan):
+            self._log_action("Preview cache invalidated by missing source files; regenerating.")
+            return None
+        if self._library_modified_since(library_root, preview_mtime):
+            self._log_action("Preview cache invalidated by newer audio files; regenerating.")
+            return None
+        return plan, preview_json_path, preview_html_path
+
+    def _handle_scan(self) -> None:
+        path = self._validate_library_root()
+        if not path:
+            return
+        self._reset_execute_confirmation()
+        self._log_action("Scan clicked")
+        self._set_status("Starting scan…", progress=0)
+        self._set_fingerprint_status("Starting scan…")
+        self._set_scan_controls_enabled(False)
+        threshold_settings = self._current_threshold_settings()
+        fingerprint_settings = self._current_fingerprint_settings()
+        show_artwork_variants = self.show_artwork_variants_var.get()
+
+        def schedule(callable_obj, *args) -> None:
+            self._schedule_after(0, callable_obj, *args)
+
+        def log_callback(message: str) -> None:
+            schedule(self._log_action, message)
+
+        def status_callback(status: str, progress: float) -> None:
+            schedule(self._set_status, status, progress)
+
+        def fingerprint_status_callback(status: str) -> None:
+            schedule(self._set_fingerprint_status, status)
+
+        def idle_callback() -> None:
+            schedule(self.update_idletasks)
+
+        def finish(result: PlanGenerationResult | None, error: Exception | None = None) -> None:
+            if error is not None:
+                self._log_action(f"Scan failed: {error}")
+                self._set_status("Scan failed", 100)
+                messagebox.showerror("Scan Failed", str(error))
+                self._set_scan_controls_enabled(True)
+                return
+            if result is None or not result.had_tracks:
+                messagebox.showwarning(
+                    "No Tracks",
+                    "No audio tracks were found in the selected library.",
+                )
+                self._set_status("Idle", 0)
+                self._set_scan_controls_enabled(True)
+                return
+            self._plan = result.plan
+            self.group_disposition_overrides.clear()
+            self._apply_deletion_mode()
+            self.preview_json_path = None
+            self.preview_html_path = None
+            if hasattr(self.master, "_set_duplicate_finder_plan"):
+                self.master._set_duplicate_finder_plan(result.plan, path)
+            self._set_scan_controls_enabled(True)
+
+        def worker() -> None:
+            try:
+                result = self._generate_plan(
+                    path,
+                    write_preview=False,
+                    threshold_settings=threshold_settings,
+                    fingerprint_settings=fingerprint_settings,
+                    show_artwork_variants=show_artwork_variants,
+                    log_callback=log_callback,
+                    status_callback=status_callback,
+                    fingerprint_status_callback=fingerprint_status_callback,
+                    idle_callback=idle_callback,
+                )
+            except Exception as exc:
+                logger.exception("Scan generation failed.")
+                self._schedule_after(0, finish, None, exc)
+                return
+            self._schedule_after(0, finish, result, None)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _start_preview_heartbeat(self) -> None:
+        self._dup_preview_heartbeat_running = True
+        self._dup_preview_heartbeat_start = time.monotonic()
+        self._dup_preview_heartbeat_last_tick = None
+        self._dup_preview_heartbeat_count = 0
+        self._dup_preview_heartbeat_stall_logged = False
+        self._schedule_after(
+            int(self._dup_preview_heartbeat_interval * 1000),
+            self._preview_heartbeat_tick,
+        )
+
+    def _preview_heartbeat_tick(self) -> None:
+        if not self._dup_preview_heartbeat_running or self._closing:
+            return
+        now = time.monotonic()
+        if self._dup_preview_heartbeat_last_tick is not None:
+            gap = now - self._dup_preview_heartbeat_last_tick
+            if (
+                gap > self._dup_preview_heartbeat_interval * 10
+                and not self._dup_preview_heartbeat_stall_logged
+            ):
+                logger.warning(
+                    "Preview heartbeat delayed by %.2fs while preview running.",
+                    gap,
+                )
+                self._dup_preview_heartbeat_stall_logged = True
+        self._dup_preview_heartbeat_last_tick = now
+        self._dup_preview_heartbeat_count += 1
+        self._schedule_after(
+            int(self._dup_preview_heartbeat_interval * 1000),
+            self._preview_heartbeat_tick,
+        )
+
+    def _stop_preview_heartbeat(self) -> None:
+        if not self._dup_preview_heartbeat_running:
+            return
+        self._dup_preview_heartbeat_running = False
+        now = time.monotonic()
+        elapsed = 0.0
+        if self._dup_preview_heartbeat_start is not None:
+            elapsed = now - self._dup_preview_heartbeat_start
+        if self._dup_preview_heartbeat_count == 0:
+            logger.warning(
+                "Preview heartbeat did not fire during preview window (%.2fs).",
+                elapsed,
+            )
+        elif (
+            self._dup_preview_heartbeat_last_tick is not None
+            and now - self._dup_preview_heartbeat_last_tick
+            > self._dup_preview_heartbeat_interval * 10
+        ):
+            stall = now - self._dup_preview_heartbeat_last_tick
+            logger.warning(
+                "Preview heartbeat stalled for %.2fs before completion.",
+                stall,
+            )
+        logger.info(
+            "Preview heartbeat stopped after %.2fs (%s ticks).",
+            elapsed,
+            self._dup_preview_heartbeat_count,
+        )
+
+    def _handle_preview(self) -> None:
+        path = self._validate_library_root()
+        if not path:
+            return
+        self._reset_execute_confirmation()
+        self._log_action("Preview clicked")
+        if self._preview_trace_enabled and self._preview_trace is not None:
+            self._preview_trace.clear()
+        self._record_preview_trace("preview-start")
+        start_ts = datetime.now().isoformat(timespec="seconds")
+        start_time = time.monotonic()
+        logger.info("Preview timing start: %s", start_ts)
+        self._start_preview_heartbeat()
+        self._set_fingerprint_status("Starting preview…")
+        self._set_status("Preview…", progress=0)
+        threshold_settings = self._current_threshold_settings()
+        fingerprint_settings = self._current_fingerprint_settings()
+        show_artwork_variants = self.show_artwork_variants_var.get()
+        logger.info(
+            "Preview settings: show_artwork_variants=%s thresholds=%s fingerprint_settings=%s",
+            show_artwork_variants,
+            threshold_settings,
+            fingerprint_settings,
+        )
+        reuse = self._try_reuse_preview(
+            path,
+            threshold_settings=threshold_settings,
+            fingerprint_settings=fingerprint_settings,
+            show_artwork_variants=show_artwork_variants,
+        )
+        if reuse is not None:
+            plan, preview_json_path, preview_html_path = reuse
+            self._plan = plan
+            self.group_disposition_overrides.clear()
+            self._apply_deletion_mode()
+            self.preview_json_path = preview_json_path
+            self.preview_html_path = preview_html_path
+            if hasattr(self.master, "_set_duplicate_finder_plan"):
+                self.master._set_duplicate_finder_plan(plan, path)
+            snapshot_path = _write_duplicate_pair_snapshot(
+                plan,
+                path,
+                include_filename_pairs=True,
+                log_callback=self._log_action,
+            )
+            if snapshot_path:
+                self._log_action(f"Duplicate pair snapshot written to {snapshot_path}")
+            self._set_fingerprint_status("Preview up to date (cached).")
+            self._set_status("Preview cached", self._weighted_progress("preview", 1))
+            self._log_action("Preview up to date; using cached preview output.")
+            if self.preview_html_path:
+                self._open_preview()
+            self._stop_preview_heartbeat()
+            return
+
+        def finalize_preview(trace_emit: bool = False) -> None:
+            self._record_preview_trace("preview-finish")
+            elapsed = time.monotonic() - start_time
+            end_ts = datetime.now().isoformat(timespec="seconds")
+            self._stop_preview_heartbeat()
+            logger.info(
+                "Preview timing end: %s (elapsed %.2fs)",
+                end_ts,
+                elapsed,
+            )
+            if trace_emit:
+                self._emit_preview_trace()
+
+        def finish(result: PlanGenerationResult | None, error: Exception | None = None) -> None:
+            def schedule(callable_obj, *args) -> None:
+                self._schedule_after(0, callable_obj, *args)
+
+            if error is not None:
+                schedule(self._log_action, f"Preview failed: {error}")
+                schedule(self._set_status, "Preview failed", 100)
+                schedule(messagebox.showerror, "Preview Failed", str(error))
+                schedule(finalize_preview, True)
+                return
+
+            if result is None or not result.had_tracks:
+                schedule(messagebox.showwarning, "No Tracks", "No audio tracks were found in the selected library.")
+                schedule(self._set_status, "Idle", 0)
+                schedule(finalize_preview)
+                return
+
+            self._plan = result.plan
+            self.group_disposition_overrides.clear()
+            self._apply_deletion_mode()
+            self.preview_json_path = result.preview_json_path
+            self.preview_html_path = result.preview_html_path
+            if hasattr(self.master, "_set_duplicate_finder_plan"):
+                self.master._set_duplicate_finder_plan(result.plan, path)
+
+            for message in result.log_messages:
+                schedule(self._log_action, message)
+            schedule(self._set_status, "Preview generated", self._weighted_progress("preview", 1))
+            if self.preview_html_path:
+                schedule(self._open_preview)
+            schedule(finalize_preview)
+
+        def worker() -> None:
+            try:
+                result = self._generate_plan(
+                    path,
+                    write_preview=True,
+                    threshold_settings=threshold_settings,
+                    fingerprint_settings=fingerprint_settings,
+                    show_artwork_variants=show_artwork_variants,
+                )
+            except Exception as exc:
+                logger.exception("Preview generation failed.")
+                self._schedule_after(0, finish, None, exc)
+                return
+            self._schedule_after(0, finish, result, None)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _handle_execute(self) -> None:
+        if not self._execute_confirmation_pending:
+            self._execute_confirmation_pending = True
+            self.execute_label_var.set("Confirm Execute")
+            self._log_action("Execute confirmation requested.")
+            return
+        path = self._validate_library_root()
+        if not path:
+            return
+        self.execution_report_path = None
+        self.open_report_btn.config(state="disabled")
+        preview_plan_path = self.preview_json_path or os.path.join(path, "Docs", "duplicate_preview.json")
+        plan_input = self._plan
+        plan_for_checks = self._plan
+        current_thresholds = self._current_threshold_settings()
+        current_fingerprint_settings = self._current_fingerprint_settings()
+        if plan_input and not self._thresholds_match(
+            getattr(plan_input, "threshold_settings", None),
+            current_thresholds,
+        ):
+            messagebox.showwarning(
+                "Thresholds Changed",
+                "Threshold settings changed since the last scan. Regenerate the preview or scan before executing.",
+            )
+            self._log_action("Execute blocked: threshold settings changed since last scan.")
+            return
+        if plan_input and not self._fingerprint_settings_match(
+            getattr(plan_input, "fingerprint_settings", None),
+            current_fingerprint_settings,
+        ):
+            messagebox.showwarning(
+                "Thresholds Changed",
+                "Fingerprint settings changed since the last scan. Regenerate the preview or scan before executing.",
+            )
+            self._log_action("Execute blocked: fingerprint settings changed since last scan.")
+            return
+        if preview_plan_path and os.path.exists(preview_plan_path):
+            if not self.preview_json_path:
+                self.preview_json_path = preview_plan_path
+            if not self.preview_html_path:
+                preview_html_path = os.path.join(path, "Docs", "duplicate_preview.html")
+                plan_for_html = plan_for_checks or self._load_preview_plan(preview_plan_path)
+                if plan_for_html:
+                    export_consolidation_preview_html(
+                        plan_for_html,
+                        preview_html_path,
+                        show_artwork_variants=self.show_artwork_variants_var.get(),
+                    )
+                    self.preview_html_path = preview_html_path
+            if not plan_for_checks:
+                plan_for_checks = self._load_preview_plan(preview_plan_path)
+                if plan_for_checks:
+                    self._plan = plan_for_checks
+            if plan_for_checks and not self._thresholds_match(
+                getattr(plan_for_checks, "threshold_settings", None),
+                current_thresholds,
+            ):
+                messagebox.showwarning(
+                    "Thresholds Changed",
+                    "Threshold settings changed since the preview was generated. "
+                    "Generate a new preview to execute with the latest thresholds.",
+                )
+                self._log_action("Execute blocked: preview thresholds do not match current settings.")
+                return
+            if plan_for_checks and not self._fingerprint_settings_match(
+                getattr(plan_for_checks, "fingerprint_settings", None),
+                current_fingerprint_settings,
+            ):
+                messagebox.showwarning(
+                    "Thresholds Changed",
+                    "Fingerprint settings changed since the preview was generated. "
+                    "Generate a new preview to execute with the latest settings.",
+                )
+                self._log_action("Execute blocked: preview fingerprint settings do not match current settings.")
+                return
+            if plan_input:
+                self._log_action("Using in-memory plan for execution.")
+            else:
+                plan_input = preview_plan_path
+                self._log_action(f"Using preview output for execution: {preview_plan_path}")
+
+        if not plan_input:
+            messagebox.showwarning("Preview Required", "Generate a preview before executing.")
+            self._log_action("Execute blocked: no plan generated")
+            return
+        allow_review_required = self._execute_confirmation_pending
+        if plan_for_checks and plan_for_checks.review_required_count and not allow_review_required:
+            messagebox.showwarning(
+                "Review Required",
+                "Resolve review-required groups or confirm execution again to bypass the review block.",
+            )
+            self._log_action("Execute blocked: review required groups pending")
+            return
+        if self.delete_losers_var.get() and not self.quarantine_var.get():
+            messagebox.showwarning(
+                "Cleanup Required",
+                "Deletion requires cleanup to be enabled. Check Quarantine Duplicates or disable deletion.",
+            )
+            self._log_action("Execute blocked: deletion enabled while cleanup disabled")
+            return
+
+        playlists_dir = self.playlist_path_var.get().strip()
+        if not self.update_playlists_var.get():
+            playlists_dir = ""
+            self._log_action("Playlist updates disabled; playlists will not be rewritten.")
+        elif playlists_dir and not os.path.isdir(playlists_dir):
+            messagebox.showwarning(
+                "Playlist Folder Missing",
+                f"The selected playlist folder does not exist:\n{playlists_dir}",
+            )
+            self._log_action(f"Execute blocked: playlist folder missing ({playlists_dir})")
+            return
+
+        docs_dir = os.path.join(path, "Docs")
+        os.makedirs(docs_dir, exist_ok=True)
+        reports_dir = os.path.join(docs_dir, "duplicate_execution_reports")
+
+        def log_callback(msg: str) -> None:
+            self._schedule_after(0, self._log_action, msg)
+
+        disposition_counts = self._count_group_dispositions()
+        deletions_requested = disposition_counts.get("delete", 0) > 0
+        quarantines_requested = disposition_counts.get("quarantine", 0) > 0
+
+        config = ExecutionConfig(
+            library_root=path,
+            reports_dir=reports_dir,
+            playlists_dir=playlists_dir,
+            quarantine_dir=os.path.join(path, "Quarantine"),
+            quarantine_flatten=True,
+            log_callback=log_callback,
+            allow_review_required=allow_review_required,
+            retain_losers=not self.quarantine_var.get(),
+            allow_deletion=deletions_requested,
+            confirm_deletion=deletions_requested,
+            show_artwork_variants=self.show_artwork_variants_var.get(),
+        )
+
+        if not self.quarantine_var.get():
+            if quarantines_requested or deletions_requested:
+                self._log_action(
+                    "Quarantine disabled globally; group overrides will still move or delete selected losers."
+                )
+            else:
+                self._log_action("Quarantine disabled; duplicates will be retained in place.")
+        if deletions_requested:
+            self._log_action("Deletion enabled; selected losers will be deleted during execution.")
+
+        self._set_status("Executing…", progress=10)
+        self._log_action("Execute started")
+        self._reset_execute_confirmation()
+
+        def finish(result, error: Exception | None = None) -> None:
+            try:
+                if error is not None:
+                    self._log_action(f"Execution failed: {error}")
+                    self._set_status("Execution failed", progress=100)
+                    messagebox.showerror("Execution Failed", str(error))
+                    self._reset_execute_confirmation()
+                    return
+                cancelled = any(action.status == "cancelled" for action in result.actions)
+                if cancelled:
+                    status = "Execution cancelled"
+                else:
+                    status = "Executed" if result.success else "Execution failed"
+                self._set_status(status, progress=100)
+                if cancelled:
+                    self._log_action("Execution complete: cancelled")
+                else:
+                    self._log_action(f"Execution complete: {'success' if result.success else 'failed'}")
+                report_path = result.report_paths.get("html_report")
+                self._log_action(f"Execution report: {report_path}")
+                if report_path:
+                    if not os.path.exists(ensure_long_path(report_path)):
+                        self._log_action("Execution report missing at expected path; enabling Open Report anyway.")
+                    self.execution_report_path = report_path
+                    self.open_report_btn.config(state="normal")
+                else:
+                    self.execution_report_path = None
+                    self.open_report_btn.config(state="disabled")
+                if cancelled:
+                    report_line = ""
+                    if report_path:
+                        if os.path.exists(ensure_long_path(report_path)):
+                            report_line = f"\n\nReport (HTML): {report_path}"
+                        else:
+                            report_line = (
+                                "\n\nReport (HTML) was not found at the expected path:\n"
+                                f"{report_path}"
+                            )
+                    messagebox.showinfo(
+                        "Execution Cancelled",
+                        "Execution was cancelled. Review the report for details."
+                        f"{report_line}",
+                    )
+                elif not result.success:
+                    report_line = ""
+                    if report_path:
+                        if os.path.exists(ensure_long_path(report_path)):
+                            report_line = f"\n\nReport (HTML): {report_path}"
+                        else:
+                            report_line = (
+                                "\n\nReport (HTML) was not found at the expected path:\n"
+                                f"{report_path}"
+                            )
+                    messagebox.showwarning(
+                        "Execution Failed",
+                        "Execution completed with errors. Review the report for details."
+                        f"{report_line}",
+                    )
+                self._reset_execute_confirmation()
+            except Exception as exc:
+                self._log_action(f"Execution finish handler failed: {exc}")
+                self._set_status("Execution failed", progress=100)
+                messagebox.showerror(
+                    "Execution Failed",
+                    "An unexpected error occurred while finalizing execution. "
+                    "Check the log for details.",
+                )
+                self._reset_execute_confirmation()
+
+        def worker() -> None:
+            try:
+                result = execute_consolidation_plan(plan_input, config)
+            except Exception as exc:
+                self._schedule_after(0, finish, None, exc)
+                return
+            self._schedule_after(0, finish, result, None)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _toggle_update_playlists(self) -> None:
+        state = "enabled" if self.update_playlists_var.get() else "disabled"
+        self._log_action(f"Update Playlists {state}")
+        self._reset_execute_confirmation()
+
+    def _toggle_show_artwork_variants(self) -> None:
+        enabled = self.show_artwork_variants_var.get()
+        cfg = load_config()
+        cfg["duplicate_finder_show_artwork_variants"] = bool(enabled)
+        save_config(cfg)
+        state = "enabled" if enabled else "disabled"
+        self._log_action(f"Show different artwork variants {state}")
+        self._reset_execute_confirmation()
+
+    def _toggle_quarantine(self) -> None:
+        state = "enabled" if self.quarantine_var.get() else "disabled"
+        self._log_action(f"Quarantine Duplicates {state}")
+        if not self.quarantine_var.get() and self.delete_losers_var.get():
+            messagebox.showwarning(
+                "Cleanup Required",
+                "Deletion requires cleanup to be enabled. Re-enabling Quarantine Duplicates.",
+            )
+            self.quarantine_var.set(True)
+            self._log_action("Quarantine Duplicates enabled to support deletions.")
+        self._reset_preview_if_needed()
+        self._reset_execute_confirmation()
+
+    def _toggle_delete_losers(self) -> None:
+        if self.delete_losers_var.get():
+            if not self.quarantine_var.get():
+                self.quarantine_var.set(True)
+                self._log_action("Quarantine Duplicates enabled to support deletions.")
+            self._log_action("Delete losers enabled; preview will mark losers for deletion.")
+        else:
+            self._log_action("Delete losers disabled; preview will quarantine losers.")
+        self._apply_deletion_mode()
+        self._reset_preview_if_needed()
+        self._reset_execute_confirmation()
+
+    def _apply_deletion_mode(self) -> None:
+        if not self._plan:
+            return
+        default_disposition = self._default_group_disposition()
+        for group in self._plan.groups:
+            if group.group_id in self.group_disposition_overrides:
+                continue
+            for loser in group.losers:
+                current = group.loser_disposition.get(loser, "quarantine")
+                if current in ("retain", "quarantine", "delete"):
+                    group.loser_disposition[loser] = default_disposition
+        self._plan.refresh_plan_signature()
+        self._update_groups_view(self._plan)
+
+    def _reset_preview_if_needed(self) -> None:
+        if self.preview_json_path:
+            self.preview_json_path = None
+            self.preview_html_path = None
+            self._log_action("Preview cleared; generate a new preview to reflect delete settings.")
+
+    def _open_preview(self) -> None:
+        self._record_preview_trace("preview-open")
+        self._open_local_html(
+            self.preview_html_path,
+            title="Preview Output",
+            missing_message="Preview output could not be found. Generate a new preview.",
+            empty_message="No preview output is available yet.",
+        )
+
+    def _open_execution_report(self) -> None:
+        self._open_local_html(
+            self.execution_report_path,
+            title="Execution Report",
+            missing_message=(
+                "Execution report could not be found. Run the execution again to generate a new report."
+            ),
+            empty_message="No execution report is available yet.",
+        )
+
+    def _open_local_html(
+        self,
+        path: str | None,
+        *,
+        title: str,
+        missing_message: str,
+        empty_message: str,
+    ) -> None:
+        if not path:
+            messagebox.showinfo(title, empty_message)
+            return
+        safe_path = ensure_long_path(path)
+        if not os.path.exists(safe_path):
+            messagebox.showerror(f"{title} Missing", missing_message)
+            return
+        display_path = strip_ext_prefix(path)
+        try:
+            uri = Path(display_path).resolve().as_uri()
+        except Exception:
+            uri = display_path
+        webbrowser.open(uri)
+
+class SimilarityInspectorDialog(tk.Toplevel):
+    """Inspect fingerprint similarity for two selected audio files."""
+
+    def __init__(self, parent: tk.Widget):
+        super().__init__(parent)
+        self.title("Similarity Inspector")
+        self.transient(parent)
+        self.resizable(True, True)
+        self.parent = parent
+
+        cfg = load_config()
+        self.song_a_var = tk.StringVar()
+        self.song_b_var = tk.StringVar()
+        self.trim_silence_var = tk.BooleanVar(value=bool(cfg.get("trim_silence", False)))
+        self.offset_var = tk.StringVar(value=str(cfg.get("fingerprint_offset_ms", FP_OFFSET_MS)))
+        self.duration_var = tk.StringVar(value=str(cfg.get("fingerprint_duration_ms", FP_DURATION_MS)))
+        self.silence_db_var = tk.StringVar(value=str(cfg.get("fingerprint_silence_threshold_db", FP_SILENCE_THRESHOLD_DB)))
+        self.silence_len_var = tk.StringVar(value=str(cfg.get("fingerprint_silence_min_len_ms", FP_SILENCE_MIN_LEN_MS)))
+        self.exact_var = tk.StringVar(value=str(cfg.get("exact_duplicate_threshold", EXACT_DUPLICATE_THRESHOLD)))
+        self.near_var = tk.StringVar(value=str(cfg.get("near_duplicate_threshold", NEAR_DUPLICATE_THRESHOLD)))
+        self.mixed_var = tk.StringVar(value=str(cfg.get("mixed_codec_threshold_boost", MIXED_CODEC_THRESHOLD_BOOST)))
+
+        container = ttk.Frame(self, padding=12)
+        container.pack(fill="both", expand=True)
+
+        ttk.Label(
+            container,
+            text="Compare two tracks using the Duplicate Finder fingerprint pipeline.",
+            foreground="#555",
+            wraplength=520,
+        ).pack(anchor="w")
+
+        file_frame = ttk.LabelFrame(container, text="Tracks")
+        file_frame.pack(fill="x", pady=(10, 8))
+
+        def _file_row(label: str, var: tk.StringVar, row: int, command: Callable[[], None]) -> None:
+            ttk.Label(file_frame, text=label).grid(row=row, column=0, sticky="w", padx=6, pady=6)
+            ttk.Entry(file_frame, textvariable=var, width=60).grid(row=row, column=1, sticky="ew", padx=6, pady=6)
+            ttk.Button(file_frame, text="Browse…", command=command).grid(row=row, column=2, sticky="e", padx=6, pady=6)
+
+        _file_row("Song A", self.song_a_var, 0, lambda: self._choose_file(self.song_a_var))
+        _file_row("Song B", self.song_b_var, 1, lambda: self._choose_file(self.song_b_var))
+        file_frame.columnconfigure(1, weight=1)
+
+        controls = ttk.Frame(container)
+        controls.pack(fill="x", pady=(0, 8))
+        ttk.Button(controls, text="Run", command=self._run_inspection).pack(side="left")
+        ttk.Button(
+            controls,
+            text="Duplicate Finder Report",
+            command=self._run_duplicate_finder_report,
+        ).pack(side="left", padx=(6, 0))
+        ttk.Button(controls, text="Close", command=self.destroy).pack(side="left", padx=(6, 0))
+
+        self.advanced_visible = False
+        self.advanced_btn = ttk.Button(
+            container, text="Advanced ▸", command=self._toggle_advanced
+        )
+        self.advanced_btn.pack(anchor="w", pady=(4, 0))
+
+        self.advanced_frame = ttk.LabelFrame(container, text="Advanced Overrides")
+        self._build_advanced_controls()
+
+        results_frame = ttk.LabelFrame(container, text="Results")
+        results_frame.pack(fill="both", expand=True, pady=(10, 0))
+        self.results_text = ScrolledText(results_frame, height=12, wrap="word", state="disabled")
+        self.results_text.pack(fill="both", expand=True, padx=6, pady=6)
+
+    def _build_advanced_controls(self) -> None:
+        frame = self.advanced_frame
+        settings_frame = ttk.Frame(frame)
+        settings_frame.pack(fill="x", padx=8, pady=8)
+
+        ttk.Checkbutton(
+            settings_frame,
+            text="Trim leading/trailing silence before fingerprinting",
+            variable=self.trim_silence_var,
+        ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 6))
+
+        def _row(label: str, var: tk.StringVar, row: int) -> None:
+            ttk.Label(settings_frame, text=label).grid(row=row, column=0, sticky="w", pady=2)
+            ttk.Entry(settings_frame, textvariable=var, width=16).grid(row=row, column=1, sticky="w", pady=2)
+
+        row_idx = 1
+        _row("Fingerprint offset (ms)", self.offset_var, row_idx)
+        row_idx += 1
+        _row("Fingerprint duration (ms)", self.duration_var, row_idx)
+        row_idx += 1
+        _row("Silence threshold (dB)", self.silence_db_var, row_idx)
+        row_idx += 1
+        _row("Silence min length (ms)", self.silence_len_var, row_idx)
+        row_idx += 1
+        _row("Exact duplicate threshold", self.exact_var, row_idx)
+        row_idx += 1
+        _row("Near duplicate threshold", self.near_var, row_idx)
+        row_idx += 1
+        _row("Mixed-codec boost", self.mixed_var, row_idx)
+
+    def _toggle_advanced(self) -> None:
+        if self.advanced_visible:
+            self.advanced_frame.pack_forget()
+            self.advanced_btn.configure(text="Advanced ▸")
+            self.advanced_visible = False
+        else:
+            self.advanced_frame.pack(fill="x", pady=(6, 0))
+            self.advanced_btn.configure(text="Advanced ▾")
+            self.advanced_visible = True
+
+    def _choose_file(self, var: tk.StringVar) -> None:
+        initial_dir = load_last_path() or os.getcwd()
+        path = filedialog.askopenfilename(
+            title="Select audio file",
+            initialdir=initial_dir,
+        )
+        if path:
+            var.set(path)
+            save_last_path(os.path.dirname(path))
+
+    def _parse_float(self, raw: str, label: str, *, min_value: float | None = None) -> float | None:
+        try:
+            value = float(raw)
+        except ValueError:
+            messagebox.showwarning("Invalid Value", f"{label} must be a number.")
+            return None
+        if min_value is not None and value < min_value:
+            messagebox.showwarning("Invalid Value", f"{label} must be at least {min_value}.")
+            return None
+        return value
+
+    def _parse_int(self, raw: str, label: str, *, min_value: int | None = None) -> int | None:
+        try:
+            value = int(float(raw))
+        except ValueError:
+            messagebox.showwarning("Invalid Value", f"{label} must be a whole number.")
+            return None
+        if min_value is not None and value < min_value:
+            messagebox.showwarning("Invalid Value", f"{label} must be at least {min_value}.")
+            return None
+        return value
+
+    def _collect_settings(self) -> dict[str, float | int | bool] | None:
+        exact = self._parse_float(self.exact_var.get().strip(), "Exact duplicate threshold", min_value=0.0)
+        if exact is None:
+            return None
+        near = self._parse_float(self.near_var.get().strip(), "Near duplicate threshold", min_value=0.0)
+        if near is None:
+            return None
+        if near < exact:
+            messagebox.showwarning(
+                "Invalid Value",
+                "Near duplicate threshold must be greater than or equal to the exact threshold.",
+            )
+            return None
+        mixed = self._parse_float(self.mixed_var.get().strip(), "Mixed-codec boost", min_value=0.0)
+        if mixed is None:
+            return None
+        offset = self._parse_int(self.offset_var.get().strip(), "Fingerprint offset (ms)", min_value=0)
+        if offset is None:
+            return None
+        duration = self._parse_int(self.duration_var.get().strip(), "Fingerprint duration (ms)", min_value=0)
+        if duration is None:
+            return None
+        silence_db = self._parse_float(self.silence_db_var.get().strip(), "Silence threshold (dB)")
+        if silence_db is None:
+            return None
+        silence_len = self._parse_int(self.silence_len_var.get().strip(), "Silence min length (ms)", min_value=0)
+        if silence_len is None:
+            return None
+        return {
+            "exact_duplicate_threshold": exact,
+            "near_duplicate_threshold": near,
+            "mixed_codec_threshold_boost": mixed,
+            "fingerprint_offset_ms": offset,
+            "fingerprint_duration_ms": duration,
+            "fingerprint_silence_threshold_db": silence_db,
+            "fingerprint_silence_min_len_ms": silence_len,
+            "trim_silence": bool(self.trim_silence_var.get()),
+        }
+
+    def _threshold_settings_snapshot(self, settings: dict[str, float | int | bool]) -> dict[str, float]:
+        return {
+            "exact_duplicate_threshold": float(settings["exact_duplicate_threshold"]),
+            "near_duplicate_threshold": float(settings["near_duplicate_threshold"]),
+            "mixed_codec_threshold_boost": float(settings["mixed_codec_threshold_boost"]),
+            "preview_artwork_max_dim": float(settings.get("preview_artwork_max_dim", PREVIEW_ARTWORK_MAX_DIM)),
+            "preview_artwork_quality": float(settings.get("preview_artwork_quality", PREVIEW_ARTWORK_QUALITY)),
+        }
+
+    def _fingerprint_settings_snapshot(self, settings: dict[str, float | int | bool]) -> dict[str, object]:
+        return {
+            "trim_silence": bool(settings["trim_silence"]),
+            "fingerprint_offset_ms": int(settings["fingerprint_offset_ms"]),
+            "fingerprint_duration_ms": int(settings["fingerprint_duration_ms"]),
+            "fingerprint_silence_threshold_db": float(settings["fingerprint_silence_threshold_db"]),
+            "fingerprint_silence_min_len_ms": int(settings["fingerprint_silence_min_len_ms"]),
+        }
+
+    def _is_lossless(self, path: str) -> bool:
+        ext = os.path.splitext(path)[1].lower()
+        return ext in LOSSLESS_EXTS
+
+    def _fingerprint_for_path(self, path: str, settings: dict[str, float | int | bool]) -> tuple[str | None, str | None]:
+        try:
+            start_sec = float(settings["fingerprint_offset_ms"]) / 1000.0
+            duration_ms = float(settings["fingerprint_duration_ms"])
+            duration_sec = duration_ms / 1000.0 if duration_ms > 0 else 120.0
+            silence_db = float(settings["fingerprint_silence_threshold_db"])
+            silence_len = float(settings["fingerprint_silence_min_len_ms"]) / 1000.0
+            fp = chromaprint_utils.fingerprint_fpcalc(
+                ensure_long_path(path),
+                trim=bool(settings["trim_silence"]),
+                start_sec=start_sec,
+                duration_sec=duration_sec,
+                threshold_db=silence_db,
+                min_silence_duration=silence_len,
+            )
+            return fp, None
+        except chromaprint_utils.FingerprintError as exc:
+            return None, str(exc)
+        except Exception as exc:  # pragma: no cover - guard against unexpected failures
+            return None, str(exc)
+
+    def _format_duration(self, seconds: float | None) -> str:
+        if not seconds:
+            return "n/a"
+        total = int(round(seconds))
+        hours, rem = divmod(total, 3600)
+        minutes, secs = divmod(rem, 60)
+        if hours:
+            return f"{hours}:{minutes:02d}:{secs:02d}"
+        return f"{minutes}:{secs:02d}"
+
+    def _audio_summary(self, path: str) -> dict[str, object]:
+        summary: dict[str, object] = {
+            "path": path,
+            "codec": os.path.splitext(path)[1].lstrip(".").upper() or "n/a",
+            "sample_rate": None,
+            "channels": None,
+            "duration": None,
+        }
+        try:
+            audio = MutagenFile(ensure_long_path(path))
+        except Exception:
+            audio = None
+        if audio and hasattr(audio, "info") and audio.info:
+            info = audio.info
+            codec = getattr(info, "codec", None)
+            if not codec and getattr(audio, "mime", None):
+                mime = audio.mime
+                if isinstance(mime, (list, tuple)) and mime:
+                    codec = mime[0]
+                elif isinstance(mime, str):
+                    codec = mime
+            summary["codec"] = codec or summary["codec"]
+            summary["sample_rate"] = getattr(info, "sample_rate", None) or getattr(info, "samplerate", None)
+            summary["channels"] = getattr(info, "channels", None)
+            summary["duration"] = getattr(info, "length", None)
+        return summary
+
+    def _format_summary_line(self, summary: dict[str, object]) -> str:
+        sample_rate = summary.get("sample_rate") or "n/a"
+        channels = summary.get("channels") or "n/a"
+        duration = self._format_duration(summary.get("duration") if isinstance(summary.get("duration"), (int, float)) else None)
+        codec = summary.get("codec") or "n/a"
+        return f"Codec: {codec} | Sample rate: {sample_rate} Hz | Channels: {channels} | Duration: {duration}"
+
+    def _export_similarity_inspector_html(
+        self,
+        *,
+        report_path: str,
+        summary_a: dict[str, object],
+        summary_b: dict[str, object],
+        settings: dict[str, float | int | bool],
+        exact_threshold: float,
+        near_threshold: float,
+        mixed_boost: float,
+        mixed_codec: bool,
+        effective_near: float,
+        distance: float,
+        verdict: str,
+        off_by: float | None,
+        err_a: str | None,
+        err_b: str | None,
+    ) -> None:
+        def esc(value: object) -> str:
+            return html.escape(str(value))
+
+        html_lines = [
+            "<!doctype html>",
+            "<html lang='en'>",
+            "<head>",
+            "<meta charset='utf-8' />",
+            "<title>Similarity Inspector Report</title>",
+            "<style>",
+            "body{font-family:Arial, sans-serif; margin:24px; color:#222;}",
+            "h1{font-size:20px; margin-bottom:6px;}",
+            "h2{font-size:16px; margin-top:24px;}",
+            "table{border-collapse:collapse; width:100%; margin-top:8px;}",
+            "th,td{border:1px solid #ddd; padding:8px; text-align:left; vertical-align:top;}",
+            "th{background:#f4f4f4; width:200px;}",
+            ".path{font-family:monospace; word-break:break-all;}",
+            ".meta{color:#555; font-size:12px; margin-top:4px;}",
+            ".muted{color:#666; font-size:12px;}",
+            "</style>",
+            "</head>",
+            "<body>",
+            "<h1>Similarity Inspector Report</h1>",
+            f"<div class='muted'>Generated: {esc(datetime.now().strftime('%Y-%m-%d %H:%M:%S'))}</div>",
+            "<h2>Verdict</h2>",
+            "<table>",
+            f"<tr><th>Verdict</th><td>{esc(verdict)}</td></tr>",
+            f"<tr><th>Raw fingerprint distance</th><td>{esc(f'{distance:.4f}')}</td></tr>",
+            f"<tr><th>Effective near threshold</th><td>{esc(f'{effective_near:.4f}')}</td></tr>",
+            "</table>",
+            "<h2>Tracks</h2>",
+            "<table>",
+            "<tr><th>Song A</th><td>",
+            f"<div class='path'>{esc(summary_a.get('path'))}</div>",
+            f"<div class='meta'>{esc(self._format_summary_line(summary_a))}</div>",
+            "</td></tr>",
+            "<tr><th>Song B</th><td>",
+            f"<div class='path'>{esc(summary_b.get('path'))}</div>",
+            f"<div class='meta'>{esc(self._format_summary_line(summary_b))}</div>",
+            "</td></tr>",
+            "</table>",
+            "<h2>Fingerprint Settings</h2>",
+            "<table>",
+            f"<tr><th>Trim silence</th><td>{esc(settings['trim_silence'])}</td></tr>",
+            f"<tr><th>Fingerprint offset (ms)</th><td>{esc(settings['fingerprint_offset_ms'])}</td></tr>",
+            f"<tr><th>Fingerprint duration (ms)</th><td>{esc(settings['fingerprint_duration_ms'])}</td></tr>",
+            f"<tr><th>Silence threshold (dB)</th><td>{esc(settings['fingerprint_silence_threshold_db'])}</td></tr>",
+            f"<tr><th>Silence min length (ms)</th><td>{esc(settings['fingerprint_silence_min_len_ms'])}</td></tr>",
+            "</table>",
+            "<h2>Thresholds</h2>",
+            "<table>",
+            f"<tr><th>Exact threshold</th><td>{esc(f'{exact_threshold:.4f}')}</td></tr>",
+            f"<tr><th>Near threshold</th><td>{esc(f'{near_threshold:.4f}')}</td></tr>",
+            f"<tr><th>Mixed-codec boost</th><td>{esc(f'{mixed_boost:.4f}')}</td></tr>",
+            f"<tr><th>Mixed-codec applied</th><td>{esc('Yes' if mixed_codec else 'No')}</td></tr>",
+            "</table>",
+        ]
+        if off_by is not None:
+            html_lines.extend(
+                [
+                    "<h2>Distance Gap</h2>",
+                    "<table>",
+                    f"<tr><th>How far off</th><td>{esc(f'{off_by:.4f}')}</td></tr>",
+                    "</table>",
+                ]
+            )
+        if err_a or err_b:
+            html_lines.extend(["<h2>Fingerprint Errors</h2>", "<table>"])
+            if err_a:
+                html_lines.append(f"<tr><th>Song A</th><td>{esc(err_a)}</td></tr>")
+            if err_b:
+                html_lines.append(f"<tr><th>Song B</th><td>{esc(err_b)}</td></tr>")
+            html_lines.append("</table>")
+        html_lines.extend(["</body>", "</html>"])
+
+        with open(report_path, "w", encoding="utf-8") as handle:
+            handle.write("\n".join(html_lines))
+
+    def _set_results(self, text: str) -> None:
+        self.results_text.configure(state="normal")
+        self.results_text.delete("1.0", "end")
+        self.results_text.insert("end", text)
+        self.results_text.configure(state="disabled")
+        self.results_text.see("end")
+
+    def _run_inspection(self) -> None:
+        path_a = self.song_a_var.get().strip()
+        path_b = self.song_b_var.get().strip()
+        if not path_a or not path_b:
+            messagebox.showwarning("Missing Files", "Please select both Song A and Song B.")
+            return
+        for path in (path_a, path_b):
+            if not os.path.isfile(path):
+                messagebox.showwarning("Invalid File", f"File not found:\n{path}")
+                return
+            if os.path.splitext(path)[1].lower() not in SUPPORTED_EXTS:
+                messagebox.showwarning("Unsupported File", f"Unsupported audio file:\n{path}")
+                return
+
+        library_root = None
+        if hasattr(self.parent, "require_library"):
+            library_root = self.parent.require_library()
+        if not library_root:
+            return
+
+        settings = self._collect_settings()
+        if settings is None:
+            return
+
+        fp_a, err_a = self._fingerprint_for_path(path_a, settings)
+        fp_b, err_b = self._fingerprint_for_path(path_b, settings)
+        distance = fingerprint_distance(fp_a, fp_b)
+
+        exact_threshold = float(settings["exact_duplicate_threshold"])
+        near_threshold = max(float(settings["near_duplicate_threshold"]), exact_threshold)
+        mixed_boost = float(settings["mixed_codec_threshold_boost"])
+        mixed_codec = self._is_lossless(path_a) != self._is_lossless(path_b)
+        effective_near = near_threshold + mixed_boost if mixed_codec else near_threshold
+
+        if fp_a and fp_b:
+            if distance <= exact_threshold:
+                verdict = "Exact duplicate"
+            elif distance <= effective_near:
+                verdict = "Near duplicate"
+            else:
+                verdict = "Not a match"
+        else:
+            verdict = "Not a match (fingerprint unavailable)"
+
+        off_by = None
+        if distance > effective_near:
+            off_by = distance - effective_near
+
+        summary_a = self._audio_summary(path_a)
+        summary_b = self._audio_summary(path_b)
+
+        docs_dir = os.path.join(library_root, "Docs")
+        os.makedirs(docs_dir, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        report_path = os.path.join(docs_dir, f"similarity_inspector_report_{timestamp}.html")
+        try:
+            self._export_similarity_inspector_html(
+                report_path=report_path,
+                summary_a=summary_a,
+                summary_b=summary_b,
+                settings=settings,
+                exact_threshold=exact_threshold,
+                near_threshold=near_threshold,
+                mixed_boost=mixed_boost,
+                mixed_codec=mixed_codec,
+                effective_near=effective_near,
+                distance=distance,
+                verdict=verdict,
+                off_by=off_by,
+                err_a=err_a,
+                err_b=err_b,
+            )
+        except OSError as exc:
+            messagebox.showwarning("Report Save Failed", f"Could not save report:\n{exc}")
+
+        report_lines = [
+            "Similarity Inspector Report",
+            f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+            "",
+            f"Verdict: {verdict}",
+            f"Raw fingerprint distance: {distance:.4f}",
+        ]
+        if off_by is not None:
+            report_lines.append(f"How far off: {off_by:.4f} above the effective near threshold")
+        if err_a or err_b:
+            report_lines.append("")
+            report_lines.append("Fingerprint Errors:")
+            if err_a:
+                report_lines.append(f"  Song A: {err_a}")
+            if err_b:
+                report_lines.append(f"  Song B: {err_b}")
+        report_lines.append("")
+        report_lines.append(f"Saved HTML report: {report_path}")
+        self._set_results("\n".join(report_lines))
+
+    def _run_duplicate_finder_report(self) -> None:
+        path_a = self.song_a_var.get().strip()
+        path_b = self.song_b_var.get().strip()
+        if not path_a or not path_b:
+            messagebox.showwarning("Missing Files", "Please select both Song A and Song B.")
+            return
+        for path in (path_a, path_b):
+            if not os.path.isfile(path):
+                messagebox.showwarning("Invalid File", f"File not found:\n{path}")
+                return
+            if os.path.splitext(path)[1].lower() not in SUPPORTED_EXTS:
+                messagebox.showwarning("Unsupported File", f"Unsupported audio file:\n{path}")
+                return
+
+        library_root = None
+        if hasattr(self.parent, "require_library"):
+            library_root = self.parent.require_library()
+        if not library_root:
+            return
+
+        settings = self._collect_settings()
+        if settings is None:
+            return
+
+        fp_a, err_a = self._fingerprint_for_path(path_a, settings)
+        fp_b, err_b = self._fingerprint_for_path(path_b, settings)
+
+        report = build_duplicate_pair_report(
+            {"path": path_a, "fingerprint": fp_a, "ext": os.path.splitext(path_a)[1].lower()},
+            {"path": path_b, "fingerprint": fp_b, "ext": os.path.splitext(path_b)[1].lower()},
+            exact_duplicate_threshold=float(settings["exact_duplicate_threshold"]),
+            near_duplicate_threshold=float(settings["near_duplicate_threshold"]),
+            mixed_codec_threshold_boost=float(settings["mixed_codec_threshold_boost"]),
+            fingerprint_settings=self._fingerprint_settings_snapshot(settings),
+            threshold_settings=self._threshold_settings_snapshot(settings),
+        )
+
+        docs_dir = os.path.join(library_root, "Docs")
+        os.makedirs(docs_dir, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        report_path = os.path.join(docs_dir, f"duplicate_pair_report_{timestamp}.html")
+        try:
+            export_duplicate_pair_report_html(report, report_path)
+        except OSError as exc:
+            messagebox.showwarning("Report Save Failed", f"Could not save report:\n{exc}")
+            report_path = None
+
+        report_lines = [
+            "Duplicate Finder Pair Report",
+            f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+            "",
+            f"Verdict: {report.verdict}",
+            f"Match type: {report.match_type}",
+        ]
+        if report.fingerprint_distance is not None:
+            report_lines.append(f"Fingerprint distance: {report.fingerprint_distance:.4f}")
+        report_lines.append("")
+        report_lines.append("Gate Checks:")
+        for step in report.steps:
+            report_lines.append(f"  - {step.name}: {step.status} ({step.detail})")
+        if err_a or err_b:
+            report_lines.append("")
+            report_lines.append("Fingerprint Errors:")
+            if err_a:
+                report_lines.append(f"  Song A: {err_a}")
+            if err_b:
+                report_lines.append(f"  Song B: {err_b}")
+        if report_path:
+            report_lines.append("")
+            report_lines.append(f"Saved HTML report: {report_path}")
+
+        self._set_results("\n".join(report_lines))
+
+
+class FuzzyDuplicateFinderDialog(tk.Toplevel):
+    """Find fuzzy duplicates using metadata words and fingerprint checks."""
+
+    def __init__(self, parent: tk.Widget):
+        super().__init__(parent)
+        self.title("Metadata Fuzzy Duplicate Finder")
+        self.transient(parent)
+        self.resizable(True, True)
+        self.parent = parent
+        cfg = load_config()
+
+        self.min_word_len_var = tk.StringVar(value="4")
+        self.min_shared_var = tk.StringVar(value="2")
+        self.max_word_freq_var = tk.StringVar(value="200")
+        self.include_title_var = tk.BooleanVar(value=True)
+        self.include_artist_var = tk.BooleanVar(value=True)
+        self.include_album_var = tk.BooleanVar(value=True)
+        self.include_album_artist_var = tk.BooleanVar(value=True)
+        self.include_genre_var = tk.BooleanVar(value=False)
+        self.include_filename_var = tk.BooleanVar(value=False)
+
+        self.exact_var = tk.StringVar(value=str(cfg.get("exact_duplicate_threshold", EXACT_DUPLICATE_THRESHOLD)))
+        self.near_var = tk.StringVar(value=str(cfg.get("near_duplicate_threshold", NEAR_DUPLICATE_THRESHOLD)))
+        self.mixed_var = tk.StringVar(value=str(cfg.get("mixed_codec_threshold_boost", MIXED_CODEC_THRESHOLD_BOOST)))
+        self.include_missing_fp_var = tk.BooleanVar(value=False)
+        self.include_non_matches_var = tk.BooleanVar(value=False)
+        self.skip_fingerprint_var = tk.BooleanVar(value=False)
+
+        self.status_var = tk.StringVar(value="Ready")
+        self.progress_var = tk.StringVar(value="")
+        self.summary_var = tk.StringVar(value="No results yet.")
+
+        self._results: list[dict[str, object]] = []
+        self._scan_thread: threading.Thread | None = None
+        self._cancel_event = threading.Event()
+
+        container = ttk.Frame(self, padding=12)
+        container.pack(fill="both", expand=True)
+
+        ttk.Label(
+            container,
+            text="Find duplicate candidates by matching metadata words, then validate with fingerprints.",
+            foreground="#555",
+            wraplength=760,
+        ).pack(anchor="w")
+
+        settings_frame = ttk.LabelFrame(container, text="Metadata Match Settings")
+        settings_frame.pack(fill="x", pady=(10, 8))
+        settings_frame.columnconfigure(1, weight=1)
+        settings_frame.columnconfigure(3, weight=1)
+
+        ttk.Label(settings_frame, text="Min word length (>3):").grid(row=0, column=0, sticky="w", padx=6, pady=4)
+        ttk.Entry(settings_frame, textvariable=self.min_word_len_var, width=6).grid(
+            row=0, column=1, sticky="w", padx=6, pady=4
+        )
+        ttk.Label(settings_frame, text="Min shared words:").grid(row=0, column=2, sticky="w", padx=6, pady=4)
+        ttk.Entry(settings_frame, textvariable=self.min_shared_var, width=6).grid(
+            row=0, column=3, sticky="w", padx=6, pady=4
+        )
+        ttk.Label(settings_frame, text="Ignore words seen in >N tracks:").grid(
+            row=1, column=0, sticky="w", padx=6, pady=4
+        )
+        ttk.Entry(settings_frame, textvariable=self.max_word_freq_var, width=6).grid(
+            row=1, column=1, sticky="w", padx=6, pady=4
+        )
+
+        field_frame = ttk.Frame(settings_frame)
+        field_frame.grid(row=2, column=0, columnspan=4, sticky="w", padx=6, pady=(4, 6))
+        ttk.Label(field_frame, text="Search fields:").pack(side="left")
+        ttk.Checkbutton(field_frame, text="Title", variable=self.include_title_var).pack(side="left", padx=(6, 0))
+        ttk.Checkbutton(field_frame, text="Artist", variable=self.include_artist_var).pack(side="left", padx=(6, 0))
+        ttk.Checkbutton(field_frame, text="Album", variable=self.include_album_var).pack(side="left", padx=(6, 0))
+        ttk.Checkbutton(field_frame, text="Album Artist", variable=self.include_album_artist_var).pack(
+            side="left", padx=(6, 0)
+        )
+        ttk.Checkbutton(field_frame, text="Genre", variable=self.include_genre_var).pack(side="left", padx=(6, 0))
+        ttk.Checkbutton(field_frame, text="Filename", variable=self.include_filename_var).pack(side="left", padx=(6, 0))
+
+        fp_frame = ttk.LabelFrame(container, text="Fingerprint Filter")
+        fp_frame.pack(fill="x", pady=(0, 8))
+        fp_frame.columnconfigure(1, weight=1)
+        fp_frame.columnconfigure(3, weight=1)
+
+        ttk.Label(fp_frame, text="Exact threshold:").grid(row=0, column=0, sticky="w", padx=6, pady=4)
+        ttk.Entry(fp_frame, textvariable=self.exact_var, width=8).grid(row=0, column=1, sticky="w", padx=6, pady=4)
+        ttk.Label(fp_frame, text="Near threshold:").grid(row=0, column=2, sticky="w", padx=6, pady=4)
+        ttk.Entry(fp_frame, textvariable=self.near_var, width=8).grid(row=0, column=3, sticky="w", padx=6, pady=4)
+        ttk.Label(fp_frame, text="Mixed-codec boost:").grid(row=1, column=0, sticky="w", padx=6, pady=4)
+        ttk.Entry(fp_frame, textvariable=self.mixed_var, width=8).grid(row=1, column=1, sticky="w", padx=6, pady=4)
+        self.include_missing_fp_check = ttk.Checkbutton(
+            fp_frame,
+            text="Include pairs without fingerprints",
+            variable=self.include_missing_fp_var,
+        )
+        self.include_missing_fp_check.grid(row=1, column=2, columnspan=2, sticky="w", padx=6, pady=4)
+        self.skip_fingerprint_check = ttk.Checkbutton(
+            fp_frame,
+            text="Skip fingerprint check (metadata-only scan)",
+            variable=self.skip_fingerprint_var,
+            command=self._toggle_fingerprint_controls,
+        )
+        self.skip_fingerprint_check.grid(row=2, column=0, columnspan=4, sticky="w", padx=6, pady=(0, 4))
+
+        fp_help = ttk.Label(
+            fp_frame,
+            text=(
+                "Tip: “Include pairs without fingerprints” keeps items where fingerprinting fails. "
+                "“Skip fingerprint check” avoids fingerprinting entirely."
+            ),
+            foreground="#666",
+            wraplength=720,
+        )
+        fp_help.grid(row=3, column=0, columnspan=4, sticky="w", padx=6, pady=(0, 6))
+
+        action_row = ttk.Frame(container)
+        action_row.pack(fill="x", pady=(0, 6))
+        self.run_btn = ttk.Button(action_row, text="Run Scan", command=self._start_scan)
+        self.run_btn.pack(side="left")
+        self.cancel_btn = ttk.Button(action_row, text="Cancel", command=self._cancel_scan, state="disabled")
+        self.cancel_btn.pack(side="left", padx=(6, 0))
+        ttk.Checkbutton(
+            action_row,
+            text="Include non-matching fingerprints in review",
+            variable=self.include_non_matches_var,
+        ).pack(side="left", padx=(12, 0))
+        ttk.Button(action_row, text="Close", command=self.destroy).pack(side="right")
+
+        progress_row = ttk.Frame(container)
+        progress_row.pack(fill="x", pady=(0, 6))
+        ttk.Label(progress_row, textvariable=self.progress_var, foreground="#555").pack(side="left")
+        ttk.Label(progress_row, textvariable=self.status_var, foreground="#777").pack(side="right")
+
+        self.progress_bar = ttk.Progressbar(container, mode="determinate")
+        self.progress_bar.pack(fill="x", pady=(0, 8))
+
+        results_frame = ttk.LabelFrame(container, text="Candidate Results")
+        results_frame.pack(fill="both", expand=True)
+        results_frame.rowconfigure(1, weight=1)
+        results_frame.columnconfigure(0, weight=1)
+
+        ttk.Label(results_frame, textvariable=self.summary_var, foreground="#555").grid(
+            row=0, column=0, sticky="w", padx=6, pady=(6, 0)
+        )
+
+        columns = ("verdict", "distance", "shared", "words", "track_a", "track_b")
+        self.results_tree = ttk.Treeview(results_frame, columns=columns, show="headings", height=10)
+        self.results_tree.heading("verdict", text="Verdict")
+        self.results_tree.heading("distance", text="Distance")
+        self.results_tree.heading("shared", text="Shared Words")
+        self.results_tree.heading("words", text="Matched Words")
+        self.results_tree.heading("track_a", text="Track A")
+        self.results_tree.heading("track_b", text="Track B")
+        self.results_tree.column("verdict", width=100, anchor="w")
+        self.results_tree.column("distance", width=80, anchor="center")
+        self.results_tree.column("shared", width=110, anchor="center")
+        self.results_tree.column("words", width=220, anchor="w")
+        self.results_tree.column("track_a", width=260, anchor="w")
+        self.results_tree.column("track_b", width=260, anchor="w")
+        self.results_tree.grid(row=1, column=0, sticky="nsew", padx=6, pady=6)
+        tree_scroll = ttk.Scrollbar(results_frame, orient="vertical", command=self.results_tree.yview)
+        tree_scroll.grid(row=1, column=1, sticky="ns", pady=6)
+        self.results_tree.configure(yscrollcommand=tree_scroll.set)
+        self.results_tree.bind("<<TreeviewSelect>>", self._show_result_details)
+
+        details_frame = ttk.LabelFrame(container, text="Selected Pair Details")
+        details_frame.pack(fill="x", pady=(8, 0))
+        self.details_text = ScrolledText(details_frame, height=6, wrap="word", state="disabled")
+        self.details_text.pack(fill="both", expand=True, padx=6, pady=6)
+
+        review_row = ttk.Frame(container)
+        review_row.pack(fill="x", pady=(6, 0))
+        self.review_btn = ttk.Button(
+            review_row,
+            text="Send Matches to Duplicate Pair Review",
+            command=self._send_to_pair_review,
+            state="disabled",
+        )
+        self.review_btn.pack(side="left")
+
+        self._toggle_fingerprint_controls()
+
+    def _log_details(self, text: str) -> None:
+        self.details_text.configure(state="normal")
+        self.details_text.delete("1.0", "end")
+        self.details_text.insert("end", text)
+        self.details_text.configure(state="disabled")
+
+    def _show_result_details(self, _event: tk.Event | None = None) -> None:  # type: ignore[name-defined]
+        selected = self.results_tree.selection()
+        if not selected:
+            return
+        item_id = selected[0]
+        try:
+            idx = int(self.results_tree.item(item_id, "tags")[0])
+        except (ValueError, IndexError):
+            return
+        if idx < 0 or idx >= len(self._results):
+            return
+        result = self._results[idx]
+        lines = [
+            f"Verdict: {result.get('verdict')}",
+            f"Fingerprint distance: {result.get('distance')}",
+            f"Shared words ({result.get('shared_count')}): {', '.join(result.get('words', []))}",
+            "",
+            f"Track A: {result.get('left_path')}",
+            f"Track B: {result.get('right_path')}",
+        ]
+        self._log_details("\n".join(lines))
+
+    def _parse_int(self, raw: str, label: str, *, min_value: int | None = None) -> int | None:
+        try:
+            value = int(float(raw))
+        except ValueError:
+            messagebox.showwarning("Invalid Value", f"{label} must be a whole number.")
+            return None
+        if min_value is not None and value < min_value:
+            messagebox.showwarning("Invalid Value", f"{label} must be at least {min_value}.")
+            return None
+        return value
+
+    def _parse_float(self, raw: str, label: str, *, min_value: float | None = None) -> float | None:
+        try:
+            value = float(raw)
+        except ValueError:
+            messagebox.showwarning("Invalid Value", f"{label} must be a number.")
+            return None
+        if min_value is not None and value < min_value:
+            messagebox.showwarning("Invalid Value", f"{label} must be at least {min_value}.")
+            return None
+        return value
+
+    def _toggle_fingerprint_controls(self) -> None:
+        if self.skip_fingerprint_var.get():
+            self.include_missing_fp_check.configure(state="disabled")
+        else:
+            self.include_missing_fp_check.configure(state="normal")
+
+    def _collect_settings(self) -> dict[str, object] | None:
+        min_word_len = self._parse_int(self.min_word_len_var.get().strip(), "Min word length", min_value=4)
+        if min_word_len is None:
+            return None
+        min_shared = self._parse_int(self.min_shared_var.get().strip(), "Min shared words", min_value=1)
+        if min_shared is None:
+            return None
+        max_word_freq = self._parse_int(
+            self.max_word_freq_var.get().strip() or "0", "Max word frequency", min_value=0
+        )
+        if max_word_freq is None:
+            return None
+        exact = self._parse_float(self.exact_var.get().strip(), "Exact threshold", min_value=0.0)
+        if exact is None:
+            return None
+        near = self._parse_float(self.near_var.get().strip(), "Near threshold", min_value=0.0)
+        if near is None:
+            return None
+        if near < exact:
+            messagebox.showwarning(
+                "Invalid Value",
+                "Near threshold must be greater than or equal to the exact threshold.",
+            )
+            return None
+        mixed = self._parse_float(self.mixed_var.get().strip(), "Mixed-codec boost", min_value=0.0)
+        if mixed is None:
+            return None
+        fields = {
+            "title": bool(self.include_title_var.get()),
+            "artist": bool(self.include_artist_var.get()),
+            "album": bool(self.include_album_var.get()),
+            "albumartist": bool(self.include_album_artist_var.get()),
+            "genre": bool(self.include_genre_var.get()),
+            "filename": bool(self.include_filename_var.get()),
+        }
+        if not any(fields.values()):
+            messagebox.showwarning("Missing Fields", "Select at least one metadata field to match.")
+            return None
+        skip_fingerprint = bool(self.skip_fingerprint_var.get())
+        return {
+            "min_word_len": min_word_len,
+            "min_shared": min_shared,
+            "max_word_freq": max_word_freq,
+            "fields": fields,
+            "exact_threshold": exact,
+            "near_threshold": near,
+            "mixed_boost": mixed,
+            "include_missing_fp": False if skip_fingerprint else bool(self.include_missing_fp_var.get()),
+            "skip_fingerprint": skip_fingerprint,
+        }
+
+    def _tokenize(self, text: str, min_len: int) -> set[str]:
+        tokens = re.findall(r"[a-z0-9]+", text.lower())
+        return {tok for tok in tokens if len(tok) >= min_len and not tok.isdigit()}
+
+    def _metadata_words(self, path: str, tags: dict[str, object], fields: dict[str, bool], min_len: int) -> set[str]:
+        words: set[str] = set()
+        if fields.get("title") and tags.get("title"):
+            words |= self._tokenize(str(tags.get("title")), min_len)
+        if fields.get("artist") and tags.get("artist"):
+            words |= self._tokenize(str(tags.get("artist")), min_len)
+        if fields.get("album") and tags.get("album"):
+            words |= self._tokenize(str(tags.get("album")), min_len)
+        if fields.get("albumartist") and tags.get("albumartist"):
+            words |= self._tokenize(str(tags.get("albumartist")), min_len)
+        if fields.get("genre") and tags.get("genre"):
+            words |= self._tokenize(str(tags.get("genre")), min_len)
+        if fields.get("filename"):
+            stem = os.path.splitext(os.path.basename(path))[0]
+            words |= self._tokenize(stem, min_len)
+        return words
+
+    def _walk_library_files(self, library_root: str) -> list[str]:
+        paths: list[str] = []
+        for dirpath, _dirs, files in os.walk(library_root):
+            rel = os.path.relpath(dirpath, library_root)
+            parts = {p.lower() for p in rel.split(os.sep)}
+            if {"not sorted", "playlists"} & parts:
+                continue
+            for fname in files:
+                if os.path.splitext(fname)[1].lower() in SUPPORTED_EXTS:
+                    paths.append(os.path.join(dirpath, fname))
+        return paths
+
+    def _is_lossless(self, path: str) -> bool:
+        return os.path.splitext(path)[1].lower() in LOSSLESS_EXTS
+
+    def _start_scan(self) -> None:
+        if self._scan_thread and self._scan_thread.is_alive():
+            return
+        settings = self._collect_settings()
+        if settings is None:
+            return
+        library = None
+        if hasattr(self.parent, "require_library"):
+            library = self.parent.require_library()
+        if not library:
+            return
+        self._cancel_event.clear()
+        self._results = []
+        self.results_tree.delete(*self.results_tree.get_children())
+        self.summary_var.set("Scanning…")
+        self.progress_var.set("")
+        self.status_var.set("Running")
+        self.run_btn.configure(state="disabled")
+        self.cancel_btn.configure(state="normal")
+        self.review_btn.configure(state="disabled")
+        self._log_details("")
+        self._scan_thread = threading.Thread(
+            target=self._scan_worker,
+            args=(library, settings),
+            daemon=True,
+        )
+        self._scan_thread.start()
+
+    def _cancel_scan(self) -> None:
+        self._cancel_event.set()
+        self.status_var.set("Cancelling…")
+
+    def _scan_worker(self, library_root: str, settings: dict[str, object]) -> None:
+        def schedule(fn: Callable, *args, **kwargs) -> None:
+            self.after(0, lambda: fn(*args, **kwargs))
+
+        try:
+            schedule(self.progress_var.set, "Collecting audio files…")
+            paths = self._walk_library_files(library_root)
+            if self._cancel_event.is_set():
+                schedule(self._finish_scan, "Cancelled")
+                return
+            total = len(paths)
+            schedule(self.progress_bar.configure, maximum=max(total, 1), value=0)
+            schedule(self.progress_var.set, f"Reading metadata (0/{total})…")
+
+            fields = settings["fields"]
+            min_len = int(settings["min_word_len"])
+            max_word_freq = int(settings["max_word_freq"])
+
+            word_index: dict[str, set[int]] = defaultdict(set)
+            for idx, path in enumerate(paths):
+                if self._cancel_event.is_set():
+                    schedule(self._finish_scan, "Cancelled")
+                    return
+                tags, _covers, _error, _reader = read_metadata(path, include_cover=False)
+                words = self._metadata_words(path, tags, fields, min_len)
+                if words:
+                    for word in words:
+                        word_index[word].add(idx)
+                schedule(self.progress_bar.configure, value=idx + 1)
+                schedule(self.progress_var.set, f"Reading metadata ({idx + 1}/{total})…")
+
+            if self._cancel_event.is_set():
+                schedule(self._finish_scan, "Cancelled")
+                return
+
+            schedule(self.progress_var.set, "Building candidate pairs…")
+            pair_words: dict[tuple[int, int], set[str]] = defaultdict(set)
+            for word, idxs in word_index.items():
+                if max_word_freq and len(idxs) > max_word_freq:
+                    continue
+                if len(idxs) < 2:
+                    continue
+                for left, right in combinations(sorted(idxs), 2):
+                    pair_words[(left, right)].add(word)
+
+            min_shared = int(settings["min_shared"])
+            candidates: list[tuple[int, int, list[str]]] = []
+            for (left, right), words in pair_words.items():
+                if len(words) >= min_shared:
+                    candidates.append((left, right, sorted(words)))
+
+            if not candidates:
+                schedule(self._finish_scan, "No candidates found.")
+                return
+
+            candidates.sort(key=lambda item: len(item[2]), reverse=True)
+
+            skip_fingerprint = bool(settings["skip_fingerprint"])
+            fp_map: dict[str, str | None] = {}
+            if skip_fingerprint:
+                schedule(self.progress_var.set, "Skipping fingerprint checks (metadata-only)…")
+            else:
+                schedule(self.progress_var.set, "Computing fingerprints…")
+                unique_paths = {paths[left] for left, _right, _words in candidates}
+                unique_paths |= {paths[right] for _left, right, _words in candidates}
+
+                db_path = os.path.join(library_root, "Docs", ".simple_fps.db")
+                ensure_fingerprint_cache(db_path)
+
+                total_fps = len(unique_paths)
+                schedule(self.progress_bar.configure, maximum=max(total_fps, 1), value=0)
+                with ThreadPoolExecutor(max_workers=min(6, (os.cpu_count() or 4))) as executor:
+                    futures = {executor.submit(get_fingerprint, path, db_path, _compute_fp): path for path in unique_paths}
+                    completed = 0
+                    for future in as_completed(futures):
+                        if self._cancel_event.is_set():
+                            schedule(self._finish_scan, "Cancelled")
+                            return
+                        path = futures[future]
+                        try:
+                            fp_map[path] = future.result()
+                        except Exception:
+                            fp_map[path] = None
+                        completed += 1
+                        schedule(self.progress_bar.configure, value=completed)
+                        schedule(self.progress_var.set, f"Computing fingerprints ({completed}/{total_fps})…")
+
+            exact_threshold = float(settings["exact_threshold"])
+            near_threshold = float(settings["near_threshold"])
+            mixed_boost = float(settings["mixed_boost"])
+            include_missing_fp = bool(settings["include_missing_fp"])
+
+            results: list[dict[str, object]] = []
+            matches = 0
+            for left_idx, right_idx, words in candidates:
+                left_path = paths[left_idx]
+                right_path = paths[right_idx]
+                fp_left = fp_map.get(left_path)
+                fp_right = fp_map.get(right_path)
+                if skip_fingerprint:
+                    distance = None
+                    verdict = "Metadata Only"
+                else:
+                    distance = fingerprint_distance(fp_left, fp_right)
+                    verdict = "No Match"
+                    effective_near = near_threshold
+                    mixed_codec = self._is_lossless(left_path) != self._is_lossless(right_path)
+                    if mixed_codec:
+                        effective_near += mixed_boost
+                    if fp_left and fp_right:
+                        if distance <= exact_threshold:
+                            verdict = "Exact"
+                        elif distance <= effective_near:
+                            verdict = "Near"
+                    elif include_missing_fp:
+                        verdict = "No Fingerprint"
+
+                if verdict in {"Exact", "Near", "Metadata Only"}:
+                    matches += 1
+                results.append(
+                    {
+                        "left_path": left_path,
+                        "right_path": right_path,
+                        "distance": distance,
+                        "verdict": verdict,
+                        "shared_count": len(words),
+                        "words": words,
+                    }
+                )
+
+            schedule(self._finish_scan, "Complete", results, matches)
+        except Exception as exc:
+            schedule(self._finish_scan, f"Failed: {exc}")
+
+    def _finish_scan(
+        self,
+        status: str,
+        results: list[dict[str, object]] | None = None,
+        matches: int = 0,
+    ) -> None:
+        if status == "Cancelled":
+            self.summary_var.set("Scan cancelled.")
+        elif status.startswith("Failed"):
+            self.summary_var.set(status)
+        elif status == "No candidates found.":
+            self.summary_var.set("No metadata candidates found.")
+        else:
+            result_count = len(results or [])
+            self.summary_var.set(f"{result_count} candidate pairs, {matches} fingerprint matches.")
+        self.status_var.set(status)
+        self.progress_var.set("")
+        self.run_btn.configure(state="normal")
+        self.cancel_btn.configure(state="disabled")
+        self.progress_bar.configure(value=0)
+
+        if results is not None:
+            self._results = results
+            self._render_results(results)
+            self.review_btn.configure(state="normal" if results else "disabled")
+
+    def _render_results(self, results: list[dict[str, object]]) -> None:
+        self.results_tree.delete(*self.results_tree.get_children())
+        for idx, result in enumerate(results):
+            distance = result.get("distance")
+            distance_str = f"{distance:.4f}" if isinstance(distance, (int, float)) else "n/a"
+            shared = result.get("shared_count", 0)
+            words = ", ".join(result.get("words", [])[:6])
+            if len(result.get("words", [])) > 6:
+                words = f"{words}…"
+            left_name = os.path.basename(str(result.get("left_path", "")))
+            right_name = os.path.basename(str(result.get("right_path", "")))
+            self.results_tree.insert(
+                "",
+                "end",
+                values=(
+                    result.get("verdict"),
+                    distance_str,
+                    shared,
+                    words,
+                    left_name,
+                    right_name,
+                ),
+                tags=(str(idx),),
+            )
+
+    def _send_to_pair_review(self) -> None:
+        if not self._results:
+            messagebox.showinfo("Duplicate Pair Review", "Run a scan and select matches first.")
+            return
+        library = None
+        if hasattr(self.parent, "require_library"):
+            library = self.parent.require_library()
+        if not library:
+            return
+        include_non_matches = bool(self.include_non_matches_var.get())
+        selected_pairs: list[DuplicatePair] = []
+        seen: set[tuple[str, str]] = set()
+        for result in self._results:
+            verdict = result.get("verdict")
+            if verdict not in {"Exact", "Near", "Metadata Only"} and not include_non_matches:
+                continue
+            left_path = str(result.get("left_path"))
+            right_path = str(result.get("right_path"))
+            _append_duplicate_pair(
+                selected_pairs,
+                seen,
+                left_path,
+                right_path,
+                None,
+                "metadata_fuzzy",
+            )
+        if not selected_pairs:
+            messagebox.showinfo("Duplicate Pair Review", "No matching pairs are available for review.")
+            return
+        snapshot_path, signature = _write_custom_pair_snapshot(
+            library,
+            selected_pairs,
+            include_filename_pairs=True,
+        )
+        if not snapshot_path or not signature:
+            messagebox.showerror("Duplicate Pair Review", "Failed to write the review snapshot.")
+            return
+        existing = getattr(self.parent, "duplicate_pair_review_window", None)
+        if existing and existing.winfo_exists():
+            existing.destroy()
+            setattr(self.parent, "duplicate_pair_review_window", None)
+        plan = ConsolidationPlan(plan_signature=signature)
+        win = DuplicatePairReviewTool(self.parent, library_path=library, plan=plan)
+        win.bind(
+            "<Destroy>",
+            lambda e: (
+                setattr(self.parent, "duplicate_pair_review_window", None)
+                if e.widget is win
+                else None
+            ),
+        )
+        setattr(self.parent, "duplicate_pair_review_window", win)
+
+
+class M4ATesterDialog(tk.Toplevel):
+    """Standalone UI for validating M4A metadata/album art parsing."""
+
+    def __init__(self, parent: tk.Widget):
+        super().__init__(parent)
+        self.title("M4A Tester")
+        self.transient(parent)
+        self.resizable(True, True)
+        self.parent = parent
+
+        self.file_path_var = tk.StringVar()
+        self._cover_photo: ImageTk.PhotoImage | None = None
+
+        container = ttk.Frame(self, padding=12)
+        container.pack(fill="both", expand=True)
+
+        ttk.Label(
+            container,
+            text="Select an M4A file to validate album art and metadata parsing.",
+            foreground="#555",
+            wraplength=540,
+        ).pack(anchor="w")
+
+        file_frame = ttk.LabelFrame(container, text="M4A File")
+        file_frame.pack(fill="x", pady=(10, 8))
+        ttk.Label(file_frame, text="File").grid(
+            row=0, column=0, sticky="w", padx=6, pady=6
+        )
+        entry = ttk.Entry(
+            file_frame, textvariable=self.file_path_var, width=60, state="readonly"
+        )
+        entry.grid(row=0, column=1, sticky="ew", padx=6, pady=6)
+        ttk.Button(file_frame, text="Browse…", command=self._choose_file).grid(
+            row=0, column=2, sticky="e", padx=6, pady=6
+        )
+        file_frame.columnconfigure(1, weight=1)
+
+        content = ttk.Frame(container)
+        content.pack(fill="both", expand=True)
+
+        art_frame = ttk.LabelFrame(content, text="Album Art")
+        art_frame.pack(side="left", fill="both", expand=False, padx=(0, 8))
+        self.cover_label = ttk.Label(
+            art_frame,
+            text="No album art loaded",
+            anchor="center",
+            width=28,
+            padding=8,
+        )
+        self.cover_label.pack(fill="both", expand=True)
+
+        metadata_frame = ttk.LabelFrame(content, text="Metadata")
+        metadata_frame.pack(side="left", fill="both", expand=True)
+        self.metadata_text = ScrolledText(
+            metadata_frame, height=16, wrap="word", state="disabled"
+        )
+        self.metadata_text.pack(fill="both", expand=True, padx=6, pady=6)
+
+        controls = ttk.Frame(container)
+        controls.pack(fill="x", pady=(8, 0))
+        ttk.Button(controls, text="Close", command=self.destroy).pack(side="left")
+
+    def _choose_file(self) -> None:
+        initial_dir = load_last_path() or os.getcwd()
+        chosen = filedialog.askopenfilename(
+            parent=self,
+            title="Select M4A File",
+            initialdir=initial_dir,
+            filetypes=[("M4A files", "*.m4a")],
+        )
+        if not chosen:
+            return
+        if not chosen.lower().endswith(".m4a"):
+            messagebox.showerror("M4A Tester", "Please select a .m4a file.")
+            return
+        self.file_path_var.set(chosen)
+        save_last_path(os.path.dirname(chosen))
+        self._load_metadata(chosen)
+
+    def _load_metadata(self, path: str) -> None:
+        self._set_metadata_text("")
+        self._set_cover_image(None)
+
+        tags, _cover_payloads, error, _reader = read_metadata(path, include_cover=False)
+
+        def _format_value(value: object) -> str | None:
+            if value in (None, "", []):
+                return None
+            if isinstance(value, (list, tuple)):
+                return ", ".join(str(item) for item in value if item not in (None, ""))
+            return str(value)
+
+        lines = []
+        track_value = _format_value(tags.get("tracknumber") or tags.get("track"))
+        disc_value = _format_value(tags.get("discnumber") or tags.get("disc"))
+        display_fields = [
+            ("Title", "title"),
+            ("Artist", "artist"),
+            ("Album", "album"),
+            ("Album Artist", "albumartist"),
+            ("Track", track_value),
+            ("Disc", disc_value),
+            ("Year", "year"),
+            ("Date", "date"),
+            ("Genre", "genre"),
+            ("Compilation", "compilation"),
+        ]
+        for label, key in display_fields:
+            value = _format_value(tags.get(key)) if isinstance(key, str) else key
+            if value:
+                lines.append(f"{label}: {value}")
+        if error and not lines:
+            lines.append(f"Metadata error: {error}")
+        self._set_metadata_text("\n".join(lines) if lines else "No metadata found.")
+
+        cover_bytes = self._extract_cover_art_bytes(path)
+        if cover_bytes:
+            try:
+                image = Image.open(BytesIO(cover_bytes))
+                image.thumbnail((240, 240))
+                self._set_cover_image(image)
+            except Exception:
+                self.cover_label.config(text="Failed to load album art")
+        else:
+            self.cover_label.config(text="No album art found")
+
+    def _extract_cover_art_bytes(self, path: str) -> bytes | None:
+        if shutil.which("ffmpeg"):
+            cmd = [
+                "ffmpeg",
+                "-v",
+                "error",
+                "-i",
+                ensure_long_path(path),
+                "-map",
+                "0:v",
+                "-frames:v",
+                "1",
+                "-f",
+                "image2pipe",
+                "-vcodec",
+                "png",
+                "-",
+            ]
+            try:
+                result = subprocess.run(
+                    cmd,
+                    check=False,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+            except Exception:
+                result = None
+            if result and result.returncode == 0 and result.stdout:
+                return result.stdout
+
+        return read_sidecar_artwork_bytes(path)
+
+    def _set_metadata_text(self, content: str) -> None:
+        self.metadata_text.configure(state="normal")
+        self.metadata_text.delete("1.0", tk.END)
+        self.metadata_text.insert("1.0", content)
+        self.metadata_text.configure(state="disabled")
+
+    def _set_cover_image(self, image: Image.Image | None) -> None:
+        if image is None:
+            self._cover_photo = None
+            self.cover_label.configure(image="", text="No album art loaded")
+            return
+        self._cover_photo = ImageTk.PhotoImage(image)
+        self.cover_label.configure(image=self._cover_photo, text="")
+
+
+class LibraryCompressionPanel(ttk.Frame):
+    """UI panel for converting a library mirror into Opus files."""
+
+    def __init__(self, parent: tk.Widget, controller: tk.Widget):
+        super().__init__(parent, padding=12)
+        self.controller = controller
+
+        default_path = ""
+        if hasattr(controller, "library_path_var"):
+            default_path = controller.library_path_var.get()
+
+        self.source_var = tk.StringVar(value=default_path)
+        self.destination_var = tk.StringVar(value="")
+        self.status_var = tk.StringVar(value="Ready to mirror library.")
+        self.progress_var = tk.StringVar(value="Progress: 0 / 0")
+        self.overwrite_var = tk.BooleanVar(value=False)
+        self._worker: threading.Thread | None = None
+        self._log_shown = False
+        self.report_path: str | None = None
+
+        ttk.Label(
+            self,
+            text="Library Compression",
+            font=_scaled_font(self, 12, "bold"),
+        ).pack(anchor="w")
+        ttk.Label(
+            self,
+            text="Create a mirror of your library with FLAC files converted to Opus (96 kbps).",
+            foreground="#555",
+            wraplength=520,
+        ).pack(anchor="w", pady=(0, 8))
+
+        source_frame = ttk.LabelFrame(self, text="Source Library")
+        source_frame.pack(fill="x", pady=(10, 6))
+        ttk.Entry(source_frame, textvariable=self.source_var, width=60).grid(
+            row=0, column=0, sticky="ew", padx=6, pady=6
+        )
+        ttk.Button(source_frame, text="Browse…", command=self._browse_source).grid(
+            row=0, column=1, sticky="e", padx=6, pady=6
+        )
+        source_frame.columnconfigure(0, weight=1)
+
+        dest_frame = ttk.LabelFrame(self, text="Destination Mirror")
+        dest_frame.pack(fill="x", pady=(0, 6))
+        ttk.Entry(dest_frame, textvariable=self.destination_var, width=60).grid(
+            row=0, column=0, sticky="ew", padx=6, pady=6
+        )
+        ttk.Button(dest_frame, text="Browse…", command=self._browse_destination).grid(
+            row=0, column=1, sticky="e", padx=6, pady=6
+        )
+        dest_frame.columnconfigure(0, weight=1)
+
+        ttk.Checkbutton(
+            self,
+            text="Overwrite existing files in the destination",
+            variable=self.overwrite_var,
+        ).pack(anchor="w", pady=(0, 4))
+
+        ttk.Label(self, textvariable=self.status_var).pack(anchor="w", pady=(4, 8))
+        self.progress = ttk.Progressbar(
+            self,
+            mode="determinate",
+        )
+        self.progress.pack(fill="x", pady=(0, 8))
+        ttk.Label(self, textvariable=self.progress_var).pack(anchor="w", pady=(0, 8))
+
+        controls = ttk.Frame(self)
+        controls.pack(anchor="e")
+        self.run_btn = ttk.Button(controls, text="Start", command=self._start)
+        self.run_btn.pack(side="right", padx=(6, 0))
+        self.open_report_btn = ttk.Button(
+            controls,
+            text="Open Report",
+            command=self._open_report,
+            state="disabled",
+        )
+        self.open_report_btn.pack(side="right", padx=(0, 6))
+
+    def _browse_source(self) -> None:
+        initial = self.source_var.get() or load_last_path() or os.getcwd()
+        folder = filedialog.askdirectory(
+            parent=self, title="Select Source Library", initialdir=initial
+        )
+        if folder:
+            self.source_var.set(folder)
+
+    def _browse_destination(self) -> None:
+        initial = self.destination_var.get() or load_last_path() or os.getcwd()
+        folder = filedialog.askdirectory(
+            parent=self, title="Select Destination Folder", initialdir=initial
+        )
+        if folder:
+            self.destination_var.set(folder)
+
+    def _start(self) -> None:
+        source = self.source_var.get().strip()
+        destination = self.destination_var.get().strip()
+
+        if not source or not os.path.isdir(source):
+            messagebox.showwarning(
+                "Source Required", "Select a valid source library folder."
+            )
+            return
+        if not destination or not os.path.isdir(destination):
+            messagebox.showwarning(
+                "Destination Required", "Select a valid destination folder."
+            )
+            return
+        if os.path.abspath(source) == os.path.abspath(destination):
+            messagebox.showerror(
+                "Invalid Destination",
+                "The destination folder must be different from the source.",
+            )
+            return
+        try:
+            if os.path.commonpath([source, destination]) == os.path.abspath(source):
+                messagebox.showerror(
+                    "Invalid Destination",
+                    "The destination cannot be inside the source library.",
+                )
+                return
+        except ValueError:
+            pass
+        if not shutil.which("ffmpeg"):
+            messagebox.showerror(
+                "FFmpeg Required",
+                "FFmpeg was not found on your PATH. Install it to convert FLAC files.",
+            )
+            return
+
+        self._set_running(True, "Scanning library…")
+        overwrite = self.overwrite_var.get()
+        self.report_path = None
+        self.open_report_btn.configure(state="disabled")
+
+        def worker() -> None:
+            try:
+                summary = self._mirror_library(source, destination, overwrite)
+                self.after(0, lambda: self._finished(summary))
+            except Exception as exc:  # pragma: no cover - safety net
+                self.after(0, lambda: self._failed(str(exc)))
+
+        self._worker = threading.Thread(target=worker, daemon=True)
+        self._worker.start()
+
+    def _set_running(self, running: bool, status: str) -> None:
+        self.status_var.set(status)
+        state = "disabled" if running else "normal"
+        self.run_btn.configure(state=state)
+        if running:
+            self.progress.configure(maximum=1, value=0)
+            self.progress_var.set("Progress: 0 / 0")
+            self._log_shown = False
+
+    def _log(self, message: str) -> None:
+        if hasattr(self.controller, "_log"):
+            self.controller._log(message)
+            if hasattr(self.controller, "show_log_tab") and not self._log_shown:
+                self.controller.show_log_tab()
+                self._log_shown = True
+        else:
+            print(message)
+
+    def _mirror_library(
+        self, source: str, destination: str, overwrite: bool
+    ) -> dict[str, object]:
+        def progress_callback(
+            total_tasks: int,
+            completed: int,
+            converted: int,
+            copied: int,
+            skipped: int,
+            errors: int,
+        ) -> None:
+            self.after(
+                0,
+                lambda t=total_tasks, d=completed: (
+                    self.status_var.set("Mirroring library…"),
+                    self.progress.configure(maximum=max(t, 1)),
+                    self.progress.configure(value=d),
+                    self.progress_var.set(f"Progress: {d} / {t}"),
+                ),
+            )
+
+        return mirror_library(
+            source,
+            destination,
+            overwrite,
+            progress_callback=progress_callback,
+            log_callback=self._log,
+        )
+
+    def _finished(self, summary: dict[str, object]) -> None:
+        self._set_running(False, "Completed.")
+        message = (
+            "Mirror complete.\n\n"
+            f"Files processed: {summary['total']}\n"
+            f"FLAC converted: {summary['converted']}\n"
+            f"Other files copied: {summary['copied']}\n"
+            f"Skipped: {summary['skipped']}\n"
+            f"Errors: {summary['errors']}"
+        )
+        self.status_var.set(
+            f"Done. Converted {summary['converted']} and copied {summary['copied']}."
+        )
+        messagebox.showinfo("Library Compression", message)
+        self._write_report(summary)
+        self._log(
+            "Library Compression: "
+            f"total={summary['total']} converted={summary['converted']} "
+            f"copied={summary['copied']} skipped={summary['skipped']} "
+            f"errors={summary['errors']}"
+        )
+
+    def _failed(self, error: str) -> None:
+        self._set_running(False, "Failed.")
+        messagebox.showerror("Library Compression", f"Run failed:\n{error}")
+
+    def _write_report(self, summary: dict[str, object]) -> None:
+        destination = self.destination_var.get().strip()
+        if not destination:
+            return
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        reports_dir = os.path.join(
+            destination,
+            "Docs",
+            "opus_library_mirror_reports",
+        )
+        report_path = os.path.join(
+            reports_dir,
+            f"opus_library_mirror_report_{timestamp}.html",
+        )
+        try:
+            write_mirror_report(report_path, summary)
+        except OSError as exc:
+            self._log(f"Library Compression: failed to write report: {exc}")
+            self.report_path = None
+            self.open_report_btn.configure(state="disabled")
+            return
+        self.report_path = report_path
+        self.open_report_btn.configure(state="normal")
+        self._log(f"Library Compression: report saved to {report_path}")
+
+    def _open_report(self) -> None:
+        if not self.report_path:
+            messagebox.showinfo("Library Compression", "No report is available yet.")
+            return
+        safe_path = ensure_long_path(self.report_path)
+        if not os.path.exists(safe_path):
+            messagebox.showerror(
+                "Report Missing",
+                "The report could not be found. Run the mirror again to generate a new report.",
+            )
+            return
+        display_path = strip_ext_prefix(self.report_path)
+        try:
+            uri = Path(display_path).resolve().as_uri()
+        except Exception:
+            uri = display_path
+        webbrowser.open(uri)
+
+
+class OpusTesterDialog(tk.Toplevel):
+    """Standalone UI for validating Opus metadata/album art parsing."""
+
+    def __init__(self, parent: tk.Widget):
+        super().__init__(parent)
+        self.title("Opus Tester")
+        self.transient(parent)
+        self.resizable(True, True)
+        self.parent = parent
+
+        self.file_path_var = tk.StringVar()
+        self._cover_photo: ImageTk.PhotoImage | None = None
+
+        container = ttk.Frame(self, padding=12)
+        container.pack(fill="both", expand=True)
+
+        ttk.Label(
+            container,
+            text="Select an Opus file to validate album art and metadata parsing.",
+            foreground="#555",
+            wraplength=540,
+        ).pack(anchor="w")
+
+        file_frame = ttk.LabelFrame(container, text="Opus File")
+        file_frame.pack(fill="x", pady=(10, 8))
+        ttk.Label(file_frame, text="File").grid(
+            row=0, column=0, sticky="w", padx=6, pady=6
+        )
+        entry = ttk.Entry(
+            file_frame, textvariable=self.file_path_var, width=60, state="readonly"
+        )
+        entry.grid(row=0, column=1, sticky="ew", padx=6, pady=6)
+        ttk.Button(file_frame, text="Browse…", command=self._choose_file).grid(
+            row=0, column=2, sticky="e", padx=6, pady=6
+        )
+        file_frame.columnconfigure(1, weight=1)
+
+        content = ttk.Frame(container)
+        content.pack(fill="both", expand=True)
+
+        art_frame = ttk.LabelFrame(content, text="Album Art")
+        art_frame.pack(side="left", fill="both", expand=False, padx=(0, 8))
+        self.cover_label = ttk.Label(
+            art_frame,
+            text="No album art loaded",
+            anchor="center",
+            width=28,
+            padding=8,
+        )
+        self.cover_label.pack(fill="both", expand=True)
+
+        metadata_frame = ttk.LabelFrame(content, text="Metadata")
+        metadata_frame.pack(side="left", fill="both", expand=True)
+        self.metadata_text = ScrolledText(
+            metadata_frame, height=16, wrap="word", state="disabled"
+        )
+        self.metadata_text.pack(fill="both", expand=True, padx=6, pady=6)
+
+        controls = ttk.Frame(container)
+        controls.pack(fill="x", pady=(8, 0))
+        ttk.Button(controls, text="Close", command=self.destroy).pack(side="left")
+
+    def _choose_file(self) -> None:
+        initial_dir = load_last_path() or os.getcwd()
+        chosen = filedialog.askopenfilename(
+            parent=self,
+            title="Select Opus File",
+            initialdir=initial_dir,
+            filetypes=[("Opus files", "*.opus")],
+        )
+        if not chosen:
+            return
+        if not chosen.lower().endswith(".opus"):
+            messagebox.showerror("Opus Tester", "Please select a .opus file.")
+            return
+        self.file_path_var.set(chosen)
+        save_last_path(os.path.dirname(chosen))
+        self._load_metadata(chosen)
+
+    def _load_metadata(self, path: str) -> None:
+        self._set_metadata_text("")
+        self._set_cover_image(None)
+
+        tags, cover_payloads, error = read_opus_metadata(path)
+
+        def _format_value(value: object) -> str | None:
+            if value in (None, "", []):
+                return None
+            if isinstance(value, (list, tuple)):
+                return ", ".join(str(item) for item in value if item not in (None, ""))
+            return str(value)
+
+        lines = []
+        track_value = _format_value(tags.get("tracknumber") or tags.get("track"))
+        disc_value = _format_value(tags.get("discnumber") or tags.get("disc"))
+        display_fields = [
+            ("Title", "title"),
+            ("Artist", "artist"),
+            ("Album", "album"),
+            ("Album Artist", "albumartist"),
+            ("Track", track_value),
+            ("Disc", disc_value),
+            ("Year", "year"),
+            ("Date", "date"),
+            ("Genre", "genre"),
+            ("Compilation", "compilation"),
+        ]
+        for label, key in display_fields:
+            value = _format_value(tags.get(key)) if isinstance(key, str) else key
+            if value:
+                lines.append(f"{label}: {value}")
+        if error and not lines:
+            lines.append(f"Metadata error: {error}")
+        self._set_metadata_text("\n".join(lines) if lines else "No metadata found.")
+
+        cover_bytes = cover_payloads[0] if cover_payloads else None
+        if cover_bytes:
+            try:
+                image = Image.open(BytesIO(cover_bytes))
+                image.thumbnail((240, 240))
+                self._set_cover_image(image)
+            except Exception:
+                self.cover_label.config(text="Failed to load album art")
+        else:
+            self.cover_label.config(text="No album art found")
+
+    def _set_metadata_text(self, content: str) -> None:
+        self.metadata_text.configure(state="normal")
+        self.metadata_text.delete("1.0", tk.END)
+        self.metadata_text.insert("1.0", content)
+        self.metadata_text.configure(state="disabled")
+
+    def _set_cover_image(self, image: Image.Image | None) -> None:
+        if image is None:
+            self._cover_photo = None
+            self.cover_label.configure(image="", text="No album art loaded")
+            return
+        self._cover_photo = ImageTk.PhotoImage(image)
+        self.cover_label.configure(image=self._cover_photo, text="")
+
+
+def _normalize_playlist_line(line: str) -> str:
+    return line.rstrip("\n").rstrip("\r")
+
+
+_COPY_SUFFIX_RE = re.compile(r"(?:\s*-\s*copy|\s+copy)(?:\s*\d+)?$", re.IGNORECASE)
+_NUMBER_SUFFIX_RE = re.compile(r"\s*[\(\[\{]\s*\d+\s*[\)\]\}]\s*$")
+_TRACK_NUMBER_PREFIX_RE = re.compile(r"^\s*\d{1,3}\s*[-._ ]*")
+_SHORT_NUMBER_TOKEN_RE = re.compile(r"\b\d{1,3}\b")
+
+
+def _normalize_track_name(name: str) -> str:
+    base = name.lower()
+    base = base.replace("_", " ").replace(".", " ")
+    base = _COPY_SUFFIX_RE.sub("", base)
+    base = _NUMBER_SUFFIX_RE.sub("", base)
+    base = _TRACK_NUMBER_PREFIX_RE.sub("", base)
+    base = _SHORT_NUMBER_TOKEN_RE.sub("", base)
+    return re.sub(r"\s+", " ", base).strip()
+
+
+def _tokenize_track_name(name: str) -> list[str]:
+    tokens = [tok for tok in re.split(r"[^a-z0-9]+", name.lower()) if tok]
+    return [tok for tok in tokens if not tok.isdigit()]
+
+
+def _iter_playlist_tracks(lines: list[str]) -> list[str]:
+    tracks = []
+    for raw in lines:
+        stripped = raw.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        tracks.append(stripped)
+    return tracks
+
+
+def _build_library_search_index(
+    library_root: str, valid_exts: set[str]
+) -> tuple[
+    dict[str, list[str]],
+    dict[str, list[str]],
+    dict[str, list[str]],
+    dict[str, list[str]],
+    dict[str, set[str]],
+]:
+    basename_index: dict[str, list[str]] = {}
+    stem_index: dict[str, list[str]] = {}
+    normalized_stem_index: dict[str, list[str]] = {}
+    normalized_name_index: dict[str, list[str]] = {}
+    token_index: dict[str, set[str]] = {}
+    for dirpath, dirnames, filenames in os.walk(library_root):
+        dirnames.sort()
+        filenames.sort()
+        for fname in filenames:
+            ext = os.path.splitext(fname)[1].lower()
+            if ext not in valid_exts:
+                continue
+            full_path = os.path.join(dirpath, fname)
+            basename_key = os.path.normcase(fname)
+            stem_key = os.path.normcase(os.path.splitext(fname)[0])
+            basename_index.setdefault(basename_key, []).append(full_path)
+            stem_index.setdefault(stem_key, []).append(full_path)
+            normalized_key = os.path.normcase(_strip_indexer_suffix(stem_key))
+            normalized_stem_index.setdefault(normalized_key, []).append(full_path)
+            normalized_name = _normalize_track_name(stem_key)
+            if normalized_name:
+                normalized_name_index.setdefault(normalized_name, []).append(full_path)
+                for token in _tokenize_track_name(normalized_name):
+                    token_index.setdefault(token, set()).add(full_path)
+    return (
+        basename_index,
+        stem_index,
+        normalized_stem_index,
+        normalized_name_index,
+        token_index,
+    )
+
+
+def _select_library_match(
+    candidates: list[str], prefer_opus: bool, target_ext: str | None
+) -> str | None:
+    if not candidates:
+        return None
+
+    def sort_key(path: str) -> tuple[int, str]:
+        ext = os.path.splitext(path)[1].lower()
+        same_ext_rank = 0 if target_ext and ext == target_ext else 1
+        opus_rank = 0 if prefer_opus and ext == ".opus" else 1
+        return (same_ext_rank, opus_rank, os.path.normcase(path))
+
+    return sorted(candidates, key=sort_key)[0]
+
+
+def _find_library_match(
+    target_path: str,
+    basename_index: dict[str, list[str]],
+    stem_index: dict[str, list[str]],
+    normalized_stem_index: dict[str, list[str]],
+    normalized_name_index: dict[str, list[str]],
+    token_index: dict[str, set[str]],
+    prefer_opus: bool,
+) -> str | None:
+    target_ext = os.path.splitext(target_path)[1].lower() or None
+    basename_key = os.path.normcase(os.path.basename(target_path))
+    candidates = basename_index.get(basename_key)
+    if candidates:
+        return _select_library_match(candidates, prefer_opus, target_ext)
+    stem_key = os.path.normcase(os.path.splitext(os.path.basename(target_path))[0])
+    candidates = stem_index.get(stem_key)
+    if candidates:
+        return _select_library_match(candidates, prefer_opus, target_ext)
+    stem_key = os.path.normcase(_strip_indexer_suffix(stem_key))
+    candidates = stem_index.get(stem_key)
+    if candidates:
+        return _select_library_match(candidates, prefer_opus, target_ext)
+    candidates = normalized_stem_index.get(stem_key)
+    if candidates:
+        return _select_library_match(candidates, prefer_opus, target_ext)
+
+    normalized_target = _normalize_track_name(os.path.splitext(basename_key)[0])
+    if not normalized_target:
+        return None
+    tokens = set(_tokenize_track_name(normalized_target))
+    candidates = normalized_name_index.get(normalized_target, [])
+    if not candidates:
+        if tokens:
+            candidate_set: set[str] = set()
+            for token in tokens:
+                candidate_set.update(token_index.get(token, set()))
+            candidates = list(candidate_set)
+    if not candidates:
+        return None
+
+    def score(path: str) -> tuple[float, float]:
+        cand_name = _normalize_track_name(os.path.splitext(os.path.basename(path))[0])
+        cand_tokens = set(_tokenize_track_name(cand_name))
+        overlap = len(tokens & cand_tokens) / len(tokens) if tokens else 0.0
+        ratio = difflib.SequenceMatcher(None, normalized_target, cand_name).ratio()
+        bonus = 0.0
+        cand_ext = os.path.splitext(path)[1].lower()
+        if target_ext and cand_ext == target_ext:
+            bonus += 0.1
+        if prefer_opus and cand_ext == ".opus":
+            bonus += 0.1
+        return overlap + ratio + bonus, overlap
+
+    best_path = None
+    best_score = 0.0
+    best_overlap = 0.0
+    for path in candidates:
+        total_score, overlap = score(path)
+        if total_score > best_score:
+            best_score = total_score
+            best_overlap = overlap
+            best_path = path
+
+    if best_path is None:
+        return None
+    if best_overlap < 0.4 and best_score < 1.0:
+        return None
+    return best_path
+
+
+def _path_from_file_uri(uri: str) -> str:
+    parsed = urllib.parse.urlparse(uri)
+    path = urllib.parse.unquote(parsed.path or "")
+    if parsed.netloc and parsed.netloc.lower() not in ("", "localhost"):
+        if path.startswith("/"):
+            path = path[1:]
+        return os.path.join(f"//{parsed.netloc}", path)
+    if path.startswith("/") and re.match(r"/[a-zA-Z]:", path):
+        path = path[1:]
+    if not path and parsed.netloc:
+        path = urllib.parse.unquote(parsed.netloc)
+    return path
+
+
+def _clean_playlist_entry(entry: str) -> str:
+    stripped = entry.strip()
+    if not stripped or stripped.startswith("#"):
+        return stripped
+    if len(stripped) > 1 and stripped[0] == stripped[-1] and stripped[0] in {"'", '"'}:
+        stripped = stripped[1:-1].strip()
+    if stripped.lower().startswith("file://"):
+        stripped = _path_from_file_uri(stripped)
+    stripped = os.path.expandvars(os.path.expanduser(stripped))
+    return stripped
+
+
+def _resolve_playlist_target(
+    entry: str, playlist_dir: str, library_root: str
+) -> tuple[str, bool, bool]:
+    was_absolute = os.path.isabs(entry)
+    abs_path = entry
+    if not was_absolute:
+        abs_path = os.path.normpath(os.path.join(playlist_dir, entry))
+    root = os.path.normcase(os.path.abspath(library_root))
+    candidate = os.path.normcase(os.path.abspath(abs_path))
+    if os.path.commonpath([root, candidate]) != root:
+        return entry, was_absolute, False
+    return abs_path, was_absolute, True
+
+
+def _strip_indexer_suffix(name: str) -> str:
+    return re.sub(r"\s*\(\d+\)$", "", name).strip()
+
+
+class PlaylistRepairDialog(tk.Toplevel):
+    """Repair playlist entries by locating missing files in the library."""
+
+    def __init__(self, parent: tk.Widget, library_root: str):
+        super().__init__(parent)
+        self.title("Playlist Repair")
+        self.transient(parent)
+        self.resizable(True, True)
+        self.parent = parent
+        self.library_root = library_root
+
+        self.playlist_paths: list[str] = []
+        self.prefer_opus_var = tk.BooleanVar(value=False)
+        self.status_var = tk.StringVar(value="Ready to repair playlists.")
+        self.progress_var = tk.StringVar(value="Progress: 0 / 0")
+        self.report_path: str | None = None
+        self._worker: threading.Thread | None = None
+
+        container = ttk.Frame(self, padding=12)
+        container.pack(fill="both", expand=True)
+
+        ttk.Label(
+            container,
+            text="Select playlists to repair. Missing tracks will be "
+            "updated using the library search index.",
+            foreground="#555",
+            wraplength=560,
+        ).pack(anchor="w")
+
+        playlist_frame = ttk.LabelFrame(container, text="Playlists")
+        playlist_frame.pack(fill="both", expand=True, pady=(10, 6))
+        playlist_frame.columnconfigure(0, weight=1)
+        playlist_frame.rowconfigure(0, weight=1)
+        self.playlist_list = tk.Listbox(playlist_frame, height=6)
+        self.playlist_list.grid(row=0, column=0, sticky="nsew", padx=6, pady=6)
+        playlist_scroll = ttk.Scrollbar(
+            playlist_frame, orient="vertical", command=self.playlist_list.yview
+        )
+        playlist_scroll.grid(row=0, column=1, sticky="ns", pady=6)
+        self.playlist_list.configure(yscrollcommand=playlist_scroll.set)
+
+        buttons = ttk.Frame(playlist_frame)
+        buttons.grid(row=1, column=0, columnspan=2, sticky="e", padx=6, pady=(0, 6))
+        ttk.Button(buttons, text="Add…", command=self._add_playlists).pack(
+            side="left"
+        )
+        ttk.Button(
+            buttons, text="Remove Selected", command=self._remove_selected
+        ).pack(side="left", padx=(6, 0))
+        ttk.Button(buttons, text="Clear", command=self._clear_playlists).pack(
+            side="left", padx=(6, 0)
+        )
+
+        ttk.Checkbutton(
+            container,
+            text="Prefer Opus when searching for missing FLAC tracks",
+            variable=self.prefer_opus_var,
+        ).pack(anchor="w", pady=(0, 6))
+
+        ttk.Label(container, textvariable=self.status_var).pack(anchor="w")
+        self.progress = ttk.Progressbar(container, mode="determinate")
+        self.progress.pack(fill="x", pady=(2, 6))
+        ttk.Label(container, textvariable=self.progress_var).pack(anchor="w")
+
+        log_frame = ttk.LabelFrame(container, text="Repair Log")
+        log_frame.pack(fill="both", expand=True, pady=(8, 6))
+        self.log_text = ScrolledText(log_frame, height=10, wrap="word", state="disabled")
+        self.log_text.pack(fill="both", expand=True, padx=6, pady=6)
+
+        controls = ttk.Frame(container)
+        controls.pack(fill="x", pady=(6, 0))
+        self.run_btn = ttk.Button(controls, text="Run Repair", command=self._start)
+        self.run_btn.pack(side="right")
+        self.open_report_btn = ttk.Button(
+            controls, text="Open Report", command=self._open_report, state="disabled"
+        )
+        self.open_report_btn.pack(side="right", padx=(0, 6))
+        ttk.Button(controls, text="Close", command=self.destroy).pack(side="left")
+
+    def _add_playlists(self) -> None:
+        initial_dir = os.path.join(self.library_root, "Playlists")
+        if not os.path.isdir(initial_dir):
+            initial_dir = load_last_path() or os.getcwd()
+        chosen = filedialog.askopenfilenames(
+            parent=self,
+            title="Select Playlists",
+            initialdir=initial_dir,
+            filetypes=[("Playlist files", "*.m3u *.m3u8")],
+        )
+        if not chosen:
+            return
+        save_last_path(os.path.dirname(chosen[0]))
+        for path in chosen:
+            if path not in self.playlist_paths:
+                self.playlist_paths.append(path)
+                self.playlist_list.insert("end", path)
+
+    def _remove_selected(self) -> None:
+        selected = list(self.playlist_list.curselection())
+        for idx in reversed(selected):
+            path = self.playlist_list.get(idx)
+            self.playlist_list.delete(idx)
+            if path in self.playlist_paths:
+                self.playlist_paths.remove(path)
+
+    def _clear_playlists(self) -> None:
+        self.playlist_paths.clear()
+        self.playlist_list.delete(0, tk.END)
+
+    def _append_log(self, message: str) -> None:
+        self.log_text.configure(state="normal")
+        self.log_text.insert("end", message + "\n")
+        self.log_text.see("end")
+        self.log_text.configure(state="disabled")
+
+    def _set_running(self, running: bool, status: str) -> None:
+        self.status_var.set(status)
+        state = "disabled" if running else "normal"
+        self.run_btn.configure(state=state)
+
+    def _update_progress(self, total: int, completed: int) -> None:
+        self.progress.configure(maximum=max(total, 1))
+        self.progress.configure(value=completed)
+        self.progress_var.set(f"Progress: {completed} / {total}")
+
+    def _start(self) -> None:
+        if not self.playlist_paths:
+            messagebox.showwarning("Playlists Required", "Select at least one playlist.")
+            return
+        self._set_running(True, "Preparing library index…")
+        self.report_path = None
+        self.open_report_btn.configure(state="disabled")
+
+        def worker() -> None:
+            try:
+                summary = self._repair_playlists()
+                self.after(0, lambda: self._finish(summary))
+            except Exception as exc:  # pragma: no cover - safety net
+                self.after(0, lambda: self._fail(str(exc)))
+
+        self._worker = threading.Thread(target=worker, daemon=True)
+        self._worker.start()
+
+    def _repair_playlists(self) -> dict[str, object]:
+        playlist_paths = list(self.playlist_paths)
+        prefer_opus = self.prefer_opus_var.get()
+        valid_exts = {ext.lower() for ext in playlist_generator.DEFAULT_EXTS}
+        total_entries = 0
+        for path in playlist_paths:
+            try:
+                with open(path, "r", encoding="utf-8-sig") as handle:
+                    total_entries += len(_iter_playlist_tracks(handle.readlines()))
+            except OSError:
+                self.after(0, lambda p=path: self._append_log(f"! Failed to read {p}"))
+        self.after(0, lambda: self._update_progress(total_entries, 0))
+
+        (
+            basename_index,
+            stem_index,
+            normalized_stem_index,
+            normalized_name_index,
+            token_index,
+        ) = _build_library_search_index(self.library_root, valid_exts)
+        self.after(
+            0,
+            lambda: self._append_log(
+                f"→ Indexed {sum(len(v) for v in basename_index.values())} tracks."
+            ),
+        )
+
+        missing_entries: list[tuple[str, str]] = []
+        processed = 0
+        fixed_opus = 0
+        fixed_search = 0
+        updated_playlists = 0
+        entries_scanned = 0
+
+        def progress_tick() -> None:
+            nonlocal processed
+            processed += 1
+            if processed % 10 == 0 or processed == total_entries:
+                self.after(0, lambda p=processed: self._update_progress(total_entries, p))
+
+        for playlist_path in playlist_paths:
+            playlist_dir = os.path.dirname(playlist_path)
+            try:
+                with open(playlist_path, "r", encoding="utf-8-sig") as handle:
+                    lines = [_normalize_playlist_line(line) for line in handle.readlines()]
+            except OSError as exc:
+                self.after(
+                    0,
+                    lambda p=playlist_path, e=exc: self._append_log(
+                        f"! Failed to open {p}: {e}"
+                    ),
+                )
+                continue
+
+            changed = False
+            new_lines: list[str] = []
+            for raw in lines:
+                stripped = raw.strip()
+                if not stripped or stripped.startswith("#"):
+                    new_lines.append(raw)
+                    continue
+                entries_scanned += 1
+
+                cleaned_entry = _clean_playlist_entry(stripped)
+                if not cleaned_entry:
+                    new_lines.append(raw)
+                    progress_tick()
+                    continue
+                abs_path, was_absolute, within_root = _resolve_playlist_target(
+                    cleaned_entry, playlist_dir, self.library_root
+                )
+                target_for_match = abs_path if within_root else cleaned_entry
+
+                if within_root:
+                    safe_path = ensure_long_path(abs_path)
+                    if os.path.exists(safe_path):
+                        new_lines.append(raw)
+                        progress_tick()
+                        continue
+
+                opus_swapped = False
+                if within_root:
+                    ext = os.path.splitext(abs_path)[1].lower()
+                    if prefer_opus and ext == ".flac":
+                        opus_candidate = os.path.splitext(abs_path)[0] + ".opus"
+                        if os.path.exists(ensure_long_path(opus_candidate)):
+                            new_line = (
+                                opus_candidate
+                                if was_absolute
+                                else os.path.relpath(opus_candidate, playlist_dir)
+                            )
+                            new_lines.append(new_line)
+                            fixed_opus += 1
+                            changed = True
+                            opus_swapped = True
+                    elif not prefer_opus and ext == ".opus":
+                        flac_candidate = os.path.splitext(abs_path)[0] + ".flac"
+                        if os.path.exists(ensure_long_path(flac_candidate)):
+                            new_line = (
+                                flac_candidate
+                                if was_absolute
+                                else os.path.relpath(flac_candidate, playlist_dir)
+                            )
+                            new_lines.append(new_line)
+                            fixed_opus += 1
+                            changed = True
+                            opus_swapped = True
+                if opus_swapped:
+                    progress_tick()
+                    continue
+
+                match = _find_library_match(
+                    target_for_match,
+                    basename_index,
+                    stem_index,
+                    normalized_stem_index,
+                    normalized_name_index,
+                    token_index,
+                    prefer_opus,
+                )
+                if match:
+                    new_line = match if was_absolute else os.path.relpath(match, playlist_dir)
+                    new_lines.append(new_line)
+                    fixed_search += 1
+                    changed = True
+                else:
+                    new_lines.append(raw)
+                    missing_entries.append((playlist_path, cleaned_entry))
+                progress_tick()
+
+            if changed:
+                try:
+                    with open(playlist_path, "w", encoding="utf-8") as handle:
+                        handle.write("\n".join(new_lines) + "\n")
+                    updated_playlists += 1
+                    self.after(
+                        0,
+                        lambda p=playlist_path: self._append_log(
+                            f"✓ Updated {p}"
+                        ),
+                    )
+                except OSError as exc:
+                    self.after(
+                        0,
+                        lambda p=playlist_path, e=exc: self._append_log(
+                            f"! Failed to write {p}: {e}"
+                        ),
+                    )
+            else:
+                self.after(
+                    0,
+                    lambda p=playlist_path: self._append_log(
+                        f"• No changes needed for {p}"
+                    ),
+                )
+
+        summary = {
+            "playlist_count": len(playlist_paths),
+            "entries_scanned": entries_scanned,
+            "updated_playlists": updated_playlists,
+            "fixed_opus": fixed_opus,
+            "fixed_search": fixed_search,
+            "missing": missing_entries,
+            "prefer_opus": prefer_opus,
+        }
+        self._write_report(summary)
+        return summary
+
+    def _write_report(self, summary: dict[str, object]) -> None:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        reports_dir = os.path.join(self.library_root, "Docs", "playlist_repair_reports")
+        os.makedirs(reports_dir, exist_ok=True)
+        report_path = os.path.join(reports_dir, f"playlist_repair_report_{timestamp}.txt")
+
+        missing_entries = summary.get("missing", [])
+        if not isinstance(missing_entries, list):
+            missing_entries = []
+
+        lines = [
+            "Playlist Repair Report",
+            f"Library: {self.library_root}",
+            f"Prefer Opus: {summary.get('prefer_opus')}",
+            f"Playlists processed: {summary.get('playlist_count')}",
+            f"Entries scanned: {summary.get('entries_scanned')}",
+            f"Playlists updated: {summary.get('updated_playlists')}",
+            f"Fixed via Opus swap: {summary.get('fixed_opus')}",
+            f"Fixed via library search: {summary.get('fixed_search')}",
+            f"Missing entries: {len(missing_entries)}",
+            "",
+        ]
+
+        if missing_entries:
+            lines.append("Missing Tracks:")
+            for playlist_path, entry in missing_entries:
+                lines.append(f"- {playlist_path}: {entry}")
+        else:
+            lines.append("All entries were resolved.")
+
+        try:
+            with open(report_path, "w", encoding="utf-8") as handle:
+                handle.write("\n".join(lines))
+        except OSError as exc:
+            self.after(
+                0,
+                lambda e=exc: self._append_log(f"! Failed to write report: {e}"),
+            )
+            self.report_path = None
+            return
+
+        self.report_path = report_path
+        self.after(
+            0,
+            lambda p=report_path: self._append_log(f"→ Report saved to {p}"),
+        )
+
+    def _finish(self, summary: dict[str, object]) -> None:
+        self._set_running(False, "Completed playlist repair.")
+        missing = summary.get("missing", [])
+        missing_count = len(missing) if isinstance(missing, list) else 0
+        message = (
+            "Playlist repair complete.\n\n"
+            f"Playlists processed: {summary.get('playlist_count')}\n"
+            f"Entries scanned: {summary.get('entries_scanned')}\n"
+            f"Playlists updated: {summary.get('updated_playlists')}\n"
+            f"Fixed via Opus swap: {summary.get('fixed_opus')}\n"
+            f"Fixed via library search: {summary.get('fixed_search')}\n"
+            f"Missing entries: {missing_count}"
+        )
+        if self.report_path:
+            self.open_report_btn.configure(state="normal")
+        messagebox.showinfo("Playlist Repair", message)
+
+    def _fail(self, error: str) -> None:
+        self._set_running(False, "Repair failed.")
+        messagebox.showerror("Playlist Repair", f"Repair failed:\n{error}")
+
+    def _open_report(self) -> None:
+        if not self.report_path:
+            messagebox.showinfo("Playlist Repair", "No report is available yet.")
+            return
+        safe_path = ensure_long_path(self.report_path)
+        if not os.path.exists(safe_path):
+            messagebox.showerror(
+                "Report Missing",
+                "The report could not be found. Run the repair again to generate a new report.",
+            )
+            return
+        display_path = strip_ext_prefix(self.report_path)
+        try:
+            uri = Path(display_path).resolve().as_uri()
+        except Exception:
+            uri = display_path
+        webbrowser.open(uri)
+
+
+class OpusLibraryMirrorDialog(tk.Toplevel):
+    """Create a mirrored library with FLAC files converted to Opus."""
+
+    def __init__(self, parent: tk.Widget):
+        super().__init__(parent)
+        self.title("Opus Library Mirror")
+        self.transient(parent)
+        self.resizable(True, False)
+        self.parent = parent
+
+        default_path = ""
+        if hasattr(parent, "library_path_var"):
+            default_path = parent.library_path_var.get()
+
+        self.source_var = tk.StringVar(value=default_path)
+        self.destination_var = tk.StringVar(value="")
+        self.status_var = tk.StringVar(value="Ready to mirror library.")
+        self.overwrite_var = tk.BooleanVar(value=False)
+        self._worker: threading.Thread | None = None
+        self.report_path: str | None = None
+
+        container = ttk.Frame(self, padding=12)
+        container.pack(fill="both", expand=True)
+
+        ttk.Label(
+            container,
+            text="Create a mirror of your library with FLAC files converted to Opus (96 kbps).",
+            foreground="#555",
+            wraplength=520,
+        ).pack(anchor="w")
+
+        source_frame = ttk.LabelFrame(container, text="Source Library")
+        source_frame.pack(fill="x", pady=(10, 6))
+        ttk.Entry(source_frame, textvariable=self.source_var, width=60).grid(
+            row=0, column=0, sticky="ew", padx=6, pady=6
+        )
+        ttk.Button(source_frame, text="Browse…", command=self._browse_source).grid(
+            row=0, column=1, sticky="e", padx=6, pady=6
+        )
+        source_frame.columnconfigure(0, weight=1)
+
+        dest_frame = ttk.LabelFrame(container, text="Destination Mirror")
+        dest_frame.pack(fill="x", pady=(0, 6))
+        ttk.Entry(dest_frame, textvariable=self.destination_var, width=60).grid(
+            row=0, column=0, sticky="ew", padx=6, pady=6
+        )
+        ttk.Button(dest_frame, text="Browse…", command=self._browse_destination).grid(
+            row=0, column=1, sticky="e", padx=6, pady=6
+        )
+        dest_frame.columnconfigure(0, weight=1)
+
+        ttk.Checkbutton(
+            container,
+            text="Overwrite existing files in the destination",
+            variable=self.overwrite_var,
+        ).pack(anchor="w", pady=(0, 4))
+
+        ttk.Label(container, textvariable=self.status_var).pack(anchor="w", pady=(4, 8))
+        self.progress = ttk.Progressbar(
+            container,
+            mode="determinate",
+        )
+        self.progress.pack(fill="x", pady=(0, 8))
+
+        controls = ttk.Frame(container)
+        controls.pack(anchor="e")
+        self.run_btn = ttk.Button(controls, text="Start", command=self._start)
+        self.run_btn.pack(side="right", padx=(6, 0))
+        self.close_btn = ttk.Button(controls, text="Close", command=self.destroy)
+        self.close_btn.pack(side="right")
+        self.open_report_btn = ttk.Button(
+            controls,
+            text="Open Report",
+            command=self._open_report,
+            state="disabled",
+        )
+        self.open_report_btn.pack(side="right", padx=(0, 6))
+
+    def _browse_source(self) -> None:
+        initial = self.source_var.get() or load_last_path() or os.getcwd()
+        folder = filedialog.askdirectory(
+            parent=self, title="Select Source Library", initialdir=initial
+        )
+        if folder:
+            self.source_var.set(folder)
+
+    def _browse_destination(self) -> None:
+        initial = self.destination_var.get() or load_last_path() or os.getcwd()
+        folder = filedialog.askdirectory(
+            parent=self, title="Select Destination Folder", initialdir=initial
+        )
+        if folder:
+            self.destination_var.set(folder)
+
+    def _start(self) -> None:
+        source = self.source_var.get().strip()
+        destination = self.destination_var.get().strip()
+
+        if not source or not os.path.isdir(source):
+            messagebox.showwarning(
+                "Source Required", "Select a valid source library folder."
+            )
+            return
+        if not destination or not os.path.isdir(destination):
+            messagebox.showwarning(
+                "Destination Required", "Select a valid destination folder."
+            )
+            return
+        if os.path.abspath(source) == os.path.abspath(destination):
+            messagebox.showerror(
+                "Invalid Destination",
+                "The destination folder must be different from the source.",
+            )
+            return
+        try:
+            if os.path.commonpath([source, destination]) == os.path.abspath(source):
+                messagebox.showerror(
+                    "Invalid Destination",
+                    "The destination cannot be inside the source library.",
+                )
+                return
+        except ValueError:
+            pass
+        if not shutil.which("ffmpeg"):
+            messagebox.showerror(
+                "FFmpeg Required",
+                "FFmpeg was not found on your PATH. Install it to convert FLAC files.",
+            )
+            return
+
+        self._set_running(True, "Scanning library…")
+        overwrite = self.overwrite_var.get()
+        self.report_path = None
+        self.open_report_btn.configure(state="disabled")
+
+        def worker() -> None:
+            try:
+                summary = self._mirror_library(source, destination, overwrite)
+                self.after(0, lambda: self._finished(summary))
+            except Exception as exc:  # pragma: no cover - safety net
+                self.after(0, lambda: self._failed(str(exc)))
+
+        self._worker = threading.Thread(target=worker, daemon=True)
+        self._worker.start()
+
+    def _set_running(self, running: bool, status: str) -> None:
+        self.status_var.set(status)
+        state = "disabled" if running else "normal"
+        self.run_btn.configure(state=state)
+        self.close_btn.configure(state=state)
+        if running:
+            self.progress.configure(maximum=1, value=0)
+
+    def _log(self, message: str) -> None:
+        if hasattr(self.parent, "_log"):
+            self.parent._log(message)
+            if hasattr(self.parent, "show_log_tab"):
+                self.parent.show_log_tab()
+        else:
+            print(message)
+
+    def _mirror_library(
+        self, source: str, destination: str, overwrite: bool
+    ) -> dict[str, object]:
+        def progress_callback(
+            total_tasks: int,
+            completed: int,
+            converted: int,
+            copied: int,
+            skipped: int,
+            errors: int,
+        ) -> None:
+            self.after(
+                0,
+                lambda t=total_tasks, d=completed: (
+                    self.status_var.set("Mirroring library…"),
+                    self.progress.configure(maximum=max(t, 1)),
+                    self.progress.configure(value=d),
+                ),
+            )
+
+        return mirror_library(
+            source,
+            destination,
+            overwrite,
+            progress_callback=progress_callback,
+            log_callback=self._log,
+        )
+
+    def _finished(self, summary: dict[str, object]) -> None:
+        self._set_running(False, "Completed.")
+        message = (
+            "Mirror complete.\n\n"
+            f"Files processed: {summary['total']}\n"
+            f"FLAC converted: {summary['converted']}\n"
+            f"Other files copied: {summary['copied']}\n"
+            f"Skipped: {summary['skipped']}\n"
+            f"Errors: {summary['errors']}"
+        )
+        self.status_var.set(
+            f"Done. Converted {summary['converted']} and copied {summary['copied']}."
+        )
+        messagebox.showinfo("Opus Library Mirror", message)
+        self._write_report(summary)
+        self._log(
+            "Opus Library Mirror: "
+            f"total={summary['total']} converted={summary['converted']} "
+            f"copied={summary['copied']} skipped={summary['skipped']} "
+            f"errors={summary['errors']}"
+        )
+
+    def _failed(self, error: str) -> None:
+        self._set_running(False, "Failed.")
+        messagebox.showerror("Opus Library Mirror", f"Run failed:\n{error}")
+
+    def _write_report(self, summary: dict[str, object]) -> None:
+        destination = self.destination_var.get().strip()
+        if not destination:
+            return
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        reports_dir = os.path.join(
+            destination,
+            "Docs",
+            "opus_library_mirror_reports",
+        )
+        report_path = os.path.join(
+            reports_dir,
+            f"opus_library_mirror_report_{timestamp}.html",
+        )
+        try:
+            write_mirror_report(report_path, summary)
+        except OSError as exc:
+            self._log(f"Opus Library Mirror: failed to write report: {exc}")
+            self.report_path = None
+            self.open_report_btn.configure(state="disabled")
+            return
+        self.report_path = report_path
+        self.open_report_btn.configure(state="normal")
+        self._log(f"Opus Library Mirror: report saved to {report_path}")
+
+    def _open_report(self) -> None:
+        if not self.report_path:
+            messagebox.showinfo("Opus Library Mirror", "No report is available yet.")
+            return
+        safe_path = ensure_long_path(self.report_path)
+        if not os.path.exists(safe_path):
+            messagebox.showerror(
+                "Report Missing",
+                "The report could not be found. Run the mirror again to generate a new report.",
+            )
+            return
+        display_path = strip_ext_prefix(self.report_path)
+        try:
+            uri = Path(display_path).resolve().as_uri()
+        except Exception:
+            uri = display_path
+        webbrowser.open(uri)
+
+
+class DuplicateBucketingPocDialog(tk.Toplevel):
+    """Minimal UI for the Duplicate Bucketing proof-of-concept tool."""
+
+    def __init__(self, parent: tk.Widget):
+        super().__init__(parent)
+        self.title("Duplicate Bucketing POC")
+        self.transient(parent)
+        self.resizable(False, False)
+        self.parent = parent
+
+        default_path = ""
+        if hasattr(parent, "library_path_var"):
+            default_path = parent.library_path_var.get()
+
+        self.folder_var = tk.StringVar(value=default_path)
+        self.status_var = tk.StringVar(value="Idle")
+        self.run_btn: ttk.Button | None = None
+
+        container = ttk.Frame(self, padding=12)
+        container.pack(fill="both", expand=True)
+
+        ttk.Label(
+            container,
+            text="Select a folder to scan for duplicate bucketing.",
+            foreground="#555",
+            wraplength=420,
+        ).pack(anchor="w")
+
+        row = ttk.Frame(container)
+        row.pack(fill="x", pady=(10, 6))
+        ttk.Entry(row, textvariable=self.folder_var, width=50).pack(side="left", fill="x", expand=True)
+        ttk.Button(row, text="Browse…", command=self._browse_folder).pack(side="left", padx=(6, 0))
+
+        controls = ttk.Frame(container)
+        controls.pack(fill="x", pady=(4, 0))
+        self.run_btn = ttk.Button(controls, text="Run", command=self._run)
+        self.run_btn.pack(side="left")
+        ttk.Button(controls, text="Close", command=self.destroy).pack(side="left", padx=(6, 0))
+
+        ttk.Label(container, textvariable=self.status_var).pack(anchor="w", pady=(8, 0))
+
+    def _browse_folder(self) -> None:
+        initial_dir = load_last_path() or os.getcwd()
+        chosen = filedialog.askdirectory(
+            title="Select Folder for Duplicate Bucketing",
+            initialdir=initial_dir,
+        )
+        if chosen:
+            self.folder_var.set(chosen)
+            save_last_path(chosen)
+
+    def _set_running(self, running: bool, status: str) -> None:
+        self.status_var.set(status)
+        if self.run_btn:
+            self.run_btn.configure(state=("disabled" if running else "normal"))
+
+    def _log(self, message: str) -> None:
+        if hasattr(self.parent, "_log"):
+            self.parent._log(message)
+            if hasattr(self.parent, "show_log_tab"):
+                self.parent.show_log_tab()
+        else:
+            print(message)
+
+    def _run(self) -> None:
+        folder = self.folder_var.get().strip()
+        if not folder or not os.path.isdir(folder):
+            messagebox.showwarning("Folder Required", "Please select a valid folder.")
+            return
+
+        self._set_running(True, "Running…")
+
+        def worker() -> None:
+            try:
+                report_path = run_duplicate_bucketing_poc(folder, log_callback=self._log)
+                self.after(0, lambda: self._on_complete(report_path))
+            except Exception as exc:  # pragma: no cover - safety net
+                self.after(0, lambda: self._on_error(str(exc)))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_complete(self, report_path: str) -> None:
+        self._set_running(False, "Completed")
+        open_report = messagebox.askyesno(
+            "Duplicate Bucketing POC",
+            f"Report saved to:\n{report_path}\n\nOpen it now?",
+        )
+        if open_report:
+            try:
+                uri = Path(report_path).resolve().as_uri()
+            except Exception:
+                uri = report_path
+            webbrowser.open(uri)
+
+    def _on_error(self, error: str) -> None:
+        self._set_running(False, "Failed")
+        messagebox.showerror("Duplicate Bucketing POC", f"Run failed:\n{error}")
+
+
+class FileCleanupDialog(tk.Toplevel):
+    def __init__(self, parent: tk.Widget):
+        super().__init__(parent)
+        self.title("File Clean Up")
+        self.transient(parent)
+        self.resizable(False, False)
+        self.parent = parent
+        self.library_path_var = tk.StringVar(
+            value=getattr(parent, "library_path", "") or ""
+        )
+        self.status_var = tk.StringVar(value="Ready to scan.")
+        self._worker: threading.Thread | None = None
+
+        container = ttk.Frame(self)
+        container.pack(fill="both", expand=True, padx=12, pady=12)
+
+        ttk.Label(
+            container,
+            text="File Clean Up",
+            font=_scaled_font(container, 12, "bold"),
+        ).pack(anchor="w")
+        ttk.Label(
+            container,
+            text=(
+                "Remove trailing (numbers) or 'copy' suffixes from audio filenames "
+                "in the library. Any collisions with existing filenames are skipped."
+            ),
+            foreground="#555",
+            wraplength=420,
+        ).pack(anchor="w", pady=(0, 8))
+
+        ttk.Label(container, text="Library Root").pack(anchor="w")
+        lib_row = ttk.Frame(container)
+        lib_row.pack(fill="x", pady=(0, 8))
+        ttk.Entry(lib_row, textvariable=self.library_path_var, width=60).pack(
+            side="left", fill="x", expand=True
+        )
+        ttk.Button(lib_row, text="Browse…", command=self._browse_library).pack(
+            side="left", padx=(6, 0)
+        )
+
+        ttk.Label(container, textvariable=self.status_var).pack(anchor="w", pady=(4, 8))
+
+        btn_row = ttk.Frame(container)
+        btn_row.pack(anchor="e")
+        self.execute_btn = ttk.Button(
+            btn_row, text="Execute", command=self._execute_cleanup
+        )
+        self.execute_btn.pack(side="right", padx=(6, 0))
+        self.close_btn = ttk.Button(btn_row, text="Cancel", command=self.destroy)
+        self.close_btn.pack(side="right")
+
+    def _browse_library(self) -> None:
+        initial = self.library_path_var.get() or load_last_path() or os.getcwd()
+        folder = filedialog.askdirectory(
+            parent=self, title="Select Library Root", initialdir=initial
+        )
+        if folder:
+            self.library_path_var.set(folder)
+
+    def _execute_cleanup(self) -> None:
+        library_root = self.library_path_var.get()
+        if not library_root:
+            messagebox.showwarning(
+                "No Library", "Select a library folder before running cleanup."
+            )
+            return
+        if not os.path.isdir(library_root):
+            messagebox.showerror(
+                "Invalid Library", "The selected folder does not exist."
+            )
+            return
+
+        self.execute_btn.configure(state="disabled")
+        self.status_var.set("Scanning files…")
+
+        def task() -> None:
+            summary = self._run_cleanup(library_root)
+            self.after(0, lambda: self._cleanup_finished(summary))
+
+        self._worker = threading.Thread(target=task, daemon=True)
+        self._worker.start()
+
+    def _run_cleanup(self, library_root: str) -> dict[str, int | list[str] | str | None]:
+        total = 0
+        renamed = 0
+        skipped = 0
+        conflicts = 0
+        errors = 0
+        skipped_files: list[str] = []
+        rename_map: dict[str, str] = {}
+        playlist_error: str | None = None
+        numeric_suffix = re.compile(r"\s*\(\d+\)$")
+        copy_suffix = re.compile(r"\s*(?:-\s*)?copy(?:\s*\(\d+\))?$", re.IGNORECASE)
+
+        for root, _dirs, files in os.walk(library_root):
+            for filename in files:
+                ext = os.path.splitext(filename)[1].lower()
+                if ext not in SUPPORTED_EXTS:
+                    continue
+                total += 1
+                stem = os.path.splitext(filename)[0]
+                new_stem = copy_suffix.sub("", stem)
+                new_stem = numeric_suffix.sub("", new_stem)
+                if new_stem == stem:
+                    skipped += 1
+                    continue
+                new_name = f"{new_stem}{ext}"
+                src = os.path.join(root, filename)
+                dst = os.path.join(root, new_name)
+                if os.path.exists(dst):
+                    conflicts += 1
+                    skipped_files.append(src)
+                    continue
+                try:
+                    os.rename(src, dst)
+                    renamed += 1
+                    rename_map[src] = dst
+                except OSError:
+                    errors += 1
+
+        if rename_map:
+            try:
+                from playlist_generator import update_playlists
+                update_playlists(rename_map)
+            except Exception as exc:
+                playlist_error = str(exc)
+
+        return {
+            "total": total,
+            "renamed": renamed,
+            "skipped": skipped,
+            "conflicts": conflicts,
+            "errors": errors,
+            "skipped_files": skipped_files,
+            "playlist_error": playlist_error,
+        }
+
+    def _cleanup_finished(self, summary: dict[str, int | list[str] | str | None]) -> None:
+        self.execute_btn.configure(state="normal")
+        self.close_btn.configure(text="Close")
+        message = (
+            "Finished. "
+            f"Renamed {summary['renamed']} of {summary['total']} files. "
+            f"Skipped {summary['skipped']}, conflicts {summary['conflicts']}, "
+            f"errors {summary['errors']}."
+        )
+        if summary.get("playlist_error"):
+            message = f"{message} Playlist update failed."
+        elif summary.get("renamed"):
+            message = f"{message} Playlists updated."
+        self.status_var.set(message)
+        if hasattr(self.parent, "_log"):
+            self.parent._log(
+                "File Clean Up: "
+                f"renamed={summary['renamed']} total={summary['total']} "
+                f"skipped={summary['skipped']} conflicts={summary['conflicts']} "
+                f"errors={summary['errors']}"
+            )
+            playlist_error = summary.get("playlist_error")
+            if playlist_error:
+                self.parent._log(f"File Clean Up: playlist update failed: {playlist_error}")
+            skipped_files = summary.get("skipped_files") or []
+            if skipped_files:
+                skipped_details = "\n".join(
+                    f"- {path}" for path in sorted(skipped_files)
+                )
+                self.parent._log(
+                    "File Clean Up: skipped files due to name conflicts:\n"
+                    f"{skipped_details}"
+                )
+
+
+class DuplicateScanEngineTool(tk.Toplevel):
+    """GUI wrapper for the staged duplicate scan engine."""
+
+    def __init__(self, parent: tk.Widget, library_path: str):
+        super().__init__(parent)
+        self.title("Duplicate Scan Engine")
+        self.transient(parent)
+        self.resizable(True, True)
+        self._running = False
+
+        self.library_path_var = tk.StringVar(value=library_path or "")
+        default_db_path = self._default_db_path(library_path)
+        self.db_path_var = tk.StringVar(value=default_db_path)
+
+        self.sample_rate_var = tk.StringVar(value="11025")
+        self.max_analysis_sec_var = tk.StringVar(value="120")
+        self.duration_tolerance_ms_var = tk.StringVar(value="2000")
+        self.duration_tolerance_ratio_var = tk.StringVar(value="0.01")
+        self.fp_bands_var = tk.StringVar(value="8")
+        self.min_band_collisions_var = tk.StringVar(value="2")
+        self.fp_distance_threshold_var = tk.StringVar(value="0.2")
+        self.chroma_offset_var = tk.StringVar(value="12")
+        self.chroma_match_threshold_var = tk.StringVar(value="0.82")
+        self.chroma_possible_threshold_var = tk.StringVar(value="0.72")
+
+        container = ttk.Frame(self)
+        container.pack(fill="both", expand=True, padx=10, pady=10)
+
+        ttk.Label(
+            container,
+            text="Duplicate Scan Engine",
+            font=_scaled_font(container, 12, "bold"),
+        ).pack(anchor="w")
+        ttk.Label(
+            container,
+            text=(
+                "Runs a staged duplicate scan (audio headers → fingerprint LSH → verification) "
+                "and writes results to a SQLite database."
+            ),
+            foreground="#555",
+            wraplength=560,
+        ).pack(anchor="w", pady=(0, 8))
+
+        lib_frame = ttk.LabelFrame(container, text="Paths")
+        lib_frame.pack(fill="x", pady=(0, 10))
+
+        lib_row = ttk.Frame(lib_frame)
+        lib_row.pack(fill="x", padx=8, pady=6)
+        ttk.Label(lib_row, text="Library Root").pack(side="left")
+        ttk.Entry(lib_row, textvariable=self.library_path_var, width=60).pack(
+            side="left", padx=6, fill="x", expand=True
+        )
+        ttk.Button(lib_row, text="Browse…", command=self._browse_library).pack(
+            side="left"
+        )
+
+        db_row = ttk.Frame(lib_frame)
+        db_row.pack(fill="x", padx=8, pady=(0, 8))
+        ttk.Label(db_row, text="Database").pack(side="left")
+        ttk.Entry(db_row, textvariable=self.db_path_var, width=60).pack(
+            side="left", padx=6, fill="x", expand=True
+        )
+        ttk.Button(db_row, text="Browse…", command=self._browse_db).pack(side="left")
+
+        settings = ttk.LabelFrame(container, text="Scan Settings")
+        settings.pack(fill="x", pady=(0, 10))
+        for idx in range(2):
+            settings.columnconfigure(idx * 2, weight=1)
+
+        self._add_setting(
+            settings,
+            0,
+            "Sample rate (Hz)",
+            self.sample_rate_var,
+        )
+        self._add_setting(
+            settings,
+            1,
+            "Max analysis seconds",
+            self.max_analysis_sec_var,
+        )
+        self._add_setting(
+            settings,
+            2,
+            "Duration tolerance (ms)",
+            self.duration_tolerance_ms_var,
+        )
+        self._add_setting(
+            settings,
+            3,
+            "Duration tolerance ratio",
+            self.duration_tolerance_ratio_var,
+        )
+        self._add_setting(
+            settings,
+            4,
+            "FP bands",
+            self.fp_bands_var,
+        )
+        self._add_setting(
+            settings,
+            5,
+            "Min band collisions",
+            self.min_band_collisions_var,
+        )
+        self._add_setting(
+            settings,
+            6,
+            "FP distance threshold",
+            self.fp_distance_threshold_var,
+        )
+        self._add_setting(
+            settings,
+            7,
+            "Chroma offset frames",
+            self.chroma_offset_var,
+        )
+        self._add_setting(
+            settings,
+            8,
+            "Chroma match threshold",
+            self.chroma_match_threshold_var,
+        )
+        self._add_setting(
+            settings,
+            9,
+            "Chroma possible threshold",
+            self.chroma_possible_threshold_var,
+        )
+
+        controls = ttk.Frame(container)
+        controls.pack(fill="x", pady=(0, 10))
+        self.run_btn = ttk.Button(controls, text="Run Scan", command=self._run_scan)
+        self.run_btn.pack(side="left")
+        self.status_var = tk.StringVar(value="Idle")
+        ttk.Label(controls, textvariable=self.status_var, foreground="#555").pack(
+            side="left", padx=(10, 0)
+        )
+
+        log_frame = ttk.LabelFrame(container, text="Log")
+        log_frame.pack(fill="both", expand=True)
+        self.log_text = ScrolledText(log_frame, height=10, state="disabled")
+        self.log_text.pack(fill="both", expand=True, padx=6, pady=6)
+
+    def _default_db_path(self, library_path: str) -> str:
+        if not library_path:
+            return ""
+        docs_dir = os.path.join(library_path, "Docs")
+        os.makedirs(docs_dir, exist_ok=True)
+        return os.path.join(docs_dir, "duplicate_scan.db")
+
+    def _add_setting(
+        self,
+        parent: tk.Widget,
+        row: int,
+        label: str,
+        variable: tk.StringVar,
+    ) -> None:
+        ttk.Label(parent, text=label).grid(
+            row=row, column=0, sticky="w", padx=8, pady=3
+        )
+        ttk.Entry(parent, textvariable=variable, width=14).grid(
+            row=row, column=1, sticky="w", padx=(0, 16), pady=3
+        )
+
+    def _browse_library(self) -> None:
+        path = filedialog.askdirectory(title="Select Library Root")
+        if path:
+            self.library_path_var.set(path)
+            self.db_path_var.set(self._default_db_path(path))
+
+    def _browse_db(self) -> None:
+        path = filedialog.asksaveasfilename(
+            title="Select database path",
+            defaultextension=".db",
+            filetypes=[("SQLite DB", "*.db"), ("All files", "*.*")],
+        )
+        if path:
+            self.db_path_var.set(path)
+
+    def _log(self, message: str) -> None:
+        if not self.winfo_exists():
+            return
+        self.log_text.configure(state="normal")
+        self.log_text.insert("end", message + "\n")
+        self.log_text.see("end")
+        self.log_text.configure(state="disabled")
+
+    def _set_running(self, running: bool) -> None:
+        self._running = running
+        self.run_btn.configure(state="disabled" if running else "normal")
+        self.status_var.set("Running..." if running else "Idle")
+
+    def _run_scan(self) -> None:
+        if self._running:
+            return
+        library_path = self.library_path_var.get().strip()
+        db_path = self.db_path_var.get().strip()
+        if not library_path:
+            messagebox.showwarning("Duplicate Scan Engine", "Select a library first.")
+            return
+        if not db_path:
+            messagebox.showwarning("Duplicate Scan Engine", "Select a database path.")
+            return
+
+        try:
+            config = DuplicateScanConfig(
+                sample_rate=int(self.sample_rate_var.get()),
+                max_analysis_sec=float(self.max_analysis_sec_var.get()),
+                duration_tolerance_ms=int(self.duration_tolerance_ms_var.get()),
+                duration_tolerance_ratio=float(self.duration_tolerance_ratio_var.get()),
+                fp_bands=int(self.fp_bands_var.get()),
+                min_band_collisions=int(self.min_band_collisions_var.get()),
+                fp_distance_threshold=float(self.fp_distance_threshold_var.get()),
+                chroma_max_offset_frames=int(self.chroma_offset_var.get()),
+                chroma_match_threshold=float(self.chroma_match_threshold_var.get()),
+                chroma_possible_threshold=float(
+                    self.chroma_possible_threshold_var.get()
+                ),
+            )
+        except ValueError:
+            messagebox.showerror(
+                "Duplicate Scan Engine",
+                "Invalid settings; please check numeric fields.",
+            )
+            return
+
+        def log_callback(msg: str) -> None:
+            self.after(0, lambda: self._log(msg))
+
+        def run() -> None:
+            try:
+                summary = run_duplicate_scan(
+                    library_path, db_path, config, log_callback=log_callback
+                )
+            except Exception as exc:
+                self.after(0, lambda: self._log(f"Error: {exc}"))
+            else:
+                self.after(
+                    0,
+                    lambda: self._log(
+                        "Summary: "
+                        f"{summary.tracks_total} tracks, "
+                        f"{summary.headers_updated} headers updated, "
+                        f"{summary.fingerprints_updated} fingerprints updated, "
+                        f"{summary.edges_written} edges, "
+                        f"{summary.groups_written} groups."
+                    ),
+                )
+            finally:
+                self.after(0, lambda: self._set_running(False))
+
+        self._set_running(True)
+        threading.Thread(target=run, daemon=True).start()
+
 
 class SoundVaultImporterApp(tk.Tk):
     def __init__(self):
@@ -472,7 +7903,7 @@ class SoundVaultImporterApp(tk.Tk):
         self.library_path = ""
         self.library_name_var = tk.StringVar(value="No library selected")
         self.library_path_var = tk.StringVar(value="")
-        # Folder to run Quality Checker - now always uses library_path
+        # Folder to run Duplicate Finder - now always uses library_path
         self.dup_folder_var = tk.StringVar(value="")  # retained for compatibility
         self.library_stats_var = tk.StringVar(value="")
         self.show_all = False
@@ -482,16 +7913,22 @@ class SoundVaultImporterApp(tk.Tk):
 
         # Cached tracks and feature vectors for interactive clustering
         self.cluster_data = None
+        self.cluster_manager = None
+        self.cluster_generation_running = False
         self.folder_filter = {"include": [], "exclude": []}
 
-        # Library Sync state
-        self.sync_debug_var = tk.BooleanVar(value=False)
-        self.sync_library_var = tk.StringVar(value="")
-        self.sync_incoming_var = tk.StringVar(value="")
-        self.sync_auto_var = tk.BooleanVar(value=True)
-        self.sync_new = []
-        self.sync_existing = []
-        self.sync_improved = []
+        # Shared audio feature/analysis engine selection
+        self.feature_engine_var = tk.StringVar(value="librosa")
+
+        # Cached plugin panels to avoid teardown/rebuild churn
+        self.plugin_views: dict[str, ttk.Frame] = {}
+        self.active_plugin: str | None = None
+
+        self.use_review_sync_var = tk.BooleanVar(
+            value=cfg.get("use_library_sync_review", False)
+        )
+        self.sync_review_window: library_sync_review.LibrarySyncReviewWindow | None = None
+        self.sync_review_panel: library_sync_review.LibrarySyncReviewPanel | None = None
 
         # ── Tag Fixer state ──
         self.tagfix_folder_var = tk.StringVar(value="")
@@ -504,21 +7941,61 @@ class SoundVaultImporterApp(tk.Tk):
         self.tf_apply_genres = tk.BooleanVar(value=False)
         self.tagfix_db_path = ""
         self.tagfix_debug_var = tk.BooleanVar(value=False)
+        self.tagfix_api_status = tk.StringVar(value="")
 
-        self.dup_debug_var = tk.BooleanVar(value=False)
+        # Duplicate Finder state
+        self.duplicate_finder_window: DuplicateFinderShell | None = None
+        self.duplicate_pair_review_window: DuplicatePairReviewTool | None = None
+        self.duplicate_scan_engine_window: DuplicateScanEngineTool | None = None
+        self.playlist_repair_window: PlaylistRepairDialog | None = None
+        self.duplicate_finder_plan: ConsolidationPlan | None = None
+        self.duplicate_finder_plan_library: str | None = None
 
-        # Distance threshold for duplicate scanning
-        dup_thr = cfg.get("duplicate_threshold", 0.03)
-        self.fp_threshold_var = tk.DoubleVar(value=dup_thr)
-        dup_pref = cfg.get("duplicate_prefix_len", sdf_mod.FP_PREFIX_LEN)
-        self.fp_prefix_var = tk.IntVar(value=dup_pref)
-
-        # Quality Checker state
-        self._dup_logging = False
+        # Shared preview/playback state
         self._preview_thread = None
-        self.preview_player = PreviewPlayer(
+        self.player_status_var = tk.StringVar(
+            value="Select a library to load tracks."
+        )
+        self.preview_player = VlcPreviewPlayer(
             on_done=lambda: self.after(0, self._preview_finished_ui)
         )
+        self.preview_backend_available = self.preview_player.available
+        self.preview_backend_error = self.preview_player.availability_error
+        if not self.preview_backend_available:
+            reason = self.preview_backend_error or "Install python-vlc to enable playback."
+            logging.error("Preview backend unavailable: %s", reason)
+            self.player_status_var.set(f"Preview disabled: {reason}")
+        else:
+            logging.info("VLC preview backend initialized")
+        self._preview_in_progress = False
+        self._player_busy_item: str | None = None
+        self._ignore_next_preview_finish = False
+        self._dup_preview_heartbeat_running = False
+        self._dup_preview_heartbeat_start: float | None = None
+        self._dup_preview_heartbeat_last_tick: float | None = None
+        self._dup_preview_heartbeat_count = 0
+        self._dup_preview_heartbeat_interval = 0.1
+        self._dup_preview_heartbeat_stall_logged = False
+
+        # Player tab state
+        self.player_tracks: list[dict[str, str]] = []
+        self.player_tree_paths: dict[str, str] = {}
+        self.player_tree_rows: dict[str, dict[str, str]] = {}
+        self._player_load_thread: threading.Thread | None = None
+        self.player_art_image: ImageTk.PhotoImage | None = None
+        self.player_search_var = tk.StringVar(value="")
+        self.player_temp_playlist: list[str] = []
+        self.player_playlist_status_var = tk.StringVar(
+            value="No songs in the playlist builder yet."
+        )
+        self.player_playlist_listbox: tk.Listbox | None = None
+        self.player_view_label: str | None = None
+        self.player_playlist_mode = False
+        self.player_playlist_rows: list[dict[str, str]] = []
+        self.player_playlist_tree_paths: dict[str, str] = {}
+        self.player_playlist_tree_rows: dict[str, dict[str, str]] = {}
+        self.player_playlist_tree: ttk.Treeview | None = None
+        self.player_playlist_frame: ttk.Frame | None = None
 
         # assume ffmpeg is available without performing checks
         self.ffmpeg_available = True
@@ -530,6 +8007,8 @@ class SoundVaultImporterApp(tk.Tk):
         self.theme_var = tk.StringVar(value=default_theme)
         self.scale_var = tk.StringVar(value=str(self.current_scale))
 
+        self._base_font_sizes = self._capture_base_font_sizes()
+        self._apply_font_scaling()
         self._configure_treeview_style()
 
         # Build initial UI
@@ -541,111 +8020,196 @@ class SoundVaultImporterApp(tk.Tk):
         base = 20
         self.style.configure("Treeview", rowheight=int(base * self.current_scale))
 
+    def _capture_base_font_sizes(self) -> dict[str, int]:
+        font_names = (
+            "TkDefaultFont",
+            "TkTextFont",
+            "TkFixedFont",
+            "TkMenuFont",
+            "TkHeadingFont",
+            "TkCaptionFont",
+            "TkSmallCaptionFont",
+            "TkIconFont",
+            "TkTooltipFont",
+        )
+        sizes: dict[str, int] = {}
+        for name in font_names:
+            try:
+                sizes[name] = int(tkfont.nametofont(name).cget("size"))
+            except tk.TclError:
+                continue
+        return sizes
+
+    def _apply_font_scaling(self) -> None:
+        for name, base_size in self._base_font_sizes.items():
+            try:
+                font = tkfont.nametofont(name)
+            except tk.TclError:
+                continue
+            scaled = max(1, int(round(abs(base_size) * self.current_scale)))
+            font.configure(size=scaled if base_size >= 0 else -scaled)
+
+    def _configure_top_ribbon_style(self) -> None:
+        base_pad = max(2, int(round(4 * self.current_scale)))
+        self.style.configure(
+            "TopRibbon.TButton",
+            font=_scaled_font(self, 10),
+            padding=(base_pad, base_pad),
+        )
+        self.style.configure(
+            "TopRibbonExit.TButton",
+            font=_scaled_font(self, 10, "bold"),
+            padding=(base_pad, base_pad),
+        )
+        self.style.configure("TopRibbon.TLabel", font=_scaled_font(self, 10))
+        self.style.configure(
+            "TopRibbon.TCombobox",
+            font=_scaled_font(self, 10),
+            padding=(base_pad, base_pad),
+        )
+        menu_scale = 1.25
+        menu_size = max(1, int(round(10 * self.current_scale * menu_scale)))
+        self._menu_font = ("TkMenuFont", menu_size)
+        self.style.configure(
+            "TCombobox",
+            font=_scaled_font(self, 10),
+            padding=(base_pad, base_pad),
+        )
+
     def build_ui(self):
         """Create all menus, frames, and widgets."""
         # Theme selector setup
         themes = self.style.theme_names()
 
+        self._configure_top_ribbon_style()
+
         # ─── Menu Bar ───────────────────────────────────────────────────────
-        menubar = tk.Menu(self)
+        menubar = tk.Menu(self, font=self._menu_font)
         self.config(menu=menubar)
 
-        file_menu = tk.Menu(menubar, tearoff=False)
+        file_menu = tk.Menu(menubar, tearoff=False, font=self._menu_font)
         file_menu.add_command(label="Open Library…", command=self.select_library)
         file_menu.add_command(label="Validate Library", command=self.validate_library)
-        file_menu.add_command(label="Import New Songs", command=self.import_songs)
-        file_menu.add_command(label="Scan for Orphans", command=self.scan_orphans)
-        file_menu.add_command(label="Compare Libraries", command=self.compare_libraries)
-        file_menu.add_command(label="Show All Files", command=self._on_show_all)
         file_menu.add_separator()
         file_menu.add_command(label="Exit", command=self._on_exit)
         menubar.add_cascade(label="File", menu=file_menu)
 
-        settings_menu = tk.Menu(menubar, tearoff=False)
+        settings_menu = tk.Menu(menubar, tearoff=False, font=self._menu_font)
         settings_menu.add_command(
             label="Metadata Services…", command=self.open_metadata_settings
         )
         menubar.add_cascade(label="Settings", menu=settings_menu)
 
-        tools_menu = tk.Menu(menubar, tearoff=False)
+        tools_menu = tk.Menu(menubar, tearoff=False, font=self._menu_font)
         tools_menu.add_command(
-            label="Regenerate Playlists", command=self.regenerate_playlists
+            label="Library Sync…", command=self._open_library_sync_tool
         )
+        tools_menu.add_checkbutton(
+            label="Use Library Sync (Review)",
+            variable=self.use_review_sync_var,
+            command=self._toggle_library_sync_mode,
+        )
+        tools_menu.add_separator()
         tools_menu.add_command(label="Fix Tags via AcoustID", command=self.fix_tags_gui)
         tools_menu.add_command(
             label="Generate Library Index…",
             command=lambda: generate_index(self.require_library()),
         )
         tools_menu.add_command(
-            label="List Unique Genres…",
-            command=lambda: list_unique_genres(self.require_library()),
+            label="Export Artist/Title List…",
+            command=self._export_artist_title_list,
         )
-        if PYDUB_AVAILABLE and self.ffmpeg_available:
-            tools_menu.add_command(
-                label="Play Highlight…", command=self.sample_song_highlight
-            )
-        else:
-            tools_menu.add_command(
-                label="Play Highlight… (requires pydub & ffmpeg)", state="disabled"
-            )
-        tools_menu.add_separator()
         tools_menu.add_command(
-            label="Genre Normalizer", command=self._open_genre_normalizer
+            label="Export List by Codec…",
+            command=self._export_codec_file_list,
         )
+        tools_menu.add_command(
+            label="Playlist Artwork", command=self.open_playlist_artwork_folder
+        )
+        tools_menu.add_command(
+            label="Playlist Repair…", command=self._open_playlist_repair_tool
+        )
+        tools_menu.add_command(label="File Clean Up…", command=self._open_file_cleanup_tool)
+        tools_menu.add_command(
+            label="Similarity Inspector…", command=self._open_similarity_inspector_tool
+        )
+        tools_menu.add_command(
+            label="Metadata Fuzzy Duplicate Finder…",
+            command=self._open_fuzzy_duplicate_finder_tool,
+        )
+        tools_menu.add_command(
+            label="Duplicate Bucketing POC…",
+            command=self._open_duplicate_bucketing_poc_tool,
+        )
+        tools_menu.add_command(
+            label="Duplicate Pair Review…",
+            command=self._open_duplicate_pair_review_tool,
+        )
+        tools_menu.add_command(
+            label="Duplicate Scan Engine…",
+            command=self._open_duplicate_scan_engine_tool,
+        )
+        tools_menu.add_command(label="M4A Tester…", command=self._open_m4a_tester_tool)
+        tools_menu.add_command(label="Opus Tester…", command=self._open_opus_tester_tool)
+        tools_menu.add_separator()
         tools_menu.add_command(label="Reset Tag-Fix Log", command=self.reset_tagfix_log)
-        cluster_menu = tk.Menu(tools_menu, tearoff=False)
-        cluster_menu.add_command(
-            label="K-Means…",
-            command=lambda: self.cluster_playlists_dialog("kmeans"),
-        )
-        cluster_menu.add_command(
-            label="HDBSCAN…",
-            command=lambda: self.cluster_playlists_dialog("hdbscan"),
-        )
-        tools_menu.add_cascade(label="Clustered Playlists", menu=cluster_menu)
         menubar.add_cascade(label="Tools", menu=tools_menu)
 
-        debug_menu = tk.Menu(menubar, tearoff=False)
+        debug_menu = tk.Menu(menubar, tearoff=False, font=self._menu_font)
         debug_menu.add_command(
             label="Enable Verbose Logging",
             command=lambda: logging.getLogger().setLevel(logging.DEBUG),
         )
         menubar.add_cascade(label="Debug", menu=debug_menu)
 
-        help_menu = tk.Menu(menubar, tearoff=False)
+        help_menu = tk.Menu(menubar, tearoff=False, font=self._menu_font)
         help_menu.add_command(
             label="View Crash Log…", command=self._view_crash_log
         )
         menubar.add_cascade(label="Help", menu=help_menu)
 
         # ─── Library Info ───────────────────────────────────────────────────
-        top = tk.Frame(self)
+        top = ttk.Frame(self)
         top.pack(fill="x", padx=10, pady=(10, 0))
-        tk.Button(top, text="Choose Library…", command=self.select_library).pack(
-            side="left"
-        )
-        tk.Label(top, textvariable=self.library_name_var, anchor="w").pack(
-            side="left", padx=(5, 0)
-        )
+        ttk.Button(
+            top,
+            text="Choose Library…",
+            command=self.select_library,
+            style="TopRibbon.TButton",
+        ).pack(side="left")
+        ttk.Label(
+            top,
+            textvariable=self.library_name_var,
+            anchor="w",
+            style="TopRibbon.TLabel",
+        ).pack(side="left", padx=(5, 0))
         cb = ttk.Combobox(
             top,
             textvariable=self.theme_var,
             values=themes,
             state="readonly",
             width=20,
+            style="TopRibbon.TCombobox",
         )
         cb.pack(side="right", padx=5)
         cb.bind("<<ComboboxSelected>>", self.on_theme_change)
-        scale_choices = ["1.25", "1.5", "1.75", "2.0", "2.25"]
+        scale_choices = ["1.25", "1.5", "1.75", "2.0", "2.25", "3.0", "3.5", "4.0", "5.0", "6.0"]
         cb_scale = ttk.Combobox(
             top,
             textvariable=self.scale_var,
             values=scale_choices,
             state="readonly",
             width=5,
+            style="TopRibbon.TCombobox",
         )
         cb_scale.pack(side="right", padx=5)
         cb_scale.bind("<<ComboboxSelected>>", self.on_scale_change)
+        ttk.Button(
+            top,
+            text="Exit",
+            command=self._on_exit,
+            style="TopRibbonExit.TButton",
+        ).pack(side="right", padx=5)
         tk.Label(self, textvariable=self.library_path_var, anchor="w").pack(
             fill="x", padx=10
         )
@@ -762,10 +8326,9 @@ class SoundVaultImporterApp(tk.Tk):
         for name in [
             "Interactive – KMeans",
             "Interactive – HDBSCAN",
-            "Sort by Genre",
+            "Genre Normalizer",
+            "Year Assistant",
             "Tempo/Energy Buckets",
-            "Metadata",
-            "More Like This",
             "Auto-DJ",
         ]:
             self.plugin_list.insert("end", name)
@@ -818,6 +8381,13 @@ class SoundVaultImporterApp(tk.Tk):
             text="Verbose Debug",
             variable=self.tagfix_debug_var,
         ).pack(side="left", padx=(5, 0))
+        api_status = ttk.Frame(opts)
+        api_status.pack(side="left", padx=(10, 0))
+        self.tagfix_api_indicator = tk.Label(api_status, text="●", fg="#d68a00")
+        self.tagfix_api_indicator.pack(side="left")
+        ttk.Label(api_status, textvariable=self.tagfix_api_status).pack(
+            side="left", padx=(4, 0)
+        )
 
         self.tagfix_progress = ttk.Progressbar(
             self.tagfix_tab, orient="horizontal", mode="determinate"
@@ -897,125 +8467,170 @@ class SoundVaultImporterApp(tk.Tk):
             apply_frame, text="Apply Selected", command=self._apply_selected_tags
         ).pack(side="right")
 
-        # ─── Quality Checker Tab ─────────────────────────────────────────
+        # ─── Duplicate Finder Tab ─────────────────────────────────────────
         self.dup_tab = ttk.Frame(self.notebook)
-        self.notebook.add(self.dup_tab, text="Quality Checker")
+        self.notebook.add(self.dup_tab, text="Duplicate Finder")
 
-        df_controls = ttk.Frame(self.dup_tab)
-        df_controls.pack(fill="x", padx=10, pady=(10, 5))
-        ttk.Label(df_controls, textvariable=self.library_path_var).pack(side="left")
+        df_container = ttk.LabelFrame(self.dup_tab, text="Duplicate Finder")
+        df_container.pack(fill="both", expand=True, padx=10, pady=10)
+        ttk.Label(
+            df_container,
+            textvariable=self.library_path_var,
+            justify="left",
+        ).pack(anchor="w", padx=10, pady=(8, 4))
+        ttk.Label(
+            df_container,
+            text=(
+                "Preview duplicate groups and launch the Duplicate Finder workflow. "
+                "Execution writes backups and reports under the library Docs folder."
+            ),
+            wraplength=520,
+            justify="left",
+        ).pack(anchor="w", padx=10, pady=(0, 6))
         self.scan_btn = ttk.Button(
-            df_controls,
-            text="Scan",
+            df_container,
+            text="Open Duplicate Finder",
             command=self.scan_duplicates,
             state="disabled",
         )
-        self.scan_btn.pack(side="left", padx=(5, 0))
-        ttk.Label(df_controls, text="Distance Threshold:").pack(side="left", padx=(10, 0))
-        thr_entry = ttk.Entry(df_controls, textvariable=self.fp_threshold_var, width=5)
-        thr_entry.pack(side="left")
-        ttk.Label(df_controls, text="Prefix Length:").pack(side="left", padx=(10, 0))
-        pref_entry = ttk.Entry(df_controls, textvariable=self.fp_prefix_var, width=4)
-        pref_entry.pack(side="left")
-        self.fp_threshold_var.trace_add("write", lambda *a: self._validate_threshold())
-        self.fp_prefix_var.trace_add("write", lambda *a: self._validate_threshold())
-        ttk.Checkbutton(
-            df_controls,
-            text="Verbose Debug",
-            variable=self.dup_debug_var,
-        ).pack(side="left", padx=(5, 0))
+        self.scan_btn.pack(anchor="w", padx=10, pady=(4, 10))
+        self._check_tagfix_api_status()
 
-        self.qc_canvas = tk.Canvas(self.dup_tab)
-        self.qc_scroll = ttk.Scrollbar(
-            self.dup_tab, orient="vertical", command=self.qc_canvas.yview
+        # ─── Player Tab ────────────────────────────────────────────────
+        self.player_tab = ttk.Frame(self.notebook)
+        self.notebook.add(self.player_tab, text="Player")
+
+        player_controls = ttk.Frame(self.player_tab)
+        player_controls.pack(fill="x", padx=10, pady=(10, 5))
+        ttk.Label(player_controls, textvariable=self.player_status_var).pack(
+            side="left"
         )
-        self.qc_canvas.configure(yscrollcommand=self.qc_scroll.set)
-        self.qc_canvas.pack(side="left", fill="both", expand=True, padx=(10, 0), pady=(0, 10))
-        self.qc_scroll.pack(side="right", fill="y", pady=(0, 10))
-        self.qc_inner = ttk.Frame(self.qc_canvas)
-        self.qc_canvas.create_window((0, 0), window=self.qc_inner, anchor="nw")
-        self.qc_inner.bind(
-            "<Configure>",
-            lambda e: self.qc_canvas.configure(scrollregion=self.qc_canvas.bbox("all")),
+        ttk.Label(player_controls, text="Search:").pack(side="left", padx=(10, 4))
+        player_search = ttk.Entry(
+            player_controls, textvariable=self.player_search_var, width=30
         )
-        if self.library_path_var.get():
-            self.scan_btn.config(state="normal")
-        self._validate_threshold()
+        player_search.pack(side="left")
+        self.player_search_var.trace_add("write", lambda *_: self._apply_player_filter())
+        self.player_reload_btn = ttk.Button(
+            player_controls,
+            text="Reload",
+            command=self._load_player_library_async,
+            state="disabled",
+        )
+        self.player_reload_btn.pack(side="right")
+
+        player_content = ttk.Frame(self.player_tab)
+        player_content.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+
+        self.player_table_region = ttk.Frame(player_content)
+        self.player_table_region.pack(side="left", fill="both", expand=True)
+        self.player_library_frame = self._create_player_library_table(
+            self.player_table_region
+        )
+        self.player_library_frame.pack(fill="both", expand=True)
+
+        art_panel = ttk.Frame(player_content)
+        art_panel.pack(side="right", fill="y", padx=(10, 0))
+        self.player_art_caption = ttk.Label(
+            art_panel,
+            text="Select a track to view album art",
+            wraplength=220,
+            justify="center",
+        )
+        self.player_art_caption.pack(fill="x", pady=(0, 6))
+        self.player_art_label = ttk.Label(art_panel)
+        self.player_art_label.pack(fill="x")
+        self.player_playlist_toggle_btn = ttk.Button(
+            art_panel, text="Add Playlist", command=self._toggle_player_playlist_view
+        )
+        self.player_playlist_toggle_btn.pack(fill="x", pady=(0, 6))
+        ttk.Button(
+            art_panel, text="Load Playlist", command=self._player_load_playlist
+        ).pack(fill="x", pady=(6, 6))
+        self._update_player_art(None)
+
+        playlist_box = ttk.LabelFrame(art_panel, text="Playlist Builder")
+        playlist_box.pack(fill="both", expand=True, pady=(10, 0))
+        ttk.Label(
+            playlist_box, textvariable=self.player_playlist_status_var
+        ).pack(anchor="w", padx=5, pady=(5, 2))
+
+        pl_list_frame = ttk.Frame(playlist_box)
+        pl_list_frame.pack(fill="both", expand=True, padx=5)
+        pl_scroll = ttk.Scrollbar(pl_list_frame, orient="vertical")
+        self.player_playlist_listbox = tk.Listbox(
+            pl_list_frame,
+            selectmode="extended",
+            height=10,
+            yscrollcommand=pl_scroll.set,
+        )
+        self.player_playlist_listbox.pack(side="left", fill="both", expand=True)
+        pl_scroll.config(command=self.player_playlist_listbox.yview)
+        pl_scroll.pack(side="right", fill="y")
+
+        btn_row1 = ttk.Frame(playlist_box)
+        btn_row1.pack(fill="x", padx=5, pady=(5, 0))
+        ttk.Button(
+            btn_row1, text="Add Selected", command=self._player_add_selection_to_temp
+        ).pack(side="left", expand=True, fill="x")
+        ttk.Button(
+            btn_row1,
+            text="Remove Selected",
+            command=self._player_remove_selected_from_temp,
+        ).pack(side="left", expand=True, fill="x", padx=(5, 0))
+
+        btn_row2 = ttk.Frame(playlist_box)
+        btn_row2.pack(fill="x", padx=5, pady=(5, 5))
+        ttk.Button(btn_row2, text="Clear", command=self._player_clear_temp_playlist).pack(
+            side="left", fill="x"
+        )
+        ttk.Button(
+            btn_row2, text="Save Playlist", command=self._player_save_temp_playlist
+        ).pack(side="left", expand=True, fill="x", padx=(5, 0))
+        ttk.Button(
+            btn_row2,
+            text="Current Playlists",
+            command=self._player_show_current_playlists,
+        ).pack(side="left", expand=True, fill="x", padx=(5, 0))
+        self._sync_player_playlist()
+
+        # ─── Library Compression Tab ──────────────────────────────────────
+        self.library_compression_tab = ttk.Frame(self.notebook)
+        self.notebook.add(self.library_compression_tab, text="Library Compression")
+        self.library_compression_panel = LibraryCompressionPanel(
+            self.library_compression_tab,
+            controller=self,
+        )
+        self.library_compression_panel.pack(fill="both", expand=True)
 
         # ─── Library Sync Tab ─────────────────────────────────────────────
         self.sync_tab = ttk.Frame(self.notebook)
         self.notebook.add(self.sync_tab, text="Library Sync")
-
-        path_row = ttk.Frame(self.sync_tab)
-        path_row.pack(fill="x", padx=10, pady=(10, 5))
-        ttk.Label(path_row, text="Library Folder:").grid(row=0, column=0, sticky="w")
-        ttk.Entry(path_row, textvariable=self.sync_library_var, state="readonly").grid(
-            row=0, column=1, sticky="ew"
+        self.sync_review_panel = library_sync_review.LibrarySyncReviewPanel(
+            self.sync_tab,
+            library_root=self.library_path or "",
         )
-        ttk.Button(path_row, text="Browse…", command=self._browse_sync_library).grid(
-            row=0, column=2, padx=(5, 0)
-        )
-        path_row.columnconfigure(1, weight=1)
-
-        inc_row = ttk.Frame(self.sync_tab)
-        inc_row.pack(fill="x", padx=10, pady=(0, 5))
-        ttk.Label(inc_row, text="Incoming Folder:").grid(row=0, column=0, sticky="w")
-        ttk.Entry(inc_row, textvariable=self.sync_incoming_var).grid(
-            row=0, column=1, sticky="ew"
-        )
-        ttk.Button(inc_row, text="Browse…", command=self._browse_sync_incoming).grid(
-            row=0, column=2, padx=(5, 0)
-        )
-        inc_row.columnconfigure(1, weight=1)
-
-        ttk.Button(self.sync_tab, text="Scan", command=self._scan_library_sync).pack(
-            pady=5
-        )
-
-        lists = ttk.Frame(self.sync_tab)
-        lists.pack(fill="both", expand=True, padx=10, pady=5)
-        lists.columnconfigure((0, 1, 2), weight=1)
-
-        ttk.Label(lists, text="New Tracks").grid(row=0, column=0)
-        ttk.Label(lists, text="Existing").grid(row=0, column=1)
-        ttk.Label(lists, text="Improvement Candidates").grid(row=0, column=2)
-
-        self.sync_new_list = tk.Listbox(lists, selectmode="extended")
-        self.sync_new_list.grid(row=1, column=0, sticky="nsew")
-        self.sync_existing_list = tk.Listbox(lists, selectmode="extended")
-        self.sync_existing_list.grid(row=1, column=1, sticky="nsew")
-        self.sync_improved_list = tk.Listbox(lists, selectmode="extended")
-        self.sync_improved_list.grid(row=1, column=2, sticky="nsew")
-
-        actions = ttk.Frame(self.sync_tab)
-        actions.pack(fill="x", padx=10, pady=(0, 10))
-        ttk.Checkbutton(
-            actions, text="Auto-Update Playlists", variable=self.sync_auto_var
-        ).pack(side="left")
-        ttk.Button(actions, text="Copy New", command=self._copy_new_tracks).pack(
-            side="left", padx=(5, 0)
-        )
-        ttk.Button(
-            actions, text="Replace Selected", command=self._replace_selected
-        ).pack(side="left", padx=(5, 0))
+        self.sync_review_panel.pack(fill="both", expand=True)
 
         # after your other tabs
-        help_frame = ttk.Frame(self.notebook)
-        self.notebook.add(help_frame, text="Help")
+        self.help_tab = ttk.Frame(self.notebook)
+        self.notebook.add(self.help_tab, text="Help")
 
         # Chat history display
         self.chat_history = ScrolledText(
-            help_frame, height=15, state="disabled", wrap="word"
+            self.help_tab, height=15, state="disabled", wrap="word"
         )
         self.chat_history.pack(fill="both", expand=True, padx=10, pady=(10, 5))
 
         # Entry + send button
-        entry_frame = ttk.Frame(help_frame)
+        entry_frame = ttk.Frame(self.help_tab)
         entry_frame.pack(fill="x", padx=10, pady=(0, 10))
         self.chat_input = ttk.Entry(entry_frame)
         self.chat_input.pack(side="left", fill="x", expand=True)
         send_btn = ttk.Button(entry_frame, text="Send", command=self._send_help_query)
         send_btn.pack(side="right", padx=(5, 0))
+
+        self._reorder_tabs()
 
     def on_theme_change(self, event=None):
         """Apply the selected theme and persist to config."""
@@ -1036,6 +8651,7 @@ class SoundVaultImporterApp(tk.Tk):
         cfg = load_config()
         cfg["ui_scale"] = scale
         save_config(cfg)
+        self._apply_font_scaling()
         self._configure_treeview_style()
         for widget in self.winfo_children():
             widget.destroy()
@@ -1043,15 +8659,30 @@ class SoundVaultImporterApp(tk.Tk):
 
     def on_plugin_select(self, event):
         """Swap in the UI panel for the selected playlist plugin."""
-        for w in self.plugin_panel.winfo_children():
-            w.destroy()
+        switch_start = time.perf_counter()
         try:
             sel = self.plugin_list.get(self.plugin_list.curselection())
         except tk.TclError:
             return
-        panel = create_panel_for_plugin(self, sel, parent=self.plugin_panel)
+        logging.info("[perf] tool switch -> %s", sel)
+
+        # Ensure any previously displayed plugin panels are hidden before showing the
+        # newly selected tool. This avoids orphaned UIs sticking around when
+        # switching between tools (e.g., the Tempo/Energy Buckets view).
+        for panel in self.plugin_views.values():
+            panel.pack_forget()
+
+        panel = self.plugin_views.get(sel)
+        if panel is None:
+            panel = create_panel_for_plugin(self, sel, parent=self.plugin_panel)
+            if panel:
+                self.plugin_views[sel] = panel
         if panel:
+            logging.info("[perf] show panel %s", sel)
             panel.pack(fill="both", expand=True)
+            self.active_plugin = sel
+        duration = (time.perf_counter() - switch_start) * 1000
+        logging.info("[perf] tool switch complete in %.1f ms", duration)
 
     def _load_genre_mapping(self):
         """Load genre mapping from ``self.mapping_path`` if possible."""
@@ -1077,29 +8708,696 @@ class SoundVaultImporterApp(tk.Tk):
         self.library_path = info["path"]
         self.library_name_var.set(info["name"])
         self.library_path_var.set(info["path"])
-        self.mapping_path = os.path.join(self.library_path, ".genre_mapping.json")
+        self.mapping_path = os.path.join(self.library_path, "Docs", ".genre_mapping.json")
         self._load_genre_mapping()
+        if hasattr(self, "player_search_var"):
+            self.player_search_var.set("")
+        if hasattr(self, "player_playlist_listbox"):
+            self._player_set_temp_playlist([])
         # Clear any cached clustering data when switching libraries
         self.cluster_data = None
+        self.cluster_manager = None
+        self.plugin_views.clear()
+        self.active_plugin = None
         if hasattr(self, "scan_btn"):
             self.scan_btn.config(state="normal")
-            self._validate_threshold()
         self.update_library_info()
+        if hasattr(self, "player_reload_btn"):
+            self.player_reload_btn.config(state="normal")
+        self._load_player_library_async()
+        if self.sync_review_panel:
+            self.sync_review_panel.set_folders(library_root=self.library_path)
 
     def update_library_info(self):
         if not self.library_path:
             self.library_stats_var.set("")
+            if hasattr(self, "player_reload_btn"):
+                self.player_reload_btn.config(state="disabled")
+            if hasattr(self, "scan_btn"):
+                self.scan_btn.config(state="disabled")
+            self.player_status_var.set("Select a library to load tracks.")
             return
         num = count_audio_files(self.library_path)
         is_valid, _ = validate_soundvault_structure(self.library_path)
         status = "Valid" if is_valid else "Invalid"
-        self.library_stats_var.set(f"Songs: {num}\nValidation: {status}")
+        self.library_stats_var.set(f"Songs: {num}    Validation: {status}")
 
     def require_library(self):
         if not self.library_path:
             messagebox.showwarning("No Library", "Please select a library first.")
             return None
         return self.library_path
+
+    def _open_path(self, path: str) -> None:
+        if not path:
+            return
+        try:
+            if sys.platform == "win32":
+                os.startfile(path)  # type: ignore[attr-defined]
+            elif sys.platform == "darwin":
+                subprocess.run(["open", path], check=False)
+            else:
+                subprocess.run(["xdg-open", path], check=False)
+        except Exception as exc:  # pragma: no cover - OS interaction
+            messagebox.showerror("Open Folder", f"Could not open {path}: {exc}")
+
+    def open_playlist_artwork_folder(self) -> None:
+        """Ensure the playlist artwork folder exists and open it for the user."""
+
+        library = self.require_library()
+        if not library:
+            return
+
+        playlists_dir = os.path.join(library, "Playlists")
+        artwork_dir = os.path.join(playlists_dir, "artwork")
+
+        try:
+            os.makedirs(artwork_dir, exist_ok=True)
+        except Exception as exc:
+            messagebox.showerror(
+                "Playlist Artwork",
+                f"Could not create the artwork folder:\n{exc}",
+            )
+            self._log(f"✘ Failed to prepare playlist artwork folder: {exc}")
+            return
+
+        info = (
+            "Playlist artwork folder is ready.\n\n"
+            f"Location:\n{artwork_dir}\n\n"
+            "Drop cover images here to accompany your playlists."
+        )
+        messagebox.showinfo("Playlist Artwork", info)
+        self._log(f"🎨 Playlist artwork folder ready at {artwork_dir}")
+        self._open_path(artwork_dir)
+
+    def _clean_tag_text(self, value: object | None) -> str | None:
+        if value is None:
+            return None
+        if isinstance(value, bytes):
+            for encoding in ("utf-8", "utf-16", "latin-1"):
+                try:
+                    return value.decode(encoding).strip() or None
+                except UnicodeDecodeError:
+                    continue
+            return value.decode("utf-8", errors="replace").strip() or None
+        if isinstance(value, str):
+            cleaned = value.strip()
+            return cleaned or None
+        try:
+            cleaned = str(value).strip()
+            return cleaned or None
+        except Exception:
+            return None
+
+    def _export_artist_title_list(self) -> None:
+        library = self.require_library()
+        if not library:
+            return
+
+        docs_dir = os.path.join(library, "Docs")
+        try:
+            os.makedirs(docs_dir, exist_ok=True)
+        except OSError as exc:
+            messagebox.showerror(
+                "Export Artist/Title List",
+                f"Could not create documentation folder:\n{exc}",
+            )
+            return
+
+        output_path = os.path.join(docs_dir, "artist_title_list.txt")
+        exts = {".m4a", ".aac", ".mp3", ".wav", ".ogg", ".opus", ".flac"}
+        q: queue.Queue[tuple[str, object]] = queue.Queue()
+        running = tk.BooleanVar(value=False)
+        exclude_flac_var = tk.BooleanVar(value=False)
+        add_album_duplicates_var = tk.BooleanVar(value=False)
+
+        dlg = tk.Toplevel(self)
+        dlg.title("Export Artist/Title List")
+        dlg.resizable(True, False)
+
+        header = ttk.Frame(dlg)
+        header.pack(fill="x", padx=12, pady=(12, 6))
+        ttk.Label(
+            header,
+            text="Export Artist/Title List",
+            font=_scaled_font(header, 11, "bold"),
+        ).pack(anchor="w")
+        ttk.Label(
+            header,
+            text="Generate a sorted list of all artist/title pairs in the library.",
+            wraplength=520,
+        ).pack(anchor="w", pady=(2, 0))
+
+        info_frame = ttk.LabelFrame(dlg, text="Library Path")
+        info_frame.pack(fill="x", padx=12, pady=(0, 10))
+        ttk.Label(info_frame, text=library, wraplength=520).pack(
+            anchor="w", padx=8, pady=6
+        )
+
+        output_frame = ttk.LabelFrame(dlg, text="Output File")
+        output_frame.pack(fill="x", padx=12, pady=(0, 10))
+        ttk.Label(output_frame, text=output_path, wraplength=520).pack(
+            anchor="w", padx=8, pady=6
+        )
+
+        options_frame = ttk.LabelFrame(dlg, text="Options")
+        options_frame.pack(fill="x", padx=12, pady=(0, 10))
+        ttk.Checkbutton(
+            options_frame,
+            text="Exclude flac files",
+            variable=exclude_flac_var,
+        ).pack(anchor="w", padx=8, pady=6)
+        ttk.Checkbutton(
+            options_frame,
+            text="Add album song duplicates",
+            variable=add_album_duplicates_var,
+        ).pack(anchor="w", padx=8, pady=0)
+
+        progress_var = tk.StringVar(value="Ready to start.")
+        progress = ttk.Progressbar(dlg, mode="determinate")
+        progress.pack(fill="x", padx=12)
+        ttk.Label(dlg, textvariable=progress_var).pack(
+            anchor="w", padx=14, pady=(4, 0)
+        )
+
+        log_group = ttk.LabelFrame(dlg, text="Export Log")
+        log_group.pack(fill="both", expand=True, padx=12, pady=(10, 0))
+        log_box = ScrolledText(log_group, height=8, state="disabled")
+        log_box.pack(fill="both", expand=True, padx=6, pady=6)
+
+        button_frame = ttk.Frame(dlg)
+        button_frame.pack(fill="x", padx=12, pady=12)
+
+        def append_log(message: str) -> None:
+            self._log(message)
+            log_box.configure(state="normal")
+            log_box.insert("end", message + "\n")
+            log_box.see("end")
+            log_box.configure(state="disabled")
+
+        def set_controls(active: bool) -> None:
+            start_btn.config(state="disabled" if active else "normal")
+            open_state = (
+                "normal" if not active and open_btn_enabled.get() else "disabled"
+            )
+            open_btn.config(state=open_state)
+            close_btn.config(state="disabled" if active else "normal")
+
+        def start_export() -> None:
+            if running.get():
+                return
+            running.set(True)
+            open_btn_enabled.set(False)
+            progress_var.set("Scanning library for audio files…")
+            progress.config(mode="indeterminate", value=0)
+            progress.start(10)
+            log_box.configure(state="normal")
+            log_box.delete("1.0", "end")
+            log_box.configure(state="disabled")
+            append_log("Starting artist/title export…")
+            append_log(f"Library: {library}")
+            set_controls(active=True)
+
+            def worker() -> None:
+                try:
+                    audio_files: list[str] = []
+                    exclude_flac = exclude_flac_var.get()
+                    for dirpath, _, files in os.walk(library):
+                        for filename in files:
+                            ext = os.path.splitext(filename)[1].lower()
+                            if exclude_flac and ext == ".flac":
+                                continue
+                            if ext in exts:
+                                audio_files.append(os.path.join(dirpath, filename))
+                    q.put(("files", len(audio_files)))
+
+                    entries: list[str] = []
+                    entry_data: list[tuple[str, str, str | None, str | None]] = []
+                    error_count = 0
+                    for idx, full_path in enumerate(audio_files, start=1):
+                        ext = os.path.splitext(full_path)[1].lower()
+                        filename = os.path.basename(full_path)
+                        if ext == ".opus":
+                            tags, _covers, error = read_opus_metadata(full_path)
+                            if error:
+                                error_count += 1
+                                q.put(
+                                    ("log", f"Skipped unreadable OPUS file: {filename}")
+                                )
+                        else:
+                            tags = read_tags(full_path)
+                        artist = self._clean_tag_text(
+                            tags.get("artist") or tags.get("albumartist")
+                        )
+                        title = self._clean_tag_text(tags.get("title"))
+                        album = self._clean_tag_text(tags.get("album"))
+                        track = self._clean_tag_text(
+                            tags.get("tracknumber") or tags.get("track")
+                        )
+                        if track and "/" in track:
+                            track = track.split("/", 1)[0].strip() or None
+                        if not title:
+                            title = os.path.splitext(filename)[0]
+                        if not artist:
+                            artist = "Unknown Artist"
+                        entry_data.append((artist, title, album, track))
+                        if idx == 1 or idx % 50 == 0 or idx == len(audio_files):
+                            q.put(("progress", idx, len(audio_files)))
+
+                    add_album_duplicates = add_album_duplicates_var.get()
+                    duplicate_counts = Counter(
+                        (artist, title) for artist, title, _album, _track in entry_data
+                    )
+                    album_duplicate_counts = Counter(
+                        (artist, title, album)
+                        for artist, title, album, _track in entry_data
+                    )
+                    for artist, title, album, track in entry_data:
+                        if add_album_duplicates and duplicate_counts[(artist, title)] > 1:
+                            album_label = album or "Unknown Album"
+                            if album_duplicate_counts[(artist, title, album)] > 1:
+                                track_label = track or "Unknown Track"
+                                entries.append(
+                                    f"{artist} - {title} - {album_label} - {track_label}"
+                                )
+                            else:
+                                entries.append(f"{artist} - {title} - {album_label}")
+                        else:
+                            entries.append(f"{artist} - {title}")
+
+                    entries = sorted(set(entries), key=str.lower)
+                    with open(output_path, "w", encoding="utf-8") as handle:
+                        handle.write("\n".join(entries))
+                    q.put(("done", output_path, len(entries), error_count))
+                except Exception as exc:  # pragma: no cover - UI surface only
+                    q.put(("error", str(exc)))
+
+            threading.Thread(target=worker, daemon=True).start()
+            poll_queue()
+
+        def poll_queue() -> None:
+            try:
+                while True:
+                    message = q.get_nowait()
+                    tag = message[0]
+                    if tag == "log":
+                        append_log(message[1])
+                    elif tag == "files":
+                        total = message[1]
+                        progress.stop()
+                        progress.config(
+                            mode="determinate", maximum=max(1, total), value=0
+                        )
+                        progress_var.set(f"0/{total} processed")
+                        append_log(f"Found {total} audio files to process.")
+                    elif tag == "progress":
+                        value, total = message[1], message[2]
+                        progress["value"] = value
+                        progress_var.set(f"{value}/{total} processed")
+                    elif tag == "done":
+                        _, path, count, error_count = message
+                        running.set(False)
+                        open_btn_enabled.set(True)
+                        progress["value"] = progress["maximum"]
+                        note = ""
+                        if error_count:
+                            note = f" ({error_count} files skipped)"
+                        progress_var.set(f"Completed – {count} entries{note}")
+                        append_log(f"Export complete: {path}")
+                        if error_count:
+                            append_log(f"Skipped {error_count} files due to read errors.")
+                        set_controls(active=False)
+                    elif tag == "error":
+                        running.set(False)
+                        progress.stop()
+                        progress_var.set("Export failed")
+                        set_controls(active=False)
+                        messagebox.showerror("Export Artist/Title List", message[1])
+            except queue.Empty:
+                pass
+            if running.get():
+                dlg.after(200, poll_queue)
+
+        open_btn_enabled = tk.BooleanVar(value=False)
+
+        start_btn = ttk.Button(button_frame, text="Start Export", command=start_export)
+        start_btn.pack(side="left")
+        open_btn = ttk.Button(
+            button_frame,
+            text="Open List",
+            command=lambda: self._open_path(output_path),
+            state="disabled",
+        )
+        open_btn.pack(side="left", padx=(6, 0))
+        close_btn = ttk.Button(button_frame, text="Close", command=dlg.destroy)
+        close_btn.pack(side="right")
+
+        def on_close() -> None:
+            if running.get():
+                messagebox.showinfo(
+                    "Export Artist/Title List",
+                    "Please wait for the export to finish before closing this window.",
+                )
+                return
+            dlg.destroy()
+
+        dlg.protocol("WM_DELETE_WINDOW", on_close)
+
+    def _export_codec_file_list(self) -> None:
+        library = self.require_library()
+        if not library:
+            return
+
+        docs_dir = os.path.join(library, "Docs")
+        try:
+            os.makedirs(docs_dir, exist_ok=True)
+        except OSError as exc:
+            messagebox.showerror(
+                "Export List by Codec",
+                f"Could not create documentation folder:\n{exc}",
+            )
+            return
+
+        output_path = os.path.join(docs_dir, "codec_file_list.txt")
+        audio_exts = {".m4a", ".aac", ".mp3", ".wav", ".ogg", ".opus", ".flac"}
+        q: queue.Queue[tuple[str, object]] = queue.Queue()
+        running = tk.BooleanVar(value=False)
+        scanning = tk.BooleanVar(value=False)
+        exclude_path_var = tk.BooleanVar(value=False)
+
+        dlg = tk.Toplevel(self)
+        dlg.title("Export List by Codec")
+        dlg.resizable(True, False)
+
+        header = ttk.Frame(dlg)
+        header.pack(fill="x", padx=12, pady=(12, 6))
+        ttk.Label(
+            header,
+            text="Export List by Codec",
+            font=_scaled_font(header, 11, "bold"),
+        ).pack(anchor="w")
+        ttk.Label(
+            header,
+            text="Detect audio file extensions in the library and export file lists by codec.",
+            wraplength=560,
+        ).pack(anchor="w", pady=(2, 0))
+
+        info_frame = ttk.LabelFrame(dlg, text="Library Path")
+        info_frame.pack(fill="x", padx=12, pady=(0, 10))
+        ttk.Label(info_frame, text=library, wraplength=560).pack(
+            anchor="w", padx=8, pady=6
+        )
+
+        output_frame = ttk.LabelFrame(dlg, text="Output File")
+        output_frame.pack(fill="x", padx=12, pady=(0, 10))
+        ttk.Label(output_frame, text=output_path, wraplength=560).pack(
+            anchor="w", padx=8, pady=6
+        )
+
+        selection_frame = ttk.LabelFrame(dlg, text="Codec Selection")
+        selection_frame.pack(fill="both", expand=True, padx=12, pady=(0, 10))
+        selection_frame.columnconfigure((0, 2), weight=1)
+
+        available_frame = ttk.Frame(selection_frame)
+        available_frame.grid(row=0, column=0, sticky="nsew", padx=(6, 4), pady=6)
+        ttk.Label(available_frame, text="Detected Extensions").pack(anchor="w")
+        available_list = tk.Listbox(
+            available_frame, height=8, exportselection=False, selectmode="extended"
+        )
+        available_list.pack(fill="both", expand=True, pady=(4, 0))
+
+        controls_frame = ttk.Frame(selection_frame)
+        controls_frame.grid(row=0, column=1, sticky="ns", padx=4, pady=6)
+        add_btn = ttk.Button(controls_frame, text="Add →")
+        add_btn.pack(fill="x")
+        remove_btn = ttk.Button(controls_frame, text="← Remove")
+        remove_btn.pack(fill="x", pady=(6, 0))
+        add_all_btn = ttk.Button(controls_frame, text="Add All")
+        add_all_btn.pack(fill="x", pady=(20, 0))
+        clear_all_btn = ttk.Button(controls_frame, text="Clear All")
+        clear_all_btn.pack(fill="x", pady=(6, 0))
+
+        include_frame = ttk.Frame(selection_frame)
+        include_frame.grid(row=0, column=2, sticky="nsew", padx=(4, 6), pady=6)
+        ttk.Label(include_frame, text="Include List").pack(anchor="w")
+        include_list = tk.Listbox(
+            include_frame, height=8, exportselection=False, selectmode="extended"
+        )
+        include_list.pack(fill="both", expand=True, pady=(4, 0))
+
+        progress_var = tk.StringVar(value="Scanning for audio file extensions…")
+        progress = ttk.Progressbar(dlg, mode="indeterminate")
+        progress.pack(fill="x", padx=12)
+        ttk.Label(dlg, textvariable=progress_var).pack(
+            anchor="w", padx=14, pady=(4, 0)
+        )
+
+        log_group = ttk.LabelFrame(dlg, text="Export Log")
+        log_group.pack(fill="both", expand=True, padx=12, pady=(10, 0))
+        log_box = ScrolledText(log_group, height=8, state="disabled")
+        log_box.pack(fill="both", expand=True, padx=6, pady=6)
+
+        button_frame = ttk.Frame(dlg)
+        button_frame.pack(fill="x", padx=12, pady=12)
+
+        def append_log(message: str) -> None:
+            self._log(message)
+            log_box.configure(state="normal")
+            log_box.insert("end", message + "\n")
+            log_box.see("end")
+            log_box.configure(state="disabled")
+
+        def set_controls(active: bool) -> None:
+            export_btn.config(state="disabled" if active else "normal")
+            rescan_btn.config(state="disabled" if active else "normal")
+            add_state = "disabled" if active else "normal"
+            add_btn.config(state=add_state)
+            remove_btn.config(state=add_state)
+            add_all_btn.config(state=add_state)
+            clear_all_btn.config(state=add_state)
+            open_state = (
+                "normal" if not active and open_btn_enabled.get() else "disabled"
+            )
+            open_btn.config(state=open_state)
+            close_btn.config(state="disabled" if active else "normal")
+
+        def listbox_items(listbox: tk.Listbox) -> list[str]:
+            return list(listbox.get(0, "end"))
+
+        def set_listbox_items(listbox: tk.Listbox, items: list[str]) -> None:
+            listbox.delete(0, "end")
+            for item in items:
+                listbox.insert("end", item)
+
+        def sync_lists(found_exts: list[str]) -> None:
+            include_items = listbox_items(include_list)
+            cleaned_include = [item for item in include_items if item in found_exts]
+            remaining = [item for item in found_exts if item not in cleaned_include]
+            set_listbox_items(include_list, cleaned_include)
+            set_listbox_items(available_list, remaining)
+
+        def scan_extensions() -> None:
+            if scanning.get() or running.get():
+                return
+            scanning.set(True)
+            open_btn_enabled.set(False)
+            progress_var.set("Scanning library for audio file extensions…")
+            progress.config(mode="indeterminate", value=0)
+            progress.start(10)
+            log_box.configure(state="normal")
+            log_box.delete("1.0", "end")
+            log_box.configure(state="disabled")
+            append_log("Scanning library for codecs…")
+            append_log(f"Library: {library}")
+            set_controls(active=True)
+
+            def worker() -> None:
+                try:
+                    found = set()
+                    for dirpath, _, files in os.walk(library):
+                        for filename in files:
+                            ext = os.path.splitext(filename)[1].lower()
+                            if ext in audio_exts:
+                                found.add(ext)
+                    q.put(("scan_done", sorted(found)))
+                except Exception as exc:  # pragma: no cover - UI surface only
+                    q.put(("error", str(exc)))
+
+            threading.Thread(target=worker, daemon=True).start()
+            poll_queue()
+
+        def move_selected(source: tk.Listbox, target: tk.Listbox) -> None:
+            selections = list(source.curselection())
+            if not selections:
+                return
+            items = [source.get(i) for i in selections]
+            target_items = set(listbox_items(target))
+            for item in items:
+                if item not in target_items:
+                    target.insert("end", item)
+            for index in reversed(selections):
+                source.delete(index)
+
+        def add_all() -> None:
+            items = listbox_items(available_list)
+            for item in items:
+                include_list.insert("end", item)
+            available_list.delete(0, "end")
+
+        def clear_all() -> None:
+            items = listbox_items(include_list)
+            for item in items:
+                available_list.insert("end", item)
+            include_list.delete(0, "end")
+
+        def start_export() -> None:
+            if running.get() or scanning.get():
+                return
+            selected_exts = listbox_items(include_list)
+            if not selected_exts:
+                messagebox.showwarning(
+                    "Export List by Codec",
+                    "Select at least one codec extension to include.",
+                )
+                return
+            running.set(True)
+            open_btn_enabled.set(False)
+            progress_var.set("Scanning library for matching files…")
+            progress.config(mode="indeterminate", value=0)
+            progress.start(10)
+            log_box.configure(state="normal")
+            log_box.delete("1.0", "end")
+            log_box.configure(state="disabled")
+            append_log("Starting codec export…")
+            append_log(f"Library: {library}")
+            append_log(f"Included extensions: {', '.join(selected_exts)}")
+            if exclude_path_var.get():
+                append_log("Excluding file paths from report.")
+            set_controls(active=True)
+
+            def worker() -> None:
+                try:
+                    audio_files: list[str] = []
+                    selected = set(selected_exts)
+                    exclude_paths = exclude_path_var.get()
+                    for dirpath, _, files in os.walk(library):
+                        for filename in files:
+                            ext = os.path.splitext(filename)[1].lower()
+                            if ext in selected:
+                                audio_files.append(os.path.join(dirpath, filename))
+                    q.put(("files", len(audio_files)))
+
+                    entries: list[str] = []
+                    for idx, full_path in enumerate(audio_files, start=1):
+                        if exclude_paths:
+                            entry = os.path.splitext(os.path.basename(full_path))[0]
+                        else:
+                            entry = os.path.relpath(full_path, library)
+                        entries.append(entry)
+                        if idx == 1 or idx % 50 == 0 or idx == len(audio_files):
+                            q.put(("progress", idx, len(audio_files)))
+
+                    entries = sorted(set(entries), key=str.lower)
+                    with open(output_path, "w", encoding="utf-8") as handle:
+                        handle.write("\n".join(entries))
+                    q.put(("done", output_path, len(entries)))
+                except Exception as exc:  # pragma: no cover - UI surface only
+                    q.put(("error", str(exc)))
+
+            threading.Thread(target=worker, daemon=True).start()
+            poll_queue()
+
+        def poll_queue() -> None:
+            try:
+                while True:
+                    message = q.get_nowait()
+                    tag = message[0]
+                    if tag == "scan_done":
+                        scanning.set(False)
+                        progress.stop()
+                        found_exts = message[1]
+                        sync_lists(found_exts)
+                        if found_exts:
+                            progress_var.set(
+                                f"Detected {len(found_exts)} codec extension(s)."
+                            )
+                            append_log(
+                                f"Detected extensions: {', '.join(found_exts)}"
+                            )
+                        else:
+                            progress_var.set("No audio extensions found.")
+                            append_log("No audio file extensions detected.")
+                        set_controls(active=False)
+                    elif tag == "files":
+                        total = message[1]
+                        progress.stop()
+                        progress.config(
+                            mode="determinate", maximum=max(1, total), value=0
+                        )
+                        progress_var.set(f"0/{total} processed")
+                        append_log(f"Found {total} audio files to export.")
+                    elif tag == "progress":
+                        value, total = message[1], message[2]
+                        progress["value"] = value
+                        progress_var.set(f"{value}/{total} processed")
+                    elif tag == "done":
+                        _, path, count = message
+                        running.set(False)
+                        open_btn_enabled.set(True)
+                        progress["value"] = progress["maximum"]
+                        progress_var.set(f"Completed – {count} entries")
+                        append_log(f"Export complete: {path}")
+                        set_controls(active=False)
+                    elif tag == "error":
+                        running.set(False)
+                        scanning.set(False)
+                        progress.stop()
+                        progress_var.set("Export failed")
+                        set_controls(active=False)
+                        messagebox.showerror("Export List by Codec", message[1])
+            except queue.Empty:
+                pass
+            if running.get() or scanning.get():
+                dlg.after(200, poll_queue)
+
+        open_btn_enabled = tk.BooleanVar(value=False)
+
+        add_btn.config(command=lambda: move_selected(available_list, include_list))
+        remove_btn.config(command=lambda: move_selected(include_list, available_list))
+        add_all_btn.config(command=add_all)
+        clear_all_btn.config(command=clear_all)
+
+        export_btn = ttk.Button(button_frame, text="Start Export", command=start_export)
+        export_btn.pack(side="left")
+        rescan_btn = ttk.Button(button_frame, text="Rescan", command=scan_extensions)
+        rescan_btn.pack(side="left", padx=(6, 0))
+        open_btn = ttk.Button(
+            button_frame,
+            text="Open List",
+            command=lambda: self._open_path(output_path),
+            state="disabled",
+        )
+        open_btn.pack(side="left", padx=(6, 0))
+        exclude_path_chk = ttk.Checkbutton(
+            button_frame,
+            text="Exclude file path in report",
+            variable=exclude_path_var,
+        )
+        exclude_path_chk.pack(side="left", padx=(6, 0))
+        close_btn = ttk.Button(button_frame, text="Close", command=dlg.destroy)
+        close_btn.pack(side="right")
+
+        def on_close() -> None:
+            if running.get() or scanning.get():
+                messagebox.showinfo(
+                    "Export List by Codec",
+                    "Please wait for the scan/export to finish before closing this window.",
+                )
+                return
+            dlg.destroy()
+
+        dlg.protocol("WM_DELETE_WINDOW", on_close)
+        scan_extensions()
 
     def _set_status(self, text: str) -> None:
         self._full_status = text
@@ -1120,159 +9418,76 @@ class SoundVaultImporterApp(tk.Tk):
             self._log(f"✘ Invalid SoundVault: {path}\n" + "\n".join(errors))
         self.update_library_info()
 
-    def import_songs(self):
-        initial = load_last_path()
-        vault = filedialog.askdirectory(
-            title="Select SoundVault Root", initialdir=initial
-        )
-        if not vault:
-            return
-
-        save_last_path(vault)
-
-        is_valid, errors = validate_soundvault_structure(vault)
-        if not is_valid:
-            messagebox.showerror("Invalid SoundVault", "\n".join(errors))
-            self._log(f"✘ Invalid SoundVault: {vault}\n" + "\n".join(errors))
-            return
-
-        import_folder = filedialog.askdirectory(
-            title="Select Folder of New Songs", initialdir=vault
-        )
-        if not import_folder:
-            return
-
-        dry_run = messagebox.askyesno("Dry Run?", "Perform a dry-run preview only?")
-        estimate = messagebox.askyesno(
-            "Estimate BPM?", "Attempt BPM estimation for missing values?"
-        )
-
-        stop_on_error = False
-        if not dry_run:
-            stop_on_error = messagebox.askyesno(
-                "Stop on Error?",
-                "Stop the import if any file move fails?",
-            )
-
-        def log_line(msg: str) -> None:
-            self.after(0, lambda m=msg: self._log(m))
-
-        def task() -> None:
-            try:
-                summary = import_new_files(
-                    vault,
-                    import_folder,
-                    dry_run=dry_run,
-                    estimate_bpm=estimate,
-                    log_callback=log_line,
-                    stop_on_error=stop_on_error,
-                )
-
-                def ui_complete() -> None:
-                    if summary["dry_run"]:
-                        messagebox.showinfo(
-                            "Dry Run Complete",
-                            f"Preview written to:\n{summary['html']}",
-                        )
-                    else:
-                        moved = summary.get("moved", 0)
-                        base_msg = (
-                            f"Imported {moved} files. Preview:\n{summary['html']}"
-                        )
-                        if summary.get("errors"):
-                            err_text = "\n".join(summary["errors"])
-                            full_msg = f"{base_msg}\n\nErrors:\n{err_text}"
-                            if messagebox.askretrycancel(
-                                "Import Complete (with errors)", full_msg
-                            ):
-                                threading.Thread(target=task, daemon=True).start()
-                                return
-                        else:
-                            messagebox.showinfo("Import Complete", base_msg)
-
-                    if summary.get("errors"):
-                        for err in summary["errors"]:
-                            self._log(f"! {err}")
-
-                    self._log(
-                        f"✓ Import finished for {import_folder} → {vault}. Dry run: {dry_run}. BPM: {estimate}."
-                    )
-
-                self.after(0, ui_complete)
-            except Exception as e:
-
-                def ui_err() -> None:
-                    messagebox.showerror("Import failed", str(e))
-                    self._log(f"✘ Import failed for {import_folder}: {e}")
-
-                self.after(0, ui_err)
-
-        threading.Thread(target=task, daemon=True).start()
-
-    # ── Quality Checker Actions ────────────────────────────────────────
     def scan_duplicates(self):
-        folder = self.library_path_var.get()
-        if not folder:
-            messagebox.showwarning("No Folder", "Please select a library first.")
+        library = self.require_library()
+        if not library:
             return
 
-        debug_enabled = self.dup_debug_var.get()
-        sdf_mod.verbose = debug_enabled
-        fingerprint_cache.verbose = debug_enabled
-        chromaprint_utils.verbose = debug_enabled
-        if debug_enabled:
-            self._open_dup_debug_window()
+        existing = getattr(self, "duplicate_finder_window", None)
+        if existing and existing.winfo_exists():
+            existing.lift()
+            existing.focus_set()
+            return
 
-        self.clear_quality_view()
-        self.scan_btn.config(state="disabled")
+        win = DuplicateFinderShell(self, library_path=library)
+        win.bind(
+            "<Destroy>",
+            lambda e: (
+                setattr(self, "duplicate_finder_window", None)
+                if e.widget is win
+                else None
+            ),
+        )
+        self.duplicate_finder_window = win
+
+    def _set_duplicate_finder_plan(self, plan: ConsolidationPlan, library_path: str) -> None:
+        self.duplicate_finder_plan = plan
+        self.duplicate_finder_plan_library = library_path
+
+    def _load_duplicate_plan_from_preview(self, library_path: str) -> ConsolidationPlan | None:
+        preview_path = os.path.join(library_path, "Docs", "duplicate_preview.json")
         try:
-            thr = float(self.fp_threshold_var.get())
-        except Exception:
-            thr = load_config().get("duplicate_threshold", 0.03)
-            self._log("! Invalid threshold; using saved value")
-        else:
-            if not (0.0 < thr <= 1.0):
-                thr = load_config().get("duplicate_threshold", 0.03)
-                self._log("! Threshold out of range; using saved value")
-        cfg = load_config()
-        cfg["duplicate_threshold"] = thr
+            with open(preview_path, "r", encoding="utf-8") as handle:
+                payload = json.load(handle)
+        except OSError:
+            return None
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(payload, dict) or "plan" not in payload:
+            return None
         try:
-            pref_val = int(self.fp_prefix_var.get())
-        except Exception:
-            pref_val = sdf_mod.FP_PREFIX_LEN
-            self._log("! Invalid prefix length; using saved value")
-        cfg["duplicate_prefix_len"] = pref_val
-        save_config(cfg)
-        controller = ScanProgressController()
-        prog_win = ScanProgressWindow(self, controller.cancel_event)
-        controller.set_callback(prog_win.update_progress)
+            return consolidation_plan_from_dict(payload["plan"])
+        except ValueError:
+            return None
 
-        def task():
-            self._dup_logging = True
-
-            def cb(msg):
-                self.after(0, lambda m=msg: self._log(m))
-                controller.update("log", 0, 0, msg)
-
-            try:
-                dups, missing = sdf_mod.find_duplicates(
-                    folder,
-                    threshold=thr,
-                    prefix_len=pref_val,
-                    log_callback=cb,
-                    progress_callback=controller.update,
-                    cancel_event=controller.cancel_event,
-                )
-                self.after(0, lambda: self._log(f"Found {len(dups)} duplicate pairs"))
-                self.after(0, lambda: self.populate_quality_table(dups))
-                if missing:
-                    msg = f"{missing} files could not be fingerprinted."
-                    self.after(0, lambda m=msg: self._log(m))
-            finally:
-                self._dup_logging = False
-                self.after(0, lambda: (self.scan_btn.config(state="normal"), prog_win.destroy()))
-
-        threading.Thread(target=task, daemon=True).start()
+    def _open_duplicate_pair_review_tool(self) -> None:
+        library = self.require_library()
+        if not library:
+            return
+        existing = getattr(self, "duplicate_pair_review_window", None)
+        if existing and existing.winfo_exists():
+            existing.lift()
+            existing.focus_set()
+            return
+        plan = self.duplicate_finder_plan
+        if plan is None or self.duplicate_finder_plan_library != library:
+            plan = self._load_duplicate_plan_from_preview(library)
+        if plan is None:
+            messagebox.showinfo(
+                "Duplicate Pair Review",
+                "Run Duplicate Finder preview first to generate paired results.",
+            )
+            return
+        win = DuplicatePairReviewTool(self, library_path=library, plan=plan)
+        win.bind(
+            "<Destroy>",
+            lambda e: (
+                setattr(self, "duplicate_pair_review_window", None)
+                if e.widget is win
+                else None
+            ),
+        )
+        self.duplicate_pair_review_window = win
 
     def run_indexer(self):
         path = self.require_library()
@@ -1378,8 +9593,15 @@ class SoundVaultImporterApp(tk.Tk):
                 if dry_run:
                     self.after(
                         0,
+                        lambda: webbrowser.open(
+                            Path(output_html).resolve().as_uri()
+                        ),
+                    )
+                    self.after(
+                        0,
                         lambda: messagebox.showinfo(
-                            "Dry Run Complete", f"Preview written to:\n{output_html}"
+                            "Dry Run Complete",
+                            f"Preview opened in your browser:\n{output_html}",
                         ),
                     )
                 else:
@@ -1476,44 +9698,7 @@ class SoundVaultImporterApp(tk.Tk):
         ).pack(side="right", padx=20)
         top.wait_window()
         return proceed.get()
-
-    def scan_orphans(self):
-        path = self.require_library()
-        if not path:
-            return
-        messagebox.showinfo(
-            "Scan for Orphans", f"[stub] Would scan for orphans in:\n{path}"
-        )
-        self._log(f"[stub] Scan for Orphans → {path}")
-        self.update_library_info()
-
-    def compare_libraries(self):
-        master = self.require_library()
-        if not master:
-            return
-        device = filedialog.askdirectory(
-            title="Select Device Library Root", initialdir=master
-        )
-        if not device:
-            return
-        save_last_path(device)
-        messagebox.showinfo(
-            "Compare Libraries",
-            f"[stub] Would compare:\nMaster: {master}\nDevice: {device}",
-        )
-        self._log(f"[stub] Compare Libraries → Master: {master}, Device: {device}")
-        self.update_library_info()
-
-    def regenerate_playlists(self):
-        path = self.require_library()
-        if not path:
-            return
-        messagebox.showinfo(
-            "Regenerate Playlists", f"[stub] Would regenerate playlists in:\n{path}"
-        )
-        self._log(f"[stub] Regenerate Playlists → {path}")
-        self.update_library_info()
-
+      
     def cluster_playlists_dialog(self, method: str = "kmeans"):
         path = self.require_library()
         if not path:
@@ -1524,7 +9709,17 @@ class SoundVaultImporterApp(tk.Tk):
         dlg.grab_set()
         dlg.resizable(True, True)
 
-        method_var = tk.StringVar(value=method)
+        cluster_cfg = getattr(self, "cluster_params", {}) or {}
+        selected_method = cluster_cfg.get("method", method)
+
+        method_var = tk.StringVar(value=selected_method)
+        engine_default = cluster_cfg.get("engine", "serial")
+        if engine_default == "librosa":
+            engine_default = "serial"
+        engine_var = tk.StringVar(value=engine_default)
+        use_max_workers_var = tk.BooleanVar(
+            value=bool(cluster_cfg.get("use_max_workers", False))
+        )
 
         top = ttk.Frame(dlg)
         top.pack(fill="x", padx=10, pady=(10, 0))
@@ -1557,28 +9752,83 @@ class SoundVaultImporterApp(tk.Tk):
         params_frame = ttk.Frame(dlg)
         params_frame.pack(fill="x", padx=10, pady=(5, 0))
 
+        engine_frame = ttk.LabelFrame(dlg, text="Processing Engine")
+        engine_frame.pack(fill="x", padx=10, pady=(10, 0))
+
+        ttk.Radiobutton(
+            engine_frame,
+            text="Standard (single process)",
+            variable=engine_var,
+            value="serial",
+        ).pack(anchor="w", padx=5, pady=(2, 0))
+        ttk.Radiobutton(
+            engine_frame,
+            text="Parallel (multi-core)",
+            variable=engine_var,
+            value="parallel",
+        ).pack(anchor="w", padx=5, pady=(0, 5))
+
+        use_max_workers_chk = ttk.Checkbutton(
+            engine_frame,
+            text="Aggressive parallelism (use all cores minus one)",
+            variable=use_max_workers_var,
+        )
+        use_max_workers_chk.pack(anchor="w", padx=22, pady=(0, 5))
+
+        def _update_engine_state(*_args):
+            if engine_var.get() == "parallel":
+                use_max_workers_chk.state(["!disabled"])
+            else:
+                use_max_workers_chk.state(["disabled"])
+
+        engine_var.trace_add("write", _update_engine_state)
+        _update_engine_state()
+
         # KMeans params
         km_frame = ttk.Frame(params_frame)
-        km_var = tk.StringVar(value="5")
+        km_var = tk.StringVar(value=str(cluster_cfg.get("n_clusters", 5)))
         ttk.Label(km_frame, text="Number of clusters:").pack(side="left")
         ttk.Entry(km_frame, textvariable=km_var, width=10).pack(
             side="left", padx=(5, 0)
         )
+        ttk.Label(
+            km_frame,
+            text="(try ~5-20 for small libraries, 50-200 for large)",
+            foreground="gray",
+        ).pack(side="left", padx=(5, 0))
 
         # HDBSCAN params
         hdb_frame = ttk.Frame(params_frame)
-        min_size_var = tk.StringVar(value="5")
+        min_size_var = tk.StringVar(value=str(cluster_cfg.get("min_cluster_size", 5)))
         ttk.Label(hdb_frame, text="Min cluster size:").grid(row=0, column=0, sticky="w")
         ttk.Entry(hdb_frame, textvariable=min_size_var, width=10).grid(
             row=0, column=1, sticky="w", padx=(5, 0)
         )
+        ttk.Label(
+            hdb_frame,
+            text="(e.g., 5-15 for small sets, 30-80 for large)",
+            foreground="gray",
+        ).grid(row=0, column=2, sticky="w", padx=(5, 0))
         ttk.Label(hdb_frame, text="Min samples:").grid(row=1, column=0, sticky="w")
-        min_samples_var = tk.StringVar(value="")
+        min_samples_var = tk.StringVar(
+            value=str(cluster_cfg.get("min_samples", ""))
+            if "min_samples" in cluster_cfg
+            else "1"
+        )
         ttk.Entry(hdb_frame, textvariable=min_samples_var, width=10).grid(
             row=1, column=1, sticky="w", padx=(5, 0)
         )
+        ttk.Label(
+            hdb_frame,
+            text="(start with 1-5; increase for stricter clusters)",
+            foreground="gray",
+        ).grid(row=1, column=2, sticky="w", padx=(5, 0))
         ttk.Label(hdb_frame, text="Epsilon:").grid(row=2, column=0, sticky="w")
-        epsilon_var = tk.StringVar(value="")
+        epsilon_var = tk.StringVar(
+            value=str(cluster_cfg.get("cluster_selection_epsilon", ""))
+            if "cluster_selection_epsilon" in cluster_cfg
+            else ""
+        )
         ttk.Entry(hdb_frame, textvariable=epsilon_var, width=10).grid(
             row=2, column=1, sticky="w", padx=(5, 0)
         )
@@ -1666,6 +9916,13 @@ class SoundVaultImporterApp(tk.Tk):
                 "exclude": list(exc_list.get(0, "end")),
             }
 
+            engine = engine_var.get()
+            if not engine:
+                messagebox.showerror(
+                    "Select Engine", "Please select a processing engine."
+                )
+                return
+
             m = method_var.get()
             params = {}
             if m == "kmeans":
@@ -1702,35 +9959,74 @@ class SoundVaultImporterApp(tk.Tk):
                             f"{epsilon_var.get()} is not a valid number",
                         )
                         return
-            self._start_cluster_playlists(m, params, dlg)
+            self._start_cluster_playlists(
+                m, params, engine, dlg, use_max_workers_var.get()
+            )
 
         ttk.Button(btns, text="Generate", command=generate).pack(side="left", padx=5)
         ttk.Button(btns, text="Cancel", command=dlg.destroy).pack(side="left", padx=5)
 
-    def _start_cluster_playlists(self, method: str, params: dict, dlg):
+    def _start_cluster_playlists(
+        self, method: str, params: dict, engine: str, dlg, use_max_workers: bool
+    ):
         if dlg is not None:
             dlg.destroy()
         path = self.require_library()
         if not path:
             return
+        self.cluster_generation_running = True
+        self._refresh_plugin_panel()
+        self.show_log_tab()
         threading.Thread(
             target=self._run_cluster_generation,
-            args=(path, method, params),
+            args=(path, method, params, engine, use_max_workers),
             daemon=True,
         ).start()
 
-    def _run_cluster_generation(self, path: str, method: str, params: dict):
-        tracks, feats = cluster_library(
-            path, method, params, self._log, self.folder_filter
-        )
-        self.cluster_data = (tracks, feats)
-        self.cluster_params = {"method": method, **params}
+    def _run_cluster_generation(
+        self, path: str, method: str, params: dict, engine: str, use_max_workers: bool
+    ):
+        try:
+            tracks, feats = cluster_library(
+                path,
+                method,
+                params,
+                self._log,
+                self.folder_filter,
+                engine,
+                use_max_workers=use_max_workers,
+            )
+            self.cluster_data = (tracks, feats)
+            self.cluster_params = {
+                "method": method,
+                "engine": engine,
+                "use_max_workers": use_max_workers,
+                **params,
+            }
+            self.cluster_manager = ClusterComputationManager(tracks, feats, self._log)
 
-        def done():
-            messagebox.showinfo("Clustered Playlists", "Generation complete")
-            self._refresh_plugin_panel()
+            def done():
+                for name in ("Interactive – KMeans", "Interactive – HDBSCAN"):
+                    if name in self.plugin_views:
+                        try:
+                            self.plugin_views[name].destroy()
+                        except Exception:
+                            pass
+                        self.plugin_views.pop(name, None)
 
-        self.after(0, done)
+                self.cluster_generation_running = False
+                messagebox.showinfo("Clustered Playlists", "Generation complete")
+                self._refresh_plugin_panel()
+
+            self.after(0, done)
+        except Exception as exc:
+            def fail():
+                self.cluster_generation_running = False
+                messagebox.showerror("Cluster Generation Failed", str(exc))
+                self._log(f"✘ Cluster generation failed: {exc}")
+                self._refresh_plugin_panel()
+
+            self.after(0, fail)
 
     def _refresh_plugin_panel(self):
         """Rebuild the current plugin panel if a plugin is selected."""
@@ -1740,11 +10036,19 @@ class SoundVaultImporterApp(tk.Tk):
             sel = self.plugin_list.get(self.plugin_list.curselection())
         except tk.TclError:
             return
-        for w in self.plugin_panel.winfo_children():
-            w.destroy()
-        panel = create_panel_for_plugin(self, sel, parent=self.plugin_panel)
-        if panel:
-            panel.pack(fill="both", expand=True)
+        if sel in self.plugin_views:
+            panel = self.plugin_views[sel]
+            refresh = getattr(panel, "refresh_cluster_panel", None)
+            if callable(refresh):
+                refresh()
+                return
+            try:
+                panel.destroy()
+            except Exception:
+                pass
+            self.plugin_views.pop(sel, None)
+        self.active_plugin = None
+        self.on_plugin_select(None)
 
     def _tagfix_filter_dialog(self):
         dlg = tk.Toplevel(self)
@@ -1790,14 +10094,6 @@ class SoundVaultImporterApp(tk.Tk):
         dlg.wait_window()
         return result["proceed"], var_no_diff.get(), var_skipped.get(), show_all
 
-    def _on_show_all(self):
-        """Run tag-fix scan showing every file regardless of prior log."""
-        self.tagfix_show_all.set(True)
-        try:
-            self.fix_tags_gui()
-        finally:
-            self.tagfix_show_all.set(False)
-
     def fix_tags_gui(self):
         folder = self.tagfix_folder_var.get()
         if not folder:
@@ -1807,7 +10103,7 @@ class SoundVaultImporterApp(tk.Tk):
             self.tagfix_folder_var.set(folder)
 
         self.tagfix_db_path, _ = prepare_library(folder)
-        self.mapping_path = os.path.join(folder, ".genre_mapping.json")
+        self.mapping_path = os.path.join(folder, "Docs", ".genre_mapping.json")
         self._load_genre_mapping()
 
         files = discover_files(folder)
@@ -2018,6 +10314,37 @@ class SoundVaultImporterApp(tk.Tk):
             save_last_path(folder)
             self.tagfix_folder_var.set(folder)
 
+    def _check_tagfix_api_status(self) -> None:
+        cfg = load_config()
+        service = cfg.get("metadata_service", "AcoustID")
+        self.tagfix_api_indicator.configure(fg="#d68a00")
+        self.tagfix_api_status.set(f"{service}: Checking…")
+
+        def worker() -> None:
+            ok, msg = self._test_metadata_service(service)
+
+            def done() -> None:
+                if not self.winfo_exists():
+                    return
+                color = "green" if ok else "red"
+                label = "Connected" if ok else (msg or "Unavailable")
+                self.tagfix_api_indicator.configure(fg=color)
+                self.tagfix_api_status.set(f"{service}: {label}")
+
+            self.after(0, done)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _test_metadata_service(self, service: str) -> tuple[bool, str]:
+        try:
+            if service == "MusicBrainz":
+                return MusicBrainzService().test_connection()
+            if service == "AcoustID":
+                return AcoustIDService().test_connection()
+            return False, "Not supported"
+        except Exception as exc:  # pragma: no cover - defensive UI guard
+            return False, str(exc)
+
     # ── Library Quality Helpers ───────────────────────────────────────
 
     def _browse_dup_folder(self) -> None:
@@ -2134,27 +10461,6 @@ class SoundVaultImporterApp(tk.Tk):
                 tags=(tag,),
             )
 
-    def sample_song_highlight(self):
-        """Ask the user for an audio file and play its highlight."""
-        initial = load_last_path()
-        path = filedialog.askopenfilename(
-            title="Select Audio File",
-            initialdir=initial,
-            filetypes=[("Audio Files", "*.mp3 *.wav *.flac *.ogg"), ("All files", "*")],
-        )
-        if not path:
-            return
-
-        save_last_path(os.path.dirname(path))
-        try:
-            start_sec = play_snippet(path)
-            self._log(
-                f"Played highlight of '{os.path.basename(path)}' starting at {start_sec:.2f}s"
-            )
-        except Exception as e:
-            messagebox.showerror("Playback failed", str(e))
-            self._log(f"✘ Playback failed for {path}: {e}")
-
     def _open_tagfix_debug_window(self):
         if (
             getattr(self, "tagfix_debug_win", None)
@@ -2174,111 +10480,87 @@ class SoundVaultImporterApp(tk.Tk):
             widget.insert("end", msg + "\n")
             widget.see("end")
 
-    def _open_dup_debug_window(self) -> None:
-        if (
-            getattr(self, "dup_debug_win", None)
-            and self.dup_debug_win.winfo_exists()
-        ):
-            return
-        win = tk.Toplevel(self)
-        win.title("Duplicate Finder Debug")
-        text = ScrolledText(win, height=20, wrap="word")
-        text.pack(fill="both", expand=True)
-        self.dup_debug_win = win
-        self.dup_text = text
+    def initialize_genre_normalizer(self, mapping: dict, progress_callback=None):
+        """Persist mapping JSON and rewrite genre tags across the library."""
+        if not self.library_path or not getattr(self, "mapping_path", None):
+            raise ValueError("Library must be selected before initializing the normalizer.")
 
-    def _open_genre_normalizer(self, _show_dialog: bool = False):
-        """Open a dialog to assist with genre normalization."""
-        folder = self.require_library()
-        if not folder:
-            return
+        normalized_map: dict[str, list[str]] = {}
+        for raw, value in mapping.items():
+            if value is None:
+                continue
+            key = str(raw).strip()
+            if not key:
+                continue
+            if isinstance(value, list):
+                cleaned = [str(v).strip() for v in value if str(v).strip()]
+            else:
+                cleaned = [str(value).strip()] if str(value).strip() else []
+            if cleaned:
+                normalized_map[key] = cleaned
 
-        # Always refresh mapping path
-        self.mapping_path = os.path.join(folder, ".genre_mapping.json")
+        os.makedirs(os.path.dirname(self.mapping_path), exist_ok=True)
+        with open(self.mapping_path, "w", encoding="utf-8") as f:
+            json.dump(normalized_map, f, indent=2)
+        self.genre_mapping = normalized_map
 
-        if not _show_dialog:
-            # ── Show progress bar and run raw-only scan ──
-            files = discover_files(folder)
-            if not files:
-                messagebox.showinfo("No audio files", "No supported audio found.")
-                return
+        files = discover_files(self.library_path)
+        total = len(files)
+        if progress_callback:
+            progress_callback(0, total)
 
-            prog_win = tk.Toplevel(self)
-            prog_win.title("Scanning Genres…")
-            prog_bar = ttk.Progressbar(
-                prog_win, orient="horizontal", length=300, mode="determinate"
-            )
-            prog_bar.pack(padx=20, pady=20)
-            prog_bar["maximum"] = len(files)
+        changed = 0
+        for idx, path in enumerate(files, start=1):
+            if progress_callback:
+                progress_callback(idx, total)
+            tags = read_tags(path)
+            raw = tags.get("genre")
+            if raw in (None, ""):
+                continue
+            if isinstance(raw, (list, tuple)):
+                existing_genres = [str(v) for v in raw if isinstance(v, str)]
+            else:
+                existing_genres = [str(raw)]
+            rewritten: list[str] = []
+            seen: set[str] = set()
+            for entry in existing_genres:
+                parts = re.split(r"[;,/]", entry)
+                for part in parts:
+                    part = part.strip()
+                    if not part:
+                        continue
+                    mapped = normalized_map.get(part, [part])
+                    values = mapped if isinstance(mapped, list) else [mapped]
+                    for m in values:
+                        val = str(m).strip()
+                        if val and val not in seen:
+                            seen.add(val)
+                            rewritten.append(val)
 
-            def on_progress(idx, total):
-                prog_bar["value"] = idx
-                prog_win.update_idletasks()
+            if not rewritten or sorted(rewritten) == sorted(existing_genres):
+                continue
 
-            def scan_task():
-                self.raw_genre_list = scan_raw_genres(folder, on_progress)
-                prog_win.destroy()
-                # reopen dialog to show panels
-                self.after(0, lambda: self._open_genre_normalizer(True))
+            try:
+                audio["genre"] = rewritten
+                audio.save()
+                changed += 1
+            except Exception:
+                continue
 
-            threading.Thread(target=scan_task, daemon=True).start()
-            return
-
-        # ── Now _show_dialog == True: build the three-panel dialog ──
-        win = tk.Toplevel(self)
-        win.title("Genre Normalization Assistant")
-        win.grab_set()
-
-        # 1) LLM Prompt
-        tk.Label(win, text="LLM Prompt Template:").pack(
-            anchor="w", padx=10, pady=(10, 0)
-        )
-        self.text_prompt = ScrolledText(win, height=8, wrap="word")
-        self.text_prompt.pack(fill="both", padx=10)
-        self.text_prompt.insert("1.0", PROMPT_TEMPLATE.strip())
-        self.text_prompt.configure(state="disabled")
-        ttk.Button(
-            win,
-            text="Copy Prompt",
-            command=lambda: self.clipboard_append(PROMPT_TEMPLATE.strip()),
-        ).pack(anchor="e", padx=10, pady=(0, 10))
-
-        # 2) Raw Genre List
-        tk.Label(win, text="Raw Genre List:").pack(anchor="w", padx=10)
-        self.text_raw = ScrolledText(win, width=50, height=15)
-        self.text_raw.pack(fill="both", padx=10, pady=(0, 10))
-        self.text_raw.insert("1.0", "\n".join(self.raw_genre_list))
-        self.text_raw.configure(state="disabled")
-        ttk.Button(
-            win,
-            text="Copy Raw List",
-            command=lambda: self.clipboard_append("\n".join(self.raw_genre_list)),
-        ).pack(anchor="e", padx=10, pady=(0, 10))
-
-        # 3) Mapping JSON Input
-        tk.Label(win, text="Paste JSON Mapping Here:").pack(anchor="w", padx=10)
-        self.text_map = ScrolledText(win, width=50, height=10)
-        self.text_map.pack(fill="both", padx=10, pady=(0, 10))
-        # pre-load existing mapping
-        try:
-            with open(self.mapping_path, "r", encoding="utf-8") as f:
-                existing = json.load(f)
-        except Exception:
-            existing = {}
-        self.text_map.insert("1.0", json.dumps(existing, indent=2))
-
-        # Buttons: Apply Mapping & Close
-        btn_frame = ttk.Frame(win)
-        btn_frame.pack(fill="x", padx=10, pady=(0, 10))
-        ttk.Button(btn_frame, text="Apply Mapping", command=self.apply_mapping).pack(
-            side="right"
-        )
-        ttk.Button(btn_frame, text="Close", command=win.destroy).pack(
-            side="right", padx=(0, 5)
-        )
+        return changed, total
 
     def apply_mapping(self):
         """Persist mapping JSON from text box and apply normalization."""
+        if not hasattr(self, "text_map"):
+            messagebox.showwarning(
+                "No Mapping Editor", "Open the Genre Normalizer to edit mappings."
+            )
+            return
+
+        if not getattr(self, "mapping_path", None):
+            messagebox.showwarning("No Library", "Select a library before applying.")
+            return
+
         try:
             with open(self.mapping_path, "r", encoding="utf-8") as f:
                 existing_map = json.load(f)
@@ -2316,15 +10598,11 @@ class SoundVaultImporterApp(tk.Tk):
         if hasattr(self, "filtered_records") and hasattr(self, "_prop_tv"):
             self._render_table(self.filtered_records)
 
-        # Confirm success and close the normalization dialog
+        # Confirm success and keep the editor open
         messagebox.showinfo(
             "Mapping Applied",
             "Your genre mapping has been successfully saved and applied to the library.",
         )
-        try:
-            self.text_map.winfo_toplevel().destroy()
-        except Exception:
-            pass
 
     def reset_tagfix_log(self):
         initial = self.library_path or load_last_path()
@@ -2345,231 +10623,864 @@ class SoundVaultImporterApp(tk.Tk):
         self._log(f"Reset tag-fix log for {folder}")
 
     # ── Library Sync Helpers ───────────────────────────────────────────
-    def _browse_sync_library(self):
-        initial = self.sync_library_var.get() or load_last_path()
-        folder = filedialog.askdirectory(
-            title="Select Library Folder", initialdir=initial
-        )
-        if folder:
-            self.sync_library_var.set(folder)
-
-    def _browse_sync_incoming(self):
-        initial = self.sync_incoming_var.get() or load_last_path()
-        folder = filedialog.askdirectory(
-            title="Select Incoming Folder", initialdir=initial
-        )
-        if folder:
-            self.sync_incoming_var.set(folder)
-
-    def _scan_library_sync(self):
-        lib = self.sync_library_var.get()
-        inc = self.sync_incoming_var.get()
-        if not lib or not inc:
-            messagebox.showwarning(
-                "Scan", "Please choose library and incoming folders."
-            )
-            return
-        db = os.path.join(lib, "Docs", ".soundvault.db")
+    def _toggle_library_sync_mode(self) -> None:
         cfg = load_config()
-        thresholds = cfg.get("format_fp_thresholds", DEFAULT_FP_THRESHOLDS)
+        cfg["use_library_sync_review"] = bool(self.use_review_sync_var.get())
+        save_config(cfg)
 
-        library_sync.set_debug(self.sync_debug_var.get())
-
-        def task():
+    def _open_library_sync_tool(self) -> None:
+        if self.use_review_sync_var.get():
+            if self.sync_review_window and self.sync_review_window.winfo_exists():
+                self.sync_review_window.lift()
+                self.sync_review_window.focus_set()
+                return
             try:
-                res = library_sync.compare_libraries(
-                    lib, inc, db, thresholds=thresholds
+                self.sync_review_window = library_sync_review.LibrarySyncReviewWindow(
+                    self
                 )
-                self.sync_new = res["new"]
-                self.sync_existing = res["existing"]
-                self.sync_improved = res["improved"]
-                self.after(0, self._render_sync_results)
-            except Exception as e:
-                self.after(0, lambda: messagebox.showerror("Scan Failed", str(e)))
-
-        threading.Thread(target=task, daemon=True).start()
-
-    def _render_sync_results(self):
-        self.sync_new_list.delete(0, "end")
-        self.sync_existing_list.delete(0, "end")
-        self.sync_improved_list.delete(0, "end")
-        for p in self.sync_new:
-            self.sync_new_list.insert("end", os.path.basename(p))
-        for inc, _lib in self.sync_existing:
-            self.sync_existing_list.insert("end", os.path.basename(inc))
-        for inc, _lib in self.sync_improved:
-            self.sync_improved_list.insert("end", os.path.basename(inc))
-
-    def _copy_new_tracks(self):
-        idxs = self.sync_new_list.curselection()
-        if not idxs:
-            return
-        sels = [self.sync_new[int(i)] for i in idxs]
-        dests = library_sync.copy_new_tracks(
-            sels,
-            self.sync_incoming_var.get(),
-            self.sync_library_var.get(),
-        )
-        if self.sync_auto_var.get():
-            playlist_generator.update_playlists(dests)
-        messagebox.showinfo("Copy New", f"Copied {len(dests)} files")
-
-    def _replace_selected(self):
-        idxs = self.sync_improved_list.curselection()
-        if not idxs:
-            return
-        sels = [self.sync_improved[int(i)] for i in idxs]
-        dests = library_sync.replace_tracks(sels)
-        if self.sync_auto_var.get():
-            playlist_generator.update_playlists(dests)
-        messagebox.showinfo("Replace", f"Replaced {len(dests)} files")
-
-    # ── Quality Checker Helpers ─────────────────────────────────────────
-    def clear_quality_view(self) -> None:
-        for w in self.qc_inner.winfo_children():
-            w.destroy()
-
-    def _validate_threshold(self) -> None:
-        """Enable Scan button only when threshold is valid."""
-        try:
-            val = float(self.fp_threshold_var.get())
-            valid = 0.0 < val <= 1.0
-        except Exception:
-            valid = False
-        try:
-            pref = int(self.fp_prefix_var.get())
-            valid_pref = pref >= 0
-        except Exception:
-            valid_pref = False
-        folder_selected = self.library_path_var.get()
-        if valid and valid_pref and folder_selected:
-            self.scan_btn.config(state="normal")
+                self.sync_review_window.bind(
+                    "<Destroy>", lambda _e: setattr(self, "sync_review_window", None)
+                )
+            except Exception as exc:
+                messagebox.showerror("Library Sync (Review)", str(exc))
         else:
-            self.scan_btn.config(state="disabled")
+            try:
+                self.notebook.select(self.sync_tab)
+            except Exception:
+                messagebox.showinfo(
+                    "Library Sync", "The Library Sync tab is not available."
+                )
 
-    def _play_preview(self, path: str) -> None:
-        """Play an audio preview, ensuring previous playback is cleaned up."""
+    def _play_preview(
+        self,
+        path: str,
+        start_ms: int = 30000,
+        duration_ms: int = 15000,
+        player_item: str | None = None,
+    ) -> None:
+        """Play an audio preview while serializing concurrent requests."""
 
-        # Stop any current preview immediately (no Tk calls inside)
-        self.preview_player.stop_preview()
-
-        if not PYDUB_AVAILABLE:
-            messagebox.showerror(
-                "Playback failed",
-                "pydub/ffmpeg not available. Install requirements to enable preview.",
-            )
+        if not self.preview_backend_available:
+            err = self.preview_backend_error or "VLC preview backend unavailable."
+            logging.error("Preview backend unavailable: %s", err)
+            if hasattr(self, "player_status_var"):
+                self.player_status_var.set(f"Preview disabled: {err}")
+            messagebox.showerror("Playback failed", err)
             return
+
+        if self._preview_in_progress:
+            # Interrupt any existing playback before starting the new preview
+            self._ignore_next_preview_finish = True
+            self.preview_player.stop_preview()
+            self._preview_in_progress = False
+
+        if hasattr(self, "player_status_var"):
+            fname = os.path.basename(path)
+            suffix = " (30s highlight)" if duration_ms >= 30000 else ""
+            self.player_status_var.set(f"Playing {fname}{suffix}…")
+
+        self._preview_in_progress = True
+        self._set_player_play_state_busy(player_item)
 
         def task() -> None:
             try:
-                self.preview_player.play_preview(path)
-            except Exception as e:
-                self.after(0, lambda: messagebox.showerror("Playback failed", str(e)))
+                self.preview_player.play_clip(
+                    path, start_ms=start_ms, duration_ms=duration_ms
+                )
+            except PlaybackError as e:
+                logging.exception("Preview playback failed")
+                self.after(0, lambda: self._preview_finished_ui(error=str(e)))
+            except Exception as e:  # pragma: no cover - safety net
+                logging.exception("Unexpected preview failure")
+                self.after(0, lambda: self._preview_finished_ui(error=str(e)))
 
         self._preview_thread = threading.Thread(target=task, daemon=True)
         self._preview_thread.start()
 
-    def _preview_finished_ui(self):
-        # Placeholder for UI updates when preview completes
-        pass
+    def _preview_finished_ui(self, error: str | None = None):
+        if self._ignore_next_preview_finish:
+            # Skip UI reset triggered by an intentionally interrupted preview
+            self._ignore_next_preview_finish = False
+            return
 
-    def _load_thumbnail(self, path: str, size: int = 100) -> ImageTk.PhotoImage:
+        self._preview_in_progress = False
+        self._restore_player_play_icons()
+        if hasattr(self, "player_status_var"):
+            if error:
+                self.player_status_var.set("Playback failed. Check logs.")
+                messagebox.showerror("Playback failed", error)
+            else:
+                self.player_status_var.set("Ready to play another track.")
+
+    def _set_player_play_state_busy(self, item_id: str | None) -> None:
+        if not hasattr(self, "player_tree"):
+            return
+        self._restore_player_play_icons()
+        if not item_id or not self.player_tree.exists(item_id):
+            return
+        values = list(self.player_tree.item(item_id, "values"))
+        if len(values) >= 5:
+            values[4] = "⏳"
+            self.player_tree.item(item_id, values=values)
+            self._player_busy_item = item_id
+
+    def _restore_player_play_icons(self) -> None:
+        if not hasattr(self, "player_tree"):
+            return
+        if self._player_busy_item and self.player_tree.exists(self._player_busy_item):
+            values = list(self.player_tree.item(self._player_busy_item, "values"))
+            if len(values) >= 5:
+                values[4] = "▶" if self.preview_backend_available else "—"
+                self.player_tree.item(self._player_busy_item, values=values)
+        self._player_busy_item = None
+
+    def _player_art_size(self) -> int:
+        base = 200
+        scale_factor = 0.8 + (0.2 * max(self.current_scale, 1.0))
+        return int(base * min(scale_factor, 1.25))
+
+    def _load_thumbnail(self, path: str | None, size: int = 100) -> ImageTk.PhotoImage:
         img = None
-        try:
-            audio = MutagenFile(path)
-            img_data = None
-            if hasattr(audio, "tags") and audio.tags is not None:
-                for key in audio.tags.keys():
-                    if str(key).startswith("APIC"):
-                        img_data = audio.tags[key].data
+        if path:
+            try:
+                _tags, cover_payloads, _error, _reader = read_metadata(path, include_cover=True)
+                if cover_payloads:
+                    img = Image.open(BytesIO(cover_payloads[0]))
+            except Exception:
+                img = None
+            if img is None:
+                candidates = []
+                folder = os.path.dirname(path)
+                for stem in ("cover", "folder", "front", "album"):
+                    for ext in ("jpg", "jpeg", "png", "webp"):
+                        candidates.append(os.path.join(folder, f"{stem}.{ext}"))
+                for candidate in candidates:
+                    if not os.path.exists(candidate):
+                        continue
+                    try:
+                        img = Image.open(candidate)
                         break
-            if img_data is None and getattr(audio, "pictures", None):
-                pics = getattr(audio, "pictures", [])
-                if pics:
-                    img_data = pics[0].data
-            if img_data:
-                img = Image.open(BytesIO(img_data))
-        except Exception:
-            img = None
+                    except Exception:
+                        img = None
         if img is None:
             img = Image.new("RGB", (size, size), "#777777")
         img.thumbnail((size, size))
         return ImageTk.PhotoImage(img)
 
-    def populate_quality_table(self, matches):
-        self.clear_quality_view()
-        if not matches:
-            ttk.Label(self.qc_inner, text="No duplicates detected in this library").pack(pady=20)
+    def _update_player_art(
+        self, path: str | None, title: str | None = None, artist: str | None = None
+    ) -> None:
+        if not hasattr(self, "player_art_label"):
+            return
+        size = self._player_art_size()
+        art = self._load_thumbnail(path, size=size)
+        self.player_art_image = art
+        self.player_art_label.configure(image=art)
+        if path:
+            caption = title or os.path.basename(path)
+            if artist:
+                caption = f"{caption}\n{artist}"
+        else:
+            caption = "Select a track to view album art"
+        self.player_art_caption.configure(text=caption, wraplength=size + 20)
+
+    def _get_selected_player_paths(self) -> list[str]:
+        if not hasattr(self, "player_tree"):
+            return []
+
+        selections: list[str] = []
+
+        # Include selections from the main library table.
+        selection = self.player_tree.selection()
+        selections.extend(
+            [self.player_tree_paths[item] for item in selection if item in self.player_tree_paths]
+        )
+
+        # Include selections from the optional playlist preview table when visible.
+        if getattr(self, "player_playlist_tree", None):
+            pl_selection = self.player_playlist_tree.selection()
+            selections.extend(
+                [
+                    self.player_playlist_tree_paths[item]
+                    for item in pl_selection
+                    if item in self.player_playlist_tree_paths
+                ]
+            )
+
+        return selections
+
+    def _player_set_temp_playlist(self, tracks: list[str]) -> None:
+        self.player_temp_playlist = list(dict.fromkeys(tracks))
+        self._sync_player_playlist()
+
+    def _sync_player_playlist(self) -> None:
+        if self.player_playlist_listbox is None:
+            return
+        self.player_playlist_listbox.delete(0, tk.END)
+        for path in self.player_temp_playlist:
+            self.player_playlist_listbox.insert(tk.END, os.path.basename(path))
+
+        count = len(self.player_temp_playlist)
+        suffix = "song" if count == 1 else "songs"
+        self.player_playlist_status_var.set(f"Playlist builder items: {count} {suffix}")
+
+    def _player_add_selection_to_temp(self) -> None:
+        selected_paths = self._get_selected_player_paths()
+        if not selected_paths:
+            messagebox.showinfo(
+                "Playlist Builder", "Select one or more songs to add first."
+            )
             return
 
-        for keep_path, dup_path in matches:
-            row = ttk.Frame(self.qc_inner)
-            row.pack(fill="x", padx=10, pady=2)
+        combined = list(self.player_temp_playlist)
+        for path in selected_paths:
+            if path not in combined:
+                combined.append(path)
+        self._player_set_temp_playlist(combined)
 
-            play_btn = ttk.Button(row, text="▶", width=1, command=lambda p=dup_path: self._play_preview(p))
-            play_btn.pack(side="left")
+    def _player_remove_selected_from_temp(self) -> None:
+        if self.player_playlist_listbox is None:
+            return
+        selected = list(self.player_playlist_listbox.curselection())
+        if not selected:
+            messagebox.showinfo("Playlist Builder", "Select songs in the list to remove.")
+            return
 
-            thumb = self._load_thumbnail(dup_path, size=40)
-            img_label = ttk.Label(row, image=thumb)
-            img_label.image = thumb
-            img_label.pack(side="left", padx=(5, 10))
+        remaining = [
+            track for i, track in enumerate(self.player_temp_playlist) if i not in selected
+        ]
+        self._player_set_temp_playlist(remaining)
 
-            tags = get_tags(dup_path)
-            title = tags.get("title") or os.path.basename(dup_path)
-            artist = tags.get("artist") or "Unknown"
-            year = tags.get("year") or "?"
-            ext = os.path.splitext(dup_path)[1].lower()
-            size = os.path.getsize(dup_path) / 1024 / 1024
+    def _player_clear_temp_playlist(self) -> None:
+        if not self.player_temp_playlist:
+            return
+        self._player_set_temp_playlist([])
 
-            info = ttk.Frame(row)
-            info.pack(side="left", fill="x", expand=True)
-            ttk.Label(info, text=title, font=("TkDefaultFont", 9, "bold"), anchor="w").pack(anchor="w")
-            ttk.Label(info, text=f"{artist} • {year}", font=("TkDefaultFont", 8), anchor="w").pack(anchor="w")
-            ttk.Label(info, text=f"{ext[1:].upper()} {size:.1f} MB", font=("TkDefaultFont", 8), anchor="w").pack(anchor="w")
+    def _reorder_tabs(self) -> None:
+        desired = [
+            getattr(self, "log_tab", None),
+            getattr(self, "indexer_tab", None),
+            getattr(self, "dup_tab", None),
+            getattr(self, "library_compression_tab", None),
+            getattr(self, "sync_tab", None),
+            getattr(self, "playlist_tab", None),
+            getattr(self, "tagfix_tab", None),
+            getattr(self, "player_tab", None),
+            getattr(self, "help_tab", None),
+        ]
+        for tab in [t for t in desired if t is not None]:
+            if str(tab) in self.notebook.tabs():
+                self.notebook.insert("end", tab)
 
-            del_btn = ttk.Button(row, text="Delete", command=lambda p=dup_path, f=row: self._prompt_delete(p, f))
-            del_btn.pack(side="right")
+    def _player_load_playlist(self) -> None:
+        playlists_dir = os.path.join(self.library_path, "Playlists")
+        initial_dir = (
+            playlists_dir
+            if os.path.isdir(playlists_dir)
+            else self.library_path
+            if self.library_path
+            else os.getcwd()
+        )
+        chosen = filedialog.askopenfilename(
+            title="Load Playlist",
+            initialdir=initial_dir,
+            defaultextension=".m3u",
+            filetypes=[("M3U Playlist", "*.m3u"), ("All Files", "*.*")],
+        )
+        if not chosen:
+            return
 
-        self.qc_canvas.update_idletasks()
+        try:
+            with open(chosen, "r", encoding="utf-8") as f:
+                entries = [line.strip() for line in f if line.strip()]
+        except Exception as exc:
+            messagebox.showerror("Load Playlist", f"Could not read playlist: {exc}")
+            return
 
-    def _prompt_delete(self, path: str, row: tk.Widget) -> None:
-        if getattr(self, "_skip_delete_confirm", False):
-            proceed = True
-        else:
-            proceed, skip = self._confirm_delete(path)
-            if skip:
-                self._skip_delete_confirm = True
-        if not proceed:
+        base_dir = os.path.dirname(chosen)
+        resolved: list[str] = []
+        for entry in entries:
+            candidate = entry if os.path.isabs(entry) else os.path.join(base_dir, entry)
+            candidate = os.path.normpath(candidate)
+            if os.path.exists(candidate):
+                resolved.append(candidate)
+
+        if not resolved:
+            messagebox.showinfo(
+                "Load Playlist", "No valid tracks found in the selected playlist."
+            )
+            return
+
+        self._player_set_temp_playlist(resolved)
+
+    def _player_save_temp_playlist(self) -> None:
+        if not self.player_temp_playlist:
+            messagebox.showinfo("Playlist Builder", "Add songs before saving a playlist.")
+            return
+        if not self.library_path:
+            messagebox.showwarning("No Library", "Select a library before saving.")
+            return
+
+        outfile = self._player_prompt_playlist_destination()
+        if not outfile:
+            return
+
+        try:
+            write_playlist(self.player_temp_playlist, outfile)
+        except Exception as exc:
+            messagebox.showerror("Playlist", f"Failed to save playlist: {exc}")
+            return
+
+        messagebox.showinfo("Playlist", f"Playlist saved to {outfile}")
+        self._open_folder(os.path.dirname(outfile))
+
+    def _player_prompt_playlist_destination(self) -> str | None:
+        playlists_dir = os.path.join(self.library_path, "Playlists")
+        os.makedirs(playlists_dir, exist_ok=True)
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        default_name = f"PlayerSelection_{ts}.m3u"
+
+        chosen = filedialog.asksaveasfilename(
+            parent=self,
+            title="Save Playlist As",
+            defaultextension=".m3u",
+            initialdir=playlists_dir,
+            initialfile=default_name,
+            filetypes=[("M3U Playlist", "*.m3u"), ("All Files", "*.*")],
+        )
+
+        if not chosen:
+            return None
+
+        return os.path.join(playlists_dir, os.path.basename(chosen))
+
+    def _player_show_current_playlists(self) -> None:
+        if not self.library_path:
+            messagebox.showwarning("No Library", "Select a library first.")
+            return
+
+        playlists_dir = os.path.join(self.library_path, "Playlists")
+        if not os.path.isdir(playlists_dir):
+            messagebox.showinfo(
+                "Playlists", "No playlists folder found yet. Save one to get started."
+            )
             return
         try:
-            os.remove(path)
-            row.destroy()
-            self._log(f"Deleted duplicate {path}")
-        except Exception as e:
-            messagebox.showerror("Delete Failed", str(e))
+            entries = [
+                f
+                for f in os.listdir(playlists_dir)
+                if os.path.isfile(os.path.join(playlists_dir, f))
+            ]
+        except OSError as exc:
+            messagebox.showerror("Playlists", f"Could not read folder: {exc}")
+            return
 
-    def _confirm_delete(self, path: str) -> tuple[bool, bool]:
-        top = tk.Toplevel(self)
-        top.title("Confirm Delete")
-        top.grab_set()
-        ttk.Label(top, text=f"Delete {os.path.basename(path)}?").pack(padx=10, pady=(10, 5))
-        skip_var = tk.BooleanVar()
-        ttk.Checkbutton(top, text="Don't ask again this session", variable=skip_var).pack(padx=10, pady=(0, 5), anchor="w")
-        result = {"ok": False}
+        if not entries:
+            messagebox.showinfo("Playlists", "No playlists found.")
+            return
 
-        def do_ok() -> None:
-            result["ok"] = True
-            top.destroy()
+        messagebox.showinfo("Playlists", "\n".join(sorted(entries)))
 
-        def do_cancel() -> None:
-            top.destroy()
+    def _open_folder(self, path: str) -> None:
+        try:
+            if sys.platform == "win32":
+                os.startfile(path)  # type: ignore[attr-defined]
+            elif sys.platform == "darwin":
+                subprocess.run(["open", path], check=False)
+            else:
+                subprocess.run(["xdg-open", path], check=False)
+        except Exception as exc:
+            messagebox.showerror("Open Folder", f"Could not open {path}: {exc}")
 
-        btn_frame = ttk.Frame(top)
-        btn_frame.pack(pady=(0, 10))
-        ttk.Button(btn_frame, text="Delete", command=do_ok).pack(side="left", padx=5)
-        ttk.Button(btn_frame, text="Cancel", command=do_cancel).pack(side="left", padx=5)
-        top.wait_window()
-        return result["ok"], skip_var.get()
+    def _open_similarity_inspector_tool(self) -> None:
+        SimilarityInspectorDialog(self)
+
+    def _open_fuzzy_duplicate_finder_tool(self) -> None:
+        FuzzyDuplicateFinderDialog(self)
+
+    def _open_duplicate_scan_engine_tool(self) -> None:
+        library = self.require_library()
+        if not library:
+            return
+        existing = getattr(self, "duplicate_scan_engine_window", None)
+        if existing and existing.winfo_exists():
+            existing.lift()
+            existing.focus_set()
+            return
+        win = DuplicateScanEngineTool(self, library_path=library)
+        win.bind(
+            "<Destroy>",
+            lambda e: (
+                setattr(self, "duplicate_scan_engine_window", None)
+                if e.widget is win
+                else None
+            ),
+        )
+        self.duplicate_scan_engine_window = win
+
+    def _open_file_cleanup_tool(self) -> None:
+        FileCleanupDialog(self)
+
+    def _open_duplicate_bucketing_poc_tool(self) -> None:
+        DuplicateBucketingPocDialog(self)
+
+    def _open_playlist_repair_tool(self) -> None:
+        library = self.require_library()
+        if not library:
+            return
+        existing = getattr(self, "playlist_repair_window", None)
+        if existing and existing.winfo_exists():
+            existing.lift()
+            existing.focus_set()
+            return
+        win = PlaylistRepairDialog(self, library_root=library)
+        win.bind(
+            "<Destroy>",
+            lambda e: (
+                setattr(self, "playlist_repair_window", None)
+                if e.widget is win
+                else None
+            ),
+        )
+        self.playlist_repair_window = win
+
+    def _open_qt_preview_window(self) -> None:
+        qt_available = any(
+            importlib.util.find_spec(module)
+            for module in ("PySide6", "PyQt6")
+        )
+        if not qt_available:
+            messagebox.showerror(
+                "Qt Preview",
+                "PySide6 or PyQt6 is not installed. Install one of them to launch the Qt preview window.",
+            )
+            return
+
+        try:
+            subprocess.Popen(
+                [sys.executable, "-m", "gui.qt_launcher"],
+                cwd=str(Path(__file__).resolve().parent),
+            )
+        except Exception as exc:
+            messagebox.showerror(
+                "Qt Preview",
+                f"Unable to launch the Qt preview window: {exc}",
+            )
+
+    def _open_m4a_tester_tool(self) -> None:
+        M4ATesterDialog(self)
+
+    def _open_opus_tester_tool(self) -> None:
+        OpusTesterDialog(self)
+
+    def _create_player_library_table(self, parent: tk.Widget) -> ttk.Frame:
+        table = ttk.Frame(parent)
+        p_vsb = ttk.Scrollbar(table, orient="vertical")
+        p_vsb.pack(side="right", fill="y")
+        p_hsb = ttk.Scrollbar(table, orient="horizontal")
+        p_hsb.pack(side="bottom", fill="x")
+
+        cols = ("Title", "Artist", "Album", "Length", "Play")
+        self.player_tree = ttk.Treeview(
+            table,
+            columns=cols,
+            show="headings",
+            yscrollcommand=p_vsb.set,
+            xscrollcommand=p_hsb.set,
+        )
+        p_vsb.config(command=self.player_tree.yview)
+        p_hsb.config(command=self.player_tree.xview)
+        self.player_tree.pack(fill="both", expand=True)
+
+        widths = {"Title": 220, "Artist": 140, "Album": 160, "Length": 70, "Play": 50}
+        for c in cols:
+            self.player_tree.heading(c, text=c)
+            self.player_tree.column(
+                c,
+                width=widths.get(c, 100),
+                anchor="center" if c in {"Length", "Play"} else "w",
+                stretch=c != "Play",
+            )
+
+        self.player_tree.bind("<ButtonRelease-1>", self._on_player_tree_click)
+        self.player_tree.bind("<<TreeviewSelect>>", self._on_player_selection_change)
+        return table
+
+    def _create_playlist_table(self, parent: tk.Widget) -> ttk.Treeview:
+        frame = ttk.Frame(parent)
+        frame.pack(fill="both", expand=True)
+        p_vsb = ttk.Scrollbar(frame, orient="vertical")
+        p_vsb.pack(side="right", fill="y")
+        p_hsb = ttk.Scrollbar(frame, orient="horizontal")
+        p_hsb.pack(side="bottom", fill="x")
+
+        cols = ("Title", "Artist", "Play")
+        tree = ttk.Treeview(
+            frame,
+            columns=cols,
+            show="headings",
+            yscrollcommand=p_vsb.set,
+            xscrollcommand=p_hsb.set,
+        )
+        p_vsb.config(command=tree.yview)
+        p_hsb.config(command=tree.xview)
+        tree.pack(fill="both", expand=True)
+
+        widths = {"Title": 220, "Artist": 160, "Play": 50}
+        for c in cols:
+            tree.heading(c, text=c)
+            tree.column(
+                c,
+                width=widths.get(c, 100),
+                anchor="center" if c == "Play" else "w",
+                stretch=c != "Play",
+            )
+
+        tree.bind("<ButtonRelease-1>", self._on_playlist_tree_click)
+        tree.bind("<<TreeviewSelect>>", self._on_playlist_selection_change)
+        return tree
+
+    def _toggle_player_playlist_view(self) -> None:
+        if self.player_playlist_mode:
+            self._unload_player_playlist_view()
+            return
+
+        tracks = self._prompt_playlist_tracks()
+        if not tracks:
+            return
+        self.player_playlist_rows = self._prepare_player_rows(tracks)
+        self._enter_player_playlist_view()
+
+    def _prompt_playlist_tracks(self) -> list[str] | None:
+        playlists_dir = os.path.join(self.library_path, "Playlists")
+        initial_dir = (
+            playlists_dir
+            if os.path.isdir(playlists_dir)
+            else self.library_path
+            if self.library_path
+            else os.getcwd()
+        )
+        chosen = filedialog.askopenfilename(
+            title="Add Playlist",
+            initialdir=initial_dir,
+            defaultextension=".m3u",
+            filetypes=[("M3U Playlist", "*.m3u"), ("All Files", "*.*")],
+        )
+        if not chosen:
+            return None
+
+        try:
+            with open(chosen, "r", encoding="utf-8") as f:
+                entries = [line.strip() for line in f if line.strip()]
+        except Exception as exc:
+            messagebox.showerror("Playlist", f"Could not read playlist: {exc}")
+            return None
+
+        base_dir = os.path.dirname(chosen)
+        resolved: list[str] = []
+        for entry in entries:
+            candidate = entry if os.path.isabs(entry) else os.path.join(base_dir, entry)
+            candidate = os.path.normpath(candidate)
+            if os.path.exists(candidate):
+                resolved.append(candidate)
+
+        if not resolved:
+            messagebox.showinfo(
+                "Playlist", "No valid tracks found in the selected playlist."
+            )
+            return None
+        return resolved
+
+    def _enter_player_playlist_view(self) -> None:
+        self.player_playlist_mode = True
+        self.player_playlist_toggle_btn.config(text="Unload Playlist")
+        self.player_library_frame.pack_forget()
+        self.player_library_frame.pack(
+            side="left", fill="both", expand=True, padx=(0, 10), pady=(0, 0)
+        )
+
+        self.player_playlist_frame = ttk.LabelFrame(
+            self.player_table_region, text="Playlist Preview"
+        )
+        self.player_playlist_frame.pack(side="left", fill="both", expand=True)
+        self.player_playlist_tree = self._create_playlist_table(
+            self.player_playlist_frame
+        )
+        self._render_playlist_rows(self.player_playlist_rows)
+
+    def _unload_player_playlist_view(self) -> None:
+        self.player_playlist_mode = False
+        self.player_playlist_toggle_btn.config(text="Add Playlist")
+        self.player_playlist_rows = []
+        self._clear_playlist_table()
+        if getattr(self, "player_playlist_frame", None):
+            self.player_playlist_frame.destroy()
+            self.player_playlist_frame = None
+        self.player_library_frame.pack_forget()
+        self.player_library_frame.pack(fill="both", expand=True)
+        self._update_player_art(None)
+
+    def _render_playlist_rows(self, rows: list[dict[str, str]]) -> None:
+        self._clear_playlist_table()
+        if not self.player_playlist_tree:
+            return
+        play_icon = "▶" if self.preview_backend_available else "—"
+        for row in rows:
+            item = self.player_playlist_tree.insert(
+                "",
+                "end",
+                values=(
+                    row.get("title", ""),
+                    row.get("artist", ""),
+                    play_icon,
+                ),
+            )
+            path = row.get("path", "")
+            self.player_playlist_tree_paths[item] = path
+            self.player_playlist_tree_rows[item] = row
+
+    def _clear_playlist_table(self) -> None:
+        if self.player_playlist_tree:
+            for row in self.player_playlist_tree.get_children():
+                self.player_playlist_tree.delete(row)
+        self.player_playlist_tree_paths.clear()
+        self.player_playlist_tree_rows.clear()
+
+    def _on_playlist_tree_click(self, event) -> None:
+        if not self.player_playlist_tree:
+            return
+        region = self.player_playlist_tree.identify_region(event.x, event.y)
+        if region != "cell":
+            return
+        col = self.player_playlist_tree.identify_column(event.x)
+        if col != "#3":
+            return
+        item = self.player_playlist_tree.identify_row(event.y)
+        if not item:
+            return
+        path = self.player_playlist_tree_paths.get(item)
+        if not path:
+            return
+        row = self.player_playlist_tree_rows.get(item, {})
+        self._update_player_art(path, title=row.get("title"), artist=row.get("artist"))
+        self._play_preview(path, duration_ms=30000, player_item=None)
+
+    def _on_playlist_selection_change(self, _event) -> None:
+        if not self.player_playlist_tree:
+            return
+        selection = self.player_playlist_tree.selection()
+        if not selection:
+            return
+        item = selection[0]
+        path = self.player_playlist_tree_paths.get(item)
+        row = self.player_playlist_tree_rows.get(item, {})
+        self._update_player_art(path, title=row.get("title"), artist=row.get("artist"))
+
+    # ── Player Tab Helpers ─────────────────────────────────────────────
+    def _clear_player_table(self) -> None:
+        if not hasattr(self, "player_tree"):
+            return
+        for row in self.player_tree.get_children():
+            self.player_tree.delete(row)
+        self.player_tree_paths.clear()
+        self.player_tree_rows.clear()
+        self._update_player_art(None)
+
+    def _prepare_player_rows(self, tracks: list[str]) -> list[dict[str, str]]:
+        rows = []
+        for path in tracks:
+            try:
+                tags = get_tags(path)
+            except Exception as exc:
+                logging.warning("Failed to read tags for %s: %s", path, exc)
+                tags = {}
+            title = tags.get("title") or os.path.basename(path)
+            artist = tags.get("artist") or "Unknown"
+            album = tags.get("album") or ""
+            length_sec = self._get_track_length(path)
+            rows.append(
+                {
+                    "title": title,
+                    "artist": artist,
+                    "album": album,
+                    "length": self._format_duration(length_sec),
+                    "path": path,
+                }
+            )
+        return rows
+
+    def _format_duration(self, seconds: float | None) -> str:
+        if not seconds:
+            return "—"
+        mins, secs = divmod(int(seconds), 60)
+        return f"{mins}:{secs:02d}"
+
+    def _get_track_length(self, path: str) -> float | None:
+        try:
+            audio = MutagenFile(path)
+            if audio and getattr(audio, "info", None):
+                length = getattr(audio.info, "length", None)
+                if length:
+                    return float(length)
+        except Exception:
+            return None
+        return None
+
+    def _load_player_library_async(self) -> None:
+        if not self.library_path:
+            self.player_status_var.set("Select a library to load tracks.")
+            if hasattr(self, "player_reload_btn"):
+                self.player_reload_btn.config(state="disabled")
+            return
+        if self._player_load_thread and self._player_load_thread.is_alive():
+            return
+
+        self.player_status_var.set("Loading tracks…")
+        self.player_reload_btn.config(state="disabled")
+        thread = threading.Thread(
+            target=self._load_player_library, args=(self.library_path,), daemon=True
+        )
+        self._player_load_thread = thread
+        thread.start()
+
+    def _load_player_library(self, library_path: str) -> None:
+        try:
+            tracks = gather_tracks(library_path, self.folder_filter)
+        except Exception as exc:
+            self.after(
+                0,
+                lambda: self.player_status_var.set(
+                    f"Failed to load library: {exc}"
+                ),
+            )
+            self.after(0, lambda: self.player_reload_btn.config(state="normal"))
+            return
+
+        rows = self._prepare_player_rows(tracks)
+
+        self.after(0, lambda: self._update_player_table(rows, library_path))
+
+    def preview_tracks_in_player(self, tracks: list[str], label: str) -> None:
+        if not tracks:
+            messagebox.showinfo("Playlist Preview", "No tracks available to preview.")
+            return
+
+        def worker() -> None:
+            rows = self._prepare_player_rows(tracks)
+            self.after(0, lambda: self._show_player_preview(rows, label))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _show_player_preview(self, rows: list[dict[str, str]], label: str) -> None:
+        self.player_view_label = f"Previewing {label}"
+        self.player_tracks = rows
+        self._apply_player_filter(total_count=len(rows))
+        if hasattr(self, "notebook"):
+            self.notebook.select(self.player_tab)
+
+    def _update_player_table(self, rows: list[dict[str, str]], library_path: str) -> None:
+        if library_path != self.library_path:
+            return
+        self.player_view_label = f"Library – {os.path.basename(library_path)}"
+        self.player_tracks = rows
+        self._apply_player_filter(total_count=len(rows))
+
+    def _apply_player_filter(self, *_args, total_count: int | None = None) -> None:
+        if not hasattr(self, "player_tree"):
+            return
+        query = self.player_search_var.get().strip().lower()
+        if query:
+            rows = [r for r in self.player_tracks if self._matches_player_query(r, query)]
+        else:
+            rows = list(self.player_tracks)
+        self._render_player_rows(rows, total_count=total_count)
+
+    def _matches_player_query(self, row: dict[str, str], query: str) -> bool:
+        for key in ("title", "artist", "album", "length", "path"):
+            val = row.get(key)
+            if val and query in str(val).lower():
+                return True
+        return False
+
+    def _render_player_rows(
+        self, rows: list[dict[str, str]], total_count: int | None = None
+    ) -> None:
+        self._clear_player_table()
+        play_icon = "▶" if self.preview_backend_available else "—"
+        for row in rows:
+            item = self.player_tree.insert(
+                "",
+                "end",
+                values=(
+                    row["title"],
+                    row["artist"],
+                    row["album"],
+                    row["length"],
+                    play_icon,
+                ),
+            )
+            self.player_tree_paths[item] = row["path"]
+            self.player_tree_rows[item] = row
+
+        if rows:
+            first = rows[0]
+            self._update_player_art(
+                first.get("path"),
+                title=first.get("title"),
+                artist=first.get("artist"),
+            )
+        else:
+            self._update_player_art(None)
+
+        total = total_count if total_count is not None else len(rows)
+        shown = len(rows)
+        suffix = "track" if total == 1 else "tracks"
+        prefix = f"{self.player_view_label}. " if self.player_view_label else ""
+        if not self.preview_backend_available:
+            reason = self.preview_backend_error or "Install python-vlc to enable playback."
+            status = f"{prefix}Loaded {total} {suffix}. Preview disabled: {reason}"
+        else:
+            status = f"{prefix}Loaded {total} {suffix}. Click ▶ for a 30s highlight."
+        if shown != total:
+            status += f" Showing {shown} match{'es' if shown != 1 else ''}."
+        self.player_status_var.set(status)
+        self.player_reload_btn.config(state="normal")
+
+    def _on_player_tree_click(self, event) -> None:
+        region = self.player_tree.identify_region(event.x, event.y)
+        if region != "cell":
+            return
+        col = self.player_tree.identify_column(event.x)
+        # Play column is the fifth heading (#5 when using ``show='headings'``)
+        if col != "#5":
+            return
+        item = self.player_tree.identify_row(event.y)
+        if not item:
+            return
+        if not self.preview_backend_available:
+            self.player_status_var.set(
+                f"Preview disabled: {self.preview_backend_error or 'Install python-vlc.'}"
+            )
+            return
+        path = self.player_tree_paths.get(item)
+        if path:
+            row = self.player_tree_rows.get(item, {})
+            self._update_player_art(
+                path, title=row.get("title"), artist=row.get("artist")
+            )
+            self._play_preview(path, duration_ms=30000, player_item=item)
+
+    def _on_player_selection_change(self, _event) -> None:
+        if not hasattr(self, "player_tree"):
+            return
+        selection = self.player_tree.selection()
+        if not selection:
+            self._update_player_art(None)
+            return
+        item = selection[0]
+        path = self.player_tree_paths.get(item)
+        row = self.player_tree_rows.get(item, {})
+        self._update_player_art(path, title=row.get("title"), artist=row.get("artist"))
 
     def _send_help_query(self):
         threading.Thread(target=self._do_help_query, daemon=True).start()
@@ -2608,6 +11519,14 @@ class SoundVaultImporterApp(tk.Tk):
 
         frame = MetadataServiceConfigFrame(win)
         frame.pack(fill="both", expand=True, padx=10, pady=10)
+        win.bind(
+            "<Destroy>",
+            lambda e: (
+                self._check_tagfix_api_status()
+                if e.widget is win and self.winfo_exists()
+                else None
+            ),
+        )
         self._metadata_win = win
 
     def _on_exit(self) -> None:
@@ -2633,10 +11552,10 @@ class SoundVaultImporterApp(tk.Tk):
 
         win = tk.Toplevel(self)
         win.title("Crash Log")
-            text = ScrolledText(win, width=80, height=24)
-            text.pack(fill="both", expand=True)
-            text.insert("end", "".join(lines))
-            text.configure(state="disabled")
+        text = ScrolledText(win, width=80, height=24)
+        text.pack(fill="both", expand=True)
+        text.insert("end", "".join(lines))
+        text.configure(state="disabled")
 
     def show_log_tab(self) -> None:
         """Switch to the Log tab so users can see background activity."""
@@ -2650,11 +11569,6 @@ class SoundVaultImporterApp(tk.Tk):
         self.output.insert("end", line + "\n")
         self.output.see("end")
         self.output.configure(state="disabled")
-        if getattr(self, "_dup_logging", False) and hasattr(self, "dup_text"):
-            self.dup_text.configure(state="normal")
-            self.dup_text.insert("end", line + "\n")
-            self.dup_text.see("end")
-            self.dup_text.configure(state="disabled")
 
 
 if __name__ == "__main__":
