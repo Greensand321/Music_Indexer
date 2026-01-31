@@ -55,9 +55,7 @@ def cluster_library(
     """Generate clustered playlists for ``library_path`` and return features."""
 
     tracks = gather_tracks(library_path, folder_filter)
-    docs_dir = os.path.join(library_path, "Docs")
-    os.makedirs(docs_dir, exist_ok=True)
-    log_path = os.path.join(docs_dir, f"{method}_log.txt")
+    log_path = os.path.join(library_path, f"{method}_log.txt")
 
     def log(msg: str) -> None:
         log_callback(msg)
