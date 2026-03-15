@@ -233,10 +233,13 @@ controllers/
   cluster_controller.py        - Gather tracks and run clustering
   library_index_controller.py  - Build HTML index of your library
   highlight_controller.py      - Play short audio snippets
-  playlist_controller.py       - Playlist export placeholder
+  playlist_controller.py       - Playlist export and library playlist refresh
+  scan_progress_controller.py  - Scan progress updates and cancellation coordination
+  cluster_view_controller.py   - Caching helpers for interactive clustering views
 
 plugins/
   base.py               - Metadata plugin interface
+  api_service.py        - Abstract base class for external metadata service integrations
   acoustid_plugin.py    - Metadata lookup via selected service
   assistant_plugin.py   - LLM helper integration
   discogs.py            - Discogs metadata stub
