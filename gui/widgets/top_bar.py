@@ -17,6 +17,7 @@ class TopBar(QtWidgets.QWidget):
 
     library_changed = Signal(str)
     settings_requested = Signal()
+    theme_requested = Signal()
 
     def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(parent)
@@ -56,6 +57,11 @@ class TopBar(QtWidgets.QWidget):
         change_btn.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
         change_btn.clicked.connect(self._on_change_library)
         layout.addWidget(change_btn)
+
+        theme_btn = QtWidgets.QPushButton("🎨  Theme")
+        theme_btn.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
+        theme_btn.clicked.connect(self.theme_requested.emit)
+        layout.addWidget(theme_btn)
 
         settings_btn = QtWidgets.QPushButton("⚙  Settings")
         settings_btn.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))

@@ -2,9 +2,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Callable
 
 from gui.compat import QtCore, QtGui, QtWidgets, Signal
+from gui.themes.animations import AnimatedNavButton
 
 # ── Navigation model ──────────────────────────────────────────────────────────
 
@@ -65,7 +65,7 @@ class Sidebar(QtWidgets.QWidget):
         self.setObjectName("sidebar")
         self.setFixedWidth(220)
 
-        self._buttons: dict[str, QtWidgets.QPushButton] = {}
+        self._buttons: dict[str, AnimatedNavButton] = {}
         self._active_key: str = ""
 
         root_layout = QtWidgets.QVBoxLayout(self)
@@ -104,14 +104,8 @@ class Sidebar(QtWidgets.QWidget):
             nav_layout.addWidget(hdr)
 
             for item in section.items:
-                btn = QtWidgets.QPushButton(f"  {item.icon}  {item.label}")
-                btn.setObjectName("navButton")
-                btn.setCheckable(False)
-                btn.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
-                btn.setProperty("active", "false")
-                btn.clicked.connect(
-                    lambda checked=False, k=item.key: self._on_nav_click(k)
-                )
+                btn = AnimatedNavButton(item.label, item.key, item.icon)
+                btn.clicked_key.connect(self._on_nav_click)
                 nav_layout.addWidget(btn)
                 self._buttons[item.key] = btn
 
@@ -129,32 +123,17 @@ class Sidebar(QtWidgets.QWidget):
     def activate(self, key: str) -> None:
         """Programmatically activate a nav item (no signal emitted)."""
         if self._active_key and self._active_key in self._buttons:
-            prev = self._buttons[self._active_key]
-            prev.setProperty("active", "false")
-            prev.style().unpolish(prev)
-            prev.style().polish(prev)
+            self._buttons[self._active_key].active = False
 
         self._active_key = key
         if key in self._buttons:
-            btn = self._buttons[key]
-            btn.setProperty("active", "true")
-            btn.style().unpolish(btn)
-            btn.style().polish(btn)
+            self._buttons[key].active = True
 
     def set_badge(self, key: str, count: int) -> None:
         """Show a badge count next to a nav item (0 hides it)."""
         if key not in self._buttons:
             return
-        btn = self._buttons[key]
-        # Find label text without badge
-        base_text = btn.text().rstrip()
-        # Strip existing badge
-        if "(" in base_text:
-            base_text = base_text[: base_text.rfind("(")].rstrip()
-        if count > 0:
-            btn.setText(f"{base_text}  ({count})")
-        else:
-            btn.setText(base_text)
+        self._buttons[key].badge = count
 
     # ── Private ───────────────────────────────────────────────────────────
 

@@ -5,7 +5,7 @@ import sys
 from pathlib import Path
 
 from gui.compat import QtCore, QtGui, QtWidgets, Signal, Slot
-from gui.theme import build_stylesheet
+from gui.themes.manager import get_manager
 from gui.widgets.top_bar import TopBar
 from gui.widgets.sidebar import Sidebar
 from gui.widgets.log_drawer import LogDrawer
@@ -56,16 +56,15 @@ class AlphaDEXWindow(QtWidgets.QMainWindow):
 
         self._library_path: str = ""
         self._workspaces: dict[str, WorkspaceBase] = {}
+        self._theme_picker = None   # keep reference so dialog stays open
 
-        self._apply_style()
+        # Apply persisted theme before building UI
+        get_manager().load_persisted()
+        get_manager().theme_changed.connect(self._on_theme_changed)
+
         self._build_ui()
         self._setup_shortcuts()
         self._load_persisted_library()
-
-    # ── Style ─────────────────────────────────────────────────────────────
-
-    def _apply_style(self) -> None:
-        QtWidgets.QApplication.instance().setStyleSheet(build_stylesheet())
 
     # ── UI construction ───────────────────────────────────────────────────
 
@@ -81,6 +80,7 @@ class AlphaDEXWindow(QtWidgets.QMainWindow):
         self._top_bar = TopBar()
         self._top_bar.library_changed.connect(self._on_library_changed)
         self._top_bar.settings_requested.connect(self._on_settings)
+        self._top_bar.theme_requested.connect(self._on_theme_requested)
         root.addWidget(self._top_bar)
 
         # ── Body: sidebar + content ────────────────────────────────────────
@@ -95,7 +95,7 @@ class AlphaDEXWindow(QtWidgets.QMainWindow):
 
         # Content area with stacked widget
         content_frame = QtWidgets.QFrame()
-        content_frame.setStyleSheet("background: #f1f5f9;")
+        content_frame.setObjectName("contentFrame")
         content_layout = QtWidgets.QVBoxLayout(content_frame)
         content_layout.setContentsMargins(0, 0, 0, 0)
         content_layout.setSpacing(0)
@@ -216,6 +216,17 @@ class AlphaDEXWindow(QtWidgets.QMainWindow):
                 self._on_library_changed(lib)
         except Exception:
             pass
+
+    @Slot()
+    def _on_theme_requested(self) -> None:
+        from gui.themes.picker import open_theme_picker
+        self._theme_picker = open_theme_picker(self)
+
+    @Slot(object)
+    def _on_theme_changed(self, tokens) -> None:
+        """Refresh card shadows on all workspaces after a theme switch."""
+        for ws in self._workspaces.values():
+            ws.refresh_shadows()
 
     # ── Helpers ───────────────────────────────────────────────────────────
 

@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 from gui.compat import QtCore, QtWidgets, Signal
+from gui.themes.effects import card_shadow
+from gui.themes.manager import get_manager
 
 
 class WorkspaceBase(QtWidgets.QWidget):
@@ -22,6 +24,7 @@ class WorkspaceBase(QtWidgets.QWidget):
     def __init__(self, library_path: str = "", parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(parent)
         self._library_path = library_path
+        self._cards: list[QtWidgets.QFrame] = []
         self._setup_scroll()
 
     # ── Scroll wrapper ────────────────────────────────────────────────────
@@ -53,7 +56,15 @@ class WorkspaceBase(QtWidgets.QWidget):
     def _make_card(self) -> QtWidgets.QFrame:
         card = QtWidgets.QFrame()
         card.setObjectName("workspaceCard")
+        card.setGraphicsEffect(card_shadow(get_manager().current))
+        self._cards.append(card)
         return card
+
+    def refresh_shadows(self) -> None:
+        """Re-apply drop shadows after a theme change."""
+        tokens = get_manager().current
+        for card in self._cards:
+            card.setGraphicsEffect(card_shadow(tokens))
 
     def _make_section_title(self, text: str) -> QtWidgets.QLabel:
         lbl = QtWidgets.QLabel(text)
