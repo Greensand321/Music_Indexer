@@ -111,8 +111,8 @@ class TypeScale:
     MONO        = 10    # Log drawer, path labels
 
     # ── Sidebar ───────────────────────────────────────────────────────────
-    NAV_ITEM    = 10
-    NAV_SECTION = 8     # Section headers in ALL CAPS
+    NAV_ITEM    = 13
+    NAV_SECTION = 10    # Section headers in ALL CAPS
 
     # ── Controls ─────────────────────────────────────────────────────────
     BUTTON      = 11

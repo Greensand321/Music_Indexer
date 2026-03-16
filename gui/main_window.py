@@ -91,6 +91,7 @@ class AlphaDEXWindow(QtWidgets.QMainWindow):
 
         self._sidebar = Sidebar()
         self._sidebar.nav_changed.connect(self._on_nav_changed)
+        self._sidebar.exit_requested.connect(self.close)
         body_layout.addWidget(self._sidebar)
 
         # Content area with stacked widget

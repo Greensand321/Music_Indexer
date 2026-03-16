@@ -38,9 +38,15 @@ def main() -> int:
     from gui.fonts import load_fonts
     load_fonts()
 
+    # Show splash immediately, build main window in background
+    from gui.widgets.splash import SplashScreen
+    splash = SplashScreen()
+    splash.show()
+    app.processEvents()
+
     from gui.main_window import AlphaDEXWindow
     window = AlphaDEXWindow()
-    window.show()
+    splash.finished.connect(window.show)
 
     return app.exec()
 
