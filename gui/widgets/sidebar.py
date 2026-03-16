@@ -219,28 +219,22 @@ class Sidebar(QtWidgets.QWidget):
     # ── Background painting ───────────────────────────────────────────────
 
     def paintEvent(self, event: QtGui.QPaintEvent) -> None:  # noqa: N802
-        """Paint sidebar_bg at ~75 % opacity over the window-spanning gradient.
+        """Unified Canvas: sidebar is a barely-there glass pane over the shared gradient.
 
-        The same two radial glows used by GradientWidget (workspace canvas) are
-        reproduced here with window-relative origins, but at higher alpha and
-        with a larger radius so they reach the far-left panel.  A translucent
-        sidebar_bg overlay (alpha ≈ 190, ~75 %) is applied on top, giving the
-        "glass panel over a shared gradient" appearance without relying on any
-        platform compositing.
+        The window-spanning gradient is painted at the same coordinates used by
+        GradientWidget, so the two glows read as a single canvas that stretches
+        across both the sidebar and the workspace.  A very thin sidebar_bg tint
+        (alpha ≈ 28, ~11 %) is then laid on top — just enough to hint at the
+        panel boundary without breaking the illusion of one unified background.
+        A 1 px right-edge separator is drawn last to keep the nav content
+        visually anchored without a heavy divider line.
         """
         from gui.themes.manager import get_manager
         t = get_manager().current
         p = QtGui.QPainter(self)
         rect = self.rect()
 
-        # ── Step 1: solid sidebar base ─────────────────────────────────────
-        p.fillRect(rect, QtGui.QColor(t.sidebar_bg))
-
-        # ── Step 2: window-spanning gradient glows ─────────────────────────
-        # Use full diagonal as radius so both glows reach the sidebar even
-        # though it sits in the far-left corner of the window.
-        # Higher alpha than the workspace so the colour tint is visible over
-        # the dark sidebar_bg, simulating the gradient "shining through".
+        # ── Step 1: window-spanning gradient (identical to workspace) ──────
         if _gradient_enabled() and rect.width() > 0 and rect.height() > 0:
             paint_window_gradient(
                 p, self, t,
@@ -248,6 +242,21 @@ class Sidebar(QtWidgets.QWidget):
                 alpha_tr=45 if t.variant == "dark" else 28,
                 alpha_bl=60 if t.variant == "dark" else 38,
             )
+        else:
+            # Gradient disabled — fall back to a solid sidebar background
+            p.fillRect(rect, QtGui.QColor(t.sidebar_bg))
+
+        # ── Step 2: barely-there sidebar tint (~11 % opacity) ─────────────
+        if _gradient_enabled():
+            tint = QtGui.QColor(t.sidebar_bg)
+            tint.setAlpha(28 if t.variant == "dark" else 20)
+            p.fillRect(rect, tint)
+
+        # ── Step 3: 1 px right-edge separator ─────────────────────────────
+        sep_color = QtGui.QColor(t.card_border)
+        sep_color.setAlpha(80)
+        p.setPen(QtGui.QPen(sep_color, 1))
+        p.drawLine(rect.right(), rect.top(), rect.right(), rect.bottom())
 
         p.end()
 
