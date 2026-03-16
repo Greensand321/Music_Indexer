@@ -148,6 +148,8 @@ class Sidebar(QtWidgets.QWidget):
         scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         scroll.setStyleSheet("background: transparent;")
 
+        self._scroll = scroll
+
         self._nav_container = NavContainer()
         nav_layout = QtWidgets.QVBoxLayout(self._nav_container)
         nav_layout.setContentsMargins(0, 0, 0, 0)
@@ -182,9 +184,9 @@ class Sidebar(QtWidgets.QWidget):
         root_layout.addWidget(sep)
 
         # ── Exit button (pinned at bottom) ─────────────────────────────────
-        exit_btn = AnimatedNavButton("Exit", "exit", "⏻", is_exit=True)
-        exit_btn.clicked_key.connect(lambda _: self.exit_requested.emit())
-        root_layout.addWidget(exit_btn)
+        self._exit_btn = AnimatedNavButton("Exit", "exit", "⏻", is_exit=True)
+        self._exit_btn.clicked_key.connect(lambda _: self.exit_requested.emit())
+        root_layout.addWidget(self._exit_btn)
 
         # ── Activate first item ───────────────────────────────────────────
         first_key = NAV_STRUCTURE[0].items[0].key if NAV_STRUCTURE else ""
@@ -220,6 +222,35 @@ class Sidebar(QtWidgets.QWidget):
             self._nav_container.move_pill(
                 float(btn.y()), float(btn.height()), instant=True
             )
+
+    def resizeEvent(self, event: QtGui.QResizeEvent) -> None:
+        super().resizeEvent(event)
+        # Defer one tick so Qt has finished updating the scroll-area viewport
+        # height before we read it.
+        QtCore.QTimer.singleShot(0, self._relayout_buttons)
+
+    def _relayout_buttons(self) -> None:
+        """Resize all nav buttons to fill the scroll-area viewport exactly."""
+        vp_h = self._scroll.viewport().height()
+        if vp_h <= 0:
+            return
+
+        n_btns     = len(self._buttons)
+        n_sections = len(NAV_STRUCTURE)
+        n_spacers  = n_sections - 1
+        n_items    = n_sections + n_btns + n_spacers   # items before stretch
+        overhead   = (n_sections * 20        # section header fixed heights
+                      + n_spacers  * 2       # inter-section spacer heights
+                      + (n_items - 1) * 1)   # layout spacing gaps
+
+        btn_h = max(32, min(68, (vp_h - overhead) // n_btns))
+
+        for btn in self._buttons.values():
+            btn.setFixedHeight(btn_h)
+        self._exit_btn.setFixedHeight(btn_h)
+
+        # Re-anchor the pill after heights change
+        QtCore.QTimer.singleShot(0, self._snap_pill)
 
     def _on_nav_click(self, key: str) -> None:
         self.activate(key)
