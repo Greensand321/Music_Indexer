@@ -1,25 +1,52 @@
 """AlphaDEX splash / loading screen.
 
-Shows a branded loading screen with an animated progress bar that fills over
-1.5 seconds, then fades the window out before emitting ``finished`` so the
-caller can show the main window.
+Sequence
+--------
+1. Fill animation plays (1 500 ms, InOutCubic).
+2. Fill completes → ``reveal_ready`` is emitted so the caller can show the
+   main window *behind* the splash while it is still visible.
+3. Fade-out animation plays (450 ms, InCubic).
+4. Fade completes → splash closes.
+
+Colors are taken from the currently loaded ThemeManager tokens so the splash
+matches whichever theme the user last saved.  If the manager is not yet
+initialised the hardcoded Midnight-dark palette is used as a fallback.
 """
 from __future__ import annotations
 
 from gui.compat import QtCore, QtGui, QtWidgets, Signal
 
-# Hard-coded palette so the splash works before ThemeManager is initialised.
-_BG          = "#0d1117"
-_SURFACE     = "#161b22"
-_ACCENT      = "#6366f1"
-_ACCENT_DIM  = "#1e1f3a"
-_TEXT        = "#f8fafc"
-_SUBTEXT     = "#64748b"
-_BAR_TRACK   = "#1e2130"
+_FILL_MS = 1500
+_FADE_MS = 450
+_W, _H   = 520, 300
 
-_FILL_MS  = 1500   # progress bar fill duration
-_FADE_MS  =  500   # window fade-out duration
-_W, _H    =  520, 300
+
+def _theme_colors() -> dict[str, str]:
+    """Return a palette dict drawn from the active theme, or a safe fallback."""
+    try:
+        from gui.themes.manager import get_manager
+        t = get_manager().current
+        return {
+            "bg":        t.sidebar_bg,
+            "surface":   t.card_bg,
+            "border":    t.card_border,
+            "text":      t.text_primary,
+            "subtext":   t.text_secondary,
+            "accent":    t.accent,
+            "accent2":   t.accent_hover,
+            "bar_track": t.card_bg,
+        }
+    except Exception:
+        return {
+            "bg":        "#0d1117",
+            "surface":   "#161b22",
+            "border":    "#30363d",
+            "text":      "#f8fafc",
+            "subtext":   "#64748b",
+            "accent":    "#6366f1",
+            "accent2":   "#a78bfa",
+            "bar_track": "#1e2130",
+        }
 
 
 class SplashScreen(QtWidgets.QWidget):
@@ -28,11 +55,12 @@ class SplashScreen(QtWidgets.QWidget):
     Usage::
 
         splash = SplashScreen()
-        splash.finished.connect(main_window.show)
+        splash.reveal_ready.connect(main_window.show)   # show window beneath fade
         splash.show()
     """
 
-    finished = Signal()
+    reveal_ready = Signal()   # emitted when the fade-out begins
+    finished     = Signal()   # emitted when the window closes
 
     def __init__(self) -> None:
         super().__init__(
@@ -44,9 +72,10 @@ class SplashScreen(QtWidgets.QWidget):
         self.setFixedSize(_W, _H)
         self._center_on_screen()
 
-        self._progress: float = 0.0   # 0.0 → 1.0
+        self._progress: float = 0.0
+        self._colors = _theme_colors()   # snapshot once at creation
 
-        # ── Progress bar fill animation ───────────────────────────────────
+        # ── Progress fill ─────────────────────────────────────────────────
         self._fill_anim = QtCore.QVariantAnimation(self)
         self._fill_anim.setStartValue(0.0)
         self._fill_anim.setEndValue(1.0)
@@ -56,7 +85,7 @@ class SplashScreen(QtWidgets.QWidget):
         self._fill_anim.finished.connect(self._start_fade)
         self._fill_anim.start()
 
-        # ── Fade-out animation (started after fill completes) ─────────────
+        # ── Window fade-out ────────────────────────────────────────────────
         self._fade_anim = QtCore.QVariantAnimation(self)
         self._fade_anim.setStartValue(1.0)
         self._fade_anim.setEndValue(0.0)
@@ -65,13 +94,15 @@ class SplashScreen(QtWidgets.QWidget):
         self._fade_anim.valueChanged.connect(self._on_fade)
         self._fade_anim.finished.connect(self._on_done)
 
-    # ── Internal slots ────────────────────────────────────────────────────
+    # ── Slots ─────────────────────────────────────────────────────────────
 
     def _on_progress(self, value: object) -> None:
         self._progress = float(value)  # type: ignore[arg-type]
         self.update()
 
     def _start_fade(self) -> None:
+        # Reveal the main window while the splash is still opaque, then fade.
+        self.reveal_ready.emit()
         self._fade_anim.start()
 
     def _on_fade(self, value: object) -> None:
@@ -96,21 +127,25 @@ class SplashScreen(QtWidgets.QWidget):
     # ── Painting ──────────────────────────────────────────────────────────
 
     def paintEvent(self, event: QtGui.QPaintEvent) -> None:
+        c = self._colors
         p = QtGui.QPainter(self)
         p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
         p.setRenderHint(QtGui.QPainter.RenderHint.TextAntialiasing)
 
         rect = QtCore.QRectF(self.rect())
 
-        # ── Card background (rounded, slight border) ──────────────────────
+        # ── Card background ───────────────────────────────────────────────
         card = rect.adjusted(1, 1, -1, -1)
         card_path = QtGui.QPainterPath()
-        card_path.addRoundedRect(card, 18, 18)
+        card_path.addRoundedRect(card, 16, 16)
 
-        p.fillPath(card_path, QtGui.QBrush(QtGui.QColor(_BG)))
+        p.fillPath(card_path, QtGui.QBrush(QtGui.QColor(c["bg"])))
 
-        pen = QtGui.QPen(QtGui.QColor("#ffffff18"), 1.0)
-        p.setPen(pen)
+        # Subtle border — semi-transparent white for dark themes, card_border
+        # for light themes (card_border is already theme-appropriate).
+        border_col = QtGui.QColor(c["border"])
+        border_col.setAlpha(max(border_col.alpha(), 40))
+        p.setPen(QtGui.QPen(border_col, 1.0))
         p.drawPath(card_path)
         p.setPen(QtCore.Qt.PenStyle.NoPen)
 
@@ -127,9 +162,9 @@ class SplashScreen(QtWidgets.QWidget):
             QtGui.QFont.HintingPreference.PreferNoHinting
         )
         p.setFont(brand_font)
-        p.setPen(QtGui.QColor(_TEXT))
+        p.setPen(QtGui.QColor(c["text"]))
         p.drawText(
-            QtCore.QRect(0, 80, _W, 90),
+            QtCore.QRect(0, 72, _W, 96),
             int(QtCore.Qt.AlignmentFlag.AlignCenter),
             "AlphaDEX",
         )
@@ -141,47 +176,52 @@ class SplashScreen(QtWidgets.QWidget):
             QtGui.QFont.HintingPreference.PreferNoHinting
         )
         p.setFont(sub_font)
-        p.setPen(QtGui.QColor(_SUBTEXT))
+        p.setPen(QtGui.QColor(c["subtext"]))
         p.drawText(
-            QtCore.QRect(0, 170, _W, 28),
+            QtCore.QRect(0, 168, _W, 28),
             int(QtCore.Qt.AlignmentFlag.AlignCenter),
             "Music Library Manager  ·  v2.0",
         )
 
         # ── Progress bar ──────────────────────────────────────────────────
-        bar_margin = 56
-        bar_x      = float(bar_margin)
-        bar_y      = float(_H - 56)
-        bar_w      = float(_W - bar_margin * 2)
-        bar_h      = 6.0
-        radius     = bar_h / 2.0
+        margin   = 56
+        bar_x    = float(margin)
+        bar_y    = float(_H - 52)
+        bar_w    = float(_W - margin * 2)
+        bar_h    = 5.0
+        radius   = bar_h / 2.0
 
         # Track
-        track = QtCore.QRectF(bar_x, bar_y, bar_w, bar_h)
         track_path = QtGui.QPainterPath()
-        track_path.addRoundedRect(track, radius, radius)
-        p.fillPath(track_path, QtGui.QBrush(QtGui.QColor(_BAR_TRACK)))
+        track_path.addRoundedRect(
+            QtCore.QRectF(bar_x, bar_y, bar_w, bar_h), radius, radius
+        )
+        p.fillPath(track_path, QtGui.QBrush(QtGui.QColor(c["bar_track"])))
 
-        # Fill
+        # Fill with gradient
         fill_w = bar_w * self._progress
         if fill_w > 0:
-            fill = QtCore.QRectF(bar_x, bar_y, fill_w, bar_h)
             fill_path = QtGui.QPainterPath()
-            fill_path.addRoundedRect(fill, radius, radius)
-
-            grad = QtGui.QLinearGradient(bar_x, 0, bar_x + bar_w, 0)
-            grad.setColorAt(0.0, QtGui.QColor(_ACCENT))
-            grad.setColorAt(1.0, QtGui.QColor("#a78bfa"))
+            fill_path.addRoundedRect(
+                QtCore.QRectF(bar_x, bar_y, fill_w, bar_h), radius, radius
+            )
+            grad = QtGui.QLinearGradient(bar_x, 0.0, bar_x + bar_w, 0.0)
+            grad.setColorAt(0.0, QtGui.QColor(c["accent"]))
+            grad.setColorAt(1.0, QtGui.QColor(c["accent2"]))
             p.fillPath(fill_path, QtGui.QBrush(grad))
 
             # Glow dot at leading edge
             dot_cx = bar_x + fill_w
             dot_cy = bar_y + bar_h / 2.0
-            dot_r  = 5.0
+            dot_r  = 4.5
             dot_path = QtGui.QPainterPath()
             dot_path.addEllipse(
-                QtCore.QRectF(dot_cx - dot_r, dot_cy - dot_r, dot_r * 2, dot_r * 2)
+                QtCore.QRectF(
+                    dot_cx - dot_r, dot_cy - dot_r, dot_r * 2, dot_r * 2
+                )
             )
-            p.fillPath(dot_path, QtGui.QBrush(QtGui.QColor("#c4b5fd")))
+            glow = QtGui.QColor(c["accent2"])
+            glow.setAlpha(220)
+            p.fillPath(dot_path, QtGui.QBrush(glow))
 
         p.end()

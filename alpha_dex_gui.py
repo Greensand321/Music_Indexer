@@ -38,7 +38,14 @@ def main() -> int:
     from gui.fonts import load_fonts
     load_fonts()
 
-    # Show splash immediately, build main window in background
+    # Load the persisted theme now so the splash uses the correct palette.
+    # AlphaDEXWindow will call load_persisted() again, which is harmless.
+    from gui.themes.manager import get_manager
+    get_manager().load_persisted()
+
+    # Show themed splash immediately, build main window in background.
+    # reveal_ready fires when the fade *starts*, so the main window appears
+    # beneath the fading splash for a smooth cross-reveal.
     from gui.widgets.splash import SplashScreen
     splash = SplashScreen()
     splash.show()
@@ -46,7 +53,7 @@ def main() -> int:
 
     from gui.main_window import AlphaDEXWindow
     window = AlphaDEXWindow()
-    splash.finished.connect(window.show)
+    splash.reveal_ready.connect(window.show)
 
     return app.exec()
 
