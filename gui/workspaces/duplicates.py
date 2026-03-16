@@ -74,19 +74,42 @@ class DuplicatesWorkspace(WorkspaceBase):
     def _build_ui(self) -> None:
         cl = self.content_layout
 
-        cl.addWidget(self._make_section_title("Duplicate Finder"))
-        cl.addWidget(self._make_subtitle(
+        # ── Header card ───────────────────────────────────────────────────
+        header_card = self._make_card()
+        header_card.setObjectName("headerCard")
+        hl = QtWidgets.QVBoxLayout(header_card)
+        hl.setContentsMargins(20, 16, 16, 16)
+        hl.setSpacing(8)
+        hl.addWidget(self._make_section_title("Duplicate Finder"))
+        hl.addWidget(self._make_subtitle(
             "Fingerprint your library, group duplicate tracks, preview the plan, "
             "then quarantine or delete losers. "
             "Scan → Preview → Execute."
         ))
+
+        stepper = QtWidgets.QFrame()
+        stepper.setObjectName("workflowStepper")
+        sl = QtWidgets.QHBoxLayout(stepper)
+        sl.setContentsMargins(12, 8, 12, 8)
+        sl.setSpacing(4)
+        for i, step in enumerate(["1. Scan & fingerprint", "2. Review groups", "3. Execute plan"]):
+            lbl = QtWidgets.QLabel(step)
+            lbl.setObjectName("stepActive" if i == 0 else "stepInactive")
+            sl.addWidget(lbl)
+            if i < 2:
+                arr = QtWidgets.QLabel("→")
+                arr.setObjectName("stepArrow")
+                sl.addWidget(arr)
+        sl.addStretch(1)
+        hl.addWidget(stepper)
+        cl.addWidget(header_card)
 
         # ── Config card ────────────────────────────────────────────────────
         cfg_card = self._make_card()
         cfg_layout = QtWidgets.QVBoxLayout(cfg_card)
         cfg_layout.setContentsMargins(16, 16, 16, 16)
         cfg_layout.setSpacing(12)
-        cfg_layout.addWidget(QtWidgets.QLabel("Thresholds"))
+        cfg_layout.addWidget(self._make_card_title("Thresholds"))
 
         thresh_form = QtWidgets.QFormLayout()
         thresh_form.setContentsMargins(0, 0, 0, 0)
@@ -141,7 +164,14 @@ class DuplicatesWorkspace(WorkspaceBase):
         cfg_layout.addLayout(action_row)
         cl.addWidget(cfg_card)
 
-        # ── Action buttons ─────────────────────────────────────────────────
+        # ── Action card ────────────────────────────────────────────────────
+        action_card = self._make_card()
+        action_card.setObjectName("actionCard")
+        ac_layout = QtWidgets.QVBoxLayout(action_card)
+        ac_layout.setContentsMargins(16, 14, 16, 14)
+        ac_layout.setSpacing(10)
+        ac_layout.addWidget(self._make_card_title("Actions"))
+
         btn_row = QtWidgets.QHBoxLayout()
         self._scan_btn = self._make_primary_button("🔍  Scan Library")
         self._scan_btn.clicked.connect(self._on_scan)
@@ -169,7 +199,8 @@ class DuplicatesWorkspace(WorkspaceBase):
         btn_row.addWidget(self._report_btn)
         btn_row.addWidget(self._cancel_btn)
         btn_row.addStretch(1)
-        cl.addLayout(btn_row)
+        ac_layout.addLayout(btn_row)
+        cl.addWidget(action_card)
 
         # ── Progress ───────────────────────────────────────────────────────
         prog_card = self._make_card()
@@ -182,7 +213,7 @@ class DuplicatesWorkspace(WorkspaceBase):
         self._prog_bar.setTextVisible(False)
         self._prog_bar.setFixedHeight(6)
         self._prog_status = QtWidgets.QLabel("Idle")
-        self._prog_status.setStyleSheet("color: #64748b; font-size: 12px;")
+        self._prog_status.setObjectName("statusHint")
         prog_layout.addWidget(self._prog_bar)
         prog_layout.addWidget(self._prog_status)
         cl.addWidget(prog_card)
@@ -196,7 +227,7 @@ class DuplicatesWorkspace(WorkspaceBase):
         # Left: groups table
         left = QtWidgets.QVBoxLayout()
         fp_status = QtWidgets.QLabel("")
-        fp_status.setStyleSheet("color: #64748b; font-size: 11px;")
+        fp_status.setObjectName("statusHint")
         self._fp_status_lbl = fp_status
         left.addWidget(fp_status)
 
@@ -238,7 +269,7 @@ class DuplicatesWorkspace(WorkspaceBase):
         log_card = self._make_card()
         log_layout = QtWidgets.QVBoxLayout(log_card)
         log_layout.setContentsMargins(16, 16, 16, 16)
-        log_layout.addWidget(QtWidgets.QLabel("Log"))
+        log_layout.addWidget(self._make_card_title("Log"))
         self._log_area = QtWidgets.QPlainTextEdit()
         self._log_area.setReadOnly(True)
         self._log_area.setMinimumHeight(120)
