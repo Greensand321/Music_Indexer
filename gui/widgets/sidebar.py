@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 
 from gui.compat import QtCore, QtGui, QtWidgets, Signal
 from gui.themes.animations import AnimatedNavButton
+from gui.widgets.gradient_bg import _gradient_enabled, paint_window_gradient
 
 # ── Navigation model ──────────────────────────────────────────────────────────
 
@@ -214,6 +215,41 @@ class Sidebar(QtWidgets.QWidget):
         self._buttons[key].badge = count
 
     # ── Private ───────────────────────────────────────────────────────────
+
+    # ── Background painting ───────────────────────────────────────────────
+
+    def paintEvent(self, event: QtGui.QPaintEvent) -> None:  # noqa: N802
+        """Paint sidebar_bg at ~75 % opacity over the window-spanning gradient.
+
+        The same two radial glows used by GradientWidget (workspace canvas) are
+        reproduced here with window-relative origins, but at higher alpha and
+        with a larger radius so they reach the far-left panel.  A translucent
+        sidebar_bg overlay (alpha ≈ 190, ~75 %) is applied on top, giving the
+        "glass panel over a shared gradient" appearance without relying on any
+        platform compositing.
+        """
+        from gui.themes.manager import get_manager
+        t = get_manager().current
+        p = QtGui.QPainter(self)
+        rect = self.rect()
+
+        # ── Step 1: solid sidebar base ─────────────────────────────────────
+        p.fillRect(rect, QtGui.QColor(t.sidebar_bg))
+
+        # ── Step 2: window-spanning gradient glows ─────────────────────────
+        # Use full diagonal as radius so both glows reach the sidebar even
+        # though it sits in the far-left corner of the window.
+        # Higher alpha than the workspace so the colour tint is visible over
+        # the dark sidebar_bg, simulating the gradient "shining through".
+        if _gradient_enabled() and rect.width() > 0 and rect.height() > 0:
+            paint_window_gradient(
+                p, self, t,
+                radius_scale=1.05,
+                alpha_tr=45 if t.variant == "dark" else 28,
+                alpha_bl=60 if t.variant == "dark" else 38,
+            )
+
+        p.end()
 
     def _snap_pill(self) -> None:
         key = self._active_key
