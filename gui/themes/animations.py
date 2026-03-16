@@ -74,6 +74,7 @@ class AnimatedNavButton(HoverMixin, QtWidgets.QPushButton):
         label: str,
         nav_key: str,
         icon_text: str = "",
+        is_exit: bool = False,
         parent: QtWidgets.QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -82,13 +83,14 @@ class AnimatedNavButton(HoverMixin, QtWidgets.QPushButton):
         self._icon_text = icon_text
         self._active = False
         self._badge = 0
+        self._is_exit = is_exit
 
         self._init_hover()
         self.setObjectName("navButton")
         self.setCheckable(False)
         self.setFlat(True)
         self.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
-        self.setFixedHeight(36)
+        self.setFixedHeight(68)
         self.setSizePolicy(
             QtWidgets.QSizePolicy.Policy.Expanding,
             QtWidgets.QSizePolicy.Policy.Fixed,
@@ -156,24 +158,34 @@ class AnimatedNavButton(HoverMixin, QtWidgets.QPushButton):
         r = QtCore.QRectF(self.rect())
 
         # Hover tint — composites over the parent's pill or the sidebar bg.
-        # Use a lighter touch on the active item so the pill colour shows.
+        # Exit button gets a danger-red tint; others use sidebar_hover.
         if self._hover_p > 0:
-            col = QtGui.QColor(t.sidebar_hover)
-            col.setAlpha(int(self._hover_p * (30 if self._active else 60)))
+            if self._is_exit:
+                col = QtGui.QColor(t.danger)
+                col.setAlpha(int(self._hover_p * 45))
+            else:
+                col = QtGui.QColor(t.sidebar_hover)
+                col.setAlpha(int(self._hover_p * (30 if self._active else 60)))
             path = QtGui.QPainterPath()
             path.addRoundedRect(r.adjusted(2.0, 1.0, -2.0, -1.0), 8.0, 8.0)
             p.fillPath(path, QtGui.QBrush(col))
 
-        # Left accent bar — only on active item
-        if self._active:
-            bar_h = 14.0
+        # Left accent bar — only on active nav item (not on exit button)
+        if self._active and not self._is_exit:
+            bar_h = 20.0
             bar_y = (r.height() - bar_h) / 2.0
             path = QtGui.QPainterPath()
-            path.addRoundedRect(QtCore.QRectF(3.0, bar_y, 3.0, bar_h), 1.5, 1.5)
+            path.addRoundedRect(QtCore.QRectF(3.0, bar_y, 4.0, bar_h), 2.0, 2.0)
             p.fillPath(path, QtGui.QBrush(QtGui.QColor(t.accent)))
 
-        # Text — muted when idle, full brightness when active or hovered
-        if self._active:
+        # Text — muted when idle, full brightness when active or hovered;
+        # exit button fades to danger red on hover.
+        if self._is_exit:
+            if self._hover_p > 0:
+                text_col = lerp_color(t.text_secondary, t.danger, self._hover_p)
+            else:
+                text_col = QtGui.QColor(t.text_secondary)
+        elif self._active:
             text_col = QtGui.QColor(t.text_primary)
         elif self._hover_p > 0:
             text_col = lerp_color(t.text_secondary, t.text_primary, self._hover_p)
@@ -183,7 +195,7 @@ class AnimatedNavButton(HoverMixin, QtWidgets.QPushButton):
         p.setPen(text_col)
         p.setFont(self.font())
         p.drawText(
-            self.rect().adjusted(14, 0, -8, 0),
+            self.rect().adjusted(20, 0, -8, 0),
             int(QtCore.Qt.AlignmentFlag.AlignVCenter | QtCore.Qt.AlignmentFlag.AlignLeft),
             self.text(),
         )

@@ -61,13 +61,12 @@ class NavContainer(QtWidgets.QWidget):
 
     def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(parent)
-        # Fully transparent — sidebar background shows through where undrawn
         self.setAutoFillBackground(False)
         self.setAttribute(QtCore.Qt.WidgetAttribute.WA_NoSystemBackground, True)
         self.setStyleSheet("background: transparent;")
 
         self._pill_y: float = 0.0
-        self._pill_h: float = 36.0
+        self._pill_h: float = 68.0
         self._pill_visible: bool = False
 
         self._pill_anim = QtCore.QVariantAnimation(self)
@@ -109,7 +108,6 @@ class NavContainer(QtWidgets.QWidget):
         p = QtGui.QPainter(self)
         p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
 
-        # Pill: slightly inset from the full button width, 2px padding top/bottom
         pill = QtCore.QRectF(
             3.0,
             self._pill_y + 1.0,
@@ -117,7 +115,7 @@ class NavContainer(QtWidgets.QWidget):
             self._pill_h - 2.0,
         )
         path = QtGui.QPainterPath()
-        path.addRoundedRect(pill, 8.0, 8.0)
+        path.addRoundedRect(pill, 10.0, 10.0)
         p.fillPath(path, QtGui.QBrush(QtGui.QColor(t.sidebar_active)))
         p.end()
 
@@ -127,29 +125,31 @@ class NavContainer(QtWidgets.QWidget):
 class Sidebar(QtWidgets.QWidget):
     """Dark left navigation panel.
 
-    Emits:
-        nav_changed(str)  — key of the newly activated item
+    Signals:
+        nav_changed(str)     — key of the newly activated item
+        exit_requested()     — user clicked the Exit button
     """
 
-    nav_changed = Signal(str)
+    nav_changed    = Signal(str)
+    exit_requested = Signal()
 
     def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("sidebar")
-        self.setFixedWidth(185)
+        self.setFixedWidth(360)
 
         self._buttons: dict[str, AnimatedNavButton] = {}
         self._active_key: str = ""
 
         root_layout = QtWidgets.QVBoxLayout(self)
-        root_layout.setContentsMargins(8, 14, 8, 14)
+        root_layout.setContentsMargins(12, 20, 12, 12)
         root_layout.setSpacing(0)
 
         # ── Logo area ─────────────────────────────────────────────────────
         logo_lbl = QtWidgets.QLabel("AlphaDEX")
         logo_lbl.setStyleSheet(
-            "color: #f8fafc; font-size: 16px; font-weight: 700; "
-            "padding: 0 6px 12px 6px; letter-spacing: -0.02em;"
+            "color: #f8fafc; font-size: 24px; font-weight: 700; "
+            "padding: 0 8px 16px 8px; letter-spacing: -0.02em;"
         )
         root_layout.addWidget(logo_lbl)
 
@@ -163,15 +163,14 @@ class Sidebar(QtWidgets.QWidget):
         self._nav_container = NavContainer()
         nav_layout = QtWidgets.QVBoxLayout(self._nav_container)
         nav_layout.setContentsMargins(0, 0, 0, 0)
-        nav_layout.setSpacing(2)
+        nav_layout.setSpacing(4)
 
         for section in NAV_STRUCTURE:
-            # Section header
             hdr = QtWidgets.QLabel(section.title)
             hdr.setObjectName("sidebarSectionLabel")
             if nav_layout.count() > 0:
                 spacer = QtWidgets.QWidget()
-                spacer.setFixedHeight(10)
+                spacer.setFixedHeight(16)
                 spacer.setStyleSheet("background: transparent;")
                 nav_layout.addWidget(spacer)
             nav_layout.addWidget(hdr)
@@ -186,12 +185,24 @@ class Sidebar(QtWidgets.QWidget):
         scroll.setWidget(self._nav_container)
         root_layout.addWidget(scroll, stretch=1)
 
+        # ── Separator ─────────────────────────────────────────────────────
+        sep = QtWidgets.QFrame()
+        sep.setFrameShape(QtWidgets.QFrame.Shape.HLine)
+        sep.setFixedHeight(1)
+        sep.setStyleSheet("background: rgba(255,255,255,0.08); border: none;")
+        root_layout.addWidget(sep)
+
+        # ── Exit button (pinned at bottom, outside scroll area) ────────────
+        exit_btn = AnimatedNavButton("Exit", "exit", "⏻", is_exit=True)
+        exit_btn.setFixedHeight(68)
+        exit_btn.clicked_key.connect(lambda _: self.exit_requested.emit())
+        root_layout.addWidget(exit_btn)
+
         # ── Activate first item ───────────────────────────────────────────
         first_key = NAV_STRUCTURE[0].items[0].key if NAV_STRUCTURE else ""
         if first_key:
             self.activate(first_key)
 
-        # Snap pill to initial position after first layout pass
         QtCore.QTimer.singleShot(0, self._snap_pill)
 
     # ── Public API ────────────────────────────────────────────────────────
@@ -205,8 +216,6 @@ class Sidebar(QtWidgets.QWidget):
         if key in self._buttons:
             btn = self._buttons[key]
             btn.active = True
-            # Animate pill; if layout hasn't happened yet btn.y() == 0,
-            # _snap_pill() will correct it after the first layout pass.
             self._nav_container.move_pill(float(btn.y()), float(btn.height()))
 
     def set_badge(self, key: str, count: int) -> None:
@@ -218,7 +227,6 @@ class Sidebar(QtWidgets.QWidget):
     # ── Private ───────────────────────────────────────────────────────────
 
     def _snap_pill(self) -> None:
-        """Set the pill position instantly after the first layout pass."""
         key = self._active_key
         if key and key in self._buttons:
             btn = self._buttons[key]
