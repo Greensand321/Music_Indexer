@@ -29,21 +29,21 @@ NAV_STRUCTURE: list[NavSection] = [
     ]),
     NavSection("CLEAN UP", [
         NavItem("duplicates",   "Duplicates",     "🔍"),
-        NavItem("similarity",   "Similarity Inspector", "⚖"),
+        NavItem("similarity",   "Similarity",     "⚖"),
         NavItem("tag_fixer",    "Tag Fixer",      "🏷"),
         NavItem("genres",       "Genre Normalizer","🎸"),
     ]),
     NavSection("PLAYLISTS", [
-        NavItem("playlists",    "Playlist Generator", "🎵"),
-        NavItem("clustered",    "Clustered Playlists", "📊"),
-        NavItem("graph",        "Visual Music Graph",  "🌐"),
+        NavItem("playlists",    "Playlists",      "🎵"),
+        NavItem("clustered",    "Clustered",      "📊"),
+        NavItem("graph",        "Music Graph",    "🌐"),
     ]),
     NavSection("PLAYER", [
         NavItem("player",       "Player",         "▶"),
         NavItem("compression",  "Compression",    "📦"),
     ]),
     NavSection("TOOLS", [
-        NavItem("tools",        "Export & Utilities", "🛠"),
+        NavItem("tools",        "Utilities",      "🛠"),
         NavItem("help",         "Help",           "?"),
     ]),
 ]
@@ -63,13 +63,13 @@ class Sidebar(QtWidgets.QWidget):
     def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("sidebar")
-        self.setFixedWidth(220)
+        self.setFixedWidth(185)
 
         self._buttons: dict[str, AnimatedNavButton] = {}
         self._active_key: str = ""
 
         root_layout = QtWidgets.QVBoxLayout(self)
-        root_layout.setContentsMargins(10, 16, 10, 16)
+        root_layout.setContentsMargins(8, 14, 8, 14)
         root_layout.setSpacing(0)
 
         # ── Logo area ─────────────────────────────────────────────────────

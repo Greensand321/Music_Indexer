@@ -769,8 +769,14 @@ class AlphaDEXStyle(QtWidgets.QProxyStyle):
         except ImportError:
             return
 
-        W = QtGui.QFont.Weight
+        W  = QtGui.QFont.Weight
         SP = QtGui.QFont.SpacingType
+        HP = QtGui.QFont.HintingPreference
+
+        def _soft(f: QtGui.QFont) -> QtGui.QFont:
+            """Apply no-hinting for smooth, easy-on-the-eyes rendering."""
+            f.setHintingPreference(HP.PreferNoHinting)
+            return f
 
         name = widget.objectName()
 
@@ -778,38 +784,38 @@ class AlphaDEXStyle(QtWidgets.QProxyStyle):
             f = QtGui.QFont(UI_FAMILY, TypeScale.APP_TITLE)
             f.setWeight(W(TypeScale.W_BOLD))
             f.setLetterSpacing(SP.PercentageSpacing, 98.0)   # -0.02em
-            widget.setFont(f)
+            widget.setFont(_soft(f))
 
         elif name == "sectionTitle":
             f = QtGui.QFont(UI_FAMILY, TypeScale.SECTION_HDR)
             f.setWeight(W(TypeScale.W_SEMIBOLD))
-            widget.setFont(f)
+            widget.setFont(_soft(f))
 
         elif name in ("sectionSubtitle", "mutedLabel"):
             f = QtGui.QFont(UI_FAMILY, TypeScale.LABEL)
             f.setWeight(W(TypeScale.W_REGULAR))
-            widget.setFont(f)
+            widget.setFont(_soft(f))
 
         elif name == "sidebarSectionLabel":
             f = QtGui.QFont(UI_FAMILY, TypeScale.NAV_SECTION)
             f.setWeight(W(TypeScale.W_SEMIBOLD))
             f.setLetterSpacing(SP.PercentageSpacing, 108.0)  # +0.08em
-            widget.setFont(f)
+            widget.setFont(_soft(f))
 
         elif name == "navButton":
             f = QtGui.QFont(UI_FAMILY, TypeScale.NAV_ITEM)
-            f.setWeight(W(TypeScale.W_MEDIUM))
-            widget.setFont(f)
+            f.setWeight(W(TypeScale.W_REGULAR))
+            widget.setFont(_soft(f))
 
         elif name in ("libraryPath", "libStats"):
             f = QtGui.QFont(UI_FAMILY, TypeScale.SMALL)
             f.setWeight(W(TypeScale.W_REGULAR))
-            widget.setFont(f)
+            widget.setFont(_soft(f))
 
         elif name == "logText":
             f = QtGui.QFont(MONO_FAMILY, TypeScale.MONO)
             f.setWeight(W(TypeScale.W_REGULAR))
-            widget.setFont(f)
+            widget.setFont(_soft(f))
 
         elif isinstance(widget, (QtWidgets.QAbstractButton,
                                   QtWidgets.QComboBox,
@@ -817,8 +823,8 @@ class AlphaDEXStyle(QtWidgets.QProxyStyle):
                                   QtWidgets.QDoubleSpinBox,
                                   QtWidgets.QLineEdit)):
             f = QtGui.QFont(UI_FAMILY, TypeScale.BUTTON)
-            f.setWeight(W(TypeScale.W_MEDIUM))
-            widget.setFont(f)
+            f.setWeight(W(TypeScale.W_REGULAR))
+            widget.setFont(_soft(f))
 
     def unpolish(self, obj: QtWidgets.QWidget | QtWidgets.QApplication) -> None:  # type: ignore[override]
         super().unpolish(obj)

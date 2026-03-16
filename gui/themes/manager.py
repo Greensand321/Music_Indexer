@@ -210,6 +210,7 @@ class ThemeManager(QtCore.QObject):
             from gui.fonts.loader import UI_FAMILY, TypeScale
             f = QtGui.QFont(UI_FAMILY, TypeScale.BODY)
             f.setWeight(QtGui.QFont.Weight(TypeScale.W_REGULAR))
+            f.setHintingPreference(QtGui.QFont.HintingPreference.PreferNoHinting)
             app.setFont(f)
         except ImportError:
             pass
