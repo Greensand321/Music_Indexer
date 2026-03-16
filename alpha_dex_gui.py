@@ -22,7 +22,6 @@ if _REPO_ROOT not in sys.path:
 
 def main() -> int:
     from gui.compat import QtWidgets, QtGui, QtCore
-    from gui.main_window import AlphaDEXWindow
 
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
     app.setApplicationName("AlphaDEX")
@@ -35,6 +34,11 @@ def main() -> int:
     if hasattr(QtCore.Qt, "AA_UseHighDpiPixmaps"):
         app.setAttribute(QtCore.Qt.ApplicationAttribute.AA_UseHighDpiPixmaps, True)
 
+    # Register Inter + JetBrains Mono before any widget is created
+    from gui.fonts import load_fonts
+    load_fonts()
+
+    from gui.main_window import AlphaDEXWindow
     window = AlphaDEXWindow()
     window.show()
 
