@@ -93,6 +93,9 @@ class AnimatedNavButton(HoverMixin, QtWidgets.QPushButton):
             QtWidgets.QSizePolicy.Policy.Expanding,
             QtWidgets.QSizePolicy.Policy.Fixed,
         )
+        # Transparent background so the NavContainer's pill shows through
+        self.setAutoFillBackground(False)
+        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_NoSystemBackground, True)
         self.clicked.connect(lambda: self.clicked_key.emit(self._nav_key))
         self._update_text()
 
@@ -138,17 +141,59 @@ class AnimatedNavButton(HoverMixin, QtWidgets.QPushButton):
         self.setText("  ".join(parts) if self._icon_text else self._label)
 
     def paintEvent(self, event: QtGui.QPaintEvent) -> None:
-        # Delegate entirely to AlphaDEXStyle via QProxyStyle
-        opt = QtWidgets.QStyleOptionButton()
-        self.initStyleOption(opt)
-        p = QtWidgets.QStylePainter(self)
-        p.drawControl(QtWidgets.QStyle.ControlElement.CE_PushButton, opt)
+        try:
+            from gui.themes.manager import get_manager
+            from gui.themes.effects import lerp_color
+            t = get_manager().current
+        except Exception:
+            super().paintEvent(event)
+            return
 
-        # Draw badge overlay if needed
+        p = QtGui.QPainter(self)
+        p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+        p.setRenderHint(QtGui.QPainter.RenderHint.TextAntialiasing)
+
+        r = QtCore.QRectF(self.rect())
+
+        # Hover tint — composites over the parent's pill or the sidebar bg.
+        # Use a lighter touch on the active item so the pill colour shows.
+        if self._hover_p > 0:
+            col = QtGui.QColor(t.sidebar_hover)
+            col.setAlpha(int(self._hover_p * (30 if self._active else 60)))
+            path = QtGui.QPainterPath()
+            path.addRoundedRect(r.adjusted(2.0, 1.0, -2.0, -1.0), 8.0, 8.0)
+            p.fillPath(path, QtGui.QBrush(col))
+
+        # Left accent bar — only on active item
+        if self._active:
+            bar_h = 14.0
+            bar_y = (r.height() - bar_h) / 2.0
+            path = QtGui.QPainterPath()
+            path.addRoundedRect(QtCore.QRectF(3.0, bar_y, 3.0, bar_h), 1.5, 1.5)
+            p.fillPath(path, QtGui.QBrush(QtGui.QColor(t.accent)))
+
+        # Text — muted when idle, full brightness when active or hovered
+        if self._active:
+            text_col = QtGui.QColor(t.text_primary)
+        elif self._hover_p > 0:
+            text_col = lerp_color(t.text_secondary, t.text_primary, self._hover_p)
+        else:
+            text_col = QtGui.QColor(t.text_secondary)
+
+        p.setPen(text_col)
+        p.setFont(self.font())
+        p.drawText(
+            self.rect().adjusted(14, 0, -8, 0),
+            int(QtCore.Qt.AlignmentFlag.AlignVCenter | QtCore.Qt.AlignmentFlag.AlignLeft),
+            self.text(),
+        )
+
         if self._badge:
             self._draw_badge(p)
 
-    def _draw_badge(self, p: QtWidgets.QStylePainter) -> None:
+        p.end()
+
+    def _draw_badge(self, p: QtGui.QPainter) -> None:
         text = str(min(self._badge, 99)) + ("+" if self._badge > 99 else "")
         fm = QtGui.QFontMetrics(self.font())
         tw = fm.horizontalAdvance(text)
@@ -159,20 +204,19 @@ class AnimatedNavButton(HoverMixin, QtWidgets.QPushButton):
         y = (self.height() - bh) // 2
         rect = QtCore.QRect(x, y, bw, bh)
 
-        # Badge pill — accent colour
         from gui.themes.manager import get_manager
         t = get_manager().current
+        p.save()
         p.setBrush(QtGui.QColor(t.accent))
         p.setPen(QtCore.Qt.PenStyle.NoPen)
         p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
         path = QtGui.QPainterPath()
         path.addRoundedRect(QtCore.QRectF(rect), bh / 2, bh / 2)
         p.drawPath(path)
-
-        # Badge text
         p.setPen(QtGui.QColor(t.text_inverse))
         p.setFont(self.font())
         p.drawText(rect, QtCore.Qt.AlignmentFlag.AlignCenter, text)
+        p.restore()
 
 
 # ── AnimatedTabButton ─────────────────────────────────────────────────────────
