@@ -49,7 +49,80 @@ NAV_STRUCTURE: list[NavSection] = [
 ]
 
 
-# ── Sidebar widget ────────────────────────────────────────────────────────────
+# ── Sliding pill container ─────────────────────────────────────────────────────
+
+class NavContainer(QtWidgets.QWidget):
+    """Transparent nav content container that paints the sliding accent pill.
+
+    The pill is drawn in this widget's coordinate space (before children paint),
+    so nav buttons can be fully transparent and the pill shows through beneath
+    their text and hover overlays.
+    """
+
+    def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
+        super().__init__(parent)
+        # Fully transparent — sidebar background shows through where undrawn
+        self.setAutoFillBackground(False)
+        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_NoSystemBackground, True)
+        self.setStyleSheet("background: transparent;")
+
+        self._pill_y: float = 0.0
+        self._pill_h: float = 36.0
+        self._pill_visible: bool = False
+
+        self._pill_anim = QtCore.QVariantAnimation(self)
+        self._pill_anim.setDuration(320)
+        self._pill_anim.setEasingCurve(QtCore.QEasingCurve.Type.OutBack)
+        self._pill_anim.valueChanged.connect(self._on_pill_value)
+
+    # ── Animation ─────────────────────────────────────────────────────────
+
+    def _on_pill_value(self, value: object) -> None:
+        self._pill_y = float(value)  # type: ignore[arg-type]
+        self.update()
+
+    def move_pill(self, y: float, h: float, *, instant: bool = False) -> None:
+        """Animate the pill to the given widget-local position."""
+        self._pill_h = h
+        self._pill_visible = True
+        if instant:
+            self._pill_anim.stop()
+            self._pill_y = y
+            self.update()
+            return
+        self._pill_anim.stop()
+        self._pill_anim.setStartValue(float(self._pill_y))
+        self._pill_anim.setEndValue(float(y))
+        self._pill_anim.start()
+
+    # ── Painting ──────────────────────────────────────────────────────────
+
+    def paintEvent(self, event: QtGui.QPaintEvent) -> None:
+        if not self._pill_visible:
+            return
+        try:
+            from gui.themes.manager import get_manager
+            t = get_manager().current
+        except Exception:
+            return
+
+        p = QtGui.QPainter(self)
+        p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+
+        # Pill: slightly inset from the full button width, 2px padding top/bottom
+        pill = QtCore.QRectF(
+            3.0,
+            self._pill_y + 1.0,
+            float(self.width()) - 6.0,
+            self._pill_h - 2.0,
+        )
+        path = QtGui.QPainterPath()
+        path.addRoundedRect(pill, 8.0, 8.0)
+        p.fillPath(path, QtGui.QBrush(QtGui.QColor(t.sidebar_active)))
+        p.end()
+
+
+# ── Sidebar widget ─────────────────────────────────────────────────────────────
 
 class Sidebar(QtWidgets.QWidget):
     """Dark left navigation panel.
@@ -87,9 +160,8 @@ class Sidebar(QtWidgets.QWidget):
         scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         scroll.setStyleSheet("background: transparent;")
 
-        nav_widget = QtWidgets.QWidget()
-        nav_widget.setStyleSheet("background: transparent;")
-        nav_layout = QtWidgets.QVBoxLayout(nav_widget)
+        self._nav_container = NavContainer()
+        nav_layout = QtWidgets.QVBoxLayout(self._nav_container)
         nav_layout.setContentsMargins(0, 0, 0, 0)
         nav_layout.setSpacing(2)
 
@@ -100,6 +172,7 @@ class Sidebar(QtWidgets.QWidget):
             if nav_layout.count() > 0:
                 spacer = QtWidgets.QWidget()
                 spacer.setFixedHeight(10)
+                spacer.setStyleSheet("background: transparent;")
                 nav_layout.addWidget(spacer)
             nav_layout.addWidget(hdr)
 
@@ -110,13 +183,16 @@ class Sidebar(QtWidgets.QWidget):
                 self._buttons[item.key] = btn
 
         nav_layout.addStretch(1)
-        scroll.setWidget(nav_widget)
+        scroll.setWidget(self._nav_container)
         root_layout.addWidget(scroll, stretch=1)
 
         # ── Activate first item ───────────────────────────────────────────
         first_key = NAV_STRUCTURE[0].items[0].key if NAV_STRUCTURE else ""
         if first_key:
             self.activate(first_key)
+
+        # Snap pill to initial position after first layout pass
+        QtCore.QTimer.singleShot(0, self._snap_pill)
 
     # ── Public API ────────────────────────────────────────────────────────
 
@@ -127,7 +203,11 @@ class Sidebar(QtWidgets.QWidget):
 
         self._active_key = key
         if key in self._buttons:
-            self._buttons[key].active = True
+            btn = self._buttons[key]
+            btn.active = True
+            # Animate pill; if layout hasn't happened yet btn.y() == 0,
+            # _snap_pill() will correct it after the first layout pass.
+            self._nav_container.move_pill(float(btn.y()), float(btn.height()))
 
     def set_badge(self, key: str, count: int) -> None:
         """Show a badge count next to a nav item (0 hides it)."""
@@ -136,6 +216,15 @@ class Sidebar(QtWidgets.QWidget):
         self._buttons[key].badge = count
 
     # ── Private ───────────────────────────────────────────────────────────
+
+    def _snap_pill(self) -> None:
+        """Set the pill position instantly after the first layout pass."""
+        key = self._active_key
+        if key and key in self._buttons:
+            btn = self._buttons[key]
+            self._nav_container.move_pill(
+                float(btn.y()), float(btn.height()), instant=True
+            )
 
     def _on_nav_click(self, key: str) -> None:
         self.activate(key)
