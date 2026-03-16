@@ -65,12 +65,35 @@ class LibrarySyncWorkspace(WorkspaceBase):
     def _build_ui(self) -> None:
         cl = self.content_layout
 
-        cl.addWidget(self._make_section_title("Library Sync"))
-        cl.addWidget(self._make_subtitle(
+        # ── Header card ───────────────────────────────────────────────────
+        header_card = self._make_card()
+        header_card.setObjectName("headerCard")
+        hl = QtWidgets.QVBoxLayout(header_card)
+        hl.setContentsMargins(20, 16, 16, 16)
+        hl.setSpacing(8)
+        hl.addWidget(self._make_section_title("Library Sync"))
+        hl.addWidget(self._make_subtitle(
             "Compare an existing library to an incoming folder. "
             "The sync matcher fingerprints both sides, identifies new tracks, "
             "potential upgrades, and collisions, then builds a copy/move plan."
         ))
+
+        stepper = QtWidgets.QFrame()
+        stepper.setObjectName("workflowStepper")
+        sl = QtWidgets.QHBoxLayout(stepper)
+        sl.setContentsMargins(12, 8, 12, 8)
+        sl.setSpacing(4)
+        for i, step in enumerate(["1. Configure paths", "2. Scan & match", "3. Build & execute plan"]):
+            lbl = QtWidgets.QLabel(step)
+            lbl.setObjectName("stepActive" if i == 0 else "stepInactive")
+            sl.addWidget(lbl)
+            if i < 2:
+                arr = QtWidgets.QLabel("→")
+                arr.setObjectName("stepArrow")
+                sl.addWidget(arr)
+        sl.addStretch(1)
+        hl.addWidget(stepper)
+        cl.addWidget(header_card)
 
         # ── Folders card ───────────────────────────────────────────────────
         folders_card = self._make_card()
@@ -145,7 +168,14 @@ class LibrarySyncWorkspace(WorkspaceBase):
         cfg_layout.addRow("", btn_row_cfg)
         cl.addWidget(cfg_card)
 
-        # ── Scan buttons ───────────────────────────────────────────────────
+        # ── Scan card ──────────────────────────────────────────────────────
+        scan_card = self._make_card()
+        scan_card.setObjectName("actionCard")
+        sc_layout = QtWidgets.QVBoxLayout(scan_card)
+        sc_layout.setContentsMargins(16, 14, 16, 14)
+        sc_layout.setSpacing(10)
+        sc_layout.addWidget(self._make_card_title("Scan"))
+
         scan_row = QtWidgets.QHBoxLayout()
         self._scan_btn = self._make_primary_button("🔍  Scan Both Libraries")
         self._scan_btn.clicked.connect(self._on_scan)
@@ -153,12 +183,13 @@ class LibrarySyncWorkspace(WorkspaceBase):
         self._cancel_btn.setEnabled(False)
         self._cancel_btn.clicked.connect(self._on_cancel)
         self._state_lbl = QtWidgets.QLabel("State: Idle")
-        self._state_lbl.setStyleSheet("color: #64748b; font-size: 12px;")
+        self._state_lbl.setObjectName("statusHint")
         scan_row.addWidget(self._scan_btn)
         scan_row.addWidget(self._cancel_btn)
         scan_row.addStretch(1)
         scan_row.addWidget(self._state_lbl)
-        cl.addLayout(scan_row)
+        sc_layout.addLayout(scan_row)
+        cl.addWidget(scan_card)
 
         # ── Progress ───────────────────────────────────────────────────────
         prog_card = self._make_card()
@@ -170,13 +201,13 @@ class LibrarySyncWorkspace(WorkspaceBase):
         for side_name in ("Existing Library", "Incoming Folder"):
             side_col = QtWidgets.QVBoxLayout()
             lbl = QtWidgets.QLabel(side_name)
-            lbl.setStyleSheet("font-weight: 600; font-size: 12px;")
+            lbl.setObjectName("phaseLabel")
             bar = QtWidgets.QProgressBar()
             bar.setValue(0)
             bar.setTextVisible(False)
             bar.setFixedHeight(6)
             status = QtWidgets.QLabel("Idle")
-            status.setStyleSheet("color: #64748b; font-size: 11px;")
+            status.setObjectName("statusHint")
             side_col.addWidget(lbl)
             side_col.addWidget(bar)
             side_col.addWidget(status)
@@ -198,7 +229,7 @@ class LibrarySyncWorkspace(WorkspaceBase):
 
         # Incoming tracks
         left = QtWidgets.QVBoxLayout()
-        left.addWidget(QtWidgets.QLabel("Incoming Tracks"))
+        left.addWidget(self._make_card_title("Incoming Tracks"))
         self._incoming_table = QtWidgets.QTreeWidget()
         self._incoming_table.setHeaderLabels(["Track", "Status", "Distance"])
         self._incoming_table.setColumnWidth(0, 260)
@@ -210,7 +241,7 @@ class LibrarySyncWorkspace(WorkspaceBase):
 
         # Existing tracks
         right = QtWidgets.QVBoxLayout()
-        right.addWidget(QtWidgets.QLabel("Existing Tracks"))
+        right.addWidget(self._make_card_title("Existing Tracks"))
         self._existing_table = QtWidgets.QTreeWidget()
         self._existing_table.setHeaderLabels(["Track", "Status", "Best Matches"])
         self._existing_table.setColumnWidth(0, 260)
@@ -227,15 +258,14 @@ class LibrarySyncWorkspace(WorkspaceBase):
         insp_card = self._make_card()
         insp_layout = QtWidgets.QVBoxLayout(insp_card)
         insp_layout.setContentsMargins(16, 16, 16, 16)
-        insp_layout.addWidget(QtWidgets.QLabel("Match Inspector"))
+        insp_layout.addWidget(self._make_card_title("Match Inspector"))
         self._inspector = QtWidgets.QPlainTextEdit()
         self._inspector.setReadOnly(True)
         self._inspector.setFixedHeight(120)
-        self._inspector.setStyleSheet("font-family: 'Consolas', monospace; font-size: 11px;")
         self._inspector.setPlaceholderText("Select a track to see match details…")
         insp_layout.addWidget(self._inspector)
         self._match_summary_lbl = QtWidgets.QLabel("No matches yet.")
-        self._match_summary_lbl.setStyleSheet("color: #64748b; font-size: 12px;")
+        self._match_summary_lbl.setObjectName("statusHint")
         insp_layout.addWidget(self._match_summary_lbl)
         cl.addWidget(insp_card)
 
@@ -244,7 +274,7 @@ class LibrarySyncWorkspace(WorkspaceBase):
         plan_layout = QtWidgets.QVBoxLayout(plan_card)
         plan_layout.setContentsMargins(16, 16, 16, 16)
         plan_layout.setSpacing(10)
-        plan_layout.addWidget(QtWidgets.QLabel("Plan & Execution"))
+        plan_layout.addWidget(self._make_card_title("Plan & Execution"))
 
         plan_btn_row = QtWidgets.QHBoxLayout()
         self._build_plan_btn = QtWidgets.QPushButton("📋  Build Plan")
@@ -280,7 +310,7 @@ class LibrarySyncWorkspace(WorkspaceBase):
         plan_layout.addLayout(plan_btn_row)
 
         self._plan_status_lbl = QtWidgets.QLabel("No plan built.")
-        self._plan_status_lbl.setStyleSheet("color: #64748b; font-size: 12px;")
+        self._plan_status_lbl.setObjectName("statusHint")
         self._plan_bar = QtWidgets.QProgressBar()
         self._plan_bar.setValue(0)
         self._plan_bar.setTextVisible(False)
@@ -294,7 +324,7 @@ class LibrarySyncWorkspace(WorkspaceBase):
         log_layout = QtWidgets.QVBoxLayout(log_card)
         log_layout.setContentsMargins(16, 16, 16, 16)
         log_btn_row = QtWidgets.QHBoxLayout()
-        log_btn_row.addWidget(QtWidgets.QLabel("Log"))
+        log_btn_row.addWidget(self._make_card_title("Log"))
         log_btn_row.addStretch(1)
         self._export_log_btn = QtWidgets.QPushButton("Export Logs…")
         self._export_log_btn.clicked.connect(self._on_export_log)

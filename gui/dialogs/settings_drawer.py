@@ -130,6 +130,16 @@ class SettingsDrawer(QtWidgets.QDialog):
         self._exact_dup_spin.setValue(0.02)
         gen_l.addRow("Exact-duplicate threshold:", self._exact_dup_spin)
 
+        self._bg_gradient_cb = QtWidgets.QCheckBox(
+            "Background gradient — subtle accent glow behind workspace panels"
+        )
+        self._bg_gradient_cb.setChecked(True)
+        self._bg_gradient_cb.setToolTip(
+            "Paints two faint radial glows (accent colour) in opposing corners "
+            "of each workspace.  Uncheck for a flat, solid background."
+        )
+        gen_l.addRow("Appearance:", self._bg_gradient_cb)
+
         tabs.addTab(gen_w, "General")
 
         # ── MusicBrainz User-Agent ─────────────────────────────────────────
@@ -175,6 +185,7 @@ class SettingsDrawer(QtWidgets.QDialog):
             self._library_entry.setText(cfg.get("library_root", ""))
             self._near_dup_spin.setValue(cfg.get("near_duplicate_threshold", 0.1))
             self._exact_dup_spin.setValue(cfg.get("exact_duplicate_threshold", 0.02))
+            self._bg_gradient_cb.setChecked(bool(cfg.get("bg_gradient_enabled", True)))
         except Exception:
             pass
 
@@ -193,6 +204,7 @@ class SettingsDrawer(QtWidgets.QDialog):
             cfg["library_root"] = self._library_entry.text()
             cfg["near_duplicate_threshold"] = self._near_dup_spin.value()
             cfg["exact_duplicate_threshold"] = self._exact_dup_spin.value()
+            cfg["bg_gradient_enabled"] = self._bg_gradient_cb.isChecked()
             save_config(cfg)
             self.settings_saved.emit()
             self.accept()

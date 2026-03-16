@@ -78,40 +78,41 @@ class IndexerWorkspace(WorkspaceBase):
     def _build_ui(self) -> None:
         cl = self.content_layout
 
-        # ── Header ────────────────────────────────────────────────────────
-        cl.addWidget(self._make_section_title("Indexer"))
-        cl.addWidget(self._make_subtitle(
+        # ── Header card — title + description + workflow steps ─────────────
+        header_card = self._make_card()
+        header_card.setObjectName("headerCard")
+        hl = QtWidgets.QVBoxLayout(header_card)
+        hl.setContentsMargins(20, 16, 16, 16)
+        hl.setSpacing(8)
+        hl.addWidget(self._make_section_title("Indexer"))
+        hl.addWidget(self._make_subtitle(
             "Scan your library, preview the rename/move plan as HTML, then execute when ready. "
             "Always run a preview first — the HTML report shows exactly what will change."
         ))
 
-        # ── Workflow stepper banner ────────────────────────────────────────
         stepper = QtWidgets.QFrame()
-        stepper.setStyleSheet(
-            "background: #eff6ff; border: 1px solid #bfdbfe; border-radius: 8px;"
-        )
+        stepper.setObjectName("workflowStepper")
         sl = QtWidgets.QHBoxLayout(stepper)
-        sl.setContentsMargins(16, 10, 16, 10)
+        sl.setContentsMargins(12, 8, 12, 8)
+        sl.setSpacing(4)
         for i, step in enumerate(["1. Preview (dry run)", "2. Review HTML report", "3. Execute changes"]):
             lbl = QtWidgets.QLabel(step)
-            if i == 0:
-                lbl.setStyleSheet("font-weight: 700; color: #1d4ed8;")
-            else:
-                lbl.setStyleSheet("color: #3b82f6;")
+            lbl.setObjectName("stepActive" if i == 0 else "stepInactive")
             sl.addWidget(lbl)
             if i < 2:
-                arr = QtWidgets.QLabel(" → ")
-                arr.setStyleSheet("color: #93c5fd;")
+                arr = QtWidgets.QLabel("→")
+                arr.setObjectName("stepArrow")
                 sl.addWidget(arr)
         sl.addStretch(1)
-        cl.addWidget(stepper)
+        hl.addWidget(stepper)
+        cl.addWidget(header_card)
 
         # ── Options card ──────────────────────────────────────────────────
         opt_card = self._make_card()
         opt_layout = QtWidgets.QVBoxLayout(opt_card)
         opt_layout.setContentsMargins(16, 16, 16, 16)
         opt_layout.setSpacing(12)
-        opt_layout.addWidget(QtWidgets.QLabel("Options"))
+        opt_layout.addWidget(self._make_card_title("Options"))
 
         row1 = QtWidgets.QHBoxLayout()
         self._dry_run_cb = QtWidgets.QCheckBox("Dry run (preview only — no files moved)")
@@ -155,7 +156,14 @@ class IndexerWorkspace(WorkspaceBase):
         opt_layout.addWidget(adv_group)
         cl.addWidget(opt_card)
 
-        # ── Action buttons ────────────────────────────────────────────────
+        # ── Action card ───────────────────────────────────────────────────
+        action_card = self._make_card()
+        action_card.setObjectName("actionCard")
+        action_layout = QtWidgets.QVBoxLayout(action_card)
+        action_layout.setContentsMargins(16, 14, 16, 14)
+        action_layout.setSpacing(10)
+        action_layout.addWidget(self._make_card_title("Actions"))
+
         btn_row = QtWidgets.QHBoxLayout()
         self._run_btn = self._make_primary_button("▶  Run Preview")
         self._run_btn.setMinimumWidth(140)
@@ -173,14 +181,15 @@ class IndexerWorkspace(WorkspaceBase):
         btn_row.addWidget(self._report_btn)
         btn_row.addWidget(self._cancel_btn)
         btn_row.addStretch(1)
-        cl.addLayout(btn_row)
+        action_layout.addLayout(btn_row)
+        cl.addWidget(action_card)
 
         # ── Progress card ─────────────────────────────────────────────────
         prog_card = self._make_card()
         prog_layout = QtWidgets.QVBoxLayout(prog_card)
         prog_layout.setContentsMargins(16, 16, 16, 16)
         prog_layout.setSpacing(10)
-        prog_layout.addWidget(QtWidgets.QLabel("Progress"))
+        prog_layout.addWidget(self._make_card_title("Progress"))
 
         self._phase_bars: list[tuple[QtWidgets.QLabel, QtWidgets.QProgressBar]] = []
         phases = [
@@ -190,9 +199,9 @@ class IndexerWorkspace(WorkspaceBase):
         ]
         for title, desc in phases:
             phase_lbl = QtWidgets.QLabel(title)
-            phase_lbl.setStyleSheet("font-weight: 600; font-size: 12px;")
+            phase_lbl.setObjectName("phaseLabel")
             desc_lbl = QtWidgets.QLabel(desc)
-            desc_lbl.setStyleSheet("color: #64748b; font-size: 11px;")
+            desc_lbl.setObjectName("phaseDesc")
             bar = QtWidgets.QProgressBar()
             bar.setValue(0)
             bar.setFixedHeight(6)
@@ -203,7 +212,7 @@ class IndexerWorkspace(WorkspaceBase):
             self._phase_bars.append((phase_lbl, bar))
 
         self._status_lbl = QtWidgets.QLabel("Ready to preview.")
-        self._status_lbl.setStyleSheet("color: #64748b; font-size: 12px; margin-top: 4px;")
+        self._status_lbl.setObjectName("statusHint")
         prog_layout.addWidget(self._status_lbl)
         cl.addWidget(prog_card)
 
@@ -212,13 +221,12 @@ class IndexerWorkspace(WorkspaceBase):
         log_layout = QtWidgets.QVBoxLayout(log_card)
         log_layout.setContentsMargins(16, 16, 16, 16)
         log_layout.setSpacing(6)
-        log_layout.addWidget(QtWidgets.QLabel("Run log"))
+        log_layout.addWidget(self._make_card_title("Run log"))
 
         self._log_area = QtWidgets.QPlainTextEdit()
         self._log_area.setReadOnly(True)
         self._log_area.setMinimumHeight(160)
         self._log_area.setPlaceholderText("Output will appear here…")
-        self._log_area.setStyleSheet("font-family: 'Consolas', monospace; font-size: 12px;")
         log_layout.addWidget(self._log_area)
         cl.addWidget(log_card)
 
@@ -227,7 +235,7 @@ class IndexerWorkspace(WorkspaceBase):
             "Outputs: Docs/MusicIndex.html  ·  Docs/indexer_log.txt  ·  "
             "Manual Review/ for missing metadata  ·  Playlists/ when enabled"
         )
-        notes.setStyleSheet("color: #94a3b8; font-size: 11px;")
+        notes.setObjectName("notesHint")
         notes.setWordWrap(True)
         cl.addWidget(notes)
 

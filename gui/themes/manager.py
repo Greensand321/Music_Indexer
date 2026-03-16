@@ -92,6 +92,80 @@ QStatusBar {{
     border-top: 1px solid {t.card_border};
     font-size: 12px;
 }}
+
+/* ── Workspace cards ── */
+QFrame#workspaceCard {{
+    background: {t.card_bg};
+    border: 1px solid {t.card_border};
+    border-radius: 12px;
+}}
+QFrame#headerCard {{
+    background: {t.card_bg};
+    border-top: 1px solid {t.card_border};
+    border-right: 1px solid {t.card_border};
+    border-bottom: 1px solid {t.card_border};
+    border-left: 3px solid {t.accent};
+    border-radius: 10px;
+}}
+QFrame#actionCard {{
+    background: {t.card_bg};
+    border: 1px solid {t.card_border};
+    border-top: 2px solid {t.accent};
+    border-radius: 10px;
+}}
+
+/* ── Workflow stepper ── */
+QFrame#workflowStepper {{
+    background: transparent;
+    border: 1px solid {t.card_border};
+    border-radius: 6px;
+}}
+QLabel#stepActive {{
+    color: {t.accent};
+    font-weight: 700;
+    font-size: 12px;
+}}
+QLabel#stepInactive {{
+    color: {t.text_muted};
+    font-size: 12px;
+}}
+QLabel#stepArrow {{
+    color: {t.text_muted};
+    font-size: 12px;
+}}
+
+/* ── Workspace typography ── */
+QLabel#sectionTitle {{
+    color: {t.text_primary};
+    font-size: 18px;
+    font-weight: 700;
+}}
+QLabel#sectionSubtitle {{
+    color: {t.text_secondary};
+    font-size: 12px;
+}}
+QLabel#cardTitle {{
+    color: {t.text_primary};
+    font-weight: 600;
+    font-size: 13px;
+}}
+QLabel#phaseLabel {{
+    color: {t.text_primary};
+    font-weight: 600;
+    font-size: 12px;
+}}
+QLabel#phaseDesc {{
+    color: {t.text_muted};
+    font-size: 11px;
+}}
+QLabel#statusHint {{
+    color: {t.text_muted};
+    font-size: 12px;
+}}
+QLabel#notesHint {{
+    color: {t.text_muted};
+    font-size: 11px;
+}}
 QMenuBar {{
     background: {t.card_bg};
     color: {t.text_primary};
