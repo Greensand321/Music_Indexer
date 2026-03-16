@@ -36,6 +36,12 @@ PM = _S.PixelMetric
 CT = _S.ContentsType
 ST = _S.State
 
+# Qt6/PySide6 removed several enum members that existed in Qt5.
+# Use getattr sentinels so the elif branches below are simply skipped.
+_PE_FrameComboBox   = getattr(PE, "PE_FrameComboBox",   None)
+_CE_GroupBoxLabel   = getattr(CE, "CE_GroupBoxLabel",   None)
+_CE_ScrollBarGroove = getattr(CE, "CE_ScrollBarGroove", None)
+
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -309,7 +315,7 @@ class AlphaDEXStyle(QtWidgets.QProxyStyle):
                      fill=t.input_bg, border=border,
                      bw=1.5 if focused else 1.0)
 
-        elif element == PE.PE_FrameComboBox:
+        elif _PE_FrameComboBox is not None and element == _PE_FrameComboBox:
             pass  # drawn in drawComplexControl
 
         elif element == PE.PE_PanelItemViewItem:
@@ -538,7 +544,7 @@ class AlphaDEXStyle(QtWidgets.QProxyStyle):
                 return
 
         # ── Group box label ────────────────────────────────────────────────
-        elif element == CE.CE_GroupBoxLabel:
+        elif _CE_GroupBoxLabel is not None and element == _CE_GroupBoxLabel:
             if isinstance(option, QtWidgets.QStyleOptionGroupBox):
                 col = t.text_secondary
                 _aa(painter)
@@ -566,7 +572,7 @@ class AlphaDEXStyle(QtWidgets.QProxyStyle):
             _rounded(painter, option.rect.adjusted(2, 2, -2, -2),
                      R.scroll, fill=fill)
 
-        elif element == CE.CE_ScrollBarGroove:
+        elif _CE_ScrollBarGroove is not None and element == _CE_ScrollBarGroove:
             painter.fillRect(option.rect, QC(t.content_bg))
 
         else:
