@@ -21,19 +21,13 @@ if _REPO_ROOT not in sys.path:
 
 
 def main() -> int:
-    from gui.compat import QtWidgets, QtGui, QtCore
+    from gui.compat import QtWidgets, QtGui
     from gui.main_window import AlphaDEXWindow
 
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
     app.setApplicationName("AlphaDEX")
     app.setApplicationVersion("2.0")
     app.setOrganizationName("AlphaDEX")
-
-    # High-DPI support
-    if hasattr(QtCore.Qt, "AA_EnableHighDpiScaling"):
-        app.setAttribute(QtCore.Qt.ApplicationAttribute.AA_EnableHighDpiScaling, True)
-    if hasattr(QtCore.Qt, "AA_UseHighDpiPixmaps"):
-        app.setAttribute(QtCore.Qt.ApplicationAttribute.AA_UseHighDpiPixmaps, True)
 
     window = AlphaDEXWindow()
     window.show()

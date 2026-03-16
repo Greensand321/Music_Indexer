@@ -157,7 +157,6 @@ class AlphaDEXStyle(QtWidgets.QProxyStyle):
             PM.PM_ButtonMargin:               8,
             PM.PM_ButtonDefaultIndicator:     0,
             PM.PM_DefaultFrameWidth:          1,
-            PM.PM_FrameWidth:                 1,
             PM.PM_ScrollBarExtent:            8,
             PM.PM_ScrollBarSliderMin:         28,
             PM.PM_IndicatorWidth:             16,
