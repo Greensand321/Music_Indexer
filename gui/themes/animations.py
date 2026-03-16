@@ -90,7 +90,7 @@ class AnimatedNavButton(HoverMixin, QtWidgets.QPushButton):
         self.setCheckable(False)
         self.setFlat(True)
         self.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
-        self.setFixedHeight(68)
+        self.setFixedHeight(44)
         self.setSizePolicy(
             QtWidgets.QSizePolicy.Policy.Expanding,
             QtWidgets.QSizePolicy.Policy.Fixed,

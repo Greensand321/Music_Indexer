@@ -21,7 +21,6 @@ class NavSection:
     items: list[NavItem] = field(default_factory=list)
 
 
-# Full navigation structure for AlphaDEX
 NAV_STRUCTURE: list[NavSection] = [
     NavSection("ORGANIZE", [
         NavItem("indexer",      "Indexer",        "🗂"),
@@ -52,12 +51,7 @@ NAV_STRUCTURE: list[NavSection] = [
 # ── Sliding pill container ─────────────────────────────────────────────────────
 
 class NavContainer(QtWidgets.QWidget):
-    """Transparent nav content container that paints the sliding accent pill.
-
-    The pill is drawn in this widget's coordinate space (before children paint),
-    so nav buttons can be fully transparent and the pill shows through beneath
-    their text and hover overlays.
-    """
+    """Transparent nav content container that paints the sliding accent pill."""
 
     def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(parent)
@@ -66,7 +60,7 @@ class NavContainer(QtWidgets.QWidget):
         self.setStyleSheet("background: transparent;")
 
         self._pill_y: float = 0.0
-        self._pill_h: float = 68.0
+        self._pill_h: float = 44.0
         self._pill_visible: bool = False
 
         self._pill_anim = QtCore.QVariantAnimation(self)
@@ -74,14 +68,11 @@ class NavContainer(QtWidgets.QWidget):
         self._pill_anim.setEasingCurve(QtCore.QEasingCurve.Type.OutBack)
         self._pill_anim.valueChanged.connect(self._on_pill_value)
 
-    # ── Animation ─────────────────────────────────────────────────────────
-
     def _on_pill_value(self, value: object) -> None:
         self._pill_y = float(value)  # type: ignore[arg-type]
         self.update()
 
     def move_pill(self, y: float, h: float, *, instant: bool = False) -> None:
-        """Animate the pill to the given widget-local position."""
         self._pill_h = h
         self._pill_visible = True
         if instant:
@@ -93,8 +84,6 @@ class NavContainer(QtWidgets.QWidget):
         self._pill_anim.setStartValue(float(self._pill_y))
         self._pill_anim.setEndValue(float(y))
         self._pill_anim.start()
-
-    # ── Painting ──────────────────────────────────────────────────────────
 
     def paintEvent(self, event: QtGui.QPaintEvent) -> None:
         if not self._pill_visible:
@@ -109,13 +98,11 @@ class NavContainer(QtWidgets.QWidget):
         p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
 
         pill = QtCore.QRectF(
-            3.0,
-            self._pill_y + 1.0,
-            float(self.width()) - 6.0,
-            self._pill_h - 2.0,
+            3.0, self._pill_y + 1.0,
+            float(self.width()) - 6.0, self._pill_h - 2.0,
         )
         path = QtGui.QPainterPath()
-        path.addRoundedRect(pill, 10.0, 10.0)
+        path.addRoundedRect(pill, 8.0, 8.0)
         p.fillPath(path, QtGui.QBrush(QtGui.QColor(t.sidebar_active)))
         p.end()
 
@@ -142,14 +129,15 @@ class Sidebar(QtWidgets.QWidget):
         self._active_key: str = ""
 
         root_layout = QtWidgets.QVBoxLayout(self)
-        root_layout.setContentsMargins(12, 20, 12, 12)
+        root_layout.setContentsMargins(12, 16, 12, 12)
         root_layout.setSpacing(0)
 
         # ── Logo area ─────────────────────────────────────────────────────
         logo_lbl = QtWidgets.QLabel("AlphaDEX")
+        logo_lbl.setFixedHeight(44)
         logo_lbl.setStyleSheet(
-            "color: #f8fafc; font-size: 24px; font-weight: 700; "
-            "padding: 0 8px 16px 8px; letter-spacing: -0.02em;"
+            "color: #f8fafc; font-size: 22px; font-weight: 700; "
+            "padding: 0 8px; letter-spacing: -0.02em;"
         )
         root_layout.addWidget(logo_lbl)
 
@@ -163,14 +151,15 @@ class Sidebar(QtWidgets.QWidget):
         self._nav_container = NavContainer()
         nav_layout = QtWidgets.QVBoxLayout(self._nav_container)
         nav_layout.setContentsMargins(0, 0, 0, 0)
-        nav_layout.setSpacing(4)
+        nav_layout.setSpacing(1)
 
         for section in NAV_STRUCTURE:
             hdr = QtWidgets.QLabel(section.title)
             hdr.setObjectName("sidebarSectionLabel")
+            hdr.setFixedHeight(20)
             if nav_layout.count() > 0:
                 spacer = QtWidgets.QWidget()
-                spacer.setFixedHeight(16)
+                spacer.setFixedHeight(2)
                 spacer.setStyleSheet("background: transparent;")
                 nav_layout.addWidget(spacer)
             nav_layout.addWidget(hdr)
@@ -192,9 +181,8 @@ class Sidebar(QtWidgets.QWidget):
         sep.setStyleSheet("background: rgba(255,255,255,0.08); border: none;")
         root_layout.addWidget(sep)
 
-        # ── Exit button (pinned at bottom, outside scroll area) ────────────
+        # ── Exit button (pinned at bottom) ─────────────────────────────────
         exit_btn = AnimatedNavButton("Exit", "exit", "⏻", is_exit=True)
-        exit_btn.setFixedHeight(68)
         exit_btn.clicked_key.connect(lambda _: self.exit_requested.emit())
         root_layout.addWidget(exit_btn)
 
@@ -219,7 +207,6 @@ class Sidebar(QtWidgets.QWidget):
             self._nav_container.move_pill(float(btn.y()), float(btn.height()))
 
     def set_badge(self, key: str, count: int) -> None:
-        """Show a badge count next to a nav item (0 hides it)."""
         if key not in self._buttons:
             return
         self._buttons[key].badge = count
