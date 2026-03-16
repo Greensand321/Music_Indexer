@@ -5,7 +5,6 @@ from dataclasses import dataclass, field
 
 from gui.compat import QtCore, QtGui, QtWidgets, Signal
 from gui.themes.animations import AnimatedNavButton
-from gui.widgets.gradient_bg import _gradient_enabled, paint_window_gradient
 
 # ── Navigation model ──────────────────────────────────────────────────────────
 
