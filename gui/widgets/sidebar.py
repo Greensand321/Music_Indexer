@@ -215,6 +215,50 @@ class Sidebar(QtWidgets.QWidget):
 
     # ── Private ───────────────────────────────────────────────────────────
 
+    # ── Background painting ───────────────────────────────────────────────
+
+    def paintEvent(self, event: QtGui.QPaintEvent) -> None:  # noqa: N802
+        """Unified Canvas: sidebar is a barely-there glass pane over the shared gradient.
+
+        The window-spanning gradient is painted at the same coordinates used by
+        GradientWidget, so the two glows read as a single canvas that stretches
+        across both the sidebar and the workspace.  A very thin sidebar_bg tint
+        (alpha ≈ 28, ~11 %) is then laid on top — just enough to hint at the
+        panel boundary without breaking the illusion of one unified background.
+        A 1 px right-edge separator is drawn last to keep the nav content
+        visually anchored without a heavy divider line.
+        """
+        from gui.themes.manager import get_manager
+        t = get_manager().current
+        p = QtGui.QPainter(self)
+        rect = self.rect()
+
+        # ── Step 1: window-spanning gradient (identical to workspace) ──────
+        if _gradient_enabled() and rect.width() > 0 and rect.height() > 0:
+            paint_window_gradient(
+                p, self, t,
+                radius_scale=1.05,
+                alpha_tr=45 if t.variant == "dark" else 28,
+                alpha_bl=60 if t.variant == "dark" else 38,
+            )
+        else:
+            # Gradient disabled — fall back to a solid sidebar background
+            p.fillRect(rect, QtGui.QColor(t.sidebar_bg))
+
+        # ── Step 2: barely-there sidebar tint (~11 % opacity) ─────────────
+        if _gradient_enabled():
+            tint = QtGui.QColor(t.sidebar_bg)
+            tint.setAlpha(28 if t.variant == "dark" else 20)
+            p.fillRect(rect, tint)
+
+        # ── Step 3: 1 px right-edge separator ─────────────────────────────
+        sep_color = QtGui.QColor(t.card_border)
+        sep_color.setAlpha(80)
+        p.setPen(QtGui.QPen(sep_color, 1))
+        p.drawLine(rect.right(), rect.top(), rect.right(), rect.bottom())
+
+        p.end()
+
     def _snap_pill(self) -> None:
         key = self._active_key
         if key and key in self._buttons:
