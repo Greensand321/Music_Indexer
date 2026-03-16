@@ -75,6 +75,10 @@ extra dependency.
 ## Quickstart (basic flow)
 
 ```bash
+# New PySide6 GUI (recommended)
+python alpha_dex_gui.py
+
+# Legacy Tkinter GUI (still functional)
 python main_gui.py
 ```
 
@@ -114,7 +118,7 @@ The indexer automatically prefixes file paths with `\\?\` on Windows, allowing i
 
 ## Threading
 
-Long running actions such as indexing, tag fixing and library sync operations are executed in daemon threads. GUI updates from these background tasks are scheduled using Tkinter's `after` method so message boxes and progress indicators always run on the main thread.
+Long running actions such as indexing, tag fixing and library sync operations are executed in `QThread` daemon threads. GUI updates from these background tasks are delivered via Qt signals and scheduled on the main thread — worker threads never touch widgets directly.
 
 ## Configuration
 
@@ -206,50 +210,79 @@ match (or do not match) during duplicate detection.
 
 ## File Overview
 
-The codebase is organized into a handful of key modules:
+The codebase is organized into backend modules plus a PySide6 GUI layer:
 
 ```
-main_gui.py               - Tkinter entry point for the desktop app
-music_indexer_api.py      - Core scanning and relocation logic (dedupe handled elsewhere)
-playlist_generator.py     - `.m3u` playlist creation helpers
-clustered_playlists.py    - Feature extraction and clustering algorithms
-cluster_graph_panel.py    - Interactive scatter plot for clustered playlists
+alpha_dex_gui.py          - PySide6 entry point (current GUI)
+main_gui.py               - Legacy Tkinter entry point (still functional)
+
+── Backend ──────────────────────────────────────────────────────────────
+music_indexer_api.py      - Core scanning and relocation logic
+duplicate_consolidation.py - Duplicate plan builder (dry-run)
+duplicate_consolidation_executor.py - Plan executor
+library_sync.py           - Library comparison and plan execution
 fingerprint_generator.py  - Build AcoustID fingerprint database
-fingerprint_cache.py      - Persistent fingerprint cache
+fingerprint_cache.py      - Persistent SQLite fingerprint cache
 near_duplicate_detector.py - Fuzzy near-duplicate detection helpers
 tag_fixer.py              - Tag fixing engine using plugin metadata
 update_genres.py          - Batch genre tag updater via MusicBrainz
+playlist_generator.py     - .m3u playlist creation helpers
+playlist_engine.py        - Tempo/energy/Auto-DJ logic
+clustered_playlists.py    - Feature extraction and K-Means/HDBSCAN clustering
+cluster_graph_panel.py    - Interactive scatter plot for clustered playlists
 validator.py              - Verify AlphaDEX folder layout
-config.py                 - Read/write persistent configuration
-library_sync_review.py    - Library Sync review UI with plan/preview/execute controls
-library_sync.py           - Library Sync scan/compare logic and plan execution helpers
-mutagen_stub/             - Minimal fallback used by the tests
+config.py                 - Read/write persistent configuration (~/.soundvault_config.json)
+chromaprint_utils.py      - fpcalc wrapper
+audio_norm.py             - Audio normalization helpers
 
-controllers/
-  library_controller.py        - Handle library selection and persistence
-  import_controller.py         - Import new audio files
-  tagfix_controller.py         - Apply tag proposals and update DB
-  normalize_controller.py      - AI genre normalization workflow
-  cluster_controller.py        - Gather tracks and run clustering
-  library_index_controller.py  - Build HTML index of your library
-  highlight_controller.py      - Play short audio snippets
-  playlist_controller.py       - Playlist export and library playlist refresh
-  scan_progress_controller.py  - Scan progress updates and cancellation coordination
-  cluster_view_controller.py   - Caching helpers for interactive clustering views
+── PySide6 GUI (gui/) ───────────────────────────────────────────────────
+gui/main_window.py        - AlphaDEXWindow: sidebar + stacked workspace + log drawer
+gui/compat.py             - PySide6/PyQt6 compatibility shim
 
+gui/themes/               - Custom QPainter theme engine
+  tokens.py               - ThemeTokens dataclass + 14 named themes (8 dark, 6 light)
+  style.py                - AlphaDEXStyle(QProxyStyle): full QPainter rendering
+  manager.py              - ThemeManager singleton: apply/persist/auto OS day-night switch
+  effects.py              - card_shadow(), lerp_color(), build_palette(), radius constants
+  animations.py           - HoverMixin, AnimatedNavButton (badge), AnimatedButton
+  picker.py               - ThemePickerDialog (swatch grid) + AutoThemeDialog
+
+gui/widgets/
+  top_bar.py              - Library path display, stats, Theme and Settings buttons
+  sidebar.py              - Animated navigation sidebar (5 sections, 13 items)
+  log_drawer.py           - Slide-up log panel with colour-coded levels
+
+gui/workspaces/           - One QWidget per workflow (loaded into QStackedWidget)
+  base.py                 - WorkspaceBase: scroll wrapper, card/title/button helpers
+  indexer.py              - Indexer: 3-phase progress, dry-run/execute, report
+  duplicates.py           - Duplicate Finder: fingerprint scan, groups + inspector
+  library_sync.py         - Library Sync: scan, plan, copy/move execution
+  similarity.py           - Similarity Inspector: two-file threshold breakdown
+  tag_fixer.py            - Tag Fixer: proposals table with checkboxes
+  genres.py               - Genre Normalizer: MusicBrainz/Last.fm batch update
+  playlists.py            - Playlist Generator: Folder / Tempo+Energy / Auto-DJ / Repair
+  clustered.py            - Clustered Playlists: K-Means + HDBSCAN + graph launcher
+  graph.py                - Visual Music Graph launcher
+  player.py               - Player: libVLC transport controls + metadata display
+  compression.py          - Library Compression: format targets, bitrate, archive
+  tools.py                - Export & Utilities: artist/title export, codec list, cleanup
+  help.py                 - Help: doc links, keyboard shortcuts, About
+
+── Other ─────────────────────────────────────────────────────────────────
+controllers/              - Thin wrappers wiring backend to the legacy Tkinter GUI
 plugins/
   base.py               - Metadata plugin interface
-  api_service.py        - Abstract base class for external metadata service integrations
-  acoustid_plugin.py    - Metadata lookup via selected service
-  assistant_plugin.py   - LLM helper integration
-  discogs.py            - Discogs metadata stub
+  acoustid_plugin.py    - Metadata lookup via AcoustID / MusicBrainz
+  assistant_plugin.py   - LLM helper integration (requires user-supplied GGUF model)
+  discogs.py            - Discogs metadata stub (not yet wired end-to-end)
   lastfm.py             - Fetch genres from Last.fm
-  spotify.py            - Spotify metadata stub
-  test_plugin.py        - Example plugin
+  spotify.py            - Spotify metadata stub (not yet wired end-to-end)
 
-bindings/    - C++/pybind11 wrapper for llama binaries
-docs/        - Additional project documentation
-third_party/ - Prebuilt llama executables
+mutagen_stub/             - Minimal mutagen fallback used by the test suite
+bindings/                 - C++/pybind11 wrapper for llama binaries
+docs/                     - Project documentation and design notes
+third_party/              - Prebuilt llama executables
+tests/                    - pytest suite (42 modules)
 ```
 
 ## Roadmap (Upcoming Features)
@@ -265,4 +298,5 @@ See [`docs/project_documentation.html`](docs/project_documentation.html) for tec
 - **Tidal-dl sync**: `tidal-dl` is listed in `requirements.txt`, but there is no UI or workflow wired up yet.
 - **Metadata provider breadth**: only AcoustID + Last.fm are wired end-to-end; Discogs/Spotify stubs exist but are not production-ready.
 - **LLM assistant models**: no GGUF model ships with the repo; you must provide one and update `plugins/assistant_plugin.py` if you want to use the helper.
-- **Theme packs**: optional ttk theme packs are listed in `requirements.txt`, but you must install and select them manually.
+- **Library Sync Export Report**: `ReportPreviewDialog` exists but the Export Report button is not yet wired to a user-accessible control.
+- **Per-item copy/replace flags**: tracked in `library_sync_review_state.py` but not yet exposed in the UI.

@@ -17,6 +17,12 @@ from gui.themes.effects import build_palette
 # font, and explicit selection-colour anchoring.
 
 def _residual_qss(t: ThemeTokens) -> str:
+    try:
+        from gui.fonts.loader import UI_STACK, MONO_STACK
+    except ImportError:
+        UI_STACK   = '"Segoe UI", "SF Pro Text", "Helvetica Neue", Arial, sans-serif'
+        MONO_STACK = '"Consolas", "Menlo", monospace'
+
     return f"""
 QToolTip {{
     background: {t.log_bg};
@@ -24,7 +30,8 @@ QToolTip {{
     border: 1px solid {t.card_border};
     border-radius: 6px;
     padding: 4px 8px;
-    font-size: 12px;
+    font-family: {UI_STACK};
+    font-size: 9pt;
 }}
 QPlainTextEdit, QTextEdit {{
     background: {t.input_bg};
@@ -33,14 +40,16 @@ QPlainTextEdit, QTextEdit {{
     border-radius: 7px;
     selection-background-color: {t.accent};
     selection-color: {t.text_inverse};
-    font-size: 13px;
+    font-family: {UI_STACK};
+    font-size: 10pt;
 }}
 QPlainTextEdit#logText, QTextEdit#logText {{
     background: {t.log_bg};
     color: {t.log_text};
     border: none;
-    font-family: "Consolas", "JetBrains Mono", "Menlo", monospace;
-    font-size: 12px;
+    font-family: {MONO_STACK};
+    font-size: 10pt;
+    line-height: 1.4;
 }}
 QAbstractScrollArea {{
     background: {t.content_bg};
@@ -191,7 +200,19 @@ class ThemeManager(QtCore.QObject):
         app.setStyle(AlphaDEXStyle(tokens))
         app.setPalette(build_palette(tokens))
         app.setStyleSheet(_residual_qss(tokens))
+        self._set_base_font(app)
         self.theme_changed.emit(tokens)
+
+    @staticmethod
+    def _set_base_font(app: QtWidgets.QApplication) -> None:
+        """Set Inter as the application-wide default font."""
+        try:
+            from gui.fonts.loader import UI_FAMILY, TypeScale
+            f = QtGui.QFont(UI_FAMILY, TypeScale.BODY)
+            f.setWeight(QtGui.QFont.Weight(TypeScale.W_REGULAR))
+            app.setFont(f)
+        except ImportError:
+            pass
 
     def _persist(self) -> None:
         try:
