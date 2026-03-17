@@ -51,8 +51,11 @@ _MAX_SCALE  = 1.00     # tile scale at the front             (depth = 1)
 _MIN_ALPHA  = 0.38     # tile opacity at the back
 
 # Rotation
-_ROT_SPEED  = 0.0038   # radians / timer-tick (≈ 60 fps → ~13°/s, lap ~28 s)
-_ROT_RAMP   = 95       # ticks to ease from 0 → full speed
+_ROT_SPEED   = 0.0038   # radians / timer-tick (≈ 60 fps → ~13°/s, lap ~28 s)
+_ROT_RAMP    = 95       # ticks to ease rotation from 0 → full speed (~1.5 s)
+_DEPTH_RAMP  = 160      # ticks to ease depth from 1.0 → true value   (~2.5 s)
+                        # Longer than _ROT_RAMP so tiles finish morphing
+                        # gently after the ring is already spinning.
 
 # CTA card geometry (centred in the window; values are fractions of window dims)
 _CARD_W     = 340
@@ -586,24 +589,46 @@ class MosaicLanding(QtWidgets.QWidget):
         timer.start()
 
     def _on_tick(self) -> None:
-        """Advance the rotation angle and reposition every tile with depth."""
-        # Ease rotation in over the first _ROT_RAMP ticks
-        ramp = min(1.0, self._tick_count / _ROT_RAMP)
-        # Smooth ramp with a cubic ease
-        ramp = ramp * ramp * (3 - 2 * ramp)
-        self._rotation  += _ROT_SPEED * ramp
+        """Advance the rotation angle and reposition every tile with depth.
+
+        Two independent smooth-step ramps run from this tick counter:
+
+        • *rot_ramp*   (0 → 1 over _ROT_RAMP ticks)  — scales rotation speed.
+        • *depth_ramp* (0 → 1 over _DEPTH_RAMP ticks) — blends each tile's
+          depth value from 1.0 (full-size / full-opacity, exactly where the
+          fly-in left every tile) toward its true geometric depth.  Using a
+          longer ramp than rotation means tiles continue to settle visually
+          even after the ring is already spinning at full speed, giving one
+          seamless transition instead of two jarring snaps.
+        """
+        t = self._tick_count
+
+        # ── Rotation ease-in ─────────────────────────────────────────────
+        rot_t = min(1.0, t / _ROT_RAMP)
+        rot_ramp = rot_t * rot_t * (3.0 - 2.0 * rot_t)   # smoothstep
+        self._rotation   += _ROT_SPEED * rot_ramp
         self._tick_count += 1
+
+        # ── Depth blend ease-in ──────────────────────────────────────────
+        dep_t = min(1.0, t / _DEPTH_RAMP)
+        depth_ramp = dep_t * dep_t * (3.0 - 2.0 * dep_t)  # smoothstep
 
         # Compute depth for each tile and collect for z-sorting
         tile_data: list[tuple[float, _Tile, QtCore.QPoint, int]] = []
         for i, tile in enumerate(self._tiles):
-            angle = self._base_angles[i] + self._rotation
-            depth = (1.0 + math.sin(angle)) / 2.0          # 0 = back, 1 = front
-            sz    = max(
+            angle      = self._base_angles[i] + self._rotation
+            true_depth = (1.0 + math.sin(angle)) / 2.0    # 0 = back, 1 = front
+
+            # Blend: depth starts at 1.0 (fly-in state) and transitions to
+            # true_depth as depth_ramp approaches 1.  This removes the abrupt
+            # size/opacity jump that used to occur the instant the timer started.
+            depth = 1.0 - depth_ramp * (1.0 - true_depth)
+
+            sz  = max(
                 4,
                 int(_TILE_SZ * (_MIN_SCALE + (_MAX_SCALE - _MIN_SCALE) * depth)),
             )
-            pos   = self._ellipse_pos(angle, sz)
+            pos = self._ellipse_pos(angle, sz)
             tile_data.append((depth, tile, pos, sz))
 
         # Sort ascending so we raise() in depth order (front tile raised last)
