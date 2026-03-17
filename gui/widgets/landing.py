@@ -18,6 +18,7 @@ Sequence
 """
 from __future__ import annotations
 
+import os
 import random
 from pathlib import Path
 
@@ -42,6 +43,10 @@ _FADE_IN_MS  = 320   # landing window fade-in
 
 # Exported so alpha_dex_gui.py can match the cross-fade duration exactly.
 FADE_OUT_MS  = 420   # landing window fade-out / main-window fade-in
+
+# ── Album-art sidecar detection ───────────────────────────────────────────────
+_ART_NAMES = ("cover", "folder", "front", "albumart", "artwork", "album", "thumb")
+_ART_EXTS  = (".jpg", ".jpeg", ".png", ".webp")
 
 # ── Colour pool — diagonal gradient pairs for placeholder tiles ───────────────
 _GRADS: list[tuple[str, str]] = [
@@ -94,39 +99,67 @@ class _Tile(QtWidgets.QWidget):
         super().__init__(parent)
         self._grad   = grad
         self._target = target
+        self._pixmap: QtGui.QPixmap | None = None
         self.setFixedSize(_TILE_SZ, _TILE_SZ)
         # Prevent Qt from pre-filling the background so rounded corners show
         # the parent's gradient through them.
         self.setAutoFillBackground(False)
         self.setAttribute(QtCore.Qt.WidgetAttribute.WA_NoSystemBackground)
 
+    def set_pixmap(self, pm: QtGui.QPixmap) -> None:
+        """Set album-art pixmap; tile repaints itself automatically."""
+        self._pixmap = pm
+        self.update()
+
     def paintEvent(self, event: QtGui.QPaintEvent) -> None:  # noqa: N802
         p = QtGui.QPainter(self)
-        p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
-        r = QtCore.QRectF(self.rect())
+        try:
+            p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+            r = QtCore.QRectF(self.rect())
 
-        path = QtGui.QPainterPath()
-        path.addRoundedRect(r, 10, 10)
+            path = QtGui.QPainterPath()
+            path.addRoundedRect(r, 10, 10)
 
-        grad = QtGui.QLinearGradient(r.topLeft(), r.bottomRight())
-        grad.setColorAt(0.0, QtGui.QColor(self._grad[0]))
-        grad.setColorAt(1.0, QtGui.QColor(self._grad[1]))
-        p.fillPath(path, QtGui.QBrush(grad))
+            if self._pixmap is not None:
+                # Clip to rounded rect and draw scaled pixmap
+                p.setClipPath(path)
+                scaled = self._pixmap.scaled(
+                    self.size(),
+                    QtCore.Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                    QtCore.Qt.TransformationMode.SmoothTransformation,
+                )
+                ox = (scaled.width()  - self.width())  // 2
+                oy = (scaled.height() - self.height()) // 2
+                p.drawPixmap(QtCore.QPoint(-ox, -oy), scaled)
+                p.setClipping(False)
 
-        # Subtle top-edge sheen — gives a soft "depth" impression
-        p.setPen(QtGui.QPen(QtGui.QColor(255, 255, 255, 42), 1.0))
-        p.drawLine(
-            QtCore.QPointF(r.left() + 12, r.top() + 1.0),
-            QtCore.QPointF(r.right() - 12, r.top() + 1.0),
-        )
+                # Vignette overlay for depth
+                vignette = QtGui.QRadialGradient(
+                    r.center(), max(r.width(), r.height()) * 0.75
+                )
+                vignette.setColorAt(0.5, QtGui.QColor(0, 0, 0, 0))
+                vignette.setColorAt(1.0, QtGui.QColor(0, 0, 0, 80))
+                p.fillPath(path, QtGui.QBrush(vignette))
+            else:
+                grad = QtGui.QLinearGradient(r.topLeft(), r.bottomRight())
+                grad.setColorAt(0.0, QtGui.QColor(self._grad[0]))
+                grad.setColorAt(1.0, QtGui.QColor(self._grad[1]))
+                p.fillPath(path, QtGui.QBrush(grad))
 
-        # Bottom-right dark overlay to hint at depth / shadow inside the tile
-        shadow = QtGui.QLinearGradient(r.topLeft(), r.bottomRight())
-        shadow.setColorAt(0.55, QtGui.QColor(0, 0, 0, 0))
-        shadow.setColorAt(1.0,  QtGui.QColor(0, 0, 0, 55))
-        p.fillPath(path, QtGui.QBrush(shadow))
+                # Subtle top-edge sheen — gives a soft "depth" impression
+                p.setPen(QtGui.QPen(QtGui.QColor(255, 255, 255, 42), 1.0))
+                p.drawLine(
+                    QtCore.QPointF(r.left() + 12, r.top() + 1.0),
+                    QtCore.QPointF(r.right() - 12, r.top() + 1.0),
+                )
 
-        p.end()
+                # Bottom-right dark overlay to hint at depth / shadow
+                shadow = QtGui.QLinearGradient(r.topLeft(), r.bottomRight())
+                shadow.setColorAt(0.55, QtGui.QColor(0, 0, 0, 0))
+                shadow.setColorAt(1.0,  QtGui.QColor(0, 0, 0, 55))
+                p.fillPath(path, QtGui.QBrush(shadow))
+        finally:
+            p.end()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -263,29 +296,175 @@ class _CTACard(QtWidgets.QFrame):
 
     def paintEvent(self, event: QtGui.QPaintEvent) -> None:  # noqa: N802
         p = QtGui.QPainter(self)
-        p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
-        r = QtCore.QRectF(self.rect())
+        try:
+            p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+            r = QtCore.QRectF(self.rect())
 
-        path = QtGui.QPainterPath()
-        path.addRoundedRect(r, 20, 20)
+            path = QtGui.QPainterPath()
+            path.addRoundedRect(r, 20, 20)
 
-        # Dark semi-transparent fill — frosted glass look
-        p.fillPath(path, QtGui.QBrush(QtGui.QColor(10, 13, 20, 218)))
+            # Dark semi-transparent fill — frosted glass look
+            p.fillPath(path, QtGui.QBrush(QtGui.QColor(10, 13, 20, 218)))
 
-        # Hairline border
-        p.setPen(QtGui.QPen(QtGui.QColor(255, 255, 255, 22), 1.0))
-        p.drawPath(path)
+            # Hairline border
+            p.setPen(QtGui.QPen(QtGui.QColor(255, 255, 255, 22), 1.0))
+            p.drawPath(path)
 
-        # Subtle top-edge inner glow
-        glow = QtGui.QLinearGradient(
-            QtCore.QPointF(r.left(), r.top()),
-            QtCore.QPointF(r.left(), r.top() + 60),
-        )
-        glow.setColorAt(0.0, QtGui.QColor(255, 255, 255, 14))
-        glow.setColorAt(1.0, QtGui.QColor(255, 255, 255, 0))
-        p.fillPath(path, QtGui.QBrush(glow))
+            # Subtle top-edge inner glow
+            glow = QtGui.QLinearGradient(
+                QtCore.QPointF(r.left(), r.top()),
+                QtCore.QPointF(r.left(), r.top() + 60),
+            )
+            glow.setColorAt(0.0, QtGui.QColor(255, 255, 255, 14))
+            glow.setColorAt(1.0, QtGui.QColor(255, 255, 255, 0))
+            p.fillPath(path, QtGui.QBrush(glow))
+        finally:
+            p.end()
 
-        p.end()
+
+# ─────────────────────────────────────────────────────────────────────────────
+# _ArtScanner — background QThread that feeds album art to the mosaic tiles
+# ─────────────────────────────────────────────────────────────────────────────
+
+class _ArtScanner(QtCore.QThread):
+    """Scan *library_path* for album art and emit one QPixmap per tile slot.
+
+    Strategy
+    --------
+    1. Walk up to two directory levels (artist / album) and collect sidecar
+       image files whose stem matches ``_ART_NAMES`` (fast, no file I/O for
+       audio content).
+    2. If fewer images are found than tiles needed, fall back to reading
+       embedded cover art from audio files via
+       ``utils.audio_metadata_reader.read_metadata``.
+    3. Shuffle the collected paths so the mosaic looks varied on each run,
+       then emit ``art_found(tile_index, pixmap)`` for every tile slot.
+       Tiles cycle through the found images when there are fewer images
+       than tiles.
+    """
+
+    art_found = Signal(int, QtGui.QImage)  # (tile_index, image) — QImage is thread-safe
+
+    def __init__(self, library_path: str, tile_count: int) -> None:
+        super().__init__()
+        self._library  = library_path
+        self._n        = tile_count
+        self.setObjectName("ArtScanner")
+
+    # ── Helpers ───────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _is_sidecar(name: str) -> bool:
+        stem, ext = os.path.splitext(name.lower())
+        return stem in _ART_NAMES and ext in _ART_EXTS
+
+    @staticmethod
+    def _image_from_bytes(data: bytes) -> QtGui.QImage | None:
+        img = QtGui.QImage()
+        if img.loadFromData(data) and not img.isNull():
+            return img
+        return None
+
+    # ── Main scan loop ────────────────────────────────────────────────────
+
+    def run(self) -> None:  # noqa: N802
+        art_paths: list[str] = []
+
+        # Phase 1 — sidecar image files (very fast)
+        try:
+            root = self._library
+            with os.scandir(root) as lvl1:
+                for artist_entry in lvl1:
+                    if self.isInterruptionRequested():
+                        return
+                    if not artist_entry.is_dir(follow_symlinks=False):
+                        continue
+                    try:
+                        with os.scandir(artist_entry.path) as lvl2:
+                            for album_entry in lvl2:
+                                if self.isInterruptionRequested():
+                                    return
+                                if not album_entry.is_dir(follow_symlinks=False):
+                                    continue
+                                try:
+                                    with os.scandir(album_entry.path) as lvl3:
+                                        for f in lvl3:
+                                            if (
+                                                f.is_file(follow_symlinks=False)
+                                                and self._is_sidecar(f.name)
+                                            ):
+                                                art_paths.append(f.path)
+                                except OSError:
+                                    pass
+                    except OSError:
+                        pass
+        except OSError:
+            return
+
+        random.shuffle(art_paths)
+
+        # Phase 2 — embedded tags fallback (only if we need more art)
+        embedded_bytes: list[bytes] = []
+        if len(art_paths) < self._n:
+            audio_exts = {".flac", ".m4a", ".aac", ".mp3", ".wav", ".ogg", ".opus"}
+            try:
+                from utils.audio_metadata_reader import read_metadata
+                root = self._library
+                for dirpath, _dirs, files in os.walk(root):
+                    if self.isInterruptionRequested():
+                        return
+                    for fname in files:
+                        if self.isInterruptionRequested():
+                            return
+                        ext = os.path.splitext(fname)[1].lower()
+                        if ext not in audio_exts:
+                            continue
+                        try:
+                            _tags, covers, _err, _hint = read_metadata(
+                                os.path.join(dirpath, fname),
+                                include_cover=True,
+                            )
+                            if covers:
+                                embedded_bytes.append(covers[0])
+                                if len(art_paths) + len(embedded_bytes) >= self._n:
+                                    break
+                        except Exception:
+                            pass
+                    if len(art_paths) + len(embedded_bytes) >= self._n:
+                        break
+            except ImportError:
+                pass
+
+            random.shuffle(embedded_bytes)
+
+        if not art_paths and not embedded_bytes:
+            return
+
+        # Emit one QImage per tile slot, cycling through available art.
+        # QImage (unlike QPixmap) is safe to create in a non-GUI thread.
+        tile_index = 0
+        total_path = len(art_paths)
+        total_emb  = len(embedded_bytes)
+
+        for i in range(self._n):
+            if self.isInterruptionRequested():
+                return
+
+            img: QtGui.QImage | None = None
+
+            # Try sidecar path first (cycling)
+            if total_path > 0:
+                candidate = QtGui.QImage(art_paths[i % total_path])
+                if not candidate.isNull():
+                    img = candidate
+
+            # Fall back to embedded bytes (cycling)
+            if img is None and total_emb > 0:
+                img = self._image_from_bytes(embedded_bytes[i % total_emb])
+
+            if img is not None and not img.isNull():
+                self.art_found.emit(tile_index, img)
+                tile_index += 1
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -313,6 +492,9 @@ class MosaicLanding(QtWidgets.QWidget):
     ) -> None:
         super().__init__(None, QtCore.Qt.WindowType.FramelessWindowHint)
         self.setGeometry(geometry)
+        # Prevent the OS from maximizing or resizing a frameless window,
+        # which would cause concurrent paintEvents at unexpected sizes.
+        self.setFixedSize(geometry.width(), geometry.height())
         self._w       = geometry.width()
         self._h       = geometry.height()
         self._saved   = saved_path
@@ -324,6 +506,7 @@ class MosaicLanding(QtWidgets.QWidget):
         # Keep animation references alive
         self._fade_in_anim:  object = None
         self._fade_out_anim: object = None
+        self._scanner: object = None   # _ArtScanner | None
 
         self._compute_grid()
         self._build_tiles()
@@ -401,6 +584,9 @@ class MosaicLanding(QtWidgets.QWidget):
                 tile.show()
                 self._tiles.append(tile)
                 i += 1
+
+        if self._saved:
+            self._start_art_scanner()
 
     def _build_cta(self) -> None:
         self._cta = _CTACard(self, self._saved)
@@ -525,8 +711,28 @@ class MosaicLanding(QtWidgets.QWidget):
         anim.start()
 
     def _done(self) -> None:
+        if self._scanner is not None:
+            self._scanner.requestInterruption()
+            self._scanner.quit()
+            self._scanner.wait(800)
+            self._scanner = None
         self.hide()
         self.finished.emit()
+
+    # ── Art scanner ───────────────────────────────────────────────────────
+
+    def _start_art_scanner(self) -> None:
+        scanner = _ArtScanner(self._saved, len(self._tiles))
+        scanner.art_found.connect(self._on_art_found)
+        self._scanner = scanner
+        scanner.start()
+
+    def _on_art_found(self, tile_index: int, image: QtGui.QImage) -> None:
+        # We are back on the main thread here; QPixmap conversion is safe.
+        if 0 <= tile_index < len(self._tiles):
+            pm = QtGui.QPixmap.fromImage(image)
+            if not pm.isNull():
+                self._tiles[tile_index].set_pixmap(pm)
 
     # ── Background painting ────────────────────────────────────────────────
 
