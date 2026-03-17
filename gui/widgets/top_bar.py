@@ -96,11 +96,10 @@ class TopBar(QtWidgets.QWidget):
     def _on_change_library(self) -> None:
         start = self._library_path or str(Path.home())
         folder = QtWidgets.QFileDialog.getExistingDirectory(
-            self,
+            self.window(),
             "Select Music Library Folder",
             start,
-            QtWidgets.QFileDialog.Option.ShowDirsOnly
-            | QtWidgets.QFileDialog.Option.DontUseNativeDialog,
+            QtWidgets.QFileDialog.Option.ShowDirsOnly,
         )
         if folder:
             self.library_changed.emit(folder)

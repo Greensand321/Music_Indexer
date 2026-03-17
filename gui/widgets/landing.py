@@ -647,8 +647,7 @@ class MosaicLanding(QtWidgets.QWidget):
             self,
             "Select Music Library Folder",
             start,
-            QtWidgets.QFileDialog.Option.ShowDirsOnly
-            | QtWidgets.QFileDialog.Option.DontUseNativeDialog,
+            QtWidgets.QFileDialog.Option.ShowDirsOnly,
         )
         if path:
             self._accept(path)
