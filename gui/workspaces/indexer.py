@@ -19,31 +19,38 @@ class IndexerWorker(QtCore.QThread):
     finished = Signal(bool, str)  # (success, message)
 
     def __init__(self, library_path: str, dry_run: bool, create_playlists: bool,
-                 flush_cache: bool, max_workers: int) -> None:
+                 flush_cache: bool, max_workers: int, enable_phase_c: bool) -> None:
         super().__init__()
         self.library_path = library_path
         self.dry_run = dry_run
         self.create_playlists = create_playlists
         self.flush_cache = flush_cache
         self.max_workers = max_workers
-        self._cancelled = False
+        self.enable_phase_c = enable_phase_c
 
     def cancel(self) -> None:
-        self._cancelled = True
+        import indexer_control
+        indexer_control.cancel_event.set()
 
     def run(self) -> None:
         try:
             import music_indexer_api as api
+            import indexer_control
+            from indexer_control import IndexCancelled
         except ImportError as exc:
             self.finished.emit(False, f"Import error: {exc}")
             return
 
-        def _progress(pct: int, phase: str = "") -> None:
-            if not self._cancelled:
-                self.progress.emit(pct, phase)
+        # Reset global cancel flag before starting
+        indexer_control.cancel_event.clear()
+
+        def _progress(current: int, total: int, message: str, phase: str = "A") -> None:
+            indexer_control.check_cancelled()
+            pct = int(current * 100 / total) if total else 0
+            self.progress.emit(pct, phase)
 
         def _log(msg: str) -> None:
-            if not self._cancelled:
+            if not indexer_control.cancel_event.is_set():
                 self.log_line.emit(msg)
 
         try:
@@ -58,14 +65,17 @@ class IndexerWorker(QtCore.QThread):
                 create_playlists=self.create_playlists,
                 flush_cache=self.flush_cache,
                 max_workers=self.max_workers or None,
+                enable_phase_c=self.enable_phase_c,
                 progress_callback=_progress,
                 log_callback=_log,
             )
-            if self._cancelled:
+            if indexer_control.cancel_event.is_set():
                 self.finished.emit(False, "Cancelled by user.")
             else:
                 verb = "Preview" if self.dry_run else "Indexer"
                 self.finished.emit(True, f"{verb} completed successfully.")
+        except IndexCancelled:
+            self.finished.emit(False, "Cancelled by user.")
         except Exception as exc:  # noqa: BLE001
             self.finished.emit(False, str(exc))
 
@@ -286,6 +296,7 @@ class IndexerWorkspace(WorkspaceBase):
             create_playlists=self._playlists_cb.isChecked(),
             flush_cache=self._flush_cache_cb.isChecked(),
             max_workers=self._max_workers_spin.value(),
+            enable_phase_c=self._cross_album_cb.isChecked(),
         )
         self._worker.progress.connect(self._on_progress)
         self._worker.log_line.connect(self._on_log_line)
