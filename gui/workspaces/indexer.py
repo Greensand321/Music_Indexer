@@ -47,11 +47,17 @@ class IndexerWorker(QtCore.QThread):
                 self.log_line.emit(msg)
 
         try:
+            docs_dir = Path(self.library_path) / "Docs"
+            docs_dir.mkdir(parents=True, exist_ok=True)
+            output_html = str(docs_dir / "MusicIndex.html")
+
             api.run_full_indexer(
-                root=self.library_path,
-                dry_run=self.dry_run,
+                self.library_path,
+                output_html,
+                dry_run_only=self.dry_run,
                 create_playlists=self.create_playlists,
                 flush_cache=self.flush_cache,
+                max_workers=self.max_workers or None,
                 progress_callback=_progress,
                 log_callback=_log,
             )
