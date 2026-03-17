@@ -1,6 +1,8 @@
 """Genre Normalizer workspace — batch-update genres via MusicBrainz / Last.fm."""
 from __future__ import annotations
 
+import os
+
 from gui.compat import QtCore, QtGui, QtWidgets, Signal, Slot
 from gui.workspaces.base import WorkspaceBase
 
@@ -27,20 +29,40 @@ class GenreWorker(QtCore.QThread):
             self.finished.emit(False, f"Import error: {exc}")
             return
         try:
-            def _log(msg: str) -> None:
-                if not self._cancelled:
-                    self.log_line.emit(msg)
+            # Build a file-like object that routes log_line writes to the signal
+            worker_ref = self
 
-            update_genres.run(
-                self.library_path,
-                dry_run=self.dry_run,
-                overwrite=self.overwrite,
-                log_callback=_log,
-            )
+            class _LogProxy:
+                def write(self, msg: str) -> None:  # noqa: PLR6301
+                    line = msg.rstrip("\n")
+                    if line and not worker_ref._cancelled:
+                        worker_ref.log_line.emit(line)
+
+                def flush(self) -> None:
+                    pass
+
+            log_proxy = _LogProxy()
+
+            files: list[str] = []
+            for dirpath, _, filenames in os.walk(self.library_path):
+                for f in filenames:
+                    if os.path.splitext(f)[1].lower() in update_genres.SUPPORTED_EXTS:
+                        files.append(os.path.join(dirpath, f))
+
+            total = len(files)
+            for idx, filepath in enumerate(files, start=1):
+                if self._cancelled:
+                    break
+                if not self.dry_run:
+                    update_genres.process_file(filepath, log_proxy)
+                else:
+                    worker_ref.log_line.emit(f"[dry-run] would process: {os.path.basename(filepath)}")
+                self.progress.emit(int(idx * 100 / total))
+
             if self._cancelled:
                 self.finished.emit(False, "Cancelled.")
             else:
-                self.finished.emit(True, "Genre update complete.")
+                self.finished.emit(True, f"Genre update complete ({total} files processed).")
         except Exception as exc:  # noqa: BLE001
             self.finished.emit(False, str(exc))
 

@@ -19,21 +19,23 @@ class SimilarityWorker(QtCore.QThread):
     def run(self) -> None:
         try:
             from near_duplicate_detector import fingerprint_distance, _parse_fp
-            from fingerprint_cache import FingerprintCache
-            import json
+            from fingerprint_cache import get_cached_fingerprint
 
-            cache_path = Path(self.path_a).parent.parent / "Docs" / "fp_cache.db"
-            cache = FingerprintCache(str(cache_path)) if cache_path.parent.exists() else None
+            # Try to locate a fingerprint DB relative to the files' library root
+            docs_path = Path(self.path_a).parent.parent / "Docs"
+            db_path = str(docs_path / ".soundvault.db") if docs_path.exists() else ""
 
             def _get_fp(path: str) -> str | None:
-                if cache:
+                if db_path:
                     try:
-                        return cache.get(path)
+                        fp = get_cached_fingerprint(path, db_path)
+                        if fp:
+                            return fp
                     except Exception:
                         pass
                 try:
                     import acoustid
-                    dur, fp = acoustid.fingerprint_file(path)
+                    _dur, fp = acoustid.fingerprint_file(path)
                     return fp
                 except Exception:
                     return None
