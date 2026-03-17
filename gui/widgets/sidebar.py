@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 
 from gui.compat import QtCore, QtGui, QtWidgets, Signal
 from gui.themes.animations import AnimatedNavButton
+from gui.widgets.gradient_bg import _gradient_enabled, paint_window_gradient
 
 # ── Navigation model ──────────────────────────────────────────────────────────
 
@@ -232,32 +233,32 @@ class Sidebar(QtWidgets.QWidget):
         t = get_manager().current
         p = QtGui.QPainter(self)
         rect = self.rect()
+        try:
+            # ── Step 1: window-spanning gradient (identical to workspace) ──
+            if _gradient_enabled() and rect.width() > 0 and rect.height() > 0:
+                paint_window_gradient(
+                    p, self, t,
+                    radius_scale=1.05,
+                    alpha_tr=45 if t.variant == "dark" else 28,
+                    alpha_bl=60 if t.variant == "dark" else 38,
+                )
+            else:
+                # Gradient disabled — fall back to a solid sidebar background
+                p.fillRect(rect, QtGui.QColor(t.sidebar_bg))
 
-        # ── Step 1: window-spanning gradient (identical to workspace) ──────
-        if _gradient_enabled() and rect.width() > 0 and rect.height() > 0:
-            paint_window_gradient(
-                p, self, t,
-                radius_scale=1.05,
-                alpha_tr=45 if t.variant == "dark" else 28,
-                alpha_bl=60 if t.variant == "dark" else 38,
-            )
-        else:
-            # Gradient disabled — fall back to a solid sidebar background
-            p.fillRect(rect, QtGui.QColor(t.sidebar_bg))
+            # ── Step 2: barely-there sidebar tint (~11 % opacity) ──────────
+            if _gradient_enabled():
+                tint = QtGui.QColor(t.sidebar_bg)
+                tint.setAlpha(28 if t.variant == "dark" else 20)
+                p.fillRect(rect, tint)
 
-        # ── Step 2: barely-there sidebar tint (~11 % opacity) ─────────────
-        if _gradient_enabled():
-            tint = QtGui.QColor(t.sidebar_bg)
-            tint.setAlpha(28 if t.variant == "dark" else 20)
-            p.fillRect(rect, tint)
-
-        # ── Step 3: 1 px right-edge separator ─────────────────────────────
-        sep_color = QtGui.QColor(t.card_border)
-        sep_color.setAlpha(80)
-        p.setPen(QtGui.QPen(sep_color, 1))
-        p.drawLine(rect.right(), rect.top(), rect.right(), rect.bottom())
-
-        p.end()
+            # ── Step 3: 1 px right-edge separator ──────────────────────────
+            sep_color = QtGui.QColor(t.card_border)
+            sep_color.setAlpha(80)
+            p.setPen(QtGui.QPen(sep_color, 1))
+            p.drawLine(rect.right(), rect.top(), rect.right(), rect.bottom())
+        finally:
+            p.end()
 
     def _snap_pill(self) -> None:
         key = self._active_key
