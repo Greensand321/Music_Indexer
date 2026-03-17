@@ -22,7 +22,6 @@ typing_extensions
 
 # Optional metadata helpers
 spotipy
-tidal-dl
 
 # Optional UX helpers
 tqdm
