@@ -337,10 +337,14 @@ class _ArtScanner(QtCore.QThread):
        (all songs in one folder), standard artist/album trees, and anything in
        between.
     2. If fewer unique images are found than tiles needed, fall back to
-       extracting one embedded cover per directory from audio files.
-    3. Randomly sample up to *tile_count* images from the combined pool so
-       every launch shows a different selection.  Tiles beyond the pool size
-       keep their gradient placeholder; no image is ever repeated.
+       scanning audio files for embedded covers.  Every audio file in every
+       directory is checked; covers are deduplicated by their first 64 bytes so
+       the same image embedded across many tracks is only counted once.  A
+       single folder may contain several albums with distinct artwork — all are
+       collected.
+    3. Randomly sample up to *tile_count* images from a pool built to at least
+       3× the tile count so every launch shows a genuinely different selection.
+       Tiles beyond the pool size keep their gradient placeholder.
     """
 
     art_found = Signal(int, QtGui.QImage)  # (tile_index, image) — QImage is thread-safe
@@ -393,10 +397,18 @@ class _ArtScanner(QtCore.QThread):
         except OSError:
             return
 
-        # Phase 2 — embedded tags fallback, one cover per directory
+        # Phase 2 — embedded tags fallback.
+        # Scan every audio file in every directory; deduplicate by the first
+        # 64 bytes of cover data so the same image embedded across many tracks
+        # is only counted once.  No break after the first cover per directory —
+        # a single folder may contain several albums with different artwork.
         embedded_bytes: list[bytes] = []
         if len(art_paths) < self._n:
             audio_exts = {".flac", ".m4a", ".aac", ".mp3", ".wav", ".ogg", ".opus"}
+            # Build a generous pool (at least 3× tile count) so random.sample
+            # has real variety on each launch.
+            pool_cap = max(self._n * 3, 96)
+            seen_sigs: set[bytes] = set()
             try:
                 from utils.audio_metadata_reader import read_metadata
                 for dirpath, files in self._walk_depth(self._library, _SCAN_DEPTH):
@@ -412,12 +424,16 @@ class _ArtScanner(QtCore.QThread):
                                 include_cover=True,
                             )
                             if covers:
-                                embedded_bytes.append(covers[0])
-                                break  # one cover per directory; move to next
+                                sig = covers[0][:64]
+                                if sig not in seen_sigs:
+                                    seen_sigs.add(sig)
+                                    embedded_bytes.append(covers[0])
                         except Exception:
                             pass
-                    if len(art_paths) + len(embedded_bytes) >= self._n:
-                        break
+                        if len(art_paths) + len(embedded_bytes) >= pool_cap:
+                            break  # pool full; stop scanning this directory
+                    if len(art_paths) + len(embedded_bytes) >= pool_cap:
+                        break  # pool full; stop walking
             except ImportError:
                 pass
 
