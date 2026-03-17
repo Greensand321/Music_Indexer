@@ -187,6 +187,7 @@ class _Tile(QtWidgets.QWidget):
         super().__init__(parent)
         self._target  = target        # fly-in destination on the ellipse
         self._opacity = 1.0
+        self._draw_sz = float(_TILE_SZ)   # current visual size (float, never int-truncated)
         self.setAutoFillBackground(False)
         self.setAttribute(QtCore.Qt.WidgetAttribute.WA_NoSystemBackground)
         self.resize(_TILE_SZ, _TILE_SZ)
@@ -247,20 +248,24 @@ class _Tile(QtWidgets.QWidget):
 
     # ── Called by rotation timer ───────────────────────────────────────────
 
-    def set_depth(self, depth: float, sz: int) -> None:
-        """Update size and opacity; sz is pre-computed by the caller."""
-        self._opacity = _MIN_ALPHA + (1.0 - _MIN_ALPHA) * depth
-        if self.width() != sz:
-            self.resize(sz, sz)
+    def set_depth(self, depth: float, draw_sz: float) -> None:
+        """Update opacity and float draw size; widget geometry never changes."""
+        self._opacity  = _MIN_ALPHA + (1.0 - _MIN_ALPHA) * depth
+        self._draw_sz  = draw_sz
 
     # ── Painting ──────────────────────────────────────────────────────────
 
     def paintEvent(self, event: QtGui.QPaintEvent) -> None:  # noqa: N802
-        # Opacity is the only per-frame variable; everything else is pre-baked.
+        # Widget is always _TILE_SZ × _TILE_SZ.  The baked pixmap is drawn
+        # into a centered float-precision QRectF so size interpolates
+        # continuously — no integer resize(), no staircase pop.
+        pad  = (_TILE_SZ - self._draw_sz) / 2.0
+        dest = QtCore.QRectF(pad, pad, self._draw_sz, self._draw_sz)
+        src  = QtCore.QRectF(self._cached_pm.rect())
         p = QtGui.QPainter(self)
         p.setRenderHint(QtGui.QPainter.RenderHint.SmoothPixmapTransform)
         p.setOpacity(self._opacity)
-        p.drawPixmap(self.rect(), self._cached_pm)
+        p.drawPixmap(dest, self._cached_pm, src)
         p.end()
 
 
@@ -628,7 +633,7 @@ class MosaicLanding(QtWidgets.QWidget):
         depth_ramp = dep_t * dep_t * (3.0 - 2.0 * dep_t)  # smoothstep
 
         # Compute depth for each tile and collect for z-sorting
-        tile_data: list[tuple[float, _Tile, QtCore.QPoint, int]] = []
+        tile_data: list[tuple[float, _Tile, QtCore.QPoint, float]] = []
         for i, tile in enumerate(self._tiles):
             angle      = self._base_angles[i] + self._rotation
             true_depth = (1.0 + math.sin(angle)) / 2.0    # 0 = back, 1 = front
@@ -638,12 +643,13 @@ class MosaicLanding(QtWidgets.QWidget):
             # size/opacity jump that used to occur the instant the timer started.
             depth = 1.0 - depth_ramp * (1.0 - true_depth)
 
-            sz  = max(
-                4,
-                int(_TILE_SZ * (_MIN_SCALE + (_MAX_SCALE - _MIN_SCALE) * depth)),
-            )
-            pos = self._ellipse_pos(angle, sz)
-            tile_data.append((depth, tile, pos, sz))
+            # Float draw size — never truncated to int, so scaling is continuous.
+            # Widget geometry is fixed at _TILE_SZ; only the painted rect changes.
+            draw_sz = _TILE_SZ * (_MIN_SCALE + (_MAX_SCALE - _MIN_SCALE) * depth)
+
+            # Position centres the fixed-size widget on the ellipse point.
+            pos = self._ellipse_pos(angle, _TILE_SZ)
+            tile_data.append((depth, tile, pos, draw_sz))
 
         # Sort ascending so we raise() in depth order (front tile raised last)
         tile_data.sort(key=lambda d: d[0])
