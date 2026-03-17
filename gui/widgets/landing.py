@@ -185,70 +185,82 @@ class _Tile(QtWidgets.QWidget):
         pixmap: QtGui.QPixmap | None = None,
     ) -> None:
         super().__init__(parent)
-        self._grad    = grad
         self._target  = target        # fly-in destination on the ellipse
-        self._pixmap  = pixmap
         self._opacity = 1.0
         self.setAutoFillBackground(False)
         self.setAttribute(QtCore.Qt.WidgetAttribute.WA_NoSystemBackground)
         self.resize(_TILE_SZ, _TILE_SZ)
 
-    # ── Called by rotation timer ───────────────────────────────────────────
+        # Pre-bake the full tile appearance into a QPixmap once.  paintEvent
+        # then becomes a single drawPixmap call — no gradient objects, no
+        # rounded-rect clipping, no QColor allocations per frame.
+        self._cached_pm = self._bake_pixmap(grad, pixmap)
 
-    def set_depth(self, depth: float) -> None:
-        """Update size and opacity to reflect how far the tile is from the front."""
-        self._opacity = _MIN_ALPHA + (1.0 - _MIN_ALPHA) * depth
-        new_sz = max(
-            4,
-            int(_TILE_SZ * (_MIN_SCALE + (_MAX_SCALE - _MIN_SCALE) * depth)),
-        )
-        if self.width() != new_sz:
-            self.resize(new_sz, new_sz)
-        self.update()
+    @staticmethod
+    def _bake_pixmap(
+        grad: tuple[str, str],
+        pixmap: QtGui.QPixmap | None,
+    ) -> QtGui.QPixmap:
+        """Render the static tile appearance into a _TILE_SZ × _TILE_SZ QPixmap."""
+        pm = QtGui.QPixmap(_TILE_SZ, _TILE_SZ)
+        pm.fill(QtCore.Qt.GlobalColor.transparent)
 
-    # ── Painting ──────────────────────────────────────────────────────────
-
-    def paintEvent(self, event: QtGui.QPaintEvent) -> None:  # noqa: N802
-        p = QtGui.QPainter(self)
+        p = QtGui.QPainter(pm)
         p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
         p.setRenderHint(QtGui.QPainter.RenderHint.SmoothPixmapTransform)
-        p.setOpacity(self._opacity)
 
-        r = QtCore.QRectF(self.rect())
+        r    = QtCore.QRectF(0, 0, _TILE_SZ, _TILE_SZ)
         path = QtGui.QPainterPath()
         path.addRoundedRect(r, 10, 10)
 
-        if self._pixmap and not self._pixmap.isNull():
+        if pixmap and not pixmap.isNull():
             # ── Album art ─────────────────────────────────────────────────
             p.setClipPath(path)
-            # drawPixmap scales from the pre-sized source to the current rect.
-            p.drawPixmap(self.rect(), self._pixmap)
+            p.drawPixmap(QtCore.QRect(0, 0, _TILE_SZ, _TILE_SZ), pixmap)
             p.setClipping(False)
 
-            # Subtle vignette over the art
+            # Subtle vignette
             vig = QtGui.QRadialGradient(r.center(), max(r.width(), r.height()) * 0.7)
             vig.setColorAt(0.55, QtGui.QColor(0, 0, 0, 0))
             vig.setColorAt(1.00, QtGui.QColor(0, 0, 0, 70))
             p.fillPath(path, QtGui.QBrush(vig))
         else:
             # ── Gradient placeholder ───────────────────────────────────────
-            grad = QtGui.QLinearGradient(r.topLeft(), r.bottomRight())
-            grad.setColorAt(0.0, QtGui.QColor(self._grad[0]))
-            grad.setColorAt(1.0, QtGui.QColor(self._grad[1]))
-            p.fillPath(path, QtGui.QBrush(grad))
+            g = QtGui.QLinearGradient(r.topLeft(), r.bottomRight())
+            g.setColorAt(0.0, QtGui.QColor(grad[0]))
+            g.setColorAt(1.0, QtGui.QColor(grad[1]))
+            p.fillPath(path, QtGui.QBrush(g))
 
-            # Inner shadow at bottom-right
             shadow = QtGui.QLinearGradient(r.topLeft(), r.bottomRight())
             shadow.setColorAt(0.55, QtGui.QColor(0, 0, 0, 0))
             shadow.setColorAt(1.00, QtGui.QColor(0, 0, 0, 55))
             p.fillPath(path, QtGui.QBrush(shadow))
 
-        # Top-edge sheen (both art and gradient tiles)
+        # Top-edge sheen
         p.setPen(QtGui.QPen(QtGui.QColor(255, 255, 255, 42), 1.0))
         p.drawLine(
-            QtCore.QPointF(r.left() + 12, r.top() + 1.0),
-            QtCore.QPointF(r.right() - 12, r.top() + 1.0),
+            QtCore.QPointF(12, 1.0),
+            QtCore.QPointF(_TILE_SZ - 12, 1.0),
         )
+        p.end()
+        return pm
+
+    # ── Called by rotation timer ───────────────────────────────────────────
+
+    def set_depth(self, depth: float, sz: int) -> None:
+        """Update size and opacity; sz is pre-computed by the caller."""
+        self._opacity = _MIN_ALPHA + (1.0 - _MIN_ALPHA) * depth
+        if self.width() != sz:
+            self.resize(sz, sz)
+
+    # ── Painting ──────────────────────────────────────────────────────────
+
+    def paintEvent(self, event: QtGui.QPaintEvent) -> None:  # noqa: N802
+        # Opacity is the only per-frame variable; everything else is pre-baked.
+        p = QtGui.QPainter(self)
+        p.setRenderHint(QtGui.QPainter.RenderHint.SmoothPixmapTransform)
+        p.setOpacity(self._opacity)
+        p.drawPixmap(self.rect(), self._cached_pm)
         p.end()
 
 
@@ -434,6 +446,7 @@ class MosaicLanding(QtWidgets.QWidget):
         self._base_angles: list[float] = []   # initial ellipse angles per tile
         self._rotation  = 0.0                 # current rotation offset (rad)
         self._tick_count = 0                  # for ease-in ramp
+        self._prev_z_order: list[int] = []    # last sorted tile id order (z-cache)
 
         self._fly_in_grp:  QtCore.QParallelAnimationGroup | None = None
         self._fly_out_grp: QtCore.QParallelAnimationGroup | None = None
@@ -634,13 +647,27 @@ class MosaicLanding(QtWidgets.QWidget):
 
         # Sort ascending so we raise() in depth order (front tile raised last)
         tile_data.sort(key=lambda d: d[0])
-        for depth, tile, pos, sz in tile_data:
-            tile.set_depth(depth)
-            tile.move(pos)
-            tile.raise_()
 
-        # CTA card always on top
-        self._cta.raise_()
+        # ── Batch all repaints into a single composite flush ──────────────
+        # Disabling updates on the parent suppresses every child update(),
+        # resize(), and move() repaint until we re-enable — collapsing 18+
+        # per-frame repaints into one.
+        self.setUpdatesEnabled(False)
+
+        new_z_order = [id(tile) for _, tile, _, _ in tile_data]
+        z_changed   = new_z_order != self._prev_z_order
+
+        for depth, tile, pos, sz in tile_data:
+            tile.set_depth(depth, sz)
+            tile.move(pos)
+            if z_changed:
+                tile.raise_()
+
+        if z_changed:
+            self._prev_z_order = new_z_order
+            self._cta.raise_()   # CTA always on top; only needed after a re-stack
+
+        self.setUpdatesEnabled(True)   # triggers one composite repaint
 
     # ── User action handlers ───────────────────────────────────────────────
 
