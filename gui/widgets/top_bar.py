@@ -95,12 +95,28 @@ class TopBar(QtWidgets.QWidget):
 
     def _on_change_library(self) -> None:
         start = self._library_path or str(Path.home())
-        folder = QtWidgets.QFileDialog.getExistingDirectory(
-            self.window(),
-            "Select Music Library Folder",
-            start,
-            QtWidgets.QFileDialog.Option.ShowDirsOnly
-            | QtWidgets.QFileDialog.Option.DontUseNativeDialog,
-        )
-        if folder:
-            self.library_changed.emit(folder)
+
+        # Instantiate with no parent so the dialog is a standalone top-level
+        # window. Parenting it to the QMainWindow causes compositor-level
+        # blank-outs on Linux (both the dialog and parent lose their content).
+        dlg = QtWidgets.QFileDialog()
+        dlg.setWindowTitle("Select Music Library Folder")
+        dlg.setDirectory(start)
+        dlg.setFileMode(QtWidgets.QFileDialog.FileMode.Directory)
+        dlg.setOption(QtWidgets.QFileDialog.Option.ShowDirsOnly)
+        dlg.setOption(QtWidgets.QFileDialog.Option.DontUseNativeDialog)
+
+        # Centre it visually over the main window without parenting to it.
+        win = self.window()
+        if win and win.isVisible():
+            dlg.resize(820, 560)
+            fg = win.frameGeometry()
+            dlg.move(
+                fg.left() + (fg.width()  - dlg.width())  // 2,
+                fg.top()  + (fg.height() - dlg.height()) // 2,
+            )
+
+        if dlg.exec():
+            selected = dlg.selectedFiles()
+            if selected:
+                self.library_changed.emit(selected[0])

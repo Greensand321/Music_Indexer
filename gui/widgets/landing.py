@@ -643,15 +643,28 @@ class MosaicLanding(QtWidgets.QWidget):
 
     def _on_open_clicked(self) -> None:
         start = self._saved or str(Path.home())
-        path = QtWidgets.QFileDialog.getExistingDirectory(
-            self,
-            "Select Music Library Folder",
-            start,
-            QtWidgets.QFileDialog.Option.ShowDirsOnly
-            | QtWidgets.QFileDialog.Option.DontUseNativeDialog,
-        )
-        if path:
-            self._accept(path)
+
+        # Standalone top-level dialog (no parent) to avoid compositor
+        # blank-outs on Linux; manually centred over this landing window.
+        dlg = QtWidgets.QFileDialog()
+        dlg.setWindowTitle("Select Music Library Folder")
+        dlg.setDirectory(start)
+        dlg.setFileMode(QtWidgets.QFileDialog.FileMode.Directory)
+        dlg.setOption(QtWidgets.QFileDialog.Option.ShowDirsOnly)
+        dlg.setOption(QtWidgets.QFileDialog.Option.DontUseNativeDialog)
+
+        dlg.resize(820, 560)
+        if self.isVisible():
+            fg = self.frameGeometry()
+            dlg.move(
+                fg.left() + (fg.width()  - dlg.width())  // 2,
+                fg.top()  + (fg.height() - dlg.height()) // 2,
+            )
+
+        if dlg.exec():
+            selected = dlg.selectedFiles()
+            if selected:
+                self._accept(selected[0])
 
     def _accept(self, path: str) -> None:
         """Validate the chosen path and start the exit sequence."""
