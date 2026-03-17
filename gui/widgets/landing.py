@@ -327,35 +327,57 @@ class _CTACard(QtWidgets.QFrame):
 # _ArtScanner — background QThread that feeds album art to the mosaic tiles
 # ─────────────────────────────────────────────────────────────────────────────
 
+# Audio extensions scanned for embedded covers (all formats supported by
+# read_metadata, including the dedicated opus reader).
+_AUDIO_EXTS: frozenset[str] = frozenset(
+    {".flac", ".m4a", ".aac", ".mp3", ".wav", ".ogg", ".opus"}
+)
+
 class _ArtScanner(QtCore.QThread):
     """Scan *library_path* for album art and emit one unique image per tile slot.
 
-    Strategy
-    --------
-    1. Walk up to ``_SCAN_DEPTH`` directory levels collecting one sidecar
-       image per folder (fast — no audio file I/O).  Works with flat libraries
-       (all songs in one folder), standard artist/album trees, and anything in
-       between.
-    2. If fewer unique images are found than tiles needed, fall back to
-       scanning audio files for embedded covers.  Every audio file in every
-       directory is checked; covers are deduplicated by their first 64 bytes so
-       the same image embedded across many tracks is only counted once.  A
-       single folder may contain several albums with distinct artwork — all are
-       collected.
-    3. Randomly sample up to *tile_count* images from a pool built to at least
-       3× the tile count so every launch shows a genuinely different selection.
-       Tiles beyond the pool size keep their gradient placeholder.
+    Scan strategy
+    -------------
+    Both phases use a depth-limited, **randomised** walk so every launch
+    visits a different cross-section of the library — directories are shuffled
+    before descending into them, and files within each directory are shuffled
+    before inspection.  This prevents alphabetically-early, MP3-heavy folders
+    from monopolising the pool on every run.
+
+    Phase 1 — sidecar images (no audio I/O)
+        One ``cover.jpg`` / ``folder.png`` / … per directory.  Fast; runs
+        unconditionally.  Handles flat libraries (all songs in one folder) as
+        well as deep artist/album trees.
+
+    Phase 2 — embedded covers (audio tag I/O)
+        Only runs if Phase 1 produced fewer images than needed.  Every audio
+        file in every directory is inspected; the first 64 bytes of each cover
+        are used as a content fingerprint so the same artwork embedded across
+        hundreds of tracks counts only once.  A single directory may contain
+        several albums with distinct artwork — all are collected.
+        Scanning continues until *pool_cap* unique covers are found or the
+        entire library has been walked ("backtrack until enough is found").
+
+    Emit
+        ``random.sample(pool, min(len(pool), tile_count))`` selects a fresh
+        random subset on every launch.  Tiles with no signal keep their
+        gradient placeholder.
     """
 
     art_found = Signal(int, QtGui.QImage)  # (tile_index, image) — QImage is thread-safe
+
+    # Collect up to this many unique covers before sampling.
+    # Larger than tile_count so random.sample has genuine variety.
+    _POOL_CAP_MULTIPLIER = 5
 
     def __init__(self, library_path: str, tile_count: int) -> None:
         super().__init__()
         self._library  = library_path
         self._n        = tile_count
+        self._pool_cap = max(tile_count * self._POOL_CAP_MULTIPLIER, 128)
         self.setObjectName("ArtScanner")
 
-    # ── Helpers ───────────────────────────────────────────────────────────
+    # ── Low-level helpers ─────────────────────────────────────────────────
 
     @staticmethod
     def _is_sidecar(name: str) -> bool:
@@ -369,78 +391,105 @@ class _ArtScanner(QtCore.QThread):
             return img
         return None
 
-    # ── Main scan loop ────────────────────────────────────────────────────
+    def _walk(self):
+        """Yield ``(dirpath, files)`` up to ``_SCAN_DEPTH`` levels deep.
 
-    @staticmethod
-    def _walk_depth(root: str, max_depth: int):
-        """os.walk limited to *max_depth* levels below *root* (root = depth 0)."""
-        for dirpath, dirs, files in os.walk(root):
-            rel   = os.path.relpath(dirpath, root)
+        Directories are **shuffled in-place** before ``os.walk`` descends into
+        them, and the file list is shuffled before being yielded.  This
+        randomises traversal order so no part of the library is systematically
+        favoured across runs.
+        """
+        for dirpath, dirs, files in os.walk(self._library):
+            rel   = os.path.relpath(dirpath, self._library)
             depth = 0 if rel == "." else rel.count(os.sep) + 1
-            if depth >= max_depth:
-                dirs.clear()  # don't recurse any deeper
+            if depth >= _SCAN_DEPTH:
+                dirs.clear()        # prune — don't recurse past the depth cap
+            else:
+                random.shuffle(dirs)    # randomise which subtree is visited next
+            random.shuffle(files)       # randomise file order within this directory
             yield dirpath, files
 
-    def run(self) -> None:  # noqa: N802
-        art_paths: list[str] = []
+    # ── Phase 1 — sidecar image files ────────────────────────────────────
 
-        # Phase 1 — one sidecar image per folder (fast, no audio I/O).
-        # Works for flat libraries (root/songs/) as well as deep trees.
+    def _scan_sidecars(self) -> list[str]:
+        """Return one sidecar image path per directory (no audio I/O)."""
+        paths: list[str] = []
         try:
-            for dirpath, files in self._walk_depth(self._library, _SCAN_DEPTH):
+            for dirpath, files in self._walk():
                 if self.isInterruptionRequested():
-                    return
+                    return paths
                 for fname in files:
                     if self._is_sidecar(fname):
-                        art_paths.append(os.path.join(dirpath, fname))
-                        break  # one sidecar per directory
+                        paths.append(os.path.join(dirpath, fname))
+                        break   # one sidecar per directory is enough
         except OSError:
+            pass
+        return paths
+
+    # ── Phase 2 — embedded covers ─────────────────────────────────────────
+
+    def _scan_embedded(self, already_have: int) -> list[bytes]:
+        """Return unique embedded covers until the pool cap is reached.
+
+        Deduplicates by the first 64 bytes of each cover — identical artwork
+        embedded across many tracks is only added once.  Scanning continues
+        across the full library (backtracking through all directories) until
+        ``_pool_cap`` unique covers have been gathered or the walk is exhausted.
+        """
+        covers: list[bytes] = []
+        seen_sigs: set[bytes] = set()
+
+        try:
+            from utils.audio_metadata_reader import read_metadata
+        except ImportError:
+            return covers
+
+        for dirpath, files in self._walk():
+            if self.isInterruptionRequested():
+                return covers
+            for fname in files:
+                if os.path.splitext(fname)[1].lower() not in _AUDIO_EXTS:
+                    continue
+                try:
+                    _tags, raw_covers, _err, _hint = read_metadata(
+                        os.path.join(dirpath, fname),
+                        include_cover=True,
+                    )
+                    if raw_covers:
+                        sig = raw_covers[0][:64]
+                        if sig not in seen_sigs:
+                            seen_sigs.add(sig)
+                            covers.append(raw_covers[0])
+                except Exception:
+                    pass
+                if already_have + len(covers) >= self._pool_cap:
+                    return covers   # pool full — stop early
+            # After each directory, check again in case the directory
+            # had no audio files but the outer cap was hit concurrently.
+            if already_have + len(covers) >= self._pool_cap:
+                return covers
+
+        return covers
+
+    # ── Orchestration + emit ──────────────────────────────────────────────
+
+    def run(self) -> None:  # noqa: N802
+        # Phase 1: fast sidecar scan (no audio I/O).
+        art_paths = self._scan_sidecars()
+        if self.isInterruptionRequested():
             return
 
-        # Phase 2 — embedded tags fallback.
-        # Scan every audio file in every directory; deduplicate by the first
-        # 64 bytes of cover data so the same image embedded across many tracks
-        # is only counted once.  No break after the first cover per directory —
-        # a single folder may contain several albums with different artwork.
-        embedded_bytes: list[bytes] = []
+        # Phase 2: embedded covers, only if Phase 1 left us short.
+        embedded: list[bytes] = []
         if len(art_paths) < self._n:
-            audio_exts = {".flac", ".m4a", ".aac", ".mp3", ".wav", ".ogg", ".opus"}
-            # Build a generous pool (at least 3× tile count) so random.sample
-            # has real variety on each launch.
-            pool_cap = max(self._n * 3, 96)
-            seen_sigs: set[bytes] = set()
-            try:
-                from utils.audio_metadata_reader import read_metadata
-                for dirpath, files in self._walk_depth(self._library, _SCAN_DEPTH):
-                    if self.isInterruptionRequested():
-                        return
-                    for fname in files:
-                        ext = os.path.splitext(fname)[1].lower()
-                        if ext not in audio_exts:
-                            continue
-                        try:
-                            _tags, covers, _err, _hint = read_metadata(
-                                os.path.join(dirpath, fname),
-                                include_cover=True,
-                            )
-                            if covers:
-                                sig = covers[0][:64]
-                                if sig not in seen_sigs:
-                                    seen_sigs.add(sig)
-                                    embedded_bytes.append(covers[0])
-                        except Exception:
-                            pass
-                        if len(art_paths) + len(embedded_bytes) >= pool_cap:
-                            break  # pool full; stop scanning this directory
-                    if len(art_paths) + len(embedded_bytes) >= pool_cap:
-                        break  # pool full; stop walking
-            except ImportError:
-                pass
+            embedded = self._scan_embedded(already_have=len(art_paths))
+        if self.isInterruptionRequested():
+            return
 
-        # Randomly sample up to tile_count unique images from the combined pool.
-        # str items are sidecar paths; bytes items are embedded covers.
-        # Tiles that receive no signal keep their gradient placeholder.
-        pool: list = art_paths + embedded_bytes
+        # Build pool and randomly sample tile_count images.
+        # str  → sidecar file path  (load via QImage(path))
+        # bytes → embedded cover    (load via loadFromData)
+        pool: list = art_paths + embedded
         if not pool:
             return
 
