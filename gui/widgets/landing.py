@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import os
 import random
+import subprocess
 from pathlib import Path
 
 from gui.compat import QtCore, QtGui, QtWidgets, Signal
@@ -46,12 +47,6 @@ _FADE_IN_MS  = 320   # landing window fade-in
 FADE_OUT_MS  = 420   # landing window fade-out / main-window fade-in
 
 _SCAN_DEPTH = 7   # max folder depth searched for art (root = 0)
-
-# Sidecar image files recognised as album art.
-_ART_NAMES: frozenset[str] = frozenset(
-    {"cover", "folder", "front", "albumart", "artwork", "album", "thumb"}
-)
-_ART_EXTS: frozenset[str] = frozenset({".jpg", ".jpeg", ".png", ".webp"})
 
 # ── Colour pool — diagonal gradient pairs for placeholder tiles ───────────────
 _GRADS: list[tuple[str, str]] = [
@@ -396,40 +391,45 @@ class _ArtHistory:
 # ─────────────────────────────────────────────────────────────────────────────
 
 class _ArtScanner(QtCore.QThread):
-    """Scan *library_path* for album art and emit one unique image per tile slot.
+    """Scan *library_path* for embedded album art and emit one image per tile.
+
+    Cover extraction
+    ----------------
+    ``_cover_from_file()`` reads embedded covers directly from audio tags
+    without relying on sidecar image files.  It tries mutagen first (pure
+    Python, fast, no subprocess) and falls back to an ``ffmpeg`` subprocess
+    for any format mutagen cannot handle.  Supported formats include:
+
+    * **FLAC** — ``mutagen.File().pictures``
+    * **MP3 / WAV / AIFF** — ID3 ``APIC`` frames via ``mutagen``
+    * **M4A / AAC** — ``covr`` atom via ``mutagen``
+    * **OGG Vorbis / OGG Opus** — ``metadata_block_picture`` (base64 + FLAC
+      Picture) via ``mutagen``
+    * **Everything else** — ``ffmpeg -an -vframes 1 -vcodec copy -f image2pipe``
 
     Directory ordering — fresh-first with history
     ---------------------------------------------
-    ``_ordered_dirs()`` does one lightweight walk to collect all directories up
-    to ``_SCAN_DEPTH`` levels deep, then splits them into two buckets:
+    ``_ordered_dirs()`` collects all directories up to ``_SCAN_DEPTH`` levels
+    and splits them into two independently-shuffled buckets:
 
     * **Fresh** — not in ``_ArtHistory`` (never shown, or log was reset).
     * **Used**  — appeared in a previous run's selection.
 
-    Each bucket is independently shuffled; fresh directories come first so
-    every launch explores a different cross-section of a large library before
-    backtracking into recently-seen folders.
-
-    Cover collection — sidecar first, embedded fallback
-    ----------------------------------------------------
-    For each directory ``_collect_covers()`` tries:
-
-    1. **Sidecar image** (cover.jpg / folder.png / …) — fast, no audio I/O.
-       Works for libraries that store artwork only as image files on disk.
-    2. **Embedded cover** (audio tag I/O) — used only when no sidecar is found.
-       Scans all audio files in the directory so a flat folder containing
-       multiple albums can contribute more than one unique cover.
-
-    Both sources are deduplicated by the first 64 bytes of cover data so the
-    same image never fills multiple tiles.
+    Fresh directories come first.  Within each directory the file list is also
+    shuffled, so every launch reads a different track from each folder — giving
+    variety even when multiple albums share a directory.
 
     Pool + selection
     ----------------
-    Scanning continues until ``_pool_cap`` unique covers are found (at least
-    ``tile_count × 5``, minimum 128).  ``random.sample`` picks ``tile_count``
-    from that pool — genuinely different each launch.  After emitting, the
-    source directories of the shown tiles are saved to ``_ArtHistory`` so the
-    next run deprioritises them.
+    ``_collect_covers()`` walks the ordered list, reading one audio file per
+    directory until it finds a cover.  Unique covers (deduplicated by first
+    64 bytes) are kept; duplicates are skipped and the next file tried.
+    Scanning stops when ``_pool_cap`` (≥ ``tile_count × 5``, min 128) unique
+    covers are gathered, or when the library is exhausted.
+
+    ``random.sample(pool, tile_count)`` picks a fresh random subset each
+    launch.  After emitting, the source directories are saved to
+    ``_ArtHistory`` so the next run explores different folders first.
     """
 
     art_found = Signal(int, QtGui.QImage)  # (tile_index, image) — QImage is thread-safe
@@ -443,7 +443,7 @@ class _ArtScanner(QtCore.QThread):
         self._pool_cap = max(tile_count * self._POOL_CAP_MULTIPLIER, 128)
         self.setObjectName("ArtScanner")
 
-    # ── Helpers ───────────────────────────────────────────────────────────
+    # ── Low-level helpers ─────────────────────────────────────────────────
 
     @staticmethod
     def _image_from_bytes(data: bytes) -> QtGui.QImage | None:
@@ -462,12 +462,80 @@ class _ArtScanner(QtCore.QThread):
         random.shuffle(names)
         return names
 
+    @staticmethod
+    def _cover_from_file(path: str) -> bytes | None:
+        """Return the first embedded cover image from *path*, or None.
+
+        Tries mutagen (no subprocess, handles most formats).  Falls back to
+        an ``ffmpeg`` subprocess for anything mutagen cannot decode.
+        """
+        # ── mutagen ───────────────────────────────────────────────────────
+        try:
+            import mutagen
+            audio = mutagen.File(path, easy=False)
+            if audio is not None:
+                # FLAC / OGG Vorbis / OGG Opus — .pictures property
+                for pic in getattr(audio, "pictures", []):
+                    if getattr(pic, "data", None):
+                        return pic.data
+
+                tags = audio.tags
+                if tags is not None:
+                    # ID3 APIC frames — MP3, WAV, AIFF, etc.
+                    if hasattr(tags, "getall"):
+                        for frame in tags.getall("APIC:") or tags.getall("APIC"):
+                            if frame.data:
+                                return frame.data
+
+                    # MP4 / M4A / AAC
+                    covr = tags.get("covr")
+                    if covr:
+                        data = bytes(covr[0])
+                        if data:
+                            return data
+
+                    # OGG metadata_block_picture (base64-encoded FLAC Picture)
+                    mbp = tags.get("metadata_block_picture") or []
+                    if not isinstance(mbp, list):
+                        mbp = [mbp]
+                    if mbp:
+                        import base64
+                        from mutagen.flac import Picture
+                        for item in mbp:
+                            try:
+                                pic = Picture(base64.b64decode(str(item)))
+                                if pic.data:
+                                    return pic.data
+                            except Exception:
+                                pass
+        except Exception:
+            pass
+
+        # ── ffmpeg fallback ───────────────────────────────────────────────
+        try:
+            result = subprocess.run(
+                [
+                    "ffmpeg", "-v", "quiet", "-i", path,
+                    "-an", "-vframes", "1", "-vcodec", "copy",
+                    "-f", "image2pipe", "pipe:1",
+                ],
+                capture_output=True,
+                timeout=8,
+            )
+            if result.stdout:
+                return result.stdout
+        except Exception:
+            pass
+
+        return None
+
     # ── Directory ordering ────────────────────────────────────────────────
 
     def _ordered_dirs(self, history: _ArtHistory) -> list[str]:
-        """All library dirs up to _SCAN_DEPTH, fresh-first (each group shuffled).
+        """All library dirs up to _SCAN_DEPTH, fresh dirs first.
 
-        One lightweight walk — no file content reads.
+        One lightweight walk — no file content reads.  Each bucket is
+        independently shuffled so traversal order differs on every launch.
         """
         fresh: list[str] = []
         used:  list[str] = []
@@ -483,87 +551,38 @@ class _ArtScanner(QtCore.QThread):
 
     # ── Cover collection ──────────────────────────────────────────────────
 
-    @staticmethod
-    def _is_sidecar(name: str) -> bool:
-        stem, ext = os.path.splitext(name.lower())
-        return stem in _ART_NAMES and ext in _ART_EXTS
-
     def _collect_covers(
         self, dirpaths: list[str]
     ) -> list[tuple[str, bytes]]:
-        """Return ``(dirpath, cover_bytes)`` pairs up to ``_pool_cap`` unique covers.
+        """Return ``(dirpath, cover_bytes)`` up to ``_pool_cap`` unique covers.
 
-        For each directory (fresh dirs first, used dirs last) the strategy is:
-
-        1. Sidecar first — look for a recognised image file (cover.jpg,
-           folder.png, …).  Reading image bytes is fast and works for libraries
-           that store artwork only as sidecar files.
-        2. Embedded fallback — if no sidecar is found, scan audio files in the
-           same directory for an embedded cover.  Every audio file is checked
-           so a flat directory containing multiple albums can contribute more
-           than one unique cover.
-
-        Both sources are deduplicated by the first 64 bytes of cover data.
-        Scanning continues through the full ordered list (backtrack semantics:
-        fresh dirs exhausted → used dirs fill the gap) until ``_pool_cap``
-        unique covers are gathered.
+        For each directory, audio files are scanned in shuffled order.  The
+        first file that yields a cover terminates the per-directory scan
+        (whether unique or a duplicate already in the pool).  Unique covers
+        are kept; duplicates are skipped and the next file is tried instead.
+        Scanning continues through the full ordered list — if fresh dirs run
+        dry, used dirs fill any remaining gap (backtrack semantics).
         """
         results:   list[tuple[str, bytes]] = []
         seen_sigs: set[bytes] = set()
 
-        try:
-            from utils.audio_metadata_reader import read_metadata
-            _have_reader = True
-        except ImportError:
-            _have_reader = False
-
-        def _add(dirpath: str, data: bytes) -> bool:
-            """Add cover bytes if unseen; return True when pool is full."""
-            sig = data[:64]
-            if sig not in seen_sigs:
-                seen_sigs.add(sig)
-                results.append((dirpath, data))
-            return len(results) >= self._pool_cap
-
         for dirpath in dirpaths:
             if self.isInterruptionRequested():
                 return results
-
-            names = self._scandir_files(dirpath)
-
-            # ── 1. Sidecar images (no audio I/O) ─────────────────────────
-            found_sidecar = False
-            for name in names:
-                if not self._is_sidecar(name):
-                    continue
-                try:
-                    with open(os.path.join(dirpath, name), "rb") as fh:
-                        data = fh.read()
-                    if data and _add(dirpath, data):
-                        return results
-                    found_sidecar = True
-                    break   # one sidecar per directory
-                except OSError:
-                    pass
-
-            if found_sidecar:
-                continue    # sidecar covered this directory; skip audio scan
-
-            # ── 2. Embedded covers (audio tag I/O) ───────────────────────
-            if not _have_reader:
-                continue
-            for name in names:
+            for name in self._scandir_files(dirpath):
                 if os.path.splitext(name)[1].lower() not in _AUDIO_EXTS:
                     continue
-                try:
-                    _tags, raw_covers, _err, _hint = read_metadata(
-                        os.path.join(dirpath, name),
-                        include_cover=True,
-                    )
-                    if raw_covers and _add(dirpath, raw_covers[0]):
+                data = self._cover_from_file(os.path.join(dirpath, name))
+                if not data:
+                    continue
+                # Found a cover in this directory — record if unique, then move on.
+                sig = data[:64]
+                if sig not in seen_sigs:
+                    seen_sigs.add(sig)
+                    results.append((dirpath, data))
+                    if len(results) >= self._pool_cap:
                         return results
-                except Exception:
-                    pass
+                break   # one cover attempt per directory (unique or duplicate)
 
         return results
 
@@ -588,7 +607,7 @@ class _ArtScanner(QtCore.QThread):
             if img is not None:
                 self.art_found.emit(tile_index, img)
 
-        # Deprioritise the shown directories next run.
+        # Deprioritise the shown directories on the next run.
         history.add_and_save([dirpath for dirpath, _ in selected])
 
 
