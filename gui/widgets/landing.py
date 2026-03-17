@@ -18,6 +18,7 @@ Sequence
 """
 from __future__ import annotations
 
+import json
 import os
 import random
 from pathlib import Path
@@ -44,9 +45,6 @@ _FADE_IN_MS  = 320   # landing window fade-in
 # Exported so alpha_dex_gui.py can match the cross-fade duration exactly.
 FADE_OUT_MS  = 420   # landing window fade-out / main-window fade-in
 
-# ── Album-art sidecar detection ───────────────────────────────────────────────
-_ART_NAMES  = ("cover", "folder", "front", "albumart", "artwork", "album", "thumb")
-_ART_EXTS   = (".jpg", ".jpeg", ".png", ".webp")
 _SCAN_DEPTH = 7   # max folder depth searched for art (root = 0)
 
 # ── Colour pool — diagonal gradient pairs for placeholder tiles ───────────────
@@ -324,51 +322,108 @@ class _CTACard(QtWidgets.QFrame):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# _ArtScanner — background QThread that feeds album art to the mosaic tiles
+# _ArtHistory — persistent "do-not-repeat" log for the mosaic scanner
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Audio extensions scanned for embedded covers (all formats supported by
-# read_metadata, including the dedicated opus reader).
+# Audio extensions understood by read_metadata (including the opus reader).
 _AUDIO_EXTS: frozenset[str] = frozenset(
     {".flac", ".m4a", ".aac", ".mp3", ".wav", ".ogg", ".opus"}
 )
 
+
+class _ArtHistory:
+    """FIFO log of directory paths recently used for the landing mosaic.
+
+    Persisted as a JSON array at ``~/.soundvault_art_history.json``.  Capped
+    at ``MAX_ENTRIES`` paths; when full the oldest entries are evicted so the
+    scanner keeps cycling through fresh parts of the library indefinitely.
+
+    The scanner passes this object to ``_ordered_dirs()`` which puts unseen
+    directories first (shuffled) and recently-seen directories last (also
+    shuffled).  After emitting, the directories that contributed to the on-
+    screen tiles are appended here and saved.
+    """
+
+    MAX_ENTRIES = 10_000
+    _PATH = os.path.expanduser("~/.soundvault_art_history.json")
+
+    def __init__(self) -> None:
+        self._log: list[str] = []   # ordered oldest → newest
+        self._set: set[str] = set() # fast membership test
+        self._load()
+
+    def _load(self) -> None:
+        try:
+            with open(self._PATH, encoding="utf-8") as fh:
+                raw = json.load(fh)
+            if isinstance(raw, list):
+                self._log = [p for p in raw if isinstance(p, str)]
+                self._set = set(self._log)
+        except Exception:
+            pass
+
+    def add_and_save(self, paths: list[str]) -> None:
+        """Append *paths* (deduped), trim to MAX_ENTRIES, and persist."""
+        for p in paths:
+            if p not in self._set:
+                self._log.append(p)
+                self._set.add(p)
+        if len(self._log) > self.MAX_ENTRIES:
+            evicted    = self._log[: len(self._log) - self.MAX_ENTRIES]
+            self._log  = self._log[-self.MAX_ENTRIES :]
+            self._set -= set(evicted)
+        try:
+            with open(self._PATH, "w", encoding="utf-8") as fh:
+                json.dump(self._log, fh, separators=(",", ":"))
+        except Exception:
+            pass
+
+    def __contains__(self, path: str) -> bool:
+        return path in self._set
+
+    def __len__(self) -> int:
+        return len(self._log)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# _ArtScanner — background QThread that feeds album art to the mosaic tiles
+# ─────────────────────────────────────────────────────────────────────────────
+
 class _ArtScanner(QtCore.QThread):
-    """Scan *library_path* for album art and emit one unique image per tile slot.
+    """Scan *library_path* for embedded album covers and emit one per tile slot.
 
-    Scan strategy
-    -------------
-    Both phases use a depth-limited, **randomised** walk so every launch
-    visits a different cross-section of the library — directories are shuffled
-    before descending into them, and files within each directory are shuffled
-    before inspection.  This prevents alphabetically-early, MP3-heavy folders
-    from monopolising the pool on every run.
+    Why embedded-only
+    -----------------
+    Sidecar image files (cover.jpg / folder.png) exist in only a small subset
+    of directories.  Scanning those first caused the same handful of folders to
+    dominate the mosaic on every launch.  Reading embedded covers from audio
+    tags gives every track — regardless of whether its folder has a sidecar —
+    an equal chance of appearing.
 
-    Phase 1 — sidecar images (no audio I/O)
-        One ``cover.jpg`` / ``folder.png`` / … per directory.  Fast; runs
-        unconditionally.  Handles flat libraries (all songs in one folder) as
-        well as deep artist/album trees.
+    Directory ordering — fresh-first with history
+    ---------------------------------------------
+    ``_ordered_dirs()`` does one lightweight walk to collect all directories up
+    to ``_SCAN_DEPTH`` levels deep, then splits them into two buckets:
 
-    Phase 2 — embedded covers (audio tag I/O)
-        Only runs if Phase 1 produced fewer images than needed.  Every audio
-        file in every directory is inspected; the first 64 bytes of each cover
-        are used as a content fingerprint so the same artwork embedded across
-        hundreds of tracks counts only once.  A single directory may contain
-        several albums with distinct artwork — all are collected.
-        Scanning continues until *pool_cap* unique covers are found or the
-        entire library has been walked ("backtrack until enough is found").
+    * **Fresh** — not in ``_ArtHistory`` (never shown, or log was reset).
+    * **Used**  — appeared in a previous run's selection.
 
-    Emit
-        ``random.sample(pool, min(len(pool), tile_count))`` selects a fresh
-        random subset on every launch.  Tiles with no signal keep their
-        gradient placeholder.
+    Each bucket is independently shuffled; fresh directories come first.
+    ``_collect_covers()`` iterates this list so it naturally covers new
+    territory before backtracking into recently-seen directories.
+
+    Pool + selection
+    ----------------
+    Covers are collected until ``_pool_cap`` unique images are found (capped at
+    ``tile_count × 5``, minimum 128).  ``random.sample`` then picks
+    ``tile_count`` images from that pool — genuinely different each launch.
+    After emitting, the source directories of the shown tiles are appended to
+    ``_ArtHistory`` and saved.
     """
 
     art_found = Signal(int, QtGui.QImage)  # (tile_index, image) — QImage is thread-safe
 
-    # Collect up to this many unique covers before sampling.
-    # Larger than tile_count so random.sample has genuine variety.
-    _POOL_CAP_MULTIPLIER = 5
+    _POOL_CAP_MULTIPLIER = 5   # pool = at least this many × tile_count
 
     def __init__(self, library_path: str, tile_count: int) -> None:
         super().__init__()
@@ -377,12 +432,7 @@ class _ArtScanner(QtCore.QThread):
         self._pool_cap = max(tile_count * self._POOL_CAP_MULTIPLIER, 128)
         self.setObjectName("ArtScanner")
 
-    # ── Low-level helpers ─────────────────────────────────────────────────
-
-    @staticmethod
-    def _is_sidecar(name: str) -> bool:
-        stem, ext = os.path.splitext(name.lower())
-        return stem in _ART_NAMES and ext in _ART_EXTS
+    # ── Helpers ───────────────────────────────────────────────────────────
 
     @staticmethod
     def _image_from_bytes(data: bytes) -> QtGui.QImage | None:
@@ -391,120 +441,105 @@ class _ArtScanner(QtCore.QThread):
             return img
         return None
 
-    def _walk(self):
-        """Yield ``(dirpath, files)`` up to ``_SCAN_DEPTH`` levels deep.
+    @staticmethod
+    def _scandir_files(dirpath: str) -> list[str]:
+        """Shuffled list of filenames in *dirpath*; returns [] on OSError."""
+        try:
+            names = [e.name for e in os.scandir(dirpath) if e.is_file(follow_symlinks=False)]
+        except OSError:
+            return []
+        random.shuffle(names)
+        return names
 
-        Directories are **shuffled in-place** before ``os.walk`` descends into
-        them, and the file list is shuffled before being yielded.  This
-        randomises traversal order so no part of the library is systematically
-        favoured across runs.
+    # ── Directory ordering ────────────────────────────────────────────────
+
+    def _ordered_dirs(self, history: _ArtHistory) -> list[str]:
+        """All library dirs up to _SCAN_DEPTH, fresh-first (each group shuffled).
+
+        One lightweight walk — no file content reads.
         """
-        for dirpath, dirs, files in os.walk(self._library):
+        fresh: list[str] = []
+        used:  list[str] = []
+        for dirpath, dirs, _files in os.walk(self._library):
             rel   = os.path.relpath(dirpath, self._library)
             depth = 0 if rel == "." else rel.count(os.sep) + 1
             if depth >= _SCAN_DEPTH:
-                dirs.clear()        # prune — don't recurse past the depth cap
-            else:
-                random.shuffle(dirs)    # randomise which subtree is visited next
-            random.shuffle(files)       # randomise file order within this directory
-            yield dirpath, files
+                dirs.clear()
+            (used if dirpath in history else fresh).append(dirpath)
+        random.shuffle(fresh)
+        random.shuffle(used)
+        return fresh + used
 
-    # ── Phase 1 — sidecar image files ────────────────────────────────────
+    # ── Cover collection ──────────────────────────────────────────────────
 
-    def _scan_sidecars(self) -> list[str]:
-        """Return one sidecar image path per directory (no audio I/O)."""
-        paths: list[str] = []
-        try:
-            for dirpath, files in self._walk():
-                if self.isInterruptionRequested():
-                    return paths
-                for fname in files:
-                    if self._is_sidecar(fname):
-                        paths.append(os.path.join(dirpath, fname))
-                        break   # one sidecar per directory is enough
-        except OSError:
-            pass
-        return paths
+    def _collect_covers(
+        self, dirpaths: list[str]
+    ) -> list[tuple[str, bytes]]:
+        """Return ``(dirpath, cover_bytes)`` pairs up to ``_pool_cap`` unique covers.
 
-    # ── Phase 2 — embedded covers ─────────────────────────────────────────
-
-    def _scan_embedded(self, already_have: int) -> list[bytes]:
-        """Return unique embedded covers until the pool cap is reached.
-
-        Deduplicates by the first 64 bytes of each cover — identical artwork
-        embedded across many tracks is only added once.  Scanning continues
-        across the full library (backtracking through all directories) until
-        ``_pool_cap`` unique covers have been gathered or the walk is exhausted.
+        Iterates *dirpaths* in order (fresh dirs first, used dirs last).
+        Every audio file in each directory is checked; covers are deduplicated
+        by their first 64 bytes so the same artwork embedded across many tracks
+        counts only once.  Scanning continues through the full list until the
+        pool cap is reached — if the fresh bucket runs dry, the used bucket
+        fills any remaining gap (backtrack semantics).
         """
-        covers: list[bytes] = []
+        results:   list[tuple[str, bytes]] = []
         seen_sigs: set[bytes] = set()
 
         try:
             from utils.audio_metadata_reader import read_metadata
         except ImportError:
-            return covers
+            return results
 
-        for dirpath, files in self._walk():
+        for dirpath in dirpaths:
             if self.isInterruptionRequested():
-                return covers
-            for fname in files:
-                if os.path.splitext(fname)[1].lower() not in _AUDIO_EXTS:
+                return results
+            for name in self._scandir_files(dirpath):
+                if os.path.splitext(name)[1].lower() not in _AUDIO_EXTS:
                     continue
                 try:
                     _tags, raw_covers, _err, _hint = read_metadata(
-                        os.path.join(dirpath, fname),
+                        os.path.join(dirpath, name),
                         include_cover=True,
                     )
                     if raw_covers:
                         sig = raw_covers[0][:64]
                         if sig not in seen_sigs:
                             seen_sigs.add(sig)
-                            covers.append(raw_covers[0])
+                            results.append((dirpath, raw_covers[0]))
                 except Exception:
                     pass
-                if already_have + len(covers) >= self._pool_cap:
-                    return covers   # pool full — stop early
-            # After each directory, check again in case the directory
-            # had no audio files but the outer cap was hit concurrently.
-            if already_have + len(covers) >= self._pool_cap:
-                return covers
+                if len(results) >= self._pool_cap:
+                    return results
+            if len(results) >= self._pool_cap:
+                return results
 
-        return covers
+        return results
 
     # ── Orchestration + emit ──────────────────────────────────────────────
 
     def run(self) -> None:  # noqa: N802
-        # Phase 1: fast sidecar scan (no audio I/O).
-        art_paths = self._scan_sidecars()
+        history  = _ArtHistory()
+        dirpaths = self._ordered_dirs(history)
         if self.isInterruptionRequested():
             return
 
-        # Phase 2: embedded covers, only if Phase 1 left us short.
-        embedded: list[bytes] = []
-        if len(art_paths) < self._n:
-            embedded = self._scan_embedded(already_have=len(art_paths))
-        if self.isInterruptionRequested():
+        pool = self._collect_covers(dirpaths)
+        if self.isInterruptionRequested() or not pool:
             return
 
-        # Build pool and randomly sample tile_count images.
-        # str  → sidecar file path  (load via QImage(path))
-        # bytes → embedded cover    (load via loadFromData)
-        pool: list = art_paths + embedded
-        if not pool:
-            return
+        selected = random.sample(pool, min(len(pool), self._n))
 
-        for tile_index, item in enumerate(random.sample(pool, min(len(pool), self._n))):
+        for tile_index, (_, cover) in enumerate(selected):
             if self.isInterruptionRequested():
                 return
-            if isinstance(item, str):
-                img: QtGui.QImage | None = QtGui.QImage(item)
-                if img.isNull():
-                    continue
-            else:
-                img = self._image_from_bytes(item)
-                if img is None:
-                    continue
-            self.art_found.emit(tile_index, img)
+            img = self._image_from_bytes(cover)
+            if img is not None:
+                self.art_found.emit(tile_index, img)
+
+        # Deprioritise the shown directories next run.
+        history.add_and_save([dirpath for dirpath, _ in selected])
 
 
 # ─────────────────────────────────────────────────────────────────────────────
