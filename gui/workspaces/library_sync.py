@@ -1,6 +1,8 @@
 """Library Sync workspace — compare two libraries and transfer files."""
 from __future__ import annotations
 
+import os
+import threading
 import webbrowser
 from pathlib import Path
 
@@ -8,22 +10,23 @@ from gui.compat import QtCore, QtGui, QtWidgets, Signal, Slot
 from gui.workspaces.base import WorkspaceBase
 
 
-# ── Worker ────────────────────────────────────────────────────────────────────
+# ── Workers ───────────────────────────────────────────────────────────────────
 
 class SyncScanWorker(QtCore.QThread):
+    """Quick comparison: fingerprint both sides and classify incoming files."""
     progress = Signal(int, str)    # percent, side ("existing" | "incoming")
     log_line = Signal(str)
-    finished = Signal(bool, str, object)  # success, message, result
+    finished = Signal(bool, str, object)  # success, message, result dict
 
     def __init__(self, existing: str, incoming: str, thresholds: dict) -> None:
         super().__init__()
         self.existing = existing
         self.incoming = incoming
         self.thresholds = thresholds
-        self._cancelled = False
+        self._cancel_event = threading.Event()
 
     def cancel(self) -> None:
-        self._cancelled = True
+        self._cancel_event.set()
 
     def run(self) -> None:
         try:
@@ -33,22 +36,127 @@ class SyncScanWorker(QtCore.QThread):
             return
         try:
             def _log(msg: str) -> None:
-                if not self._cancelled:
+                if not self._cancel_event.is_set():
                     self.log_line.emit(msg)
+
+            docs = Path(self.existing) / "Docs"
+            docs.mkdir(parents=True, exist_ok=True)
+            db_path = str(docs / ".library_sync_fp.db")
 
             result = library_sync.compare_libraries(
                 self.existing,
                 self.incoming,
+                db_path,
                 thresholds=self.thresholds,
                 log_callback=_log,
+                cancel_event=self._cancel_event,
             )
-            if self._cancelled:
+            if self._cancel_event.is_set():
                 self.finished.emit(False, "Cancelled.", None)
             else:
-                n = len(result) if hasattr(result, "__len__") else 0
-                self.finished.emit(True, f"Scan complete — {n} match records.", result)
+                counts = {k: len(v) for k, v in result.items() if isinstance(v, list)} if isinstance(result, dict) else {}
+                summary = ", ".join(f"{v} {k}" for k, v in counts.items()) if counts else str(result)
+                self.finished.emit(True, f"Scan complete — {summary}.", result)
         except Exception as exc:  # noqa: BLE001
             self.finished.emit(False, str(exc), None)
+
+
+class SyncBuildWorker(QtCore.QThread):
+    """Build a Library Sync plan and write the preview HTML."""
+    log_line = Signal(str)
+    progress = Signal(int)
+    finished = Signal(bool, str)
+
+    def __init__(self, library_root: str, incoming_folder: str, transfer_mode: str) -> None:
+        super().__init__()
+        self.library_root = library_root
+        self.incoming_folder = incoming_folder
+        self.transfer_mode = transfer_mode
+        self._cancel_event = threading.Event()
+        # Populated during run()
+        self.plan = None
+        self.preview_html_path: str = ""
+
+    def cancel(self) -> None:
+        self._cancel_event.set()
+
+    def run(self) -> None:
+        try:
+            import library_sync
+            from library_sync import IndexCancelled
+        except ImportError as exc:
+            self.finished.emit(False, f"Import error: {exc}")
+            return
+        try:
+            docs = Path(self.library_root) / "Docs"
+            docs.mkdir(parents=True, exist_ok=True)
+            output_html = str(docs / "LibrarySyncPreview.html")
+
+            def _log(msg: str) -> None:
+                self.log_line.emit(msg)
+
+            def _progress(current: int, total: int, path: str, phase: str) -> None:
+                if total:
+                    self.progress.emit(int(current / total * 100))
+
+            plan = library_sync.build_library_sync_preview(
+                self.library_root,
+                self.incoming_folder,
+                output_html,
+                log_callback=_log,
+                progress_callback=_progress,
+                cancel_event=self._cancel_event,
+                transfer_mode=self.transfer_mode,
+            )
+            self.plan = plan
+            self.preview_html_path = output_html
+            moves = len(plan.moves) if hasattr(plan, "moves") else "?"
+            self.finished.emit(True, f"Plan built — {moves} file operation(s). Preview written.")
+        except Exception as exc:  # noqa: BLE001
+            cancelled_names = ("IndexCancelled", "Cancelled")
+            if type(exc).__name__ in cancelled_names:
+                self.finished.emit(False, "Cancelled.")
+            else:
+                self.finished.emit(False, str(exc))
+
+
+class SyncExecuteWorker(QtCore.QThread):
+    """Execute a Library Sync plan."""
+    log_line = Signal(str)
+    finished = Signal(bool, str, str)   # success, message, report_path
+
+    def __init__(self, plan, create_playlist: bool) -> None:
+        super().__init__()
+        self.plan = plan
+        self.create_playlist = create_playlist
+        self._cancel_event = threading.Event()
+
+    def cancel(self) -> None:
+        self._cancel_event.set()
+
+    def run(self) -> None:
+        try:
+            import library_sync
+        except ImportError as exc:
+            self.finished.emit(False, f"Import error: {exc}", "")
+            return
+        try:
+            def _log(msg: str) -> None:
+                self.log_line.emit(msg)
+
+            summary = library_sync.execute_library_sync_plan(
+                self.plan,
+                log_callback=_log,
+                cancel_event=self._cancel_event,
+                create_playlist=self.create_playlist,
+            )
+            report_path = str(summary.get("executed_report_path") or "")
+            moved = summary.get("moved", 0)
+            copied = summary.get("copied", 0)
+            msg = f"Execution complete — {moved} moved, {copied} copied."
+            self.finished.emit(True, msg, report_path)
+        except Exception as exc:  # noqa: BLE001
+            self.finished.emit(False, str(exc), "")
 
 
 # ── Workspace ─────────────────────────────────────────────────────────────────
@@ -60,6 +168,8 @@ class LibrarySyncWorkspace(WorkspaceBase):
         super().__init__(library_path, parent)
         self._scan_result = None
         self._worker: SyncScanWorker | None = None
+        self._build_worker: SyncBuildWorker | None = None
+        self._exec_worker: SyncExecuteWorker | None = None
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -386,14 +496,16 @@ class LibrarySyncWorkspace(WorkspaceBase):
 
     @Slot()
     def _on_cancel(self) -> None:
-        if self._worker and self._worker.isRunning():
-            self._worker.cancel()
-            self._cancel_btn.setEnabled(False)
-            self._state_lbl.setText("State: Cancelling…")
+        for w in (self._worker, self._build_worker, self._exec_worker):
+            if w and w.isRunning():
+                w.cancel()
+        self._cancel_btn.setEnabled(False)
+        self._state_lbl.setText("State: Cancelling…")
 
     @Slot()
     def _on_recompute(self) -> None:
-        self._log("Recompute not yet wired — re-scan to apply new thresholds.", "warn")
+        """Re-run the scan with current threshold settings."""
+        self._on_scan()
 
     @Slot()
     def _on_save_session(self) -> None:
@@ -410,27 +522,62 @@ class LibrarySyncWorkspace(WorkspaceBase):
 
     @Slot()
     def _on_build_plan(self) -> None:
-        self._plan_status_lbl.setText("Building plan…")
-        self._log("Build plan is not yet fully wired to backend.", "warn")
-        self._preview_plan_btn.setEnabled(True)
+        library_root = self._existing_entry.text().strip()
+        incoming = self._incoming_entry.text().strip()
+        if not library_root or not incoming:
+            QtWidgets.QMessageBox.warning(self, "Missing Paths", "Set both library paths before building a plan.")
+            return
+
+        transfer_mode = "copy" if self._transfer_toggle.isChecked() else "move"
+        self._build_plan_btn.setEnabled(False)
+        self._preview_plan_btn.setEnabled(False)
+        self._execute_plan_btn.setEnabled(False)
+        self._cancel_btn.setEnabled(True)
+        self._plan_status_lbl.setText("Building plan + preview…")
+        self._plan_bar.setValue(0)
+        self._log("Building Library Sync plan and preview…", "info")
+        self.status_changed.emit("Building plan…", "#f59e0b")
+
+        self._build_worker = SyncBuildWorker(library_root, incoming, transfer_mode)
+        self._build_worker.log_line.connect(self._on_log_line)
+        self._build_worker.progress.connect(self._plan_bar.setValue)
+        self._build_worker.finished.connect(self._on_build_finished)
+        self._build_worker.start()
 
     @Slot()
     def _on_preview_plan(self) -> None:
-        html = Path(self._existing_entry.text()) / "Docs" / "sync_preview.html"
+        html = Path(self._existing_entry.text()) / "Docs" / "LibrarySyncPreview.html"
         if html.exists():
             webbrowser.open(f"file://{html}")
         else:
-            self._log("No preview HTML found — run Build Plan first.", "warn")
+            self._log("No preview HTML found — click Build Plan first.", "warn")
 
     @Slot()
     def _on_execute_plan(self) -> None:
+        if not self._build_worker or self._build_worker.plan is None:
+            QtWidgets.QMessageBox.warning(self, "No Plan", "Build a plan first.")
+            return
+
         reply = QtWidgets.QMessageBox.question(
             self, "Confirm Execute",
-            "This will transfer files to the existing library.\n\nProceed?",
+            "This will transfer files to the existing library.\n\nThis cannot be undone.",
             QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
         )
-        if reply == QtWidgets.QMessageBox.StandardButton.Yes:
-            self._log("Execute plan not yet fully wired to backend.", "warn")
+        if reply != QtWidgets.QMessageBox.StandardButton.Yes:
+            return
+
+        create_playlist = self._output_playlist_cb.isChecked()
+        self._execute_plan_btn.setEnabled(False)
+        self._build_plan_btn.setEnabled(False)
+        self._cancel_btn.setEnabled(True)
+        self._plan_status_lbl.setText("Executing…")
+        self._plan_bar.setValue(0)
+        self.status_changed.emit("Executing…", "#f59e0b")
+
+        self._exec_worker = SyncExecuteWorker(self._build_worker.plan, create_playlist)
+        self._exec_worker.log_line.connect(self._on_log_line)
+        self._exec_worker.finished.connect(self._on_execute_finished)
+        self._exec_worker.start()
 
     @Slot()
     def _on_export_log(self) -> None:
@@ -480,19 +627,72 @@ class LibrarySyncWorkspace(WorkspaceBase):
 
         self._worker = None
 
+    @Slot(bool, str)
+    def _on_build_finished(self, success: bool, message: str) -> None:
+        self._cancel_btn.setEnabled(False)
+        self._build_plan_btn.setEnabled(True)
+        self._plan_status_lbl.setText(message)
+
+        if success:
+            self._log(message, "ok")
+            self.status_changed.emit("Plan ready", "#22c55e")
+            self._plan_bar.setValue(100)
+            self._preview_plan_btn.setEnabled(True)
+            self._execute_plan_btn.setEnabled(True)
+            # Auto-open preview
+            if self._build_worker and self._build_worker.preview_html_path:
+                html = Path(self._build_worker.preview_html_path)
+                if html.exists():
+                    webbrowser.open(f"file://{html}")
+        else:
+            self._log(message, "error" if message != "Cancelled." else "warn")
+            self.status_changed.emit("Error", "#ef4444")
+
+    @Slot(bool, str, str)
+    def _on_execute_finished(self, success: bool, message: str, report_path: str) -> None:
+        self._cancel_btn.setEnabled(False)
+        self._build_plan_btn.setEnabled(True)
+        self._execute_plan_btn.setEnabled(True)
+        self._plan_status_lbl.setText(message)
+
+        if success:
+            self._log(message, "ok")
+            self.status_changed.emit("Execution complete", "#22c55e")
+            self._plan_bar.setValue(100)
+            if report_path and Path(report_path).exists():
+                webbrowser.open(f"file://{report_path}")
+        else:
+            self._log(message, "error")
+            self.status_changed.emit("Error", "#ef4444")
+
+        self._exec_worker = None
+
     # ── Helpers ───────────────────────────────────────────────────────────
 
     def _populate_results(self, result) -> None:  # noqa: ANN001
-        if result is None:
+        """Populate incoming tracks table from compare_libraries result dict."""
+        if not isinstance(result, dict):
             return
-        items = result if hasattr(result, "__iter__") else []
-        for item in items:
-            if hasattr(item, "incoming_path"):
-                row = QtWidgets.QTreeWidgetItem([
-                    Path(item.incoming_path).name,
-                    str(getattr(item, "status", "?")),
-                    f"{getattr(item, 'distance', '?'):.3f}" if hasattr(item, "distance") else "?",
-                ])
+        # compare_libraries returns keys like "new", "upgrade_candidates", "collisions", "existing_only"
+        status_map = {
+            "new": "New",
+            "upgrade_candidates": "Upgrade",
+            "collisions": "Collision",
+            "existing_only": "Existing only",
+            "matched": "Matched",
+        }
+        self._incoming_table.clear()
+        self._existing_table.clear()
+        for key, label in status_map.items():
+            entries = result.get(key, [])
+            if not isinstance(entries, list):
+                continue
+            for entry in entries:
+                path = str(entry) if isinstance(entry, str) else str(getattr(entry, "incoming_path", entry))
+                dist = getattr(entry, "distance", None)
+                dist_str = f"{dist:.3f}" if dist is not None else "—"
+                row = QtWidgets.QTreeWidgetItem([Path(path).name, label, dist_str])
+                row.setToolTip(0, path)
                 self._incoming_table.addTopLevelItem(row)
 
     def _browse_folder(self, entry: QtWidgets.QLineEdit, title: str) -> None:

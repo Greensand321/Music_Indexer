@@ -1,8 +1,12 @@
 """Clustered Playlists workspace — K-Means / HDBSCAN clustering."""
 from __future__ import annotations
 
+import os
+
 from gui.compat import QtCore, QtGui, QtWidgets, Signal, Slot
 from gui.workspaces.base import WorkspaceBase
+
+_AUDIO_EXTS = {".mp3", ".flac", ".m4a", ".aac", ".ogg", ".wav", ".opus"}
 
 
 class ClusterWorker(QtCore.QThread):
@@ -24,7 +28,7 @@ class ClusterWorker(QtCore.QThread):
 
     def run(self) -> None:
         try:
-            import clustered_playlists
+            from clustered_playlists import generate_clustered_playlists
         except ImportError as exc:
             self.finished.emit(False, f"Import error: {exc}")
             return
@@ -33,12 +37,24 @@ class ClusterWorker(QtCore.QThread):
                 if not self._cancelled:
                     self.log_line.emit(msg)
 
-            clustered_playlists.run(
+            # Collect audio files from library
+            tracks: list[str] = []
+            for dirpath, _, files in os.walk(self.library_path):
+                for f in files:
+                    if os.path.splitext(f)[1].lower() in _AUDIO_EXTS:
+                        tracks.append(os.path.join(dirpath, f))
+            _log(f"Found {len(tracks)} tracks — extracting features…")
+
+            if self.method == "kmeans":
+                params = {"n_clusters": self.n_clusters}
+            else:
+                params = {"min_cluster_size": self.min_cluster_size}
+
+            generate_clustered_playlists(
+                tracks,
                 self.library_path,
                 method=self.method,
-                n_clusters=self.n_clusters,
-                min_cluster_size=self.min_cluster_size,
-                output_dir=self.output_dir,
+                params=params,
                 log_callback=_log,
             )
             if not self._cancelled:
