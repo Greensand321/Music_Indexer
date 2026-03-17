@@ -229,6 +229,17 @@ class AlphaDEXWindow(QtWidgets.QMainWindow):
         for ws in self._workspaces.values():
             ws.refresh_shadows()
 
+    # ── Public API ────────────────────────────────────────────────────────
+
+    def set_library(self, path: str) -> None:
+        """Pre-load a library path (called from the landing page before the
+        window is shown).  Updates the top bar label and fires the full
+        library-changed chain (workspace updates, stats, persistence)."""
+        if not path:
+            return
+        self._top_bar.set_library(path)
+        self._on_library_changed(path)
+
     # ── Helpers ───────────────────────────────────────────────────────────
 
     def _load_persisted_library(self) -> None:
