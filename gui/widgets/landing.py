@@ -50,10 +50,10 @@ _MIN_SCALE  = 0.62     # tile scale at the back of the circle (depth = 0)
 _MAX_SCALE  = 1.00     # tile scale at the front             (depth = 1)
 _MIN_ALPHA  = 0.38     # tile opacity at the back
 
-# Rotation
-_ROT_SPEED   = 0.0038   # radians / timer-tick (≈ 60 fps → ~13°/s, lap ~28 s)
-_ROT_RAMP    = 95       # ticks to ease rotation from 0 → full speed (~1.5 s)
-_DEPTH_RAMP  = 160      # ticks to ease depth from 1.0 → true value   (~2.5 s)
+# Rotation  (timer runs at 8 ms ≈ 120 fps for smooth sub-pixel movement)
+_ROT_SPEED   = 0.0019   # radians / tick  → same ~13°/s as before at 120 fps
+_ROT_RAMP    = 150      # ticks to ease rotation 0 → full speed  (~1.2 s)
+_DEPTH_RAMP  = 250      # ticks to ease depth 1.0 → true value   (~2.0 s)
                         # Longer than _ROT_RAMP so tiles finish morphing
                         # gently after the ring is already spinning.
 
@@ -583,7 +583,8 @@ class MosaicLanding(QtWidgets.QWidget):
         """Begin the continuous ellipse rotation after fly-in completes."""
         self._tick_count = 0
         timer = QtCore.QTimer(self)
-        timer.setInterval(16)          # ~60 fps
+        timer.setInterval(8)           # ~120 fps
+        timer.setTimerType(QtCore.Qt.TimerType.PreciseTimer)  # bypass OS rounding
         timer.timeout.connect(self._on_tick)
         self._rot_timer = timer
         timer.start()
