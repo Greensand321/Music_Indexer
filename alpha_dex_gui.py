@@ -8,6 +8,14 @@ using the Option A Navigator + Workspace layout.
 
 The original Tkinter app remains available at:
     python main_gui.py
+
+Start-up sequence
+-----------------
+1. ``SplashScreen`` — branded loading bar (1 500 ms fill + 450 ms fade-out).
+2. ``MosaicLanding`` — full-window animated mosaic of album-art tiles with a
+   frosted-glass CTA card.  The user selects (or confirms) their music library
+   here.  Tiles scatter and the landing cross-fades into the main window.
+3. ``AlphaDEXWindow`` — main application interface.
 """
 from __future__ import annotations
 
@@ -43,36 +51,85 @@ def main() -> int:
     from gui.icons import make_app_icon
     app.setWindowIcon(make_app_icon())
 
-    # Load the persisted theme now so the splash uses the correct palette.
-    # AlphaDEXWindow will call load_persisted() again, which is harmless.
+    # Load the persisted theme so the splash and landing use the correct palette.
+    # AlphaDEXWindow calls load_persisted() again — harmless.
     from gui.themes.manager import get_manager
     get_manager().load_persisted()
 
-    # Show themed splash immediately, build main window in background.
+    # ── Splash ────────────────────────────────────────────────────────────────
     from gui.widgets.splash import SplashScreen, _FADE_MS
     splash = SplashScreen()
     splash.show()
     app.processEvents()
 
+    # ── Main window (built now, shown only after the landing is done) ─────────
     from gui.main_window import AlphaDEXWindow
     window = AlphaDEXWindow()
 
-    # Cross-fade: when the splash begins fading out, simultaneously fade the
-    # main window *in* over the same duration so both transitions overlap.
-    def _start_cross_fade() -> None:
+    # Compute a centred geometry shared by the landing and the main window so
+    # the cross-fade from landing → main is perfectly seamless (same rect).
+    screen = app.primaryScreen()
+    sg = screen.availableGeometry() if screen else QtCore.QRect(0, 0, 1920, 1080)
+    lw, lh = 1300, 860
+    lx = sg.left() + (sg.width()  - lw) // 2
+    ly = sg.top()  + (sg.height() - lh) // 2
+    shared_geo = QtCore.QRect(lx, ly, lw, lh)
+    window.setGeometry(shared_geo)
+
+    # ── Load saved library path for the landing's "Continue" button ───────────
+    saved_lib = ""
+    try:
+        from config import load_config
+        saved_lib = load_config().get("library_root", "")
+    except Exception:
+        pass
+
+    # ── Landing page ──────────────────────────────────────────────────────────
+    from gui.widgets.landing import MosaicLanding, FADE_OUT_MS
+    landing = MosaicLanding(shared_geo, saved_lib)
+
+    # ── Cross-fade: splash → landing ──────────────────────────────────────────
+    def _splash_to_landing() -> None:
+        """Splash has begun its own fade-out; simultaneously fade the landing in.
+        Once the landing reaches full opacity the tiles fly in automatically."""
+        landing.setWindowOpacity(0.0)
+        landing.show()
+
+        fade = QtCore.QVariantAnimation(landing)
+        fade.setStartValue(0.0)
+        fade.setEndValue(1.0)
+        fade.setDuration(_FADE_MS)              # match splash fade duration
+        fade.setEasingCurve(QtCore.QEasingCurve.Type.OutCubic)
+        fade.valueChanged.connect(lambda v: landing.setWindowOpacity(float(v)))
+        fade.finished.connect(landing._fly_in)
+        # Keep a reference so the animation is not GC-collected
+        _splash_to_landing._anim = fade         # type: ignore[attr-defined]
+        fade.start()
+
+    splash.reveal_ready.connect(_splash_to_landing)
+
+    # ── Cross-fade: landing → main window ─────────────────────────────────────
+    def _landing_to_main(path: str) -> None:
+        """Called when ``library_selected`` fires at the *start* of the landing's
+        fade-out.  Fade the main window in over the same duration so both
+        windows cross-dissolve simultaneously."""
+        if path:
+            window.set_library(path)
+
         window.setWindowOpacity(0.0)
         window.show()
-        fade_in = QtCore.QVariantAnimation(window)   # parented → won't be GC'd
-        fade_in.setStartValue(0.0)
-        fade_in.setEndValue(1.0)
-        fade_in.setDuration(_FADE_MS)
-        fade_in.setEasingCurve(QtCore.QEasingCurve.Type.OutCubic)
-        fade_in.valueChanged.connect(
-            lambda v: window.setWindowOpacity(float(v))
-        )
-        fade_in.start()
 
-    splash.reveal_ready.connect(_start_cross_fade)
+        fade = QtCore.QVariantAnimation(window)
+        fade.setStartValue(0.0)
+        fade.setEndValue(1.0)
+        fade.setDuration(FADE_OUT_MS)           # match landing fade-out
+        fade.setEasingCurve(QtCore.QEasingCurve.Type.OutCubic)
+        fade.valueChanged.connect(lambda v: window.setWindowOpacity(float(v)))
+        # Keep a reference
+        _landing_to_main._anim = fade           # type: ignore[attr-defined]
+        fade.start()
+
+    landing.library_selected.connect(_landing_to_main)
 
     return app.exec()
 
