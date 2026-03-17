@@ -327,20 +327,17 @@ class _CTACard(QtWidgets.QFrame):
 # ─────────────────────────────────────────────────────────────────────────────
 
 class _ArtScanner(QtCore.QThread):
-    """Scan *library_path* for album art and emit one QPixmap per tile slot.
+    """Scan *library_path* for album art and emit one unique image per tile slot.
 
     Strategy
     --------
-    1. Walk up to two directory levels (artist / album) and collect sidecar
-       image files whose stem matches ``_ART_NAMES`` (fast, no file I/O for
-       audio content).
-    2. If fewer images are found than tiles needed, fall back to reading
-       embedded cover art from audio files via
-       ``utils.audio_metadata_reader.read_metadata``.
-    3. Shuffle the collected paths so the mosaic looks varied on each run,
-       then emit ``art_found(tile_index, pixmap)`` for every tile slot.
-       Tiles cycle through the found images when there are fewer images
-       than tiles.
+    1. Walk up to two directory levels (artist / album) collecting one sidecar
+       image per album folder (fast — no audio file I/O).
+    2. If fewer unique images are found than tiles needed, fall back to
+       extracting one embedded cover per directory from audio files.
+    3. Randomly sample up to *tile_count* images from the combined pool so
+       every launch shows a different selection.  Tiles beyond the pool size
+       keep their gradient placeholder; no image is ever repeated.
     """
 
     art_found = Signal(int, QtGui.QImage)  # (tile_index, image) — QImage is thread-safe
@@ -370,10 +367,9 @@ class _ArtScanner(QtCore.QThread):
     def run(self) -> None:  # noqa: N802
         art_paths: list[str] = []
 
-        # Phase 1 — sidecar image files (very fast)
+        # Phase 1 — one sidecar image per album folder (fast, no audio I/O)
         try:
-            root = self._library
-            with os.scandir(root) as lvl1:
+            with os.scandir(self._library) as lvl1:
                 for artist_entry in lvl1:
                     if self.isInterruptionRequested():
                         return
@@ -394,6 +390,7 @@ class _ArtScanner(QtCore.QThread):
                                                 and self._is_sidecar(f.name)
                                             ):
                                                 art_paths.append(f.path)
+                                                break  # one cover per album folder
                                 except OSError:
                                     pass
                     except OSError:
@@ -401,21 +398,16 @@ class _ArtScanner(QtCore.QThread):
         except OSError:
             return
 
-        random.shuffle(art_paths)
-
-        # Phase 2 — embedded tags fallback (only if we need more art)
+        # Phase 2 — embedded tags fallback, one cover per directory
         embedded_bytes: list[bytes] = []
         if len(art_paths) < self._n:
             audio_exts = {".flac", ".m4a", ".aac", ".mp3", ".wav", ".ogg", ".opus"}
             try:
                 from utils.audio_metadata_reader import read_metadata
-                root = self._library
-                for dirpath, _dirs, files in os.walk(root):
+                for dirpath, _dirs, files in os.walk(self._library):
                     if self.isInterruptionRequested():
                         return
                     for fname in files:
-                        if self.isInterruptionRequested():
-                            return
                         ext = os.path.splitext(fname)[1].lower()
                         if ext not in audio_exts:
                             continue
@@ -426,8 +418,7 @@ class _ArtScanner(QtCore.QThread):
                             )
                             if covers:
                                 embedded_bytes.append(covers[0])
-                                if len(art_paths) + len(embedded_bytes) >= self._n:
-                                    break
+                                break  # one cover per directory; move to next
                         except Exception:
                             pass
                     if len(art_paths) + len(embedded_bytes) >= self._n:
@@ -435,36 +426,25 @@ class _ArtScanner(QtCore.QThread):
             except ImportError:
                 pass
 
-            random.shuffle(embedded_bytes)
-
-        if not art_paths and not embedded_bytes:
+        # Randomly sample up to tile_count unique images from the combined pool.
+        # str items are sidecar paths; bytes items are embedded covers.
+        # Tiles that receive no signal keep their gradient placeholder.
+        pool: list = art_paths + embedded_bytes
+        if not pool:
             return
 
-        # Emit one QImage per tile slot, cycling through available art.
-        # QImage (unlike QPixmap) is safe to create in a non-GUI thread.
-        tile_index = 0
-        total_path = len(art_paths)
-        total_emb  = len(embedded_bytes)
-
-        for i in range(self._n):
+        for tile_index, item in enumerate(random.sample(pool, min(len(pool), self._n))):
             if self.isInterruptionRequested():
                 return
-
-            img: QtGui.QImage | None = None
-
-            # Try sidecar path first (cycling)
-            if total_path > 0:
-                candidate = QtGui.QImage(art_paths[i % total_path])
-                if not candidate.isNull():
-                    img = candidate
-
-            # Fall back to embedded bytes (cycling)
-            if img is None and total_emb > 0:
-                img = self._image_from_bytes(embedded_bytes[i % total_emb])
-
-            if img is not None and not img.isNull():
-                self.art_found.emit(tile_index, img)
-                tile_index += 1
+            if isinstance(item, str):
+                img: QtGui.QImage | None = QtGui.QImage(item)
+                if img.isNull():
+                    continue
+            else:
+                img = self._image_from_bytes(item)
+                if img is None:
+                    continue
+            self.art_found.emit(tile_index, img)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
