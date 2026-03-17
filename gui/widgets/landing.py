@@ -642,11 +642,13 @@ class MosaicLanding(QtWidgets.QWidget):
     # ── User action handlers ───────────────────────────────────────────────
 
     def _on_open_clicked(self) -> None:
+        start = self._saved or str(Path.home())
         path = QtWidgets.QFileDialog.getExistingDirectory(
             self,
             "Select Music Library Folder",
-            str(Path.home()),
-            QtWidgets.QFileDialog.Option.ShowDirsOnly,
+            start,
+            QtWidgets.QFileDialog.Option.ShowDirsOnly
+            | QtWidgets.QFileDialog.Option.DontUseNativeDialog,
         )
         if path:
             self._accept(path)

@@ -172,6 +172,7 @@ class AlphaDEXWindow(QtWidgets.QMainWindow):
     @Slot(str)
     def _on_library_changed(self, path: str) -> None:
         self._library_path = path
+        self._top_bar.set_library(path)
         for ws in self._workspaces.values():
             ws.set_library_path(path)
         self._on_log_message(f"Library set to: {path}", "ok")
