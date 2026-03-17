@@ -45,8 +45,9 @@ _FADE_IN_MS  = 320   # landing window fade-in
 FADE_OUT_MS  = 420   # landing window fade-out / main-window fade-in
 
 # ── Album-art sidecar detection ───────────────────────────────────────────────
-_ART_NAMES = ("cover", "folder", "front", "albumart", "artwork", "album", "thumb")
-_ART_EXTS  = (".jpg", ".jpeg", ".png", ".webp")
+_ART_NAMES  = ("cover", "folder", "front", "albumart", "artwork", "album", "thumb")
+_ART_EXTS   = (".jpg", ".jpeg", ".png", ".webp")
+_SCAN_DEPTH = 7   # max folder depth searched for art (root = 0)
 
 # ── Colour pool — diagonal gradient pairs for placeholder tiles ───────────────
 _GRADS: list[tuple[str, str]] = [
@@ -331,8 +332,10 @@ class _ArtScanner(QtCore.QThread):
 
     Strategy
     --------
-    1. Walk up to two directory levels (artist / album) collecting one sidecar
-       image per album folder (fast — no audio file I/O).
+    1. Walk up to ``_SCAN_DEPTH`` directory levels collecting one sidecar
+       image per folder (fast — no audio file I/O).  Works with flat libraries
+       (all songs in one folder), standard artist/album trees, and anything in
+       between.
     2. If fewer unique images are found than tiles needed, fall back to
        extracting one embedded cover per directory from audio files.
     3. Randomly sample up to *tile_count* images from the combined pool so
@@ -364,37 +367,29 @@ class _ArtScanner(QtCore.QThread):
 
     # ── Main scan loop ────────────────────────────────────────────────────
 
+    @staticmethod
+    def _walk_depth(root: str, max_depth: int):
+        """os.walk limited to *max_depth* levels below *root* (root = depth 0)."""
+        for dirpath, dirs, files in os.walk(root):
+            rel   = os.path.relpath(dirpath, root)
+            depth = 0 if rel == "." else rel.count(os.sep) + 1
+            if depth >= max_depth:
+                dirs.clear()  # don't recurse any deeper
+            yield dirpath, files
+
     def run(self) -> None:  # noqa: N802
         art_paths: list[str] = []
 
-        # Phase 1 — one sidecar image per album folder (fast, no audio I/O)
+        # Phase 1 — one sidecar image per folder (fast, no audio I/O).
+        # Works for flat libraries (root/songs/) as well as deep trees.
         try:
-            with os.scandir(self._library) as lvl1:
-                for artist_entry in lvl1:
-                    if self.isInterruptionRequested():
-                        return
-                    if not artist_entry.is_dir(follow_symlinks=False):
-                        continue
-                    try:
-                        with os.scandir(artist_entry.path) as lvl2:
-                            for album_entry in lvl2:
-                                if self.isInterruptionRequested():
-                                    return
-                                if not album_entry.is_dir(follow_symlinks=False):
-                                    continue
-                                try:
-                                    with os.scandir(album_entry.path) as lvl3:
-                                        for f in lvl3:
-                                            if (
-                                                f.is_file(follow_symlinks=False)
-                                                and self._is_sidecar(f.name)
-                                            ):
-                                                art_paths.append(f.path)
-                                                break  # one cover per album folder
-                                except OSError:
-                                    pass
-                    except OSError:
-                        pass
+            for dirpath, files in self._walk_depth(self._library, _SCAN_DEPTH):
+                if self.isInterruptionRequested():
+                    return
+                for fname in files:
+                    if self._is_sidecar(fname):
+                        art_paths.append(os.path.join(dirpath, fname))
+                        break  # one sidecar per directory
         except OSError:
             return
 
@@ -404,7 +399,7 @@ class _ArtScanner(QtCore.QThread):
             audio_exts = {".flac", ".m4a", ".aac", ".mp3", ".wav", ".ogg", ".opus"}
             try:
                 from utils.audio_metadata_reader import read_metadata
-                for dirpath, _dirs, files in os.walk(self._library):
+                for dirpath, files in self._walk_depth(self._library, _SCAN_DEPTH):
                     if self.isInterruptionRequested():
                         return
                     for fname in files:
