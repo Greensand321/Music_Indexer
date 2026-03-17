@@ -12,15 +12,22 @@ Depth / coverflow effect
 Each tile's size and opacity are driven by its sin(angle) value:
   • sin ≈ +1  (bottom of ellipse, "front") → full size & opacity
   • sin ≈ −1  (top of ellipse, "back")     → 62 % size, 38 % opacity
-Tiles are re-stacked every tick so front tiles always paint on top.
+
+Tiles are plain Python objects drawn directly by MosaicLanding.paintEvent
+in back-to-front order each frame.  There are no per-tile child QWidgets,
+no resize(), no move(), no raise_() — only one QPainter pass per tick.
+
+QVariantAnimation drives fly-in and scatter by writing each tile's _pos
+attribute via a valueChanged callback.  A single 120 fps QTimer drives
+repaints for every phase (fly-in, rotation, scatter).
 
 Sequence
 --------
 1. ``show_animated()`` — fade in, then staggered tile fly-in from edges.
-2. Fly-in completes → rotation timer starts (eases in over ~1.5 s).
+2. Fly-in completes → rotation ease-in begins (~1.2 s ramp).
 3. User clicks "Open Library" → QFileDialog → ``_accept(path)``.
    (Or "Continue" if a saved library is already in config.)
-4. Rotation timer stops; tiles scatter outward from current positions.
+4. Tiles scatter outward from current positions.
 5. ``library_selected(path)`` emitted at start of fade-out so caller can
    cross-fade the main window in simultaneously.
 6. ``finished`` emitted after the landing window is hidden.
@@ -51,15 +58,15 @@ _MAX_SCALE  = 1.00     # tile scale at the front             (depth = 1)
 _MIN_ALPHA  = 0.38     # tile opacity at the back
 
 # Rotation  (timer runs at 8 ms ≈ 120 fps for smooth sub-pixel movement)
-_ROT_SPEED   = 0.0019   # radians / tick  → same ~13°/s as before at 120 fps
-_ROT_RAMP    = 150      # ticks to ease rotation 0 → full speed  (~1.2 s)
-_DEPTH_RAMP  = 250      # ticks to ease depth 1.0 → true value   (~2.0 s)
-                        # Longer than _ROT_RAMP so tiles finish morphing
-                        # gently after the ring is already spinning.
+_ROT_SPEED  = 0.0019   # radians / tick  → ~13°/s angular velocity
+_ROT_RAMP   = 150      # ticks to ease rotation 0 → full speed  (~1.2 s)
+_DEPTH_RAMP = 250      # ticks to ease depth 1.0 → true value   (~2.0 s)
+                       # Longer than _ROT_RAMP so tiles finish morphing
+                       # gently after the ring is already spinning.
 
-# CTA card geometry (centred in the window; values are fractions of window dims)
-_CARD_W     = 340
-_CARD_H     = 352
+# CTA card geometry
+_CARD_W = 340
+_CARD_H = 352
 
 # ── Timing ────────────────────────────────────────────────────────────────────
 _STAGGER_MS  = 38
@@ -69,7 +76,7 @@ _SCATTER_MAX = 160
 _FADE_IN_MS  = 320
 
 # Exported — alpha_dex_gui.py uses this to match the cross-fade duration.
-FADE_OUT_MS  = 420
+FADE_OUT_MS = 420
 
 # ── Colour pool ───────────────────────────────────────────────────────────────
 _GRADS: list[tuple[str, str]] = [
@@ -132,7 +139,6 @@ def _quick_scan_art(library_path: str, n: int) -> list[QtGui.QPixmap]:
                     if not album.is_dir() or album.name.startswith("."):
                         continue
                     try:
-                        # Prefer exact names; fall back to any image in dir.
                         candidates: list[str] = []
                         others: list[str]     = []
                         for f in os.scandir(album.path):
@@ -142,7 +148,7 @@ def _quick_scan_art(library_path: str, n: int) -> list[QtGui.QPixmap]:
                                 candidates.insert(0, f.path)
                             elif ext in _ART_EXTS:
                                 others.append(f.path)
-                        pick = (candidates or others)
+                        pick = candidates or others
                         if pick:
                             pm = QtGui.QPixmap(pick[0])
                             if not pm.isNull():
@@ -167,42 +173,50 @@ def _quick_scan_art(library_path: str, n: int) -> list[QtGui.QPixmap]:
 # _Tile
 # ─────────────────────────────────────────────────────────────────────────────
 
-class _Tile(QtWidgets.QWidget):
-    """Album-art tile: gradient fallback or real cover image.
+class _Tile:
+    """Pure-data tile record — no QWidget overhead.
 
-    ``_target`` is the initial (rotation = 0) ellipse position used for the
-    fly-in animation.  Once the rotation timer starts the timer owns the
-    widget's position.
+    All mutable state is plain Python attributes:
 
-    ``set_depth(depth)`` is called every timer tick to update size and opacity.
+    ``_pos``      — QPoint current on-screen position.  Written by the
+                    rotation timer (during rotation) and by
+                    QVariantAnimation.valueChanged callbacks (during
+                    fly-in and scatter).
+    ``_opacity``  — float [_MIN_ALPHA, 1.0], updated each rotation tick.
+    ``_draw_sz``  — float visual size in px; never int-truncated so scaling
+                    is continuous with no staircase pop.
+    ``_cached_pm``— QPixmap baked once at construction; paintEvent blits it
+                    into a QRectF of _draw_sz centred on _pos.
     """
+
+    __slots__ = ("_target", "_pos", "_opacity", "_draw_sz", "_cached_pm")
 
     def __init__(
         self,
-        parent: QtWidgets.QWidget,
         grad: tuple[str, str],
         target: QtCore.QPoint,
         pixmap: QtGui.QPixmap | None = None,
     ) -> None:
-        super().__init__(parent)
-        self._target  = target        # fly-in destination on the ellipse
-        self._opacity = 1.0
-        self._draw_sz = float(_TILE_SZ)   # current visual size (float, never int-truncated)
-        self.setAutoFillBackground(False)
-        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_NoSystemBackground)
-        self.resize(_TILE_SZ, _TILE_SZ)
-
-        # Pre-bake the full tile appearance into a QPixmap once.  paintEvent
-        # then becomes a single drawPixmap call — no gradient objects, no
-        # rounded-rect clipping, no QColor allocations per frame.
+        self._target   = target               # ellipse destination (QPoint)
+        self._pos      = QtCore.QPoint(0, 0)  # current position; set before show
+        self._opacity  = 1.0
+        self._draw_sz  = float(_TILE_SZ)
         self._cached_pm = self._bake_pixmap(grad, pixmap)
+
+    # ── Depth update ──────────────────────────────────────────────────────
+
+    def set_depth(self, depth: float, draw_sz: float) -> None:
+        self._opacity = _MIN_ALPHA + (1.0 - _MIN_ALPHA) * depth
+        self._draw_sz = draw_sz
+
+    # ── One-time pixmap bake ───────────────────────────────────────────────
 
     @staticmethod
     def _bake_pixmap(
         grad: tuple[str, str],
         pixmap: QtGui.QPixmap | None,
     ) -> QtGui.QPixmap:
-        """Render the static tile appearance into a _TILE_SZ × _TILE_SZ QPixmap."""
+        """Render tile appearance into a _TILE_SZ × _TILE_SZ QPixmap once."""
         pm = QtGui.QPixmap(_TILE_SZ, _TILE_SZ)
         pm.fill(QtCore.Qt.GlobalColor.transparent)
 
@@ -220,7 +234,6 @@ class _Tile(QtWidgets.QWidget):
             p.drawPixmap(QtCore.QRect(0, 0, _TILE_SZ, _TILE_SZ), pixmap)
             p.setClipping(False)
 
-            # Subtle vignette
             vig = QtGui.QRadialGradient(r.center(), max(r.width(), r.height()) * 0.7)
             vig.setColorAt(0.55, QtGui.QColor(0, 0, 0, 0))
             vig.setColorAt(1.00, QtGui.QColor(0, 0, 0, 70))
@@ -239,34 +252,9 @@ class _Tile(QtWidgets.QWidget):
 
         # Top-edge sheen
         p.setPen(QtGui.QPen(QtGui.QColor(255, 255, 255, 42), 1.0))
-        p.drawLine(
-            QtCore.QPointF(12, 1.0),
-            QtCore.QPointF(_TILE_SZ - 12, 1.0),
-        )
+        p.drawLine(QtCore.QPointF(12, 1.0), QtCore.QPointF(_TILE_SZ - 12, 1.0))
         p.end()
         return pm
-
-    # ── Called by rotation timer ───────────────────────────────────────────
-
-    def set_depth(self, depth: float, draw_sz: float) -> None:
-        """Update opacity and float draw size; widget geometry never changes."""
-        self._opacity  = _MIN_ALPHA + (1.0 - _MIN_ALPHA) * depth
-        self._draw_sz  = draw_sz
-
-    # ── Painting ──────────────────────────────────────────────────────────
-
-    def paintEvent(self, event: QtGui.QPaintEvent) -> None:  # noqa: N802
-        # Widget is always _TILE_SZ × _TILE_SZ.  The baked pixmap is drawn
-        # into a centered float-precision QRectF so size interpolates
-        # continuously — no integer resize(), no staircase pop.
-        pad  = (_TILE_SZ - self._draw_sz) / 2.0
-        dest = QtCore.QRectF(pad, pad, self._draw_sz, self._draw_sz)
-        src  = QtCore.QRectF(self._cached_pm.rect())
-        p = QtGui.QPainter(self)
-        p.setRenderHint(QtGui.QPainter.RenderHint.SmoothPixmapTransform)
-        p.setOpacity(self._opacity)
-        p.drawPixmap(dest, self._cached_pm, src)
-        p.end()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -446,17 +434,19 @@ class MosaicLanding(QtWidgets.QWidget):
         self._h     = geometry.height()
         self._saved = saved_path
 
-        self._pending   = ""
-        self._tiles: list[_Tile] = []
-        self._base_angles: list[float] = []   # initial ellipse angles per tile
-        self._rotation  = 0.0                 # current rotation offset (rad)
-        self._tick_count = 0                  # for ease-in ramp
-        self._prev_z_order: list[int] = []    # last sorted tile id order (z-cache)
+        self._pending     = ""
+        self._tiles:       list[_Tile] = []
+        self._paint_order: list[_Tile] = []   # back-to-front; updated each tick
+        self._base_angles: list[float] = []
+
+        self._rotation   = 0.0
+        self._tick_count = 0
+        self._rotating   = False   # True only during the rotation phase
 
         self._fly_in_grp:  QtCore.QParallelAnimationGroup | None = None
         self._fly_out_grp: QtCore.QParallelAnimationGroup | None = None
-        self._rot_timer:   QtCore.QTimer | None = None
-        # Keep animation objects alive
+        self._tick_timer:  QtCore.QTimer | None = None
+        # Keep animation objects alive for the duration of their run.
         self._fade_in_anim:  object = None
         self._fade_out_anim: object = None
 
@@ -472,7 +462,6 @@ class MosaicLanding(QtWidgets.QWidget):
         self._rx  = self._w * _RX_FRAC
         self._ry  = self._h * _RY_FRAC
 
-        # CTA card centred in the window
         cw, ch = _CARD_W, _CARD_H
         self._center_rect = QtCore.QRect(
             int(self._cx - cw / 2),
@@ -480,22 +469,20 @@ class MosaicLanding(QtWidgets.QWidget):
             cw, ch,
         )
 
-        # Evenly distribute base angles; start at top (−π/2) so the first tile
-        # comes in from directly above the window.
         step = 2 * math.pi / _N_TILES
         self._base_angles = [
             -math.pi / 2 + step * i for i in range(_N_TILES)
         ]
 
     def _ellipse_pos(self, angle: float, sz: int) -> QtCore.QPoint:
-        """Top-left corner for a tile of *sz* px at *angle* on the ellipse."""
+        """Top-left corner that centres a tile of *sz* px on the ellipse point."""
         return QtCore.QPoint(
             int(self._cx + self._rx * math.cos(angle) - sz / 2),
             int(self._cy + self._ry * math.sin(angle) - sz / 2),
         )
 
     def _off_screen(self, target: QtCore.QPoint) -> QtCore.QPoint:
-        """Compute an off-screen start position for a tile (radially outward)."""
+        """Off-screen start for a tile's fly-in (radially outward from centre)."""
         tcx = target.x() + _TILE_SZ * 0.5
         tcy = target.y() + _TILE_SZ * 0.5
         dx, dy = tcx - self._cx, tcy - self._cy
@@ -509,10 +496,10 @@ class MosaicLanding(QtWidgets.QWidget):
             int(self._cy + dy * scale - _TILE_SZ * 0.5),
         )
 
-    def _scatter_target(self, current: QtCore.QPoint, sz: int) -> QtCore.QPoint:
-        """Random off-screen scatter destination from the tile's current position."""
-        tcx = current.x() + sz * 0.5
-        tcy = current.y() + sz * 0.5
+    def _scatter_target(self, current: QtCore.QPoint) -> QtCore.QPoint:
+        """Random off-screen scatter destination from a tile's current position."""
+        tcx = current.x() + _TILE_SZ * 0.5
+        tcy = current.y() + _TILE_SZ * 0.5
         dx = (tcx - self._cx) + random.uniform(-90, 90)
         dy = (tcy - self._cy) + random.uniform(-90, 90)
         if abs(dx) < 0.5 and abs(dy) < 0.5:
@@ -521,34 +508,33 @@ class MosaicLanding(QtWidgets.QWidget):
         sy = (self._cy + _TILE_SZ * 2.5) / (abs(dy) + 0.001)
         scale = min(sx, sy) * 1.45
         return QtCore.QPoint(
-            int(self._cx + dx * scale - sz * 0.5),
-            int(self._cy + dy * scale - sz * 0.5),
+            int(self._cx + dx * scale - _TILE_SZ * 0.5),
+            int(self._cy + dy * scale - _TILE_SZ * 0.5),
         )
 
     # ── Build ─────────────────────────────────────────────────────────────
 
     def _build_tiles(self) -> None:
-        # Scan for real album art (quick, synchronous, 2 levels deep)
-        art = _quick_scan_art(self._saved, _N_TILES)
-
-        pool = (_GRADS * 4)[: _N_TILES]
+        art  = _quick_scan_art(self._saved, _N_TILES)
+        pool = (_GRADS * 4)[:_N_TILES]
         random.shuffle(pool)
 
         for i in range(_N_TILES):
             angle  = self._base_angles[i]
             target = self._ellipse_pos(angle, _TILE_SZ)
-            pixmap = art[i] if i < len(art) else None
-            tile   = _Tile(self, pool[i % len(pool)], target, pixmap)
-            tile.move(self._off_screen(target))
-            tile.show()
+            tile   = _Tile(pool[i % len(pool)], target, art[i] if i < len(art) else None)
+            tile._pos = self._off_screen(target)   # start position for fly-in
             self._tiles.append(tile)
+
+        self._paint_order = list(self._tiles)
 
     def _build_cta(self) -> None:
         self._cta = _CTACard(self, self._saved)
         self._cta.setGeometry(self._center_rect)
         self._cta.open_clicked.connect(self._on_open_clicked)
         self._cta.reuse_clicked.connect(lambda: self._accept(self._saved))
-        self._cta.raise_()
+        # _CTACard is the only child widget; Qt automatically composites it
+        # above paintEvent output, so it is always on top without raise_().
         self._cta.show()
 
     # ── Public API ────────────────────────────────────────────────────────
@@ -557,6 +543,10 @@ class MosaicLanding(QtWidgets.QWidget):
         """Fade the window in, then start the staggered tile fly-in."""
         self.setWindowOpacity(0.0)
         self.show()
+
+        # Start the single repaint timer now so it covers every phase.
+        self._start_tick_timer()
+
         anim = QtCore.QVariantAnimation(self)
         anim.setStartValue(0.0)
         anim.setEndValue(1.0)
@@ -567,11 +557,25 @@ class MosaicLanding(QtWidgets.QWidget):
         self._fade_in_anim = anim
         anim.start()
 
+    # ── Tick timer ────────────────────────────────────────────────────────
+
+    def _start_tick_timer(self) -> None:
+        if self._tick_timer is not None:
+            return
+        timer = QtCore.QTimer(self)
+        timer.setInterval(8)
+        timer.setTimerType(QtCore.Qt.TimerType.PreciseTimer)
+        timer.timeout.connect(self._on_tick)
+        self._tick_timer = timer
+        timer.start()
+
     # ── Fly-in ────────────────────────────────────────────────────────────
 
     def _fly_in(self) -> None:
-        """Staggered fly-in from edges → initial ellipse positions.
-        When complete, rotation begins.
+        """Staggered fly-in from edges to ellipse positions.
+
+        QVariantAnimation interpolates QPoint natively; valueChanged writes
+        each tile's _pos so paintEvent always draws the current position.
         """
         order = list(range(_N_TILES))
         random.shuffle(order)
@@ -582,11 +586,12 @@ class MosaicLanding(QtWidgets.QWidget):
             seq  = QtCore.QSequentialAnimationGroup(grp)
             seq.addAnimation(QtCore.QPauseAnimation(seq_i * _STAGGER_MS))
 
-            anim = QtCore.QPropertyAnimation(tile, b"pos")
+            anim = QtCore.QVariantAnimation()
             anim.setStartValue(self._off_screen(tile._target))
             anim.setEndValue(tile._target)
             anim.setDuration(_FLY_IN_MS)
             anim.setEasingCurve(QtCore.QEasingCurve.Type.OutBack)
+            anim.valueChanged.connect(lambda v, t=tile: setattr(t, "_pos", v))
             seq.addAnimation(anim)
 
             grp.addAnimation(seq)
@@ -598,82 +603,53 @@ class MosaicLanding(QtWidgets.QWidget):
     # ── Rotation ──────────────────────────────────────────────────────────
 
     def _start_rotation(self) -> None:
-        """Begin the continuous ellipse rotation after fly-in completes."""
         self._tick_count = 0
-        timer = QtCore.QTimer(self)
-        timer.setInterval(8)           # ~120 fps
-        timer.setTimerType(QtCore.Qt.TimerType.PreciseTimer)  # bypass OS rounding
-        timer.timeout.connect(self._on_tick)
-        self._rot_timer = timer
-        timer.start()
+        self._rotating   = True
 
     def _on_tick(self) -> None:
-        """Advance the rotation angle and reposition every tile with depth.
+        """120 fps heartbeat for all three animation phases.
 
-        Two independent smooth-step ramps run from this tick counter:
-
-        • *rot_ramp*   (0 → 1 over _ROT_RAMP ticks)  — scales rotation speed.
-        • *depth_ramp* (0 → 1 over _DEPTH_RAMP ticks) — blends each tile's
-          depth value from 1.0 (full-size / full-opacity, exactly where the
-          fly-in left every tile) toward its true geometric depth.  Using a
-          longer ramp than rotation means tiles continue to settle visually
-          even after the ring is already spinning at full speed, giving one
-          seamless transition instead of two jarring snaps.
+        • Fly-in / scatter: just triggers a repaint; positions are owned by
+          QVariantAnimation.valueChanged callbacks.
+        • Rotation: advances angle, recomputes depth & position for every
+          tile, updates _paint_order, then triggers a repaint.
         """
+        if not self._rotating:
+            self.update()
+            return
+
         t = self._tick_count
 
         # ── Rotation ease-in ─────────────────────────────────────────────
-        rot_t = min(1.0, t / _ROT_RAMP)
+        rot_t    = min(1.0, t / _ROT_RAMP)
         rot_ramp = rot_t * rot_t * (3.0 - 2.0 * rot_t)   # smoothstep
         self._rotation   += _ROT_SPEED * rot_ramp
         self._tick_count += 1
 
         # ── Depth blend ease-in ──────────────────────────────────────────
-        dep_t = min(1.0, t / _DEPTH_RAMP)
+        dep_t      = min(1.0, t / _DEPTH_RAMP)
         depth_ramp = dep_t * dep_t * (3.0 - 2.0 * dep_t)  # smoothstep
 
-        # Compute depth for each tile and collect for z-sorting
-        tile_data: list[tuple[float, _Tile, QtCore.QPoint, float]] = []
+        # ── Per-tile update ───────────────────────────────────────────────
+        tile_data: list[tuple[float, _Tile]] = []
         for i, tile in enumerate(self._tiles):
             angle      = self._base_angles[i] + self._rotation
-            true_depth = (1.0 + math.sin(angle)) / 2.0    # 0 = back, 1 = front
+            true_depth = (1.0 + math.sin(angle)) / 2.0   # 0 = back, 1 = front
 
-            # Blend: depth starts at 1.0 (fly-in state) and transitions to
-            # true_depth as depth_ramp approaches 1.  This removes the abrupt
-            # size/opacity jump that used to occur the instant the timer started.
-            depth = 1.0 - depth_ramp * (1.0 - true_depth)
-
-            # Float draw size — never truncated to int, so scaling is continuous.
-            # Widget geometry is fixed at _TILE_SZ; only the painted rect changes.
+            # Blend depth from 1.0 (fly-in state) toward true geometry so
+            # tiles settle smoothly rather than snapping on rotation start.
+            depth   = 1.0 - depth_ramp * (1.0 - true_depth)
             draw_sz = _TILE_SZ * (_MIN_SCALE + (_MAX_SCALE - _MIN_SCALE) * depth)
 
-            # Position centres the fixed-size widget on the ellipse point.
-            pos = self._ellipse_pos(angle, _TILE_SZ)
-            tile_data.append((depth, tile, pos, draw_sz))
+            tile.set_depth(depth, draw_sz)
+            tile._pos = self._ellipse_pos(angle, _TILE_SZ)
+            tile_data.append((depth, tile))
 
-        # Sort ascending so we raise() in depth order (front tile raised last)
+        # ── Sort back → front for correct painter occlusion ──────────────
         tile_data.sort(key=lambda d: d[0])
+        self._paint_order = [tile for _, tile in tile_data]
 
-        # ── Batch all repaints into a single composite flush ──────────────
-        # Disabling updates on the parent suppresses every child update(),
-        # resize(), and move() repaint until we re-enable — collapsing 18+
-        # per-frame repaints into one.
-        self.setUpdatesEnabled(False)
-
-        new_z_order = [id(tile) for _, tile, _, _ in tile_data]
-        z_changed   = new_z_order != self._prev_z_order
-
-        for depth, tile, pos, sz in tile_data:
-            tile.set_depth(depth, sz)
-            tile.move(pos)
-            if z_changed:
-                tile.raise_()
-
-        if z_changed:
-            self._prev_z_order = new_z_order
-            self._cta.raise_()   # CTA always on top; only needed after a re-stack
-
-        self.setUpdatesEnabled(True)   # triggers one composite repaint
+        self.update()
 
     # ── User action handlers ───────────────────────────────────────────────
 
@@ -692,7 +668,6 @@ class MosaicLanding(QtWidgets.QWidget):
             return
         self._pending = path
 
-        # Stop fly-in if still running
         if (
             self._fly_in_grp is not None
             and self._fly_in_grp.state()
@@ -700,11 +675,8 @@ class MosaicLanding(QtWidgets.QWidget):
         ):
             self._fly_in_grp.stop()
 
-        # Stop rotation timer
-        if self._rot_timer is not None:
-            self._rot_timer.stop()
-            self._rot_timer = None
-
+        # Freeze rotation; tick timer keeps running so scatter gets repaints.
+        self._rotating = False
         self._do_scatter()
 
     # ── Scatter / exit ────────────────────────────────────────────────────
@@ -720,12 +692,14 @@ class MosaicLanding(QtWidgets.QWidget):
             seq  = QtCore.QSequentialAnimationGroup(grp)
             seq.addAnimation(QtCore.QPauseAnimation(random.randint(0, _SCATTER_MAX)))
 
-            anim = QtCore.QPropertyAnimation(tile, b"pos")
-            anim.setStartValue(tile.pos())
-            anim.setEndValue(self._scatter_target(tile.pos(), tile.width()))
+            anim = QtCore.QVariantAnimation()
+            anim.setStartValue(tile._pos)
+            anim.setEndValue(self._scatter_target(tile._pos))
             anim.setDuration(_FLY_OUT_MS)
             anim.setEasingCurve(QtCore.QEasingCurve.Type.InBack)
+            anim.valueChanged.connect(lambda v, t=tile: setattr(t, "_pos", v))
             seq.addAnimation(anim)
+
             grp.addAnimation(seq)
 
         self._fly_out_grp = grp
@@ -733,8 +707,12 @@ class MosaicLanding(QtWidgets.QWidget):
         grp.start()
 
     def _fade_out(self) -> None:
-        # Emit path now so the caller can start fading the main window in
-        # simultaneously — creating a smooth cross-dissolve.
+        # Stop the tick timer — no more repaints needed once fading.
+        if self._tick_timer is not None:
+            self._tick_timer.stop()
+            self._tick_timer = None
+
+        # Emit now so the caller can begin cross-fading the main window.
         self.library_selected.emit(self._pending)
 
         anim = QtCore.QVariantAnimation(self)
@@ -751,10 +729,12 @@ class MosaicLanding(QtWidgets.QWidget):
         self.hide()
         self.finished.emit()
 
-    # ── Background painting ────────────────────────────────────────────────
+    # ── Painting ──────────────────────────────────────────────────────────
 
     def paintEvent(self, event: QtGui.QPaintEvent) -> None:  # noqa: N802
         p = QtGui.QPainter(self)
+
+        # ── Background ────────────────────────────────────────────────────
         try:
             from gui.themes.manager import get_manager
             from gui.widgets.gradient_bg import (
@@ -772,5 +752,22 @@ class MosaicLanding(QtWidgets.QWidget):
                 )
         except Exception:
             p.fillRect(self.rect(), QtGui.QColor("#0d1117"))
-        finally:
-            p.end()
+
+        # ── Tiles (back → front) ─────────────────────────────────────────
+        # _CTACard is a child QWidget; Qt composites it above this paintEvent
+        # output automatically — it is always on top with no extra work.
+        src = QtCore.QRectF(0, 0, _TILE_SZ, _TILE_SZ)
+        p.setRenderHint(QtGui.QPainter.RenderHint.SmoothPixmapTransform)
+        for tile in self._paint_order:
+            pad  = (_TILE_SZ - tile._draw_sz) / 2.0
+            dest = QtCore.QRectF(
+                tile._pos.x() + pad,
+                tile._pos.y() + pad,
+                tile._draw_sz,
+                tile._draw_sz,
+            )
+            p.setOpacity(tile._opacity)
+            p.drawPixmap(dest, tile._cached_pm, src)
+
+        p.setOpacity(1.0)
+        p.end()
