@@ -1,18 +1,40 @@
 """Playlist Generator workspace — m3u playlists, Auto-DJ, folder playlists."""
 from __future__ import annotations
 
+import os
+import threading
 from pathlib import Path
 
 from gui.compat import QtCore, QtGui, QtWidgets, Signal, Slot
 from gui.workspaces.base import WorkspaceBase
+
+_AUDIO_EXTS = {".mp3", ".flac", ".m4a", ".aac", ".ogg", ".wav", ".opus"}
+
+
+def _find_audio_files(root: str) -> list[str]:
+    files = []
+    for dirpath, _, filenames in os.walk(root):
+        for f in filenames:
+            if os.path.splitext(f)[1].lower() in _AUDIO_EXTS:
+                files.append(os.path.join(dirpath, f))
+    return files
 
 
 class PlaylistWorker(QtCore.QThread):
     log_line = Signal(str)
     finished = Signal(bool, str)
 
-    def __init__(self, library_path: str, mode: str, output_dir: str,
-                 tempo_range: tuple, energy_range: tuple, autodj_count: int) -> None:
+    def __init__(
+        self,
+        library_path: str,
+        mode: str,
+        output_dir: str,
+        tempo_range: tuple,
+        energy_range: tuple,
+        autodj_count: int,
+        seed_track: str = "",
+        repair_paths: list | None = None,
+    ) -> None:
         super().__init__()
         self.library_path = library_path
         self.mode = mode
@@ -20,41 +42,86 @@ class PlaylistWorker(QtCore.QThread):
         self.tempo_range = tempo_range
         self.energy_range = energy_range
         self.autodj_count = autodj_count
-        self._cancelled = False
+        self.seed_track = seed_track
+        self.repair_paths = repair_paths or []
+        self._cancel_event = threading.Event()
 
     def cancel(self) -> None:
-        self._cancelled = True
+        self._cancel_event.set()
 
     def run(self) -> None:
         try:
             import playlist_generator
+            from playlist_engine import bucket_by_tempo_energy, autodj_playlist
         except ImportError as exc:
             self.finished.emit(False, f"Import error: {exc}")
             return
-        try:
-            def _log(msg: str) -> None:
-                if not self._cancelled:
-                    self.log_line.emit(msg)
 
+        def _log(msg: str) -> None:
+            if not self._cancel_event.is_set():
+                self.log_line.emit(msg)
+
+        try:
             if self.mode == "folder":
-                playlist_generator.create_folder_playlists(
-                    self.library_path, output_dir=self.output_dir, log_callback=_log
+                tracks = _find_audio_files(self.library_path)
+                _log(f"Found {len(tracks)} tracks — building folder playlists…")
+                playlist_generator.generate_playlists(
+                    {p: p for p in tracks},
+                    self.library_path,
+                    output_dir=self.output_dir or None,
+                    log_callback=_log,
                 )
+
             elif self.mode == "tempo":
-                playlist_generator.create_tempo_playlists(
+                tracks = _find_audio_files(self.library_path)
+                _log(f"Found {len(tracks)} tracks — analyzing tempo/energy…")
+                result = bucket_by_tempo_energy(
+                    tracks,
                     self.library_path,
-                    tempo_range=self.tempo_range,
-                    output_dir=self.output_dir,
                     log_callback=_log,
+                    cancel_event=self._cancel_event,
                 )
+                buckets = result.get("buckets", {})
+                playlist_paths = result.get("playlist_paths", {})
+                for key, items in buckets.items():
+                    outfile = playlist_paths.get(key)
+                    if outfile and items:
+                        playlist_generator.write_playlist(items, outfile)
+                        _log(f"✓ Wrote {len(items)} track(s) → {Path(outfile).name}")
+
             elif self.mode == "autodj":
-                playlist_generator.create_autodj_playlist(
-                    self.library_path,
-                    count=self.autodj_count,
-                    output_dir=self.output_dir,
+                tracks = _find_audio_files(self.library_path)
+                if not tracks:
+                    self.finished.emit(False, "No audio files found.")
+                    return
+                seed = self.seed_track if self.seed_track in tracks else tracks[0]
+                _log(f"Building Auto-DJ playlist from {Path(seed).name}…")
+                ordered = autodj_playlist(
+                    seed,
+                    tracks,
+                    n=self.autodj_count,
                     log_callback=_log,
+                    cancel_event=self._cancel_event,
                 )
-            if not self._cancelled:
+                playlists_dir = Path(self.library_path) / "Playlists"
+                playlists_dir.mkdir(parents=True, exist_ok=True)
+                out_path = str(playlists_dir / "autodj.m3u")
+                playlist_generator.write_playlist(ordered, out_path)
+                _log(f"✓ Wrote Auto-DJ playlist: {out_path}")
+
+            elif self.mode == "repair":
+                # Repair all playlists under library_path/Playlists/ using
+                # the existing-file search index. User-provided list is used
+                # when populated; otherwise falls back to library root.
+                if self.repair_paths:
+                    for pl_path in self.repair_paths:
+                        playlist_generator.update_playlists({pl_path: pl_path})
+                        _log(f"Repaired: {Path(pl_path).name}")
+                else:
+                    playlist_generator.update_playlists({self.library_path: self.library_path})
+                _log("Playlist repair complete.")
+
+            if not self._cancel_event.is_set():
                 self.finished.emit(True, "Playlist generation complete.")
             else:
                 self.finished.emit(False, "Cancelled.")
@@ -273,6 +340,10 @@ class PlaylistsWorkspace(WorkspaceBase):
         self._log(f"Starting {mode} playlist generation…", "info")
         self.status_changed.emit("Generating playlists…", "#f59e0b")
 
+        repair_paths = [
+            self._repair_list.item(i).text()
+            for i in range(self._repair_list.count())
+        ] if mode == "repair" else []
         self._worker = PlaylistWorker(
             library_path=self._library_path,
             mode=mode,
@@ -280,6 +351,8 @@ class PlaylistsWorkspace(WorkspaceBase):
             tempo_range=(self._tempo_min.value(), self._tempo_max.value()),
             energy_range=(self._energy_min.value(), self._energy_max.value()),
             autodj_count=self._autodj_count.value(),
+            seed_track=self._autodj_seed.text() if hasattr(self, "_autodj_seed") else "",
+            repair_paths=repair_paths,
         )
         self._worker.log_line.connect(self._log_area.appendPlainText)
         self._worker.log_line.connect(lambda m: self._log(m))

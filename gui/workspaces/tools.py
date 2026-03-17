@@ -1,11 +1,70 @@
 """Tools workspace — export utilities, diagnostics, and debug tools."""
 from __future__ import annotations
 
+import os
+import re
 import webbrowser
 from pathlib import Path
 
 from gui.compat import QtCore, QtGui, QtWidgets, Signal, Slot
 from gui.workspaces.base import WorkspaceBase
+
+_SUPPORTED_EXTS = {".mp3", ".flac", ".m4a", ".aac", ".ogg", ".wav", ".opus"}
+
+
+class FileCleanupWorker(QtCore.QThread):
+    log_line = Signal(str)
+    finished = Signal(bool, str)
+
+    def __init__(self, library_path: str) -> None:
+        super().__init__()
+        self.library_path = library_path
+
+    def run(self) -> None:
+        numeric_suffix = re.compile(r"\s*\(\d+\)$")
+        copy_suffix = re.compile(r"\s*(?:-\s*)?copy(?:\s*\(\d+\))?$", re.IGNORECASE)
+        rename_map: dict[str, str] = {}
+        renamed = skipped = conflicts = errors = 0
+
+        for root, _dirs, files in os.walk(self.library_path):
+            for filename in files:
+                ext = os.path.splitext(filename)[1].lower()
+                if ext not in _SUPPORTED_EXTS:
+                    continue
+                stem = os.path.splitext(filename)[0]
+                new_stem = copy_suffix.sub("", stem)
+                new_stem = numeric_suffix.sub("", new_stem)
+                if new_stem == stem:
+                    skipped += 1
+                    continue
+                new_name = f"{new_stem}{ext}"
+                src = os.path.join(root, filename)
+                dst = os.path.join(root, new_name)
+                if os.path.exists(dst):
+                    self.log_line.emit(f"! Conflict: {filename} → {new_name} already exists")
+                    conflicts += 1
+                    continue
+                try:
+                    os.rename(src, dst)
+                    self.log_line.emit(f"→ {filename} → {new_name}")
+                    rename_map[src] = dst
+                    renamed += 1
+                except OSError as exc:
+                    self.log_line.emit(f"! Error renaming {filename}: {exc}")
+                    errors += 1
+
+        if rename_map:
+            try:
+                from playlist_generator import update_playlists
+                update_playlists(rename_map)
+                self.log_line.emit("✓ Updated playlists")
+            except Exception as exc:  # noqa: BLE001
+                self.log_line.emit(f"! Playlist update failed: {exc}")
+
+        self.finished.emit(
+            True,
+            f"Done: {renamed} renamed, {skipped} unchanged, {conflicts} conflicts, {errors} errors."
+        )
 
 
 class ToolsWorkspace(WorkspaceBase):
@@ -13,6 +72,7 @@ class ToolsWorkspace(WorkspaceBase):
 
     def __init__(self, library_path: str = "", parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(library_path, parent)
+        self._cleanup_worker: FileCleanupWorker | None = None
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -76,10 +136,12 @@ class ToolsWorkspace(WorkspaceBase):
         ))
         codec_opts = QtWidgets.QHBoxLayout()
         codec_opts.addWidget(QtWidgets.QLabel("Include codecs:"))
+        self._codec_ext_cbs: dict[str, QtWidgets.QCheckBox] = {}
         for ext in (".flac", ".mp3", ".m4a", ".aac", ".wav", ".opus", ".ogg"):
             cb = QtWidgets.QCheckBox(ext)
             cb.setChecked(True)
             codec_opts.addWidget(cb)
+            self._codec_ext_cbs[ext] = cb
         codec_opts.addStretch(1)
         export_codec_l.addLayout(codec_opts)
         self._omit_paths_cb = QtWidgets.QCheckBox("Filenames only (no full paths)")
@@ -116,11 +178,16 @@ class ToolsWorkspace(WorkspaceBase):
         self._cleanup_status.setStyleSheet("color: #64748b;")
         cleanup_l.addWidget(self._cleanup_status)
         cleanup_btn_row = QtWidgets.QHBoxLayout()
-        cleanup_run = self._make_primary_button("Run File Cleanup")
-        cleanup_run.clicked.connect(self._on_file_cleanup)
-        cleanup_btn_row.addWidget(cleanup_run)
+        self._cleanup_run_btn = self._make_primary_button("Run File Cleanup")
+        self._cleanup_run_btn.clicked.connect(self._on_file_cleanup)
+        cleanup_btn_row.addWidget(self._cleanup_run_btn)
         cleanup_btn_row.addStretch(1)
         cleanup_l.addLayout(cleanup_btn_row)
+        self._cleanup_log = QtWidgets.QPlainTextEdit()
+        self._cleanup_log.setReadOnly(True)
+        self._cleanup_log.setFixedHeight(140)
+        self._cleanup_log.setStyleSheet("font-family: 'Consolas', monospace; font-size: 11px;")
+        cleanup_l.addWidget(self._cleanup_log)
         cleanup_l.addStretch(1)
         tabs.addTab(cleanup_w, "File Cleanup")
 
@@ -196,16 +263,71 @@ class ToolsWorkspace(WorkspaceBase):
 
     @Slot()
     def _on_export_codec(self) -> None:
-        self._log("Codec list export not yet fully wired.", "warn")
-        self._codec_status.setText("Not yet fully wired — coming soon.")
+        if not self._library_path:
+            QtWidgets.QMessageBox.warning(self, "No Library", "Select a library folder first.")
+            return
+        selected_exts = {ext for ext, cb in self._codec_ext_cbs.items() if cb.isChecked()}
+        if not selected_exts:
+            QtWidgets.QMessageBox.warning(self, "No Codecs", "Select at least one codec.")
+            return
+        omit_paths = self._omit_paths_cb.isChecked()
+        self._codec_prog.setValue(0)
+        self._codec_status.setText("Scanning…")
+        self._log("Starting codec list export…", "info")
+        try:
+            by_ext: dict[str, list[str]] = {e: [] for e in sorted(selected_exts)}
+            total = 0
+            for dirpath, _, files in os.walk(self._library_path):
+                for f in files:
+                    ext = os.path.splitext(f)[1].lower()
+                    if ext in by_ext:
+                        path = f if omit_paths else os.path.join(dirpath, f)
+                        by_ext[ext].append(path)
+                        total += 1
+            out = Path(self._library_path) / "Docs" / "codec_file_list.txt"
+            out.parent.mkdir(parents=True, exist_ok=True)
+            lines: list[str] = []
+            for ext in sorted(by_ext):
+                lines.append(f"=== {ext} ({len(by_ext[ext])} files) ===")
+                lines.extend(sorted(by_ext[ext]))
+                lines.append("")
+            out.write_text("\n".join(lines), encoding="utf-8")
+            self._codec_prog.setValue(100)
+            self._codec_status.setText(f"Written: {out}  ({total} files)")
+            self._codec_open.setEnabled(True)
+            self._codec_open.clicked.connect(lambda: self._open_file(str(out)))
+            self._log(f"Codec list exported: {total} files → {out}", "ok")
+        except Exception as exc:  # noqa: BLE001
+            self._codec_status.setText(str(exc))
+            self._log(str(exc), "error")
 
     @Slot()
     def _on_file_cleanup(self) -> None:
         if not self._library_path:
             QtWidgets.QMessageBox.warning(self, "No Library", "Select a library folder first.")
             return
-        self._log("File cleanup not yet wired.", "warn")
-        self._cleanup_status.setText("Not yet wired — coming soon.")
+        reply = QtWidgets.QMessageBox.question(
+            self, "Run File Cleanup",
+            "This will rename files by removing trailing copy/numeric suffixes.\n\nProceed?",
+            QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
+        )
+        if reply != QtWidgets.QMessageBox.StandardButton.Yes:
+            return
+        self._cleanup_log.clear()
+        self._cleanup_status.setText("Running…")
+        self._cleanup_run_btn.setEnabled(False)
+        self._log("Starting file cleanup…", "info")
+        self._cleanup_worker = FileCleanupWorker(self._library_path)
+        self._cleanup_worker.log_line.connect(self._cleanup_log.appendPlainText)
+        self._cleanup_worker.finished.connect(self._on_cleanup_finished)
+        self._cleanup_worker.start()
+
+    @Slot(bool, str)
+    def _on_cleanup_finished(self, success: bool, message: str) -> None:
+        self._cleanup_status.setText(message)
+        self._cleanup_run_btn.setEnabled(True)
+        self._log(message, "ok" if success else "error")
+        self._cleanup_worker = None
 
     @Slot()
     def _on_m4a_tester(self) -> None:
