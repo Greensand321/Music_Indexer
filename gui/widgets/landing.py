@@ -18,10 +18,13 @@ Sequence
 """
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import os
 import random
 import subprocess
+import sys
+import time
 from pathlib import Path
 
 from gui.compat import QtCore, QtGui, QtWidgets, Signal
@@ -47,6 +50,11 @@ _FADE_IN_MS  = 320   # landing window fade-in
 FADE_OUT_MS  = 420   # landing window fade-out / main-window fade-in
 
 _SCAN_DEPTH = 7   # max folder depth searched for art (root = 0)
+
+# ── Art-scanner diagnostics ────────────────────────────────────────────────────
+# Set True to print per-file extraction results to the terminal on startup.
+# Flip to False once you have confirmed which extraction path your library uses.
+_ART_SCAN_DEBUG: bool = True
 
 # ── Colour pool — diagonal gradient pairs for placeholder tiles ───────────────
 _GRADS: list[tuple[str, str]] = [
@@ -434,13 +442,12 @@ class _ArtScanner(QtCore.QThread):
 
     art_found = Signal(int, QtGui.QImage)  # (tile_index, image) — QImage is thread-safe
 
-    _POOL_CAP_MULTIPLIER = 5   # pool = at least this many × tile_count
+    _MAX_SCAN_WORKERS = 6   # parallel cover-extraction threads
 
     def __init__(self, library_path: str, tile_count: int) -> None:
         super().__init__()
-        self._library  = library_path
-        self._n        = tile_count
-        self._pool_cap = max(tile_count * self._POOL_CAP_MULTIPLIER, 128)
+        self._library = library_path
+        self._n       = tile_count
         self.setObjectName("ArtScanner")
 
     # ── Low-level helpers ─────────────────────────────────────────────────
@@ -467,7 +474,9 @@ class _ArtScanner(QtCore.QThread):
         """Return the first embedded cover image from *path*, or None.
 
         Each extraction attempt is wrapped in its own try/except so a failure
-        in one path does not prevent the others from running.
+        in one path does not prevent the others from running.  When
+        ``_ART_SCAN_DEBUG`` is True every successful hit is printed to the
+        terminal so you can see exactly which path your library uses.
 
         Order tried:
           1. mutagen .pictures  — FLAC, OGG Vorbis, OGG Opus
@@ -490,6 +499,8 @@ class _ArtScanner(QtCore.QThread):
             try:
                 for pic in audio.pictures:
                     if pic.data:
+                        if _ART_SCAN_DEBUG:
+                            print(f"[ArtScan] .pictures   {path}", flush=True)
                         return pic.data
             except Exception:
                 pass
@@ -500,6 +511,8 @@ class _ArtScanner(QtCore.QThread):
                 if tags is not None and hasattr(tags, "getall"):
                     for frame in tags.getall("APIC:") or tags.getall("APIC"):
                         if getattr(frame, "data", None):
+                            if _ART_SCAN_DEBUG:
+                                print(f"[ArtScan] APIC        {path}", flush=True)
                             return frame.data
             except Exception:
                 pass
@@ -512,6 +525,8 @@ class _ArtScanner(QtCore.QThread):
                     if covr:
                         data = bytes(covr[0])
                         if data:
+                            if _ART_SCAN_DEBUG:
+                                print(f"[ArtScan] covr        {path}", flush=True)
                             return data
             except Exception:
                 pass
@@ -527,6 +542,8 @@ class _ArtScanner(QtCore.QThread):
                 for item in mbp:
                     pic = Picture(base64.b64decode(str(item)))
                     if pic.data:
+                        if _ART_SCAN_DEBUG:
+                            print(f"[ArtScan] mbp         {path}", flush=True)
                         return pic.data
             except Exception:
                 pass
@@ -540,6 +557,8 @@ class _ArtScanner(QtCore.QThread):
                 for item in ca:
                     data = base64.b64decode(str(item))
                     if data:
+                        if _ART_SCAN_DEBUG:
+                            print(f"[ArtScan] coverart    {path}", flush=True)
                         return data
             except Exception:
                 pass
@@ -562,6 +581,8 @@ class _ArtScanner(QtCore.QThread):
                 with open(tmppath, "rb") as fh:
                     data = fh.read()
                 if data:
+                    if _ART_SCAN_DEBUG:
+                        print(f"[ArtScan] ffmpeg      {path}", flush=True)
                     return data
         except Exception:
             pass
@@ -572,6 +593,8 @@ class _ArtScanner(QtCore.QThread):
                 except OSError:
                     pass
 
+        if _ART_SCAN_DEBUG:
+            print(f"[ArtScan] NO COVER    {path}", flush=True)
         return None
 
     # ── Directory ordering ────────────────────────────────────────────────
@@ -594,66 +617,84 @@ class _ArtScanner(QtCore.QThread):
         random.shuffle(used)
         return fresh + used
 
-    # ── Cover collection ──────────────────────────────────────────────────
+    # ── Per-directory cover helper ────────────────────────────────────────
 
-    def _collect_covers(
-        self, dirpaths: list[str]
-    ) -> list[tuple[str, bytes]]:
-        """Return ``(dirpath, cover_bytes)`` up to ``_pool_cap`` unique covers.
-
-        For each directory, audio files are scanned in shuffled order.  The
-        first file that yields a cover terminates the per-directory scan
-        (whether unique or a duplicate already in the pool).  Unique covers
-        are kept; duplicates are skipped and the next file is tried instead.
-        Scanning continues through the full ordered list — if fresh dirs run
-        dry, used dirs fill any remaining gap (backtrack semantics).
-        """
-        results:   list[tuple[str, bytes]] = []
-        seen_sigs: set[bytes] = set()
-
-        for dirpath in dirpaths:
-            if self.isInterruptionRequested():
-                return results
-            for name in self._scandir_files(dirpath):
-                if os.path.splitext(name)[1].lower() not in _AUDIO_EXTS:
-                    continue
-                data = self._cover_from_file(os.path.join(dirpath, name))
-                if not data:
-                    continue
-                # Found a cover in this directory — record if unique, then move on.
-                sig = data[:64]
-                if sig not in seen_sigs:
-                    seen_sigs.add(sig)
-                    results.append((dirpath, data))
-                    if len(results) >= self._pool_cap:
-                        return results
-                break   # one cover attempt per directory (unique or duplicate)
-
-        return results
+    def _first_cover_in_dir(self, dirpath: str) -> bytes | None:
+        """Return the first embedded cover found in *dirpath*, or None."""
+        for name in self._scandir_files(dirpath):
+            if os.path.splitext(name)[1].lower() not in _AUDIO_EXTS:
+                continue
+            data = self._cover_from_file(os.path.join(dirpath, name))
+            if data:
+                return data
+        return None
 
     # ── Orchestration + emit ──────────────────────────────────────────────
 
     def run(self) -> None:  # noqa: N802
+        t0 = time.monotonic()
+
         history  = _ArtHistory()
         dirpaths = self._ordered_dirs(history)
+
+        if _ART_SCAN_DEBUG:
+            fresh_count = sum(1 for d in dirpaths if d not in history)
+            print(
+                f"[ArtScan] start  library={self._library!r}  "
+                f"dirs={len(dirpaths)} (fresh={fresh_count})  tiles={self._n}",
+                flush=True,
+            )
+
         if self.isInterruptionRequested():
             return
 
-        pool = self._collect_covers(dirpaths)
-        if self.isInterruptionRequested() or not pool:
-            return
+        selected:  list[str]  = []
+        seen_sigs: set[bytes] = set()
+        tile_index: int       = 0
 
-        selected = random.sample(pool, min(len(pool), self._n))
+        # Submit directories in chunks so we don't create thousands of futures
+        # at once for very large libraries.  Within each chunk, as_completed()
+        # lets us emit each tile the moment its cover is decoded — no waiting
+        # for the whole batch before anything appears on screen.
+        chunk_size = max(self._n * 4, 64)
 
-        for tile_index, (_, cover) in enumerate(selected):
-            if self.isInterruptionRequested():
-                return
-            img = self._image_from_bytes(cover)
-            if img is not None:
-                self.art_found.emit(tile_index, img)
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=self._MAX_SCAN_WORKERS,
+            thread_name_prefix="ArtScan",
+        ) as executor:
+            for chunk_start in range(0, len(dirpaths), chunk_size):
+                if self.isInterruptionRequested() or tile_index >= self._n:
+                    break
+                chunk   = dirpaths[chunk_start : chunk_start + chunk_size]
+                futures = {executor.submit(self._first_cover_in_dir, d): d for d in chunk}
+                for future in concurrent.futures.as_completed(futures):
+                    if self.isInterruptionRequested() or tile_index >= self._n:
+                        break
+                    dirpath = futures[future]
+                    try:
+                        cover = future.result()
+                    except Exception:
+                        cover = None
+                    if not cover:
+                        continue
+                    sig = cover[:64]
+                    if sig in seen_sigs:
+                        continue
+                    seen_sigs.add(sig)
+                    img = self._image_from_bytes(cover)
+                    if img is not None:
+                        self.art_found.emit(tile_index, img)
+                        selected.append(dirpath)
+                        tile_index += 1
 
-        # Deprioritise the shown directories on the next run.
-        history.add_and_save([dirpath for dirpath, _ in selected])
+        if _ART_SCAN_DEBUG:
+            print(
+                f"[ArtScan] done   tiles={tile_index}/{self._n}  "
+                f"elapsed={time.monotonic() - t0:.2f}s",
+                flush=True,
+            )
+
+        history.add_and_save(selected)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
