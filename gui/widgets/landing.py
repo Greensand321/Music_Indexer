@@ -466,66 +466,111 @@ class _ArtScanner(QtCore.QThread):
     def _cover_from_file(path: str) -> bytes | None:
         """Return the first embedded cover image from *path*, or None.
 
-        Tries mutagen (no subprocess, handles most formats).  Falls back to
-        an ``ffmpeg`` subprocess for anything mutagen cannot decode.
+        Each extraction attempt is wrapped in its own try/except so a failure
+        in one path does not prevent the others from running.
+
+        Order tried:
+          1. mutagen .pictures  — FLAC, OGG Vorbis, OGG Opus
+          2. ID3 APIC frames    — MP3, WAV, AIFF (mutagen)
+          3. MP4 covr atom      — M4A, AAC (mutagen)
+          4. metadata_block_picture — OGG raw dict access + base64 decode
+          5. coverart field     — OGG simpler base64 (no Picture wrapper)
+          6. ffmpeg temp-file   — universal fallback for anything mutagen misses
         """
-        # ── mutagen ───────────────────────────────────────────────────────
+        audio = None
         try:
             import mutagen
             audio = mutagen.File(path, easy=False)
-            if audio is not None:
-                # FLAC / OGG Vorbis / OGG Opus — .pictures property
-                for pic in getattr(audio, "pictures", []):
-                    if getattr(pic, "data", None):
-                        return pic.data
+        except Exception:
+            pass
 
+        if audio is not None:
+
+            # 1. FLAC / OGG Vorbis / OGG Opus — .pictures property
+            try:
+                for pic in audio.pictures:
+                    if pic.data:
+                        return pic.data
+            except Exception:
+                pass
+
+            # 2. ID3 APIC frames (MP3, WAV, AIFF …)
+            try:
+                tags = audio.tags
+                if tags is not None and hasattr(tags, "getall"):
+                    for frame in tags.getall("APIC:") or tags.getall("APIC"):
+                        if getattr(frame, "data", None):
+                            return frame.data
+            except Exception:
+                pass
+
+            # 3. MP4 / M4A / AAC — covr atom
+            try:
                 tags = audio.tags
                 if tags is not None:
-                    # ID3 APIC frames — MP3, WAV, AIFF, etc.
-                    if hasattr(tags, "getall"):
-                        for frame in tags.getall("APIC:") or tags.getall("APIC"):
-                            if frame.data:
-                                return frame.data
-
-                    # MP4 / M4A / AAC
                     covr = tags.get("covr")
                     if covr:
                         data = bytes(covr[0])
                         if data:
                             return data
+            except Exception:
+                pass
 
-                    # OGG metadata_block_picture (base64-encoded FLAC Picture)
-                    mbp = tags.get("metadata_block_picture") or []
-                    if not isinstance(mbp, list):
-                        mbp = [mbp]
-                    if mbp:
-                        import base64
-                        from mutagen.flac import Picture
-                        for item in mbp:
-                            try:
-                                pic = Picture(base64.b64decode(str(item)))
-                                if pic.data:
-                                    return pic.data
-                            except Exception:
-                                pass
-        except Exception:
-            pass
+            # 4. OGG metadata_block_picture (base64-encoded FLAC Picture)
+            #    OGG files are dict-like; access via audio.get(), not audio.tags.get()
+            try:
+                import base64
+                from mutagen.flac import Picture
+                mbp = audio.get("metadata_block_picture") or []
+                if not isinstance(mbp, list):
+                    mbp = [mbp]
+                for item in mbp:
+                    pic = Picture(base64.b64decode(str(item)))
+                    if pic.data:
+                        return pic.data
+            except Exception:
+                pass
 
-        # ── ffmpeg fallback ───────────────────────────────────────────────
+            # 5. OGG coverart (raw base64 image bytes, no Picture wrapper)
+            try:
+                import base64
+                ca = audio.get("coverart") or []
+                if not isinstance(ca, list):
+                    ca = [ca]
+                for item in ca:
+                    data = base64.b64decode(str(item))
+                    if data:
+                        return data
+            except Exception:
+                pass
+
+        # 6. ffmpeg fallback — write to a temp file to avoid pipe format issues
+        tmppath = None
         try:
+            import tempfile
+            with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
+                tmppath = tmp.name
             result = subprocess.run(
                 [
-                    "ffmpeg", "-v", "quiet", "-i", path,
-                    "-an", "-vframes", "1", "-vcodec", "copy",
-                    "-f", "image2pipe", "pipe:1",
+                    "ffmpeg", "-v", "quiet", "-y", "-i", path,
+                    "-an", "-map", "0:v:0", "-vframes", "1", tmppath,
                 ],
                 capture_output=True,
                 timeout=8,
             )
-            if result.stdout:
-                return result.stdout
+            if result.returncode == 0:
+                with open(tmppath, "rb") as fh:
+                    data = fh.read()
+                if data:
+                    return data
         except Exception:
             pass
+        finally:
+            if tmppath:
+                try:
+                    os.unlink(tmppath)
+                except OSError:
+                    pass
 
         return None
 
