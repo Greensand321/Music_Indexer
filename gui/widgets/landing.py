@@ -104,9 +104,10 @@ class _Tile(QtWidgets.QWidget):
         target: QtCore.QPoint,
     ) -> None:
         super().__init__(parent)
+        self._grad        = grad          # kept for lazy placeholder bake
         self._target      = target
         self._ready_pm:   QtGui.QPixmap | None = None
-        self._placeholder = self._bake_placeholder(grad, _TILE_SZ)
+        self._placeholder: QtGui.QPixmap | None = None  # baked on first paintEvent
         self.setFixedSize(_TILE_SZ, _TILE_SZ)
         # Prevent Qt from pre-filling the background so rounded corners show
         # the parent's gradient through them.
@@ -114,15 +115,16 @@ class _Tile(QtWidgets.QWidget):
         self.setAttribute(QtCore.Qt.WidgetAttribute.WA_NoSystemBackground)
 
     def set_pixmap(self, pm: QtGui.QPixmap) -> None:
-        """Pre-composite the art once; subsequent paintEvents are a single blit."""
-        self._ready_pm = self._bake_pixmap(pm, _TILE_SZ)
+        """Store the pre-baked pixmap (baking done off-thread); tile repaints."""
+        self._ready_pm = pm
         self.update()
 
-    # ── Bake helpers — called once, never again ────────────────────────────
+    # ── Bake helpers ───────────────────────────────────────────────────────
 
     @staticmethod
     def _bake_placeholder(grad: tuple[str, str], size: int, radius: int = 10) -> QtGui.QPixmap:
-        """Render gradient + sheen + shadow into a QPixmap once."""
+        """Render gradient + sheen + shadow into a QPixmap once.
+        Must be called on the main (GUI) thread."""
         out = QtGui.QPixmap(size, size)
         out.fill(QtGui.QColor(0, 0, 0, 0))
         r = QtCore.QRectF(0, 0, size, size)
@@ -148,36 +150,10 @@ class _Tile(QtWidgets.QWidget):
             p.end()
         return out
 
-    @staticmethod
-    def _bake_pixmap(pm: QtGui.QPixmap, size: int, radius: int = 10) -> QtGui.QPixmap:
-        """Scale, round, and vignette *pm* into a QPixmap once."""
-        scaled = pm.scaled(
-            QtCore.QSize(size, size),
-            QtCore.Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-            QtCore.Qt.TransformationMode.SmoothTransformation,
-        )
-        out = QtGui.QPixmap(size, size)
-        out.fill(QtGui.QColor(0, 0, 0, 0))
-        r = QtCore.QRectF(0, 0, size, size)
-        path = QtGui.QPainterPath()
-        path.addRoundedRect(r, radius, radius)
-        p = QtGui.QPainter(out)
-        try:
-            p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
-            p.setClipPath(path)
-            ox = (scaled.width()  - size) // 2
-            oy = (scaled.height() - size) // 2
-            p.drawPixmap(QtCore.QPoint(-ox, -oy), scaled)
-            p.setClipping(False)
-            vignette = QtGui.QRadialGradient(r.center(), max(r.width(), r.height()) * 0.75)
-            vignette.setColorAt(0.5, QtGui.QColor(0, 0, 0, 0))
-            vignette.setColorAt(1.0, QtGui.QColor(0, 0, 0, 80))
-            p.fillPath(path, QtGui.QBrush(vignette))
-        finally:
-            p.end()
-        return out
-
     def paintEvent(self, event: QtGui.QPaintEvent) -> None:  # noqa: N802
+        # Lazy-bake the placeholder on first paint so __init__ stays fast.
+        if self._placeholder is None and self._ready_pm is None:
+            self._placeholder = self._bake_placeholder(self._grad, _TILE_SZ)
         p = QtGui.QPainter(self)
         try:
             src = self._ready_pm if self._ready_pm is not None else self._placeholder
@@ -458,7 +434,9 @@ class _ArtScanner(QtCore.QThread):
 
     art_found = Signal(int, QtGui.QImage)  # (tile_index, image) — QImage is thread-safe
 
-    _MAX_SCAN_WORKERS = 6   # parallel cover-extraction threads
+    _MAX_SCAN_WORKERS   = 6  # parallel cover-extraction threads
+    _MAX_FILES_PER_DIR  = 2  # audio files tried per directory before giving up
+    _IN_FLIGHT          = _MAX_SCAN_WORKERS * 3  # futures kept active at once
 
     def __init__(self, library_path: str, tile_count: int) -> None:
         super().__init__()
@@ -469,11 +447,42 @@ class _ArtScanner(QtCore.QThread):
     # ── Low-level helpers ─────────────────────────────────────────────────
 
     @staticmethod
-    def _image_from_bytes(data: bytes) -> QtGui.QImage | None:
-        img = QtGui.QImage()
-        if img.loadFromData(data) and not img.isNull():
-            return img
-        return None
+    def _bake_image(raw: bytes, size: int = _TILE_SZ, radius: int = 10) -> QtGui.QImage | None:
+        """Decode, scale, round-clip, and vignette *raw* cover bytes into a QImage.
+
+        Called from pool worker threads.  QPainter on QImage is reentrant and
+        safe to use from any thread; QPixmap is not (GUI-thread only).
+        Returning a QImage lets the main thread do a single fast
+        QPixmap.fromImage() with no further drawing work.
+        """
+        src = QtGui.QImage()
+        if not src.loadFromData(raw) or src.isNull():
+            return None
+        src = src.scaled(
+            QtCore.QSize(size, size),
+            QtCore.Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+            QtCore.Qt.TransformationMode.SmoothTransformation,
+        )
+        out = QtGui.QImage(size, size, QtGui.QImage.Format.Format_ARGB32_Premultiplied)
+        out.fill(QtGui.QColor(0, 0, 0, 0))
+        r    = QtCore.QRectF(0, 0, size, size)
+        path = QtGui.QPainterPath()
+        path.addRoundedRect(r, radius, radius)
+        p = QtGui.QPainter(out)
+        try:
+            p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+            p.setClipPath(path)
+            ox = (src.width()  - size) // 2
+            oy = (src.height() - size) // 2
+            p.drawImage(QtCore.QPoint(-ox, -oy), src)
+            p.setClipping(False)
+            vignette = QtGui.QRadialGradient(r.center(), max(r.width(), r.height()) * 0.75)
+            vignette.setColorAt(0.5, QtGui.QColor(0, 0, 0, 0))
+            vignette.setColorAt(1.0, QtGui.QColor(0, 0, 0, 80))
+            p.fillPath(path, QtGui.QBrush(vignette))
+        finally:
+            p.end()
+        return out
 
     @staticmethod
     def _scandir_files(dirpath: str) -> list[str]:
@@ -591,16 +600,33 @@ class _ArtScanner(QtCore.QThread):
 
     # ── Per-directory cover helper ────────────────────────────────────────
 
-    def _first_cover_in_dir(self, dirpath: str) -> tuple[str, str, bytes] | None:
-        """Return ``(method, dirpath, image_bytes)`` for the first cover found,
-        or ``None`` if no audio file in *dirpath* has an embedded cover."""
+    def _first_cover_in_dir(
+        self, dirpath: str
+    ) -> tuple[str, str, bytes, QtGui.QImage] | None:
+        """Scan *dirpath* for an embedded cover; return on the first hit.
+
+        Returns ``(method, dirpath, sig_bytes, baked_image)`` or ``None``.
+        *sig_bytes* is the first 64 bytes of raw cover data used for dedup.
+        *baked_image* is a fully composited QImage ready for QPixmap.fromImage();
+        all scaling / rounding / vignetting is done here in the worker thread
+        so the main thread has zero drawing work to do.
+
+        Gives up after ``_MAX_FILES_PER_DIR`` audio files without a hit —
+        albums are tagged consistently, so one miss is almost always decisive.
+        """
+        tried = 0
         for name in self._scandir_files(dirpath):
             if os.path.splitext(name)[1].lower() not in _AUDIO_EXTS:
                 continue
             result = self._cover_from_file(os.path.join(dirpath, name))
+            tried += 1
             if result:
-                method, data = result
-                return (method, dirpath, data)
+                method, raw = result
+                img = self._bake_image(raw)
+                if img is not None:
+                    return (method, dirpath, raw[:64], img)
+            if tried >= self._MAX_FILES_PER_DIR:
+                break
         return None
 
     # ── Orchestration + emit ──────────────────────────────────────────────
@@ -614,44 +640,58 @@ class _ArtScanner(QtCore.QThread):
         if self.isInterruptionRequested():
             return
 
-        selected:   list[str]       = []
-        seen_sigs:  set[bytes]      = set()
-        tile_index: int             = 0
-        method_counts: dict[str, int] = {}
-        no_cover_dirs: int          = 0
+        selected:      list[str]        = []
+        seen_sigs:     set[bytes]       = set()
+        tile_index:    int              = 0
+        method_counts: dict[str, int]   = {}
+        no_cover_dirs: int              = 0
 
-        chunk_size = max(self._n * 4, 64)
-
-        with concurrent.futures.ThreadPoolExecutor(
+        # Rolling pool: keep _IN_FLIGHT futures active at all times.
+        # As each completes we immediately submit the next directory.
+        # When we have enough tiles the executor is shut down and any
+        # queued-but-not-started futures are cancelled (Python 3.9+).
+        executor = concurrent.futures.ThreadPoolExecutor(
             max_workers=self._MAX_SCAN_WORKERS,
             thread_name_prefix="ArtScan",
-        ) as executor:
-            for chunk_start in range(0, len(dirpaths), chunk_size):
-                if self.isInterruptionRequested() or tile_index >= self._n:
+        )
+        pending:  dict[concurrent.futures.Future, None] = {}
+        dir_iter  = iter(dirpaths)
+
+        def _fill() -> None:
+            while len(pending) < self._IN_FLIGHT:
+                try:
+                    d = next(dir_iter)
+                    pending[executor.submit(self._first_cover_in_dir, d)] = None
+                except StopIteration:
                     break
-                chunk   = dirpaths[chunk_start : chunk_start + chunk_size]
-                futures = {executor.submit(self._first_cover_in_dir, d): d for d in chunk}
-                for future in concurrent.futures.as_completed(futures):
-                    if self.isInterruptionRequested() or tile_index >= self._n:
-                        break
+
+        try:
+            _fill()
+            while pending and tile_index < self._n and not self.isInterruptionRequested():
+                done, _ = concurrent.futures.wait(
+                    pending,
+                    return_when=concurrent.futures.FIRST_COMPLETED,
+                    timeout=1.0,
+                )
+                for f in done:
+                    del pending[f]
                     try:
-                        hit = future.result()
+                        hit = f.result()
                     except Exception:
                         hit = None
                     if hit is None:
                         no_cover_dirs += 1
-                        continue
-                    method, dirpath, cover = hit
-                    sig = cover[:64]
-                    if sig in seen_sigs:
-                        continue
-                    seen_sigs.add(sig)
-                    img = self._image_from_bytes(cover)
-                    if img is not None:
-                        self.art_found.emit(tile_index, img)
-                        selected.append(dirpath)
-                        method_counts[method] = method_counts.get(method, 0) + 1
-                        tile_index += 1
+                    else:
+                        method, dirpath, sig, img = hit
+                        if sig not in seen_sigs:
+                            seen_sigs.add(sig)
+                            self.art_found.emit(tile_index, img)
+                            selected.append(dirpath)
+                            method_counts[method] = method_counts.get(method, 0) + 1
+                            tile_index += 1
+                _fill()
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
 
         if _ART_SCAN_DEBUG:
             parts = [f"tiles={tile_index}/{self._n}"]
