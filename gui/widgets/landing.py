@@ -104,9 +104,9 @@ class _Tile(QtWidgets.QWidget):
         target: QtCore.QPoint,
     ) -> None:
         super().__init__(parent)
-        self._grad   = grad
-        self._target = target
-        self._pixmap: QtGui.QPixmap | None = None
+        self._target      = target
+        self._ready_pm:   QtGui.QPixmap | None = None
+        self._placeholder = self._bake_placeholder(grad, _TILE_SZ)
         self.setFixedSize(_TILE_SZ, _TILE_SZ)
         # Prevent Qt from pre-filling the background so rounded corners show
         # the parent's gradient through them.
@@ -114,57 +114,74 @@ class _Tile(QtWidgets.QWidget):
         self.setAttribute(QtCore.Qt.WidgetAttribute.WA_NoSystemBackground)
 
     def set_pixmap(self, pm: QtGui.QPixmap) -> None:
-        """Set album-art pixmap; tile repaints itself automatically."""
-        self._pixmap = pm
+        """Pre-composite the art once; subsequent paintEvents are a single blit."""
+        self._ready_pm = self._bake_pixmap(pm, _TILE_SZ)
         self.update()
+
+    # ── Bake helpers — called once, never again ────────────────────────────
+
+    @staticmethod
+    def _bake_placeholder(grad: tuple[str, str], size: int, radius: int = 10) -> QtGui.QPixmap:
+        """Render gradient + sheen + shadow into a QPixmap once."""
+        out = QtGui.QPixmap(size, size)
+        out.fill(QtGui.QColor(0, 0, 0, 0))
+        r = QtCore.QRectF(0, 0, size, size)
+        path = QtGui.QPainterPath()
+        path.addRoundedRect(r, radius, radius)
+        p = QtGui.QPainter(out)
+        try:
+            p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+            lg = QtGui.QLinearGradient(r.topLeft(), r.bottomRight())
+            lg.setColorAt(0.0, QtGui.QColor(grad[0]))
+            lg.setColorAt(1.0, QtGui.QColor(grad[1]))
+            p.fillPath(path, QtGui.QBrush(lg))
+            p.setPen(QtGui.QPen(QtGui.QColor(255, 255, 255, 42), 1.0))
+            p.drawLine(
+                QtCore.QPointF(12, 1.0),
+                QtCore.QPointF(size - 12, 1.0),
+            )
+            shadow = QtGui.QLinearGradient(r.topLeft(), r.bottomRight())
+            shadow.setColorAt(0.55, QtGui.QColor(0, 0, 0, 0))
+            shadow.setColorAt(1.0,  QtGui.QColor(0, 0, 0, 55))
+            p.fillPath(path, QtGui.QBrush(shadow))
+        finally:
+            p.end()
+        return out
+
+    @staticmethod
+    def _bake_pixmap(pm: QtGui.QPixmap, size: int, radius: int = 10) -> QtGui.QPixmap:
+        """Scale, round, and vignette *pm* into a QPixmap once."""
+        scaled = pm.scaled(
+            QtCore.QSize(size, size),
+            QtCore.Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+            QtCore.Qt.TransformationMode.SmoothTransformation,
+        )
+        out = QtGui.QPixmap(size, size)
+        out.fill(QtGui.QColor(0, 0, 0, 0))
+        r = QtCore.QRectF(0, 0, size, size)
+        path = QtGui.QPainterPath()
+        path.addRoundedRect(r, radius, radius)
+        p = QtGui.QPainter(out)
+        try:
+            p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+            p.setClipPath(path)
+            ox = (scaled.width()  - size) // 2
+            oy = (scaled.height() - size) // 2
+            p.drawPixmap(QtCore.QPoint(-ox, -oy), scaled)
+            p.setClipping(False)
+            vignette = QtGui.QRadialGradient(r.center(), max(r.width(), r.height()) * 0.75)
+            vignette.setColorAt(0.5, QtGui.QColor(0, 0, 0, 0))
+            vignette.setColorAt(1.0, QtGui.QColor(0, 0, 0, 80))
+            p.fillPath(path, QtGui.QBrush(vignette))
+        finally:
+            p.end()
+        return out
 
     def paintEvent(self, event: QtGui.QPaintEvent) -> None:  # noqa: N802
         p = QtGui.QPainter(self)
         try:
-            p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
-            r = QtCore.QRectF(self.rect())
-
-            path = QtGui.QPainterPath()
-            path.addRoundedRect(r, 10, 10)
-
-            if self._pixmap is not None:
-                # Clip to rounded rect and draw scaled pixmap
-                p.setClipPath(path)
-                scaled = self._pixmap.scaled(
-                    self.size(),
-                    QtCore.Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-                    QtCore.Qt.TransformationMode.SmoothTransformation,
-                )
-                ox = (scaled.width()  - self.width())  // 2
-                oy = (scaled.height() - self.height()) // 2
-                p.drawPixmap(QtCore.QPoint(-ox, -oy), scaled)
-                p.setClipping(False)
-
-                # Vignette overlay for depth
-                vignette = QtGui.QRadialGradient(
-                    r.center(), max(r.width(), r.height()) * 0.75
-                )
-                vignette.setColorAt(0.5, QtGui.QColor(0, 0, 0, 0))
-                vignette.setColorAt(1.0, QtGui.QColor(0, 0, 0, 80))
-                p.fillPath(path, QtGui.QBrush(vignette))
-            else:
-                grad = QtGui.QLinearGradient(r.topLeft(), r.bottomRight())
-                grad.setColorAt(0.0, QtGui.QColor(self._grad[0]))
-                grad.setColorAt(1.0, QtGui.QColor(self._grad[1]))
-                p.fillPath(path, QtGui.QBrush(grad))
-
-                # Subtle top-edge sheen — gives a soft "depth" impression
-                p.setPen(QtGui.QPen(QtGui.QColor(255, 255, 255, 42), 1.0))
-                p.drawLine(
-                    QtCore.QPointF(r.left() + 12, r.top() + 1.0),
-                    QtCore.QPointF(r.right() - 12, r.top() + 1.0),
-                )
-
-                # Bottom-right dark overlay to hint at depth / shadow
-                shadow = QtGui.QLinearGradient(r.topLeft(), r.bottomRight())
-                shadow.setColorAt(0.55, QtGui.QColor(0, 0, 0, 0))
-                shadow.setColorAt(1.0,  QtGui.QColor(0, 0, 0, 55))
-                p.fillPath(path, QtGui.QBrush(shadow))
+            src = self._ready_pm if self._ready_pm is not None else self._placeholder
+            p.drawPixmap(0, 0, src)
         finally:
             p.end()
 
