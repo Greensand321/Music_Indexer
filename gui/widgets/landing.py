@@ -602,17 +602,13 @@ class _ArtScanner(QtCore.QThread):
 
     def _first_cover_in_dir(
         self, dirpath: str
-    ) -> tuple[str, str, bytes, QtGui.QImage] | None:
-        """Scan *dirpath* for an embedded cover; return on the first hit.
+    ) -> tuple[str, str, bytes] | None:
+        """Return ``(method, dirpath, raw_bytes)`` for the first cover found,
+        or ``None``.  Gives up after ``_MAX_FILES_PER_DIR`` audio files.
 
-        Returns ``(method, dirpath, sig_bytes, baked_image)`` or ``None``.
-        *sig_bytes* is the first 64 bytes of raw cover data used for dedup.
-        *baked_image* is a fully composited QImage ready for QPixmap.fromImage();
-        all scaling / rounding / vignetting is done here in the worker thread
-        so the main thread has zero drawing work to do.
-
-        Gives up after ``_MAX_FILES_PER_DIR`` audio files without a hit —
-        albums are tagged consistently, so one miss is almost always decisive.
+        Workers do I/O only — no Qt calls.  Baking happens in the scanner
+        QThread (``run()``) so only one background thread ever touches Qt
+        APIs, keeping GIL contention with the main thread minimal.
         """
         tried = 0
         for name in self._scandir_files(dirpath):
@@ -622,9 +618,7 @@ class _ArtScanner(QtCore.QThread):
             tried += 1
             if result:
                 method, raw = result
-                img = self._bake_image(raw)
-                if img is not None:
-                    return (method, dirpath, raw[:64], img)
+                return (method, dirpath, raw)
             if tried >= self._MAX_FILES_PER_DIR:
                 break
         return None
@@ -682,13 +676,18 @@ class _ArtScanner(QtCore.QThread):
                     if hit is None:
                         no_cover_dirs += 1
                     else:
-                        method, dirpath, sig, img = hit
+                        method, dirpath, raw = hit
+                        sig = raw[:64]
                         if sig not in seen_sigs:
                             seen_sigs.add(sig)
-                            self.art_found.emit(tile_index, img)
-                            selected.append(dirpath)
-                            method_counts[method] = method_counts.get(method, 0) + 1
-                            tile_index += 1
+                            # Bake here in the scanner QThread — one thread,
+                            # no GIL war with the 6 I/O workers or main thread.
+                            img = self._bake_image(raw)
+                            if img is not None:
+                                self.art_found.emit(tile_index, img)
+                                selected.append(dirpath)
+                                method_counts[method] = method_counts.get(method, 0) + 1
+                                tile_index += 1
                 _fill()
         finally:
             executor.shutdown(wait=False, cancel_futures=True)
