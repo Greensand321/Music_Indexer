@@ -87,7 +87,6 @@ def main() -> int:
         pass
     except Exception as e:
         # Log real errors for debugging, but continue with defaults
-        import sys
         print(f"[Warning] Failed to load saved config: {e}", file=sys.stderr)
 
     # ── Landing page ──────────────────────────────────────────────────────────
