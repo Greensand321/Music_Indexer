@@ -260,7 +260,18 @@ class SplashScreen(QtWidgets.QWidget):
             QtGui.QFont.HintingPreference.PreferNoHinting
         )
         p.setFont(brand_font)
-        p.setPen(QtGui.QColor(c["text"]))
+
+        # Draw text shadow for better readability (subtle dark shadow)
+        shadow_color = QtGui.QColor(0, 0, 0, 60)
+        p.setPen(shadow_color)
+        p.drawText(
+            QtCore.QRect(2, 74, _W, 96),  # Slightly offset for shadow
+            int(QtCore.Qt.AlignmentFlag.AlignCenter),
+            "AlphaDEX",
+        )
+
+        # Draw main text in accent color for visibility and theme complement
+        p.setPen(QtGui.QColor(c["accent"]))
         p.drawText(
             QtCore.QRect(0, 72, _W, 96),
             int(QtCore.Qt.AlignmentFlag.AlignCenter),
@@ -274,7 +285,17 @@ class SplashScreen(QtWidgets.QWidget):
             QtGui.QFont.HintingPreference.PreferNoHinting
         )
         p.setFont(sub_font)
-        p.setPen(QtGui.QColor(c["subtext"]))
+
+        # Subtitle shadow for readability
+        p.setPen(QtGui.QColor(0, 0, 0, 40))
+        p.drawText(
+            QtCore.QRect(1, 169, _W, 28),  # Slightly offset
+            int(QtCore.Qt.AlignmentFlag.AlignCenter),
+            "Music Library Manager  ·  v2.0",
+        )
+
+        # Subtitle text - use accent2 for visual harmony with the accent theme color
+        p.setPen(QtGui.QColor(c["accent2"]))
         p.drawText(
             QtCore.QRect(0, 168, _W, 28),
             int(QtCore.Qt.AlignmentFlag.AlignCenter),
