@@ -211,6 +211,12 @@ class GraphWorkspace(WorkspaceBase):
                 self._status_lbl.setText("No cluster data available")
                 return
 
+            # Check if X was downsampled for visualization
+            x_downsampled = cluster_info.get("X_downsampled", False)
+            x_total = cluster_info.get("X_total_points", len(X))
+            if x_downsampled and x_total > 0:
+                logger.info(f"Cluster data: X downsampled from {x_total} to {len(X)} points for visualization")
+
             # Create metadata dict for each point
             metadata = []
             for track_path in tracks:
