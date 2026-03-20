@@ -22,7 +22,11 @@ _W, _H   = 520, 300
 
 
 def _theme_colors() -> dict[str, str]:
-    """Return a palette dict drawn from the active theme, or a safe fallback."""
+    """Return a palette dict drawn from the active theme, or a safe fallback.
+
+    Fallback palette (Midnight dark) is used if theme manager is unavailable
+    or if an error occurs during theme loading. Errors are logged to stderr.
+    """
     try:
         from gui.themes.manager import get_manager
         t = get_manager().current
@@ -36,17 +40,29 @@ def _theme_colors() -> dict[str, str]:
             "accent2":   t.accent_hover,
             "bar_track": t.card_bg,
         }
-    except Exception:
-        return {
-            "bg":        "#0d1117",
-            "surface":   "#161b22",
-            "border":    "#30363d",
-            "text":      "#f8fafc",
-            "subtext":   "#64748b",
-            "accent":    "#6366f1",
-            "accent2":   "#a78bfa",
-            "bar_track": "#1e2130",
-        }
+    except ImportError:
+        # Theme manager module not available; use fallback (normal on first startup)
+        pass
+    except AttributeError as e:
+        # Real error in theme structure; log it for debugging
+        import sys
+        print(f"[Warning] Theme manager attribute error: {e}; using fallback", file=sys.stderr)
+    except Exception as e:
+        # Other unexpected errors; log for debugging
+        import sys
+        print(f"[Warning] Theme loading failed: {e}; using fallback", file=sys.stderr)
+
+    # Fallback palette (Midnight dark theme)
+    return {
+        "bg":        "#0d1117",
+        "surface":   "#161b22",
+        "border":    "#30363d",
+        "text":      "#f8fafc",
+        "subtext":   "#64748b",
+        "accent":    "#6366f1",
+        "accent2":   "#a78bfa",
+        "bar_track": "#1e2130",
+    }
 
 
 class SplashScreen(QtWidgets.QWidget):

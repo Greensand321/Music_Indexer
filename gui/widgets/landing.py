@@ -28,6 +28,18 @@ from pathlib import Path
 
 from gui.compat import QtCore, QtGui, QtWidgets, Signal
 
+# ── Optional module imports ────────────────────────────────────────────────────
+# Import mutagen once at module level to avoid repeated import attempts.
+try:
+    import mutagen
+    from mutagen.flac import Picture as MutagenPicture
+except ImportError:
+    mutagen = None  # type: ignore[assignment]
+    MutagenPicture = None  # type: ignore[assignment]
+
+# base64 is standard library and safe to import at module level
+import base64
+
 # ── Grid constants ─────────────────────────────────────────────────────────────
 _COLS      = 7
 _ROWS      = 5
@@ -330,6 +342,25 @@ class _CTACard(QtWidgets.QFrame):
 _AUDIO_EXTS: frozenset[str] = frozenset(
     {".flac", ".m4a", ".aac", ".mp3", ".wav", ".ogg", ".opus"}
 )
+# Lowercase variants for fast extension checking in hot path
+_AUDIO_EXTS_LOWER: frozenset[str] = frozenset(
+    ext.lower() for ext in _AUDIO_EXTS
+)
+
+
+def _is_audio_file(filename: str) -> bool:
+    """Fast check if filename has an audio extension (case-insensitive).
+
+    Optimized for the hot path: checks the filename suffix directly
+    without calling os.path.splitext().
+    """
+    # Find the last dot; if none or at position 0, not a file with extension
+    dot_pos = filename.rfind('.')
+    if dot_pos <= 0:
+        return False
+    # Extract extension (includes the dot) and check case-insensitively
+    ext = filename[dot_pos:].lower()
+    return ext in _AUDIO_EXTS_LOWER
 
 
 class _ArtHistory:
@@ -342,7 +373,8 @@ class _ArtHistory:
     The scanner passes this object to ``_ordered_dirs()`` which puts unseen
     directories first (shuffled) and recently-seen directories last (also
     shuffled).  After emitting, the directories that contributed to the on-
-    screen tiles are appended here and saved.
+    screen tiles are appended here and marked dirty. Saves are deferred to
+    avoid blocking I/O on the scanner thread.
     """
 
     MAX_ENTRIES = 10_000
@@ -351,6 +383,7 @@ class _ArtHistory:
     def __init__(self) -> None:
         self._log: list[str] = []   # ordered oldest → newest
         self._set: set[str] = set() # fast membership test
+        self._dirty: bool = False   # whether changes need to be persisted
         self._load()
 
     def _load(self) -> None:
@@ -360,11 +393,19 @@ class _ArtHistory:
             if isinstance(raw, list):
                 self._log = [p for p in raw if isinstance(p, str)]
                 self._set = set(self._log)
-        except Exception:
+        except FileNotFoundError:
+            # First startup; no history file yet. This is normal.
             pass
+        except Exception as e:
+            # Unexpected error reading history; log but continue
+            print(f"[Warning] Failed to load art history: {e}", file=sys.stderr)
 
     def add_and_save(self, paths: list[str]) -> None:
-        """Append *paths* (deduped), trim to MAX_ENTRIES, and persist."""
+        """Append *paths* (deduped), trim to MAX_ENTRIES, and mark dirty.
+
+        Actual file I/O is deferred via the _dirty flag. Call save_if_dirty()
+        when convenient (e.g., on next idle cycle) to persist changes.
+        """
         for p in paths:
             if p not in self._set:
                 self._log.append(p)
@@ -373,11 +414,23 @@ class _ArtHistory:
             evicted    = self._log[: len(self._log) - self.MAX_ENTRIES]
             self._log  = self._log[-self.MAX_ENTRIES :]
             self._set -= set(evicted)
+        # Mark changes for deferred persistence; don't block on I/O
+        self._dirty = True
+
+    def save_if_dirty(self) -> None:
+        """Persist changes to disk if any have been made since last save."""
+        if not self._dirty:
+            return
         try:
-            with open(self._PATH, "w", encoding="utf-8") as fh:
+            # Write to temp file first, then rename (atomic on most filesystems)
+            temp_path = self._PATH + ".tmp"
+            with open(temp_path, "w", encoding="utf-8") as fh:
                 json.dump(self._log, fh, separators=(",", ":"))
-        except Exception:
-            pass
+            os.replace(temp_path, self._PATH)
+            self._dirty = False
+        except Exception as e:
+            print(f"[Warning] Failed to save art history: {e}", file=sys.stderr)
+            # Don't clear _dirty; retry on next opportunity
 
     def __contains__(self, path: str) -> bool:
         return path in self._set
@@ -509,9 +562,12 @@ class _ArtScanner(QtCore.QThread):
           4. mbp        — OGG metadata_block_picture (base64 + FLAC Picture)
           5. coverart   — OGG simpler base64 blob
         """
+        # Mutagen module is loaded at module level; if None, can't proceed
+        if mutagen is None:
+            return None
+
         audio = None
         try:
-            import mutagen
             audio = mutagen.File(path, easy=False)
         except Exception:
             pass
@@ -551,21 +607,19 @@ class _ArtScanner(QtCore.QThread):
             # 4. OGG metadata_block_picture (base64-encoded FLAC Picture)
             #    OGG files are dict-like — use audio.get(), not audio.tags.get()
             try:
-                import base64
-                from mutagen.flac import Picture
-                mbp = audio.get("metadata_block_picture") or []
-                if not isinstance(mbp, list):
-                    mbp = [mbp]
-                for item in mbp:
-                    pic = Picture(base64.b64decode(str(item)))
-                    if pic.data:
-                        return ("mbp", pic.data)
+                if MutagenPicture is not None:
+                    mbp = audio.get("metadata_block_picture") or []
+                    if not isinstance(mbp, list):
+                        mbp = [mbp]
+                    for item in mbp:
+                        pic = MutagenPicture(base64.b64decode(str(item)))
+                        if pic.data:
+                            return ("mbp", pic.data)
             except Exception:
                 pass
 
             # 5. OGG coverart (raw base64 image bytes, no Picture wrapper)
             try:
-                import base64
                 ca = audio.get("coverart") or []
                 if not isinstance(ca, list):
                     ca = [ca]
@@ -585,15 +639,31 @@ class _ArtScanner(QtCore.QThread):
 
         One lightweight walk — no file content reads.  Each bucket is
         independently shuffled so traversal order differs on every launch.
+        Depth computed incrementally during traversal to avoid O(n) path operations.
         """
         fresh: list[str] = []
         used:  list[str] = []
-        for dirpath, dirs, _files in os.walk(self._library):
-            rel   = os.path.relpath(dirpath, self._library)
-            depth = 0 if rel == "." else rel.count(os.sep) + 1
+
+        def _walk(dirpath: str, depth: int) -> None:
+            """Recursively walk directories, tracking depth incrementally."""
             if depth >= _SCAN_DEPTH:
-                dirs.clear()
-            (used if dirpath in history else fresh).append(dirpath)
+                return
+
+            try:
+                entries = os.scandir(dirpath)
+                subdirs = [e.name for e in entries if e.is_dir(follow_symlinks=False)]
+            except OSError:
+                return
+
+            random.shuffle(subdirs)
+            for name in subdirs:
+                subdirpath = os.path.join(dirpath, name)
+                bucket = used if subdirpath in history else fresh
+                bucket.append(subdirpath)
+                _walk(subdirpath, depth + 1)
+
+        # Start walk from library root
+        _walk(self._library, 0)
         random.shuffle(fresh)
         random.shuffle(used)
         return fresh + used
@@ -612,7 +682,7 @@ class _ArtScanner(QtCore.QThread):
         """
         tried = 0
         for name in self._scandir_files(dirpath):
-            if os.path.splitext(name)[1].lower() not in _AUDIO_EXTS:
+            if not _is_audio_file(name):
                 continue
             result = self._cover_from_file(os.path.join(dirpath, name))
             tried += 1
@@ -701,7 +771,10 @@ class _ArtScanner(QtCore.QThread):
             parts.append(f"elapsed={time.monotonic() - t0:.2f}s")
             print(f"[ArtScan] {', '.join(parts)}", file=sys.stderr, flush=True)
 
+        # Mark history as dirty (deferred write), then persist it
         history.add_and_save(selected)
+        # Persist the history file now that scanning is complete
+        history.save_if_dirty()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -744,6 +817,7 @@ class MosaicLanding(QtWidgets.QWidget):
         self._fade_in_anim:  object = None
         self._fade_out_anim: object = None
         self._scanner: object = None   # _ArtScanner | None
+        self._art_history: _ArtHistory | None = None  # Track for deferred save
 
         self._compute_grid()
         self._build_tiles()
@@ -964,9 +1038,13 @@ class MosaicLanding(QtWidgets.QWidget):
 
     def _done(self) -> None:
         if self._scanner is not None:
+            # Disconnect signals before cleanup to prevent race conditions
+            self._scanner.art_found.disconnect()
             self._scanner.requestInterruption()
-            self._scanner.quit()
-            self._scanner.wait(800)
+            if not self._scanner.wait(2000):
+                # Thread did not exit cleanly; force termination
+                self._scanner.terminate()
+                self._scanner.wait()
             self._scanner = None
         self.hide()
         self.finished.emit()
