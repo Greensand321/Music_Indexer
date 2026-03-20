@@ -11,10 +11,15 @@ The original Tkinter app remains available at:
 
 Start-up sequence
 -----------------
-1. ``SplashScreen`` — branded loading bar (1 500 ms fill + 450 ms fade-out).
+1. ``SplashScreen`` — progressive loading bar:
+   - Phase 1 (750ms): Fast fill to 50% while UI loads.
+   - Phase 2: Monitored wait while images load; bar tracks real progress from
+     50% to 100%, or times out after 5 seconds.
+   - Fade-out: 450ms fade.
 2. ``MosaicLanding`` — full-window animated mosaic of album-art tiles with a
    frosted-glass CTA card.  The user selects (or confirms) their music library
    here.  Tiles scatter and the landing cross-fades into the main window.
+   Image loading progress is reported back to the splash in real-time.
 3. ``AlphaDEXWindow`` — main application interface.
 """
 from __future__ import annotations
@@ -92,6 +97,12 @@ def main() -> int:
     # ── Landing page ──────────────────────────────────────────────────────────
     from gui.widgets.landing import MosaicLanding, FADE_OUT_MS
     landing = MosaicLanding(shared_geo, saved_lib)
+
+    # ── Wire splash to landing for progressive image loading ────────────────
+    # The splash bar will now show real progress: 0-50% for UI load, then
+    # 50-100% as images are loaded, with a 5-second timeout if images take
+    # longer than expected.
+    landing.wire_splash_progress(splash)
 
     # ── Deferred main window construction ──────────────────────────────────────
     def _construct_main_window() -> None:
