@@ -235,7 +235,7 @@ class _CTACard(QtWidgets.QFrame):
         name_lbl.setFont(nf)
         name_lbl.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         name_lbl.setStyleSheet(
-            f"color: {text_primary}; background: transparent; letter-spacing: -1px;"
+            "color: #ffffff; background: transparent; letter-spacing: -1px;"
         )
 
         # ── Tagline ───────────────────────────────────────────────────────

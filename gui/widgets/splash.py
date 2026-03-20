@@ -123,7 +123,8 @@ class SplashScreen(QtWidgets.QWidget):
         self._fill_phase1.setStartValue(0.0)
         self._fill_phase1.setEndValue(0.5)
         self._fill_phase1.setDuration(_FILL_PHASE1_MS)
-        self._fill_phase1.setEasingCurve(QtCore.QEasingCurve.Type.InOutCubic)
+        # Use OutQuad for smooth ease-out effect (starts fast, eases smoothly to 50%)
+        self._fill_phase1.setEasingCurve(QtCore.QEasingCurve.Type.OutQuad)
         self._fill_phase1.valueChanged.connect(self._on_progress)
         self._fill_phase1.finished.connect(self._on_phase1_done)
         self._fill_phase1.start()
@@ -260,18 +261,7 @@ class SplashScreen(QtWidgets.QWidget):
             QtGui.QFont.HintingPreference.PreferNoHinting
         )
         p.setFont(brand_font)
-
-        # Draw text shadow for better readability (subtle dark shadow)
-        shadow_color = QtGui.QColor(0, 0, 0, 60)
-        p.setPen(shadow_color)
-        p.drawText(
-            QtCore.QRect(2, 74, _W, 96),  # Slightly offset for shadow
-            int(QtCore.Qt.AlignmentFlag.AlignCenter),
-            "AlphaDEX",
-        )
-
-        # Draw main text in accent color for visibility and theme complement
-        p.setPen(QtGui.QColor(c["accent"]))
+        p.setPen(QtGui.QColor(255, 255, 255))  # White text
         p.drawText(
             QtCore.QRect(0, 72, _W, 96),
             int(QtCore.Qt.AlignmentFlag.AlignCenter),
@@ -285,17 +275,7 @@ class SplashScreen(QtWidgets.QWidget):
             QtGui.QFont.HintingPreference.PreferNoHinting
         )
         p.setFont(sub_font)
-
-        # Subtitle shadow for readability
-        p.setPen(QtGui.QColor(0, 0, 0, 40))
-        p.drawText(
-            QtCore.QRect(1, 169, _W, 28),  # Slightly offset
-            int(QtCore.Qt.AlignmentFlag.AlignCenter),
-            "Music Library Manager  ·  v2.0",
-        )
-
-        # Subtitle text - use accent2 for visual harmony with the accent theme color
-        p.setPen(QtGui.QColor(c["accent2"]))
+        p.setPen(QtGui.QColor(c["subtext"]))
         p.drawText(
             QtCore.QRect(0, 168, _W, 28),
             int(QtCore.Qt.AlignmentFlag.AlignCenter),
