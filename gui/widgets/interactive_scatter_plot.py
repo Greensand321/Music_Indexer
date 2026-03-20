@@ -30,11 +30,23 @@ class InteractiveScatterPlot(QtWidgets.QWidget):
     def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(parent)
 
-        if pg is None:
-            raise ImportError("PyQtGraph is required for scatter plot visualization")
+        # Store pg status for later checks
+        self._pg_available = pg is not None
 
-        self._setup_ui()
-        self._setup_interactions()
+        if self._pg_available:
+            self._setup_ui()
+            self._setup_interactions()
+        else:
+            # Create a stub UI when PyQtGraph is not available
+            layout = QtWidgets.QVBoxLayout(self)
+            label = QtWidgets.QLabel(
+                "PyQtGraph is not installed.\n\n"
+                "To enable interactive scatter plot visualization, install it with:\n"
+                "pip install pyqtgraph\n\n"
+                "The graph workspace will be disabled without this library."
+            )
+            label.setWordWrap(True)
+            layout.addWidget(label)
 
         # Data storage
         self._X: np.ndarray | None = None  # (n_samples, 2) array
@@ -99,6 +111,10 @@ class InteractiveScatterPlot(QtWidgets.QWidget):
         metadata : List[dict], optional
             Shape (n_samples,) - metadata for each track
         """
+        # If PyQtGraph is not available, skip rendering
+        if not self._pg_available:
+            return
+
         self._X = np.asarray(X, dtype=np.float32)
         self._clusters = np.asarray(clusters, dtype=np.int32)
         self._labels = labels or [f"Track {i}" for i in range(len(X))]
@@ -148,7 +164,8 @@ class InteractiveScatterPlot(QtWidgets.QWidget):
 
     def _render(self) -> None:
         """Render scatter plot."""
-        if self._X is None or len(self._X) == 0:
+        # Skip rendering if PyQtGraph is not available
+        if not self._pg_available or self._X is None or len(self._X) == 0:
             return
 
         # Create spots for visible points
@@ -287,7 +304,8 @@ class InteractiveScatterPlot(QtWidgets.QWidget):
 
     def fit_view(self) -> None:
         """Fit all visible data in view."""
-        self.plot_widget.enableAutoRange()
+        if self._pg_available and hasattr(self, 'plot_widget'):
+            self.plot_widget.enableAutoRange()
 
     def export_selection_paths(self) -> List[str]:
         """Get file paths of selected tracks."""
