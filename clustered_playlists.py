@@ -408,4 +408,36 @@ def generate_clustered_playlists(
 
     log_callback("→ Automatic playlist export disabled; manage selections manually.")
 
-    return feats
+    # Prepare cluster metadata
+    unique_labels = set([l for l in labels if l >= 0])
+    cluster_info = {}
+    for cluster_id in sorted(unique_labels):
+        cluster_tracks = [i for i, l in enumerate(labels) if l == cluster_id]
+        cluster_info[cluster_id] = {
+            "size": len(cluster_tracks),
+            "genres": [],  # Could extract from tracks if metadata available
+            "tempo": [0, 0],  # Could compute from features if available
+        }
+
+    # Save cluster data to JSON for visualization
+    import json
+    cluster_data = {
+        "X": X.tolist() if len(X) < 10000 else [],  # Don't save huge arrays
+        "labels": labels.tolist(),
+        "tracks": tracks,
+        "cluster_info": cluster_info,
+    }
+    cluster_info_file = os.path.join(docs, "cluster_info.json")
+    with open(cluster_info_file, "w") as f:
+        json.dump(cluster_data, f, indent=2)
+    log_callback(f"✓ Saved cluster data to {cluster_info_file}")
+
+    # Return full result dict for caller
+    return {
+        "features": feats,
+        "X": X,
+        "labels": labels,
+        "tracks": tracks,
+        "cluster_info": cluster_info,
+        "metrics": {},  # Will be filled by caller with sklearn metrics
+    }
