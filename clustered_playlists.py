@@ -45,6 +45,16 @@ else:  # pragma: no cover - optional dependency
 
 AudioFeatureEngine = Literal["librosa", "essentia"]
 
+# Magic number constants for clarity
+DEFAULT_MFCC_COEFS = 13
+FEATURE_VECTOR_LENGTH = 27  # Mean MFCC (13) + Std MFCC (13) + Tempo (1)
+MAX_VISUALIZATION_POINTS = 5000  # Downsample large datasets for viz performance
+MIN_VISUALIZATION_POINTS = 100  # Ensure minimum visualization quality
+DEFAULT_CLUSTER_COUNT = 8  # Default K for K-Means
+DEFAULT_HDBSCAN_MIN_SIZE = 5  # Default minimum cluster size for HDBSCAN
+DEFAULT_HDBSCAN_MIN_SAMPLES = 5  # Default min_samples for HDBSCAN
+PROXIMITY_THRESHOLD_RATIO = 0.1  # Hover detection within 10% of data range
+
 
 def _ensure_1d(a):
     """Return ``a`` flattened to 1-D for feature stacking."""
@@ -88,7 +98,7 @@ def _extract_audio_features_librosa(file_path: str, log_callback) -> "np.ndarray
         )
         with _decode_opus_as_wav(file_path, log_callback) as audio_path:
             y, sr = librosa.load(audio_path, sr=None, mono=True)
-    mfcc = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=13)
+    mfcc = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=DEFAULT_MFCC_COEFS)
     log_callback(
         f"   \u00b7 MFCC shape for {os.path.basename(file_path)}: {mfcc.shape}"
     )
@@ -112,7 +122,7 @@ def _extract_audio_features_essentia(file_path: str, log_callback) -> "np.ndarra
     extractor = MusicExtractor(
         lowlevelStats=["mean", "stdev"],
         rhythmStats=["mean"],
-        numberMfccCoefficients=13,
+        numberMfccCoefficients=DEFAULT_MFCC_COEFS,
     )
     try:
         features = extractor(file_path)
@@ -139,9 +149,9 @@ def _extract_audio_features_essentia(file_path: str, log_callback) -> "np.ndarra
 def _assemble_feature_vector(mean_mfcc, std_mfcc, tempo_arr) -> "np.ndarray":
     vec = np.hstack([mean_mfcc, std_mfcc, tempo_arr]).astype(np.float32)
 
-    if vec.shape[0] != 27:
+    if vec.shape[0] != FEATURE_VECTOR_LENGTH:
         raise RuntimeError(
-            f"Feature vector has wrong length {vec.shape[0]}, expected 27"
+            f"Feature vector has wrong length {vec.shape[0]}, expected {FEATURE_VECTOR_LENGTH}"
         )
     return vec
 
@@ -481,8 +491,6 @@ def generate_clustered_playlists(
 
     # Save cluster data to JSON for visualization
     # For large datasets, optionally downsample X for visualization
-    MAX_VISUALIZATION_POINTS = 5000
-    MIN_VISUALIZATION_POINTS = 100
     x_to_save = X
     downsampled = False
 
