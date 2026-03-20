@@ -22,9 +22,10 @@ import sys
 from gui.compat import QtCore, QtGui, QtWidgets, Signal
 
 _FILL_PHASE1_MS = 750   # Time to load to 50%
-_FILL_PHASE2_MS = 750   # Time to load from 50% to 100%
+_FILL_PHASE2_MS = 1200  # Slower phase 2: time to load from 50% to 100% (smooth transition)
 _IMAGE_LOAD_TIMEOUT_MS = 5000  # Max time to wait for images before continuing
 _FADE_MS = 450
+_SPINNER_ROTATION_MS = 2000  # Full rotation of loading spinner
 _W, _H   = 520, 300
 
 
@@ -100,12 +101,22 @@ class SplashScreen(QtWidgets.QWidget):
 
         self._progress: float = 0.0
         self._colors = _theme_colors()   # snapshot once at creation
+        self._spinner_rotation: float = 0.0  # Rotation angle for loading spinner
 
         # ── Image loading progress tracking ────────────────────────────────
         self._images_loaded: int = 0
         self._images_target: int = 0  # Total images to expect
         self._phase2_started: bool = False
         self._image_load_timeout: QtCore.QTimer | None = None
+
+        # ── Spinner animation ──────────────────────────────────────────────
+        self._spinner_anim = QtCore.QVariantAnimation(self)
+        self._spinner_anim.setStartValue(0.0)
+        self._spinner_anim.setEndValue(360.0)
+        self._spinner_anim.setDuration(_SPINNER_ROTATION_MS)
+        self._spinner_anim.setLoopCount(-1)  # Infinite loop
+        self._spinner_anim.valueChanged.connect(self._on_spinner_rotation)
+        self._spinner_anim.start()
 
         # ── Phase 1: Fast fill to 50% ─────────────────────────────────────
         self._fill_phase1 = QtCore.QVariantAnimation(self)
@@ -161,6 +172,11 @@ class SplashScreen(QtWidgets.QWidget):
 
     def _on_progress(self, value: object) -> None:
         self._progress = float(value)  # type: ignore[arg-type]
+        self.update()
+
+    def _on_spinner_rotation(self, value: object) -> None:
+        """Update spinner rotation angle for continuous animation."""
+        self._spinner_rotation = float(value)  # type: ignore[arg-type]
         self.update()
 
     def _on_phase1_done(self) -> None:
@@ -305,5 +321,30 @@ class SplashScreen(QtWidgets.QWidget):
             glow = QtGui.QColor(c["accent2"])
             glow.setAlpha(220)
             p.fillPath(dot_path, QtGui.QBrush(glow))
+
+        # ── Loading spinner (rotating circle) ──────────────────────────────
+        # Draw a rotating circle above the progress bar
+        spinner_cx = _W / 2.0
+        spinner_cy = bar_y - 20.0  # Above the progress bar
+        spinner_r = 10.0
+
+        # Save painter state before rotation
+        p.save()
+        p.translate(spinner_cx, spinner_cy)
+        p.rotate(self._spinner_rotation)
+
+        # Draw spinning arc (12 o'clock position)
+        spinner_pen = QtGui.QPen(QtGui.QColor(c["accent"]), 2.5)
+        spinner_pen.setCapStyle(QtCore.Qt.PenCapStyle.RoundCap)
+        p.setPen(spinner_pen)
+
+        # Draw an arc from 45 to 315 degrees (270 degrees of arc)
+        arc_path = QtGui.QPainterPath()
+        arc_rect = QtCore.QRectF(-spinner_r, -spinner_r, spinner_r * 2, spinner_r * 2)
+        arc_path.arcMoveTo(arc_rect, 45.0)
+        arc_path.arcTo(arc_rect, 45.0, 270.0)
+        p.drawPath(arc_path)
+
+        p.restore()  # Restore painter state
 
         p.end()
