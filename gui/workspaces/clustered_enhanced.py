@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import logging
 import threading
+import copy
 from pathlib import Path
 
 from gui.compat import QtCore, QtGui, QtWidgets, Signal, Slot
@@ -26,7 +27,8 @@ class ClusterWorker(QtCore.QThread):
     def __init__(self, library_path: str, config: dict) -> None:
         super().__init__()
         self.library_path = library_path
-        self.config = config
+        # Deep copy config to avoid race conditions with main thread modifications
+        self.config = copy.deepcopy(config)
         self._cancelled = False
 
     def cancel(self) -> None:
