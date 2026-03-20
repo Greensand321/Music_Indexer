@@ -50,6 +50,7 @@ class SyncScanWorker(QtCore.QThread):
                 thresholds=self.thresholds,
                 log_callback=_log,
                 cancel_event=self._cancel_event,
+                include_match_objects=True,  # Request MatchResult objects for review flags
             )
             if self._cancel_event.is_set():
                 self.finished.emit(False, "Cancelled.", None)
@@ -67,11 +68,14 @@ class SyncBuildWorker(QtCore.QThread):
     progress = Signal(int)
     finished = Signal(bool, str)
 
-    def __init__(self, library_root: str, incoming_folder: str, transfer_mode: str) -> None:
+    def __init__(self, library_root: str, incoming_folder: str, transfer_mode: str,
+                 review_flags=None, match_results=None) -> None:
         super().__init__()
         self.library_root = library_root
         self.incoming_folder = incoming_folder
         self.transfer_mode = transfer_mode
+        self.review_flags = review_flags
+        self.match_results = match_results
         self._cancel_event = threading.Event()
         # Populated during run()
         self.plan = None
@@ -99,6 +103,14 @@ class SyncBuildWorker(QtCore.QThread):
                 if total:
                     self.progress.emit(int(current / total * 100))
 
+            # Convert review flags to path overrides for the plan builder
+            copy_only_paths = []
+            allowed_replacement_paths = []
+            if self.review_flags and self.match_results:
+                copy_only_paths, allowed_replacement_paths = library_sync.resolve_review_flags_to_paths(
+                    self.review_flags, self.match_results
+                )
+
             plan = library_sync.build_library_sync_preview(
                 self.library_root,
                 self.incoming_folder,
@@ -107,6 +119,8 @@ class SyncBuildWorker(QtCore.QThread):
                 progress_callback=_progress,
                 cancel_event=self._cancel_event,
                 transfer_mode=self.transfer_mode,
+                copy_only_paths=copy_only_paths,
+                allowed_replacement_paths=allowed_replacement_paths,
             )
             self.plan = plan
             self.preview_html_path = output_html
@@ -170,6 +184,12 @@ class LibrarySyncWorkspace(WorkspaceBase):
         self._worker: SyncScanWorker | None = None
         self._build_worker: SyncBuildWorker | None = None
         self._exec_worker: SyncExecuteWorker | None = None
+
+        # Initialize review state store for per-item user flags
+        from library_sync_review_state import ReviewStateStore
+        self._review_state_store = ReviewStateStore()
+        self._current_match_results: list = []  # Store MatchResult objects from scan
+
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -341,12 +361,18 @@ class LibrarySyncWorkspace(WorkspaceBase):
         left = QtWidgets.QVBoxLayout()
         left.addWidget(self._make_card_title("Incoming Tracks"))
         self._incoming_table = QtWidgets.QTreeWidget()
-        self._incoming_table.setHeaderLabels(["Track", "Status", "Distance"])
-        self._incoming_table.setColumnWidth(0, 260)
-        self._incoming_table.setColumnWidth(1, 100)
+        self._incoming_table.setHeaderLabels(["Track", "Status", "Distance", "Flag", "Note"])
+        self._incoming_table.setColumnWidth(0, 200)
+        self._incoming_table.setColumnWidth(1, 80)
+        self._incoming_table.setColumnWidth(2, 70)
+        self._incoming_table.setColumnWidth(3, 60)
+        self._incoming_table.setColumnWidth(4, 100)
         self._incoming_table.setMinimumHeight(200)
         self._incoming_table.setAlternatingRowColors(True)
         self._incoming_table.currentItemChanged.connect(self._on_incoming_selected)
+        # Enable context menu for flagging items
+        self._incoming_table.setContextMenuPolicy(QtCore.Qt.ContextMenuPolicy.CustomContextMenu)
+        self._incoming_table.customContextMenuRequested.connect(self._on_incoming_context_menu)
         left.addWidget(self._incoming_table)
 
         # Existing tracks
@@ -475,6 +501,9 @@ class LibrarySyncWorkspace(WorkspaceBase):
         except ValueError:
             pass
 
+        # Clear review state for fresh scan
+        self._review_state_store.clear_all()
+        self._current_match_results = []
         self._log_area.clear()
         self._incoming_table.clear()
         self._existing_table.clear()
@@ -538,7 +567,11 @@ class LibrarySyncWorkspace(WorkspaceBase):
         self._log("Building Library Sync plan and preview…", "info")
         self.status_changed.emit("Building plan…", "#f59e0b")
 
-        self._build_worker = SyncBuildWorker(library_root, incoming, transfer_mode)
+        self._build_worker = SyncBuildWorker(
+            library_root, incoming, transfer_mode,
+            review_flags=self._review_state_store,
+            match_results=self._current_match_results
+        )
         self._build_worker.log_line.connect(self._on_log_line)
         self._build_worker.progress.connect(self._plan_bar.setValue)
         self._build_worker.finished.connect(self._on_build_finished)
@@ -612,6 +645,9 @@ class LibrarySyncWorkspace(WorkspaceBase):
 
         if success:
             self._scan_result = result
+            # Store match objects for review flag resolution
+            if isinstance(result, dict) and "match_objects" in result:
+                self._current_match_results = result["match_objects"]
             self._exist_bar.setValue(100)
             self._incoming_bar.setValue(100)
             self._exist_status.setText("Done")
@@ -673,27 +709,41 @@ class LibrarySyncWorkspace(WorkspaceBase):
         """Populate incoming tracks table from compare_libraries result dict."""
         if not isinstance(result, dict):
             return
-        # compare_libraries returns keys like "new", "upgrade_candidates", "collisions", "existing_only"
-        status_map = {
-            "new": "New",
-            "upgrade_candidates": "Upgrade",
-            "collisions": "Collision",
-            "existing_only": "Existing only",
-            "matched": "Matched",
-        }
+
         self._incoming_table.clear()
         self._existing_table.clear()
-        for key, label in status_map.items():
-            entries = result.get(key, [])
-            if not isinstance(entries, list):
-                continue
-            for entry in entries:
-                path = str(entry) if isinstance(entry, str) else str(getattr(entry, "incoming_path", entry))
-                dist = getattr(entry, "distance", None)
-                dist_str = f"{dist:.3f}" if dist is not None else "—"
-                row = QtWidgets.QTreeWidgetItem([Path(path).name, label, dist_str])
+
+        # Use match_objects if available (preferred for track_id access)
+        if "match_objects" in result and isinstance(result["match_objects"], list):
+            for match in result["match_objects"]:
+                path = match.incoming.path
+                status_label = str(match.status).split(".")[-1] if hasattr(match.status, "name") else str(match.status)
+                dist_str = f"{match.distance:.3f}" if match.distance is not None else "—"
+                row = QtWidgets.QTreeWidgetItem([Path(path).name, status_label, dist_str, "", ""])
                 row.setToolTip(0, path)
+                # Store track_id for context menu and flag lookup
+                row.setData(0, QtCore.Qt.ItemDataRole.UserRole, match.incoming.track_id)
                 self._incoming_table.addTopLevelItem(row)
+        else:
+            # Fallback to old behavior if match_objects not available
+            status_map = {
+                "new": "New",
+                "upgrade_candidates": "Upgrade",
+                "collisions": "Collision",
+                "existing_only": "Existing only",
+                "matched": "Matched",
+            }
+            for key, label in status_map.items():
+                entries = result.get(key, [])
+                if not isinstance(entries, list):
+                    continue
+                for entry in entries:
+                    path = str(entry) if isinstance(entry, str) else str(getattr(entry, "incoming_path", entry))
+                    dist = getattr(entry, "distance", None)
+                    dist_str = f"{dist:.3f}" if dist is not None else "—"
+                    row = QtWidgets.QTreeWidgetItem([Path(path).name, label, dist_str, "", ""])
+                    row.setToolTip(0, path)
+                    self._incoming_table.addTopLevelItem(row)
 
     def _browse_folder(self, entry: QtWidgets.QLineEdit, title: str) -> None:
         start = entry.text() or str(Path.home())
@@ -703,3 +753,80 @@ class LibrarySyncWorkspace(WorkspaceBase):
 
     def _on_library_changed(self, path: str) -> None:
         self._existing_entry.setText(path)
+
+    def _on_incoming_context_menu(self, pos: QtCore.QPoint) -> None:
+        """Right-click context menu for incoming track flagging."""
+        item = self._incoming_table.itemAt(pos)
+        if not item:
+            return
+
+        track_id = item.data(0, QtCore.Qt.ItemDataRole.UserRole)
+        if not track_id:
+            return
+
+        menu = QtWidgets.QMenu()
+        menu.addAction("📋 Copy", lambda: self._flag_for_copy(track_id))
+        menu.addAction("↻ Replace", lambda: self._flag_for_replace(track_id))
+        menu.addAction("✕ Clear flag", lambda: self._flag_clear(track_id))
+        menu.addSeparator()
+        menu.addAction("📝 Add note", lambda: self._edit_note(track_id))
+        menu.exec(self._incoming_table.mapToGlobal(pos))
+
+    def _flag_for_copy(self, track_id: str) -> None:
+        """Mark track for copy, remove any replace flag."""
+        self._review_state_store.flag_for_copy(track_id)
+        self._update_incoming_item_flags(track_id)
+        self._log(f"Flagged {track_id} for copy", "info")
+
+    def _flag_for_replace(self, track_id: str) -> None:
+        """Mark track to replace existing counterpart."""
+        # Find the matching result for validation
+        match = next((r for r in self._current_match_results
+                      if r.incoming.track_id == track_id), None)
+        if not match or not match.existing:
+            QtWidgets.QMessageBox.warning(self, "Cannot Replace",
+                "No existing match found for this track.")
+            return
+
+        self._review_state_store.flag_for_replace(match)
+        self._update_incoming_item_flags(track_id)
+        self._log(f"Flagged {track_id} to replace {match.existing.track_id}", "info")
+
+    def _flag_clear(self, track_id: str) -> None:
+        """Clear both copy and replace flags."""
+        self._review_state_store.unflag_copy(track_id)
+        # Clear replace flag by removing from the replace dict
+        if track_id in self._review_state_store.flags.replace:
+            del self._review_state_store.flags.replace[track_id]
+        self._update_incoming_item_flags(track_id)
+        self._log(f"Cleared flags for {track_id}", "info")
+
+    def _edit_note(self, track_id: str) -> None:
+        """Show dialog to edit note for this track."""
+        current_note = self._review_state_store.note_for(track_id) or ""
+        text, ok = QtWidgets.QInputDialog.getMultiLineText(
+            self, "Add Note", "Notes for this track:", current_note
+        )
+        if ok:
+            self._review_state_store.set_note(track_id, text)
+            self._update_incoming_item_flags(track_id)
+            self._log(f"Added note to {track_id}", "info")
+
+    def _update_incoming_item_flags(self, track_id: str) -> None:
+        """Refresh the display for a single incoming item."""
+        # Find item by track_id
+        for i in range(self._incoming_table.topLevelItemCount()):
+            item = self._incoming_table.topLevelItem(i)
+            if item.data(0, QtCore.Qt.ItemDataRole.UserRole) == track_id:
+                # Update flag column (index 3)
+                if self._review_state_store.is_copy_flagged(track_id):
+                    item.setText(3, "📋 Copy")
+                elif self._review_state_store.replace_target(track_id):
+                    item.setText(3, "↻ Replace")
+                else:
+                    item.setText(3, "")
+
+                # Update note column (index 4)
+                note = self._review_state_store.note_for(track_id)
+                item.setText(4, note if note else "")
+                break

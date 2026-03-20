@@ -3,11 +3,15 @@ import os
 import shutil
 import subprocess
 import tempfile
+import logging
+import json as json_module
 from contextlib import contextmanager
 from collections import Counter
 from concurrent.futures import ProcessPoolExecutor, as_completed
 import multiprocessing
 from typing import Literal
+
+logger = logging.getLogger(__name__)
 
 from sklearn.cluster import KMeans
 from sklearn.preprocessing import StandardScaler
@@ -40,6 +44,16 @@ else:  # pragma: no cover - optional dependency
     MonoLoader = MusicExtractor = None  # type: ignore
 
 AudioFeatureEngine = Literal["librosa", "essentia"]
+
+# Magic number constants for clarity
+DEFAULT_MFCC_COEFS = 13
+FEATURE_VECTOR_LENGTH = 27  # Mean MFCC (13) + Std MFCC (13) + Tempo (1)
+MAX_VISUALIZATION_POINTS = 5000  # Downsample large datasets for viz performance
+MIN_VISUALIZATION_POINTS = 100  # Ensure minimum visualization quality
+DEFAULT_CLUSTER_COUNT = 8  # Default K for K-Means
+DEFAULT_HDBSCAN_MIN_SIZE = 5  # Default minimum cluster size for HDBSCAN
+DEFAULT_HDBSCAN_MIN_SAMPLES = 5  # Default min_samples for HDBSCAN
+PROXIMITY_THRESHOLD_RATIO = 0.1  # Hover detection within 10% of data range
 
 
 def _ensure_1d(a):
@@ -84,7 +98,7 @@ def _extract_audio_features_librosa(file_path: str, log_callback) -> "np.ndarray
         )
         with _decode_opus_as_wav(file_path, log_callback) as audio_path:
             y, sr = librosa.load(audio_path, sr=None, mono=True)
-    mfcc = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=13)
+    mfcc = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=DEFAULT_MFCC_COEFS)
     log_callback(
         f"   \u00b7 MFCC shape for {os.path.basename(file_path)}: {mfcc.shape}"
     )
@@ -108,7 +122,7 @@ def _extract_audio_features_essentia(file_path: str, log_callback) -> "np.ndarra
     extractor = MusicExtractor(
         lowlevelStats=["mean", "stdev"],
         rhythmStats=["mean"],
-        numberMfccCoefficients=13,
+        numberMfccCoefficients=DEFAULT_MFCC_COEFS,
     )
     try:
         features = extractor(file_path)
@@ -135,9 +149,9 @@ def _extract_audio_features_essentia(file_path: str, log_callback) -> "np.ndarra
 def _assemble_feature_vector(mean_mfcc, std_mfcc, tempo_arr) -> "np.ndarray":
     vec = np.hstack([mean_mfcc, std_mfcc, tempo_arr]).astype(np.float32)
 
-    if vec.shape[0] != 27:
+    if vec.shape[0] != FEATURE_VECTOR_LENGTH:
         raise RuntimeError(
-            f"Feature vector has wrong length {vec.shape[0]}, expected 27"
+            f"Feature vector has wrong length {vec.shape[0]}, expected {FEATURE_VECTOR_LENGTH}"
         )
     return vec
 
@@ -224,7 +238,10 @@ def _extract_features_parallel(
     for path in tracks:
         if path in cache:
             log_callback(f"• Using cached features for {os.path.basename(path)}")
-        feats.append(cache[path])
+            feats.append(cache[path])
+        else:
+            log_callback(f"! ERROR: No features found for {os.path.basename(path)} after extraction")
+            raise RuntimeError(f"Feature extraction failed for {path} - no cached features available")
 
     return feats, bool(missing)
 
@@ -333,6 +350,53 @@ def log_cluster_summary(labels: "np.ndarray", log_callback) -> None:
     log_callback(f"→ Largest clusters (id: size): {top_sizes}")
 
 
+def _validate_cache_entry(path: str, cached_time: float) -> bool:
+    """Check if cached entry is still valid (file not modified since cache was created)."""
+    try:
+        file_time = os.path.getmtime(path)
+        return file_time <= cached_time
+    except OSError:
+        # File not accessible, invalidate cache
+        return False
+
+
+def _load_cache_with_validation(cache_file: str, tracks: list, log_callback=None) -> dict:
+    """Load feature cache with validation for stale entries."""
+    if log_callback is None:
+        log_callback = lambda msg: None
+
+    try:
+        cache = dict(np.load(cache_file, allow_pickle=True).item())
+    except FileNotFoundError:
+        return {}
+    except Exception as e:
+        log_callback(f"! Error loading cache file: {e}")
+        return {}
+
+    # Validate cache entries against track modification times
+    cache_metadata_file = cache_file.replace(".npy", "_metadata.json")
+    try:
+        with open(cache_metadata_file) as f:
+            metadata = json_module.load(f)
+        cache_time = metadata.get("created_time", 0)
+    except (FileNotFoundError, json_module.JSONDecodeError):
+        cache_time = 0
+
+    # Remove stale entries
+    stale_count = 0
+    valid_cache = {}
+    for path, features in cache.items():
+        if _validate_cache_entry(path, cache_time):
+            valid_cache[path] = features
+        else:
+            stale_count += 1
+
+    if stale_count > 0:
+        log_callback(f"! Invalidated {stale_count} stale cache entries")
+
+    return valid_cache
+
+
 def generate_clustered_playlists(
     tracks,
     root_path: str,
@@ -366,15 +430,20 @@ def generate_clustered_playlists(
     # Feature cache setup
     # ------------------------------------------------------------------
     docs = os.path.join(root_path, "Docs")
-    os.makedirs(docs, exist_ok=True)
+    try:
+        os.makedirs(docs, exist_ok=True)
+    except OSError as e:
+        log_callback(f"! Warning: Cannot create Docs folder: {e}")
+        docs = root_path  # Fall back to root
+
     cache_file = os.path.join(docs, "features.npy")
 
-    try:
-        cache = dict(np.load(cache_file, allow_pickle=True).item())
-        log_callback(f"→ Loaded {len(cache)} cached feature vectors")
-    except FileNotFoundError:
-        cache = {}
-        log_callback("→ No feature cache found; extracting all tracks")
+    # Load cache with validation for stale entries
+    cache = _load_cache_with_validation(cache_file, tracks, log_callback)
+    if cache:
+        log_callback(f"→ Loaded {len(cache)} cached feature vectors (validated)")
+    else:
+        log_callback("→ No feature cache found or all entries stale; extracting all tracks")
 
     engine_mode = "serial" if engine in (None, "librosa", "serial") else "parallel"
 
@@ -392,8 +461,12 @@ def generate_clustered_playlists(
         )
 
     if updated:
-        np.save(cache_file, cache)
-        log_callback(f"✓ Saved feature cache ({len(cache)} entries) to {cache_file}")
+        try:
+            np.save(cache_file, cache)
+            log_callback(f"✓ Saved feature cache ({len(cache)} entries) to {cache_file}")
+        except OSError as e:
+            log_callback(f"! Warning: Could not save cache file: {e}")
+            logger.warning(f"Failed to save feature cache: {e}")
 
     X = np.vstack(feats)
     X = StandardScaler().fit_transform(X)
@@ -408,4 +481,71 @@ def generate_clustered_playlists(
 
     log_callback("→ Automatic playlist export disabled; manage selections manually.")
 
-    return feats
+    # Prepare cluster metadata
+    unique_labels = set([l for l in labels if l >= 0])
+    cluster_info = {}
+    for cluster_id in sorted(unique_labels):
+        track_indices = [i for i, l in enumerate(labels) if l == cluster_id]
+        cluster_info[int(cluster_id)] = {
+            "size": len(track_indices),
+            "genres": [],  # Could extract from tracks if metadata available
+            "tempo": [0, 0],  # Could compute from features if available
+        }
+
+    # Save cluster data to JSON for visualization
+    # For large datasets, optionally downsample X for visualization
+    x_to_save = X
+    downsampled = False
+
+    if len(X) > MAX_VISUALIZATION_POINTS:
+        # Downsample for visualization while keeping all labels and tracks
+        log_callback(
+            f"⚠ Library has {len(X)} tracks; downsampling X to {MAX_VISUALIZATION_POINTS} "
+            f"points for visualization (labels and tracks preserved)"
+        )
+        # Keep every nth point to maintain cluster distribution
+        step = max(1, len(X) // MAX_VISUALIZATION_POINTS)
+        indices = np.arange(0, len(X), step)
+        if len(indices) < MIN_VISUALIZATION_POINTS:
+            # Ensure minimum number of points for visualization
+            indices = np.linspace(0, len(X) - 1, MIN_VISUALIZATION_POINTS, dtype=int)
+        x_to_save = X[indices]
+        downsampled = True
+
+    cluster_data = {
+        "X": x_to_save.tolist(),
+        "X_downsampled": downsampled,  # Flag if X was downsampled
+        "X_total_points": len(X),      # Original number of points
+        "labels": labels.tolist(),
+        "tracks": tracks,
+        "cluster_info": cluster_info,
+    }
+
+    cluster_info_file = os.path.join(docs, "cluster_info.json")
+    try:
+        with open(cluster_info_file, "w") as f:
+            json_module.dump(cluster_data, f, indent=2)
+        log_callback(f"✓ Saved cluster data to {cluster_info_file}")
+
+        # Save cache metadata with timestamp
+        cache_metadata_file = cache_file.replace(".npy", "_metadata.json")
+        import time
+        metadata = {
+            "created_time": time.time(),
+            "track_count": len(tracks),
+        }
+        with open(cache_metadata_file, "w") as f:
+            json_module.dump(metadata, f, indent=2)
+    except OSError as e:
+        log_callback(f"! Error saving cluster data: {e}")
+        logger.exception("Failed to save cluster data")
+
+    # Return full result dict for caller
+    return {
+        "features": feats,
+        "X": X,
+        "labels": labels,
+        "tracks": tracks,
+        "cluster_info": cluster_info,
+        "metrics": {},  # Will be filled by caller with sklearn metrics
+    }

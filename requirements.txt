@@ -29,6 +29,7 @@ ttkthemes
 ttkbootstrap
 sv-ttk
 PySide6
+pyqtgraph>=0.13.0
 
 # Optional alternative audio engine; see README.md for install steps
 # essentia==2.1b6
