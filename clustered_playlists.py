@@ -238,7 +238,10 @@ def _extract_features_parallel(
     for path in tracks:
         if path in cache:
             log_callback(f"• Using cached features for {os.path.basename(path)}")
-        feats.append(cache[path])
+            feats.append(cache[path])
+        else:
+            log_callback(f"! ERROR: No features found for {os.path.basename(path)} after extraction")
+            raise RuntimeError(f"Feature extraction failed for {path} - no cached features available")
 
     return feats, bool(missing)
 

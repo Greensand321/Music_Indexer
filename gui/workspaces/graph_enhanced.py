@@ -425,13 +425,17 @@ class GraphWorkspace(WorkspaceBase):
         try:
             import tempfile
             import csv
+            import os
             from pathlib import Path as PathlibPath
 
             # Create temp file in same directory for atomic write
             temp_fd, temp_path = tempfile.mkstemp(dir=PathlibPath(file_path).parent, text=True)
 
             try:
-                with open(temp_fd, 'w', newline='') as f:
+                # Close the file descriptor immediately - we'll use open() instead
+                os.close(temp_fd)
+
+                with open(temp_path, 'w', newline='') as f:
                     writer = csv.writer(f)
                     writer.writerow(["path"])
                     for path in selected_paths:
@@ -483,6 +487,7 @@ class GraphWorkspace(WorkspaceBase):
         # Write M3U with proper error handling
         try:
             import tempfile
+            import os
 
             playlists_dir = Path(self._library_path) / "Playlists"
             try:
@@ -498,7 +503,10 @@ class GraphWorkspace(WorkspaceBase):
             temp_fd, temp_path = tempfile.mkstemp(dir=playlists_dir, text=True, suffix='.m3u')
 
             try:
-                with open(temp_fd, 'w') as f:
+                # Close the file descriptor immediately - we'll use open() instead
+                os.close(temp_fd)
+
+                with open(temp_path, 'w') as f:
                     f.write("#EXTM3U\n")
                     for path in selected_paths:
                         f.write(f"{path}\n")
