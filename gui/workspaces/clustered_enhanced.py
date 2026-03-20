@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import logging
 import threading
 from pathlib import Path
 
@@ -9,6 +10,8 @@ from gui.compat import QtCore, QtGui, QtWidgets, Signal, Slot
 from gui.workspaces.base import WorkspaceBase
 from gui.dialogs.clustering_wizard_dialog import ClusteringWizardDialog
 from gui.dialogs.cluster_quality_report_dialog import ClusterQualityReportDialog
+
+logger = logging.getLogger(__name__)
 
 _AUDIO_EXTS = {".mp3", ".flac", ".m4a", ".aac", ".ogg", ".wav", ".opus"}
 
@@ -108,6 +111,7 @@ class ClusterWorker(QtCore.QThread):
 
                     _log(f"Silhouette score: {metrics['silhouette_score']:.3f}")
                 except Exception as e:
+                    logger.warning(f"Could not compute metrics: {e}", exc_info=True)
                     _log(f"Could not compute metrics: {e}")
 
             self.progress.emit(95, "Finalizing results...")
@@ -122,7 +126,9 @@ class ClusterWorker(QtCore.QThread):
                 self.finished.emit(False, "Cancelled", {})
 
         except Exception as exc:
-            self.finished.emit(False, str(exc), {})
+            # Log full traceback for debugging
+            logger.exception("Clustering failed with exception")
+            self.finished.emit(False, f"Clustering failed: {exc}", {})
 
 
 class EnhancedClusteredWorkspace(WorkspaceBase):
@@ -134,6 +140,23 @@ class EnhancedClusteredWorkspace(WorkspaceBase):
         self._current_config: dict | None = None
         self._current_result: dict | None = None
         self._build_ui()
+
+    def closeEvent(self, event: QtGui.QCloseEvent) -> None:
+        """Clean up resources when workspace is closed."""
+        self._cleanup_worker()
+        super().closeEvent(event)
+
+    def _cleanup_worker(self) -> None:
+        """Stop and clean up the worker thread."""
+        if self._worker is not None:
+            # Signal the worker to stop
+            self._worker.cancel()
+            # Wait for thread to finish (with timeout)
+            if not self._worker.wait(5000):  # 5 second timeout
+                logger.warning("Worker thread did not finish within timeout, terminating")
+                self._worker.terminate()
+                self._worker.wait()
+            self._worker = None
 
     def _build_ui(self) -> None:
         """Build the UI."""
@@ -318,6 +341,9 @@ class EnhancedClusteredWorkspace(WorkspaceBase):
         self._current_config = config
         self._current_result = None
 
+        # Clean up any existing worker
+        self._cleanup_worker()
+
         # Clear results tab
         while self._results_layout.count():
             self._results_layout.takeAt(0).widget().deleteLater()
@@ -383,6 +409,11 @@ class EnhancedClusteredWorkspace(WorkspaceBase):
     def _on_clustering_finished(self, success: bool, message: str, result: dict) -> None:
         """Handle clustering completion."""
         self._current_result = result
+
+        # Clean up worker after it finishes
+        if self._worker is not None:
+            self._worker.wait()
+            self._worker = None
 
         # Clear progress panel
         while self._results_layout.count():
