@@ -384,7 +384,10 @@ class EnhancedClusteredWorkspace(WorkspaceBase):
 
         # Clear results tab
         while self._results_layout.count():
-            self._results_layout.takeAt(0).widget().deleteLater()
+            widget = self._results_layout.takeAt(0).widget()
+            if widget is not None:
+                widget.setParent(None)  # Detach immediately before scheduling deletion
+                widget.deleteLater()
 
         # Show progress
         self._show_progress_panel()
@@ -400,7 +403,10 @@ class EnhancedClusteredWorkspace(WorkspaceBase):
         """Show clustering progress panel."""
         # Clear results
         while self._results_layout.count():
-            self._results_layout.takeAt(0).widget().deleteLater()
+            widget = self._results_layout.takeAt(0).widget()
+            if widget is not None:
+                widget.setParent(None)  # Detach immediately before scheduling deletion
+                widget.deleteLater()
 
         # Progress bar
         self._progress_bar = QtWidgets.QProgressBar()
@@ -455,7 +461,10 @@ class EnhancedClusteredWorkspace(WorkspaceBase):
 
         # Clear progress panel
         while self._results_layout.count():
-            self._results_layout.takeAt(0).widget().deleteLater()
+            widget = self._results_layout.takeAt(0).widget()
+            if widget is not None:
+                widget.setParent(None)  # Detach immediately before scheduling deletion
+                widget.deleteLater()
 
         if success:
             self._show_results_panel(result)
