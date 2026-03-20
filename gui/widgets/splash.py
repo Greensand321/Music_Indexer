@@ -14,6 +14,8 @@ initialised the hardcoded Midnight-dark palette is used as a fallback.
 """
 from __future__ import annotations
 
+import sys
+
 from gui.compat import QtCore, QtGui, QtWidgets, Signal
 
 _FILL_MS = 1500
@@ -45,11 +47,9 @@ def _theme_colors() -> dict[str, str]:
         pass
     except AttributeError as e:
         # Real error in theme structure; log it for debugging
-        import sys
         print(f"[Warning] Theme manager attribute error: {e}; using fallback", file=sys.stderr)
     except Exception as e:
         # Other unexpected errors; log for debugging
-        import sys
         print(f"[Warning] Theme loading failed: {e}; using fallback", file=sys.stderr)
 
     # Fallback palette (Midnight dark theme)
