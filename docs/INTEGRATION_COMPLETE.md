@@ -144,9 +144,9 @@ python test_clustering_integration.py
 
 ### 1. Quick Start Clustering (Recommended for first test)
 ```
-1. Open AlphaDEX: python main_gui.py
-2. Select a music library (File → Select Library)
-3. Go to "Clustered Playlists" tab
+1. python alpha_dex_gui.py
+2. Wait for splash screen and select your music library
+3. Go to "Clustered Playlists" tab in the sidebar
 4. Click "🚀 Quick Start"
 5. Watch progress bar advance to 100%
 6. See clustering results with metrics
@@ -155,9 +155,9 @@ python test_clustering_integration.py
 
 ### 2. Advanced Configuration
 ```
-1. Open AlphaDEX: python main_gui.py
-2. Select a music library
-3. Go to "Clustered Playlists" → "⚙ Advanced" tab
+1. python alpha_dex_gui.py
+2. Wait for splash screen and select your music library
+3. Click "Clustered Playlists" → "⚙ Advanced" tab
 4. Click "⚙ Configure with Wizard..."
 5. Customize all 5 steps
 6. Click "▶ Run" to execute

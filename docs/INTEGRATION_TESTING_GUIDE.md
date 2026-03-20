@@ -66,12 +66,14 @@ python -c "from gui.workspaces.clustered_enhanced import EnhancedClusteredWorksp
 ### Phase 2: Launch Application (5 minutes)
 
 ```bash
-# Start the app
-python -m gui.qt_launcher
-
-# Or if using gui/main_window.py directly
-python -c "from gui.main_window import AlphaDEXWindow; from gui.compat import QtWidgets, QApplication; app = QApplication([]); w = AlphaDEXWindow(); w.show(); app.exec()"
+# Start the application with splash screen and library selection
+python alpha_dex_gui.py
 ```
+
+The app will:
+1. Show splash screen with loading bar
+2. Display landing page for library selection
+3. Cross-fade to main window with selected library loaded
 
 ### Phase 3: Test Quick Start Clustering (10 minutes)
 

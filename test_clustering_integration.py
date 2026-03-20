@@ -256,9 +256,9 @@ def main():
     if passed == total:
         print("\n🎉 All integration tests passed!")
         print("\nNext steps:")
-        print("1. Start the application: python main_gui.py")
-        print("2. Select a music library")
-        print("3. Go to 'Clustered Playlists' tab")
+        print("1. Start the application: python alpha_dex_gui.py")
+        print("2. Wait for splash screen and select your music library")
+        print("3. Click 'Clustered Playlists' in the sidebar")
         print("4. Click '🚀 Quick Start' to run clustering")
         print("5. Click '📊 Open Visual Graph' to view results")
         print("\nSee docs/INTEGRATION_TESTING_GUIDE.md for detailed testing procedures.")
