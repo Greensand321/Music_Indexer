@@ -296,7 +296,6 @@ See [`docs/project_documentation.html`](docs/project_documentation.html) for tec
 ## Known gaps
 
 - **Tidal-dl sync**: `tidal-dl` is listed in `requirements.txt`, but there is no UI or workflow wired up yet.
-- **Metadata provider breadth**: only AcoustID + Last.fm are wired end-to-end; Discogs/Spotify stubs exist but are not production-ready.
-- **LLM assistant models**: no GGUF model ships with the repo; you must provide one and update `plugins/assistant_plugin.py` if you want to use the helper.
-- **Library Sync Export Report**: `ReportPreviewDialog` exists but the Export Report button is not yet wired to a user-accessible control.
-- **Per-item copy/replace flags**: tracked in `library_sync_review_state.py` but not yet exposed in the UI.
+- **Metadata provider breadth**: only AcoustID + Last.fm are fully wired end-to-end; Spotify/Gracenote listed in config but not implemented.
+- **Library Sync per-item flags**: per-file copy/replace/skip decisions are tracked in code (`library_sync_review_state.py`) but not exposed in the UI—users cannot currently set individual file dispositions.
+- **Library Sync Export Report**: export helper functions exist but the Export Report button is not wired to a user-accessible control.

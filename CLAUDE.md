@@ -201,12 +201,14 @@ All user settings are read/written through `config.load_config()` /
 
 ## Known gaps (do not assume these are complete)
 
-- `plugins/discogs.py` and `plugins/spotify.py` are stubs — not wired end-to-end.
-- `tidal-dl` is in `requirements.txt` but has no UI or workflow.
-- The "Export Report" button path in Library Sync is modeled
-  (`ReportPreviewDialog` exists) but `preview_report()` is never called from
-  a user-accessible button.
-- Per-item copy/replace flags in Library Sync are tracked in
-  `library_sync_review_state.py` but not exposed in the UI.
-- No GGUF model ships with the repo; the LLM assistant (`plugins/assistant_plugin.py`)
-  requires a user-supplied model file.
+- **Metadata provider breadth:** Only AcoustID + Last.fm are fully wired end-to-end.
+  Spotify and Gracenote are listed in `config.SUPPORTED_SERVICES` but have no
+  backend implementation.
+- **Tidal-dl sync:** `tidal-dl` is in `requirements.txt` but has no UI or workflow.
+- **Library Sync per-item flags:** Per-file copy/replace/skip decisions are tracked
+  in `library_sync_review_state.py` (ReviewFlags, ReviewStateStore classes exist)
+  but NOT exposed in the PySide6 UI. Users cannot currently control individual file
+  dispositions during plan execution.
+- **Library Sync Export Report:** Export helper functions exist in
+  `library_sync_review_report.py` (e.g., `export_report()`, `export_review_report_html()`)
+  but the Export Report button is not wired to a user-accessible control.

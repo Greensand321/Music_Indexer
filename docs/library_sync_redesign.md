@@ -62,8 +62,21 @@ Read-only text panel summarizing:
 - **Execution:** `execute_library_sync_plan()` writes JSON audit logs plus HTML reports, optionally creates a “LibrarySync_Added_YYYY-mm-dd_hhmm.m3u8” playlist, and writes backups before replacements. Cancellations are honored between steps.
 
 ## Current Gaps (Not Yet Wired)
-- **Per-item copy/replace flags** are modeled in `library_sync_review_state.py`, but the UI does not expose buttons or menus to set them yet.
-- **Export report UI** is not exposed (the report helpers exist in `library_sync_review_report.py`, but there is no export button).
+
+### Per-item copy/replace flags
+- **Code status:** `ReviewFlags` and `ReviewStateStore` classes exist in `library_sync_review_state.py`
+  with full tracking for per-file copy/replace/skip decisions and optional notes.
+- **UI status:** NOT exposed in the PySide6 UI (`gui/workspaces/library_sync.py`).
+  The state store is instantiated but never used.
+- **Impact:** Users cannot currently control individual file dispositions; all decisions are made at
+  the plan level (build/preview/execute) rather than per-item.
+
+### Export report UI
+- **Code status:** Full export infrastructure exists in `library_sync_review_report.py`:
+  - `export_report(results, flags)` — produces JSON summary
+  - `export_review_report_html(...)` — renders full HTML report
+- **UI status:** No "Export Report" button in the PySide6 interface.
+- **Impact:** Users cannot export execution reports from the UI (reports are auto-generated to `Docs/` during execution).
 - **Filters/sorts and quick actions** (e.g., “Collisions Only” or “Sort by Quality Delta”) from earlier design notes are not present.
 
 ## Acceptance Criteria (Current Implementation)
