@@ -45,22 +45,48 @@ class ClusterWorker(QtCore.QThread):
                 if not self._cancelled:
                     self.log_line.emit(msg)
 
-            # Collect audio files
+            # Collect audio files with validation
             self.progress.emit(0, "Scanning library...")
             tracks = []
+            skipped = 0
+
             for dirpath, _, files in os.walk(self.library_path):
                 if self._cancelled:
                     self.finished.emit(False, "Cancelled", {})
                     return
                 for f in files:
                     if os.path.splitext(f)[1].lower() in _AUDIO_EXTS:
-                        tracks.append(os.path.join(dirpath, f))
+                        full_path = os.path.join(dirpath, f)
+
+                        # Validate file exists and is readable
+                        try:
+                            if not os.path.isfile(full_path):
+                                _log(f"⚠ Skipped non-file (possibly symlink): {f}")
+                                skipped += 1
+                                continue
+
+                            # Check if file is readable
+                            if not os.access(full_path, os.R_OK):
+                                _log(f"⚠ Skipped unreadable file: {f}")
+                                skipped += 1
+                                continue
+
+                            tracks.append(full_path)
+                        except OSError as e:
+                            _log(f"⚠ Error checking file {f}: {e}")
+                            skipped += 1
+                            continue
 
             if not tracks:
-                self.finished.emit(False, "No audio files found", {})
+                if skipped > 0:
+                    self.finished.emit(False, f"No readable audio files found ({skipped} files skipped)", {})
+                else:
+                    self.finished.emit(False, "No audio files found", {})
                 return
 
-            _log(f"Found {len(tracks)} tracks")
+            _log(f"Found {len(tracks)} readable tracks")
+            if skipped > 0:
+                _log(f"⚠ Skipped {skipped} files (unreadable or invalid)")
             self.progress.emit(5, f"Scanning complete: {len(tracks)} tracks")
 
             # Prepare parameters with validation
