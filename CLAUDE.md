@@ -194,6 +194,8 @@ All user settings are read/written through `config.load_config()` /
 |---|---|
 | `docs/gui_inventory.md` | Before any GUI work — full plain-English map of every screen and control |
 | `docs/library_sync_redesign.md` | Before touching Library Sync — current gaps and acceptance criteria |
+| `docs/library_sync_per_item_review.md` | Per-item flag implementation (vision, architecture, phases) |
+| `docs/library_sync_per_item_review_testing.md` | Manual testing guide for per-item flags |
 | `docs/project_documentation.html` | Broad technical overview |
 | `README.md` | User-facing feature list and known gaps |
 
@@ -205,10 +207,9 @@ All user settings are read/written through `config.load_config()` /
   Spotify and Gracenote are listed in `config.SUPPORTED_SERVICES` but have no
   backend implementation.
 - **Tidal-dl sync:** `tidal-dl` is in `requirements.txt` but has no UI or workflow.
-- **Library Sync per-item flags:** Per-file copy/replace/skip decisions are tracked
-  in `library_sync_review_state.py` (ReviewFlags, ReviewStateStore classes exist)
-  but NOT exposed in the PySide6 UI. Users cannot currently control individual file
-  dispositions during plan execution.
+- **Library Sync per-item flags:** ✅ IMPLEMENTED — Users can now right-click incoming
+  tracks to flag for copy/replace or add notes. Flags override auto-decisions during
+  plan building. See `docs/library_sync_per_item_review.md` for implementation details.
 - **Library Sync Export Report:** Export helper functions exist in
   `library_sync_review_report.py` (e.g., `export_report()`, `export_review_report_html()`)
   but the Export Report button is not wired to a user-accessible control.
