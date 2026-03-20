@@ -33,6 +33,7 @@ MIXED_CODEC_THRESHOLD_BOOST = idx_config.MIXED_CODEC_THRESHOLD_BOOST
 from crash_watcher import record_event
 from crash_logger import watcher
 from indexer_control import IndexCancelled
+from library_sync_review_state import ReviewStateStore
 
 debug: bool = False
 _logger = logging.getLogger(__name__)
@@ -890,6 +891,49 @@ def _compute_plan_items(
     return items
 
 
+def resolve_review_flags_to_paths(
+    review_flags: ReviewStateStore | None,
+    match_results: Iterable[MatchResult] | None = None,
+) -> Tuple[List[str], List[str]]:
+    """Convert ReviewStateStore flags to source and destination path lists.
+
+    Parameters
+    ----------
+    review_flags : ReviewStateStore | None
+        The review state store containing user flags.
+    match_results : Iterable[MatchResult] | None
+        Match results from compare_libraries (needed to resolve track_ids to paths).
+
+    Returns
+    -------
+    Tuple[List[str], List[str]]
+        (copy_only_paths, allowed_replacement_paths)
+    """
+    if not review_flags or not match_results:
+        return [], []
+
+    copy_only_paths: List[str] = []
+    allowed_replacement_paths: List[str] = []
+
+    # Build a map of track_id -> MatchResult for quick lookup
+    track_map = {res.incoming.track_id: res for res in match_results}
+
+    # Process copy flags
+    for track_id in review_flags.flags.copy:
+        if track_id in track_map:
+            copy_only_paths.append(_normalize_path(track_map[track_id].incoming.path))
+
+    # Process replace flags
+    for incoming_id, existing_id in review_flags.flags.replace.items():
+        if incoming_id in track_map:
+            # For replace, we allow the destination to be replaced
+            existing_path = track_map[incoming_id].existing.path if track_map[incoming_id].existing else None
+            if existing_path:
+                allowed_replacement_paths.append(_normalize_path(existing_path))
+
+    return copy_only_paths, allowed_replacement_paths
+
+
 def compute_library_sync_plan(
     library_root: str,
     incoming_folder: str,
@@ -900,6 +944,8 @@ def compute_library_sync_plan(
     max_workers: int | None = None,
     cancel_event: threading.Event | None = None,
     transfer_mode: str = "move",
+    copy_only_paths: Iterable[str] | None = None,
+    allowed_replacement_paths: Iterable[str] | None = None,
 ) -> LibrarySyncPlan:
     """Compute a deterministic move/route plan for Library Sync."""
     cancel_event = cancel_event or threading.Event()
@@ -948,9 +994,9 @@ def compute_library_sync_plan(
     plan_items = _compute_plan_items(
         remapped_moves,
         destination_root=_normalize_path(destination_root),
-        copy_only=None,
+        copy_only=copy_only_paths,
         allow_all_replacements=False,
-        allowed_replacements=None,
+        allowed_replacements=allowed_replacement_paths,
         transfer_mode=transfer_mode,
     )
 
@@ -1063,8 +1109,18 @@ def build_library_sync_preview(
     max_workers: int | None = None,
     cancel_event: threading.Event | None = None,
     transfer_mode: str = "move",
+    copy_only_paths: Iterable[str] | None = None,
+    allowed_replacement_paths: Iterable[str] | None = None,
 ) -> LibrarySyncPlan:
-    """Compute a Library Sync plan and write the dry-run preview."""
+    """Compute a Library Sync plan and write the dry-run preview.
+
+    Parameters
+    ----------
+    copy_only_paths : Iterable[str] | None
+        Source paths that should always be copied regardless of auto-decision.
+    allowed_replacement_paths : Iterable[str] | None
+        Destination paths where replacement is allowed regardless of auto-decision.
+    """
     plan = compute_library_sync_plan(
         library_root,
         incoming_folder,
@@ -1074,6 +1130,8 @@ def build_library_sync_preview(
         max_workers=max_workers,
         cancel_event=cancel_event,
         transfer_mode=transfer_mode,
+        copy_only_paths=copy_only_paths,
+        allowed_replacement_paths=allowed_replacement_paths,
     )
     plan.render_preview(output_html_path)
     return plan
