@@ -179,14 +179,14 @@ class ClusteringWizardDialog(QtWidgets.QDialog):
         # Normalization
         layout.addWidget(QtWidgets.QLabel("Normalization Method:"))
         self._norm_combo = QtWidgets.QComboBox()
-        self._norm_combo.addItems([
+        norm_options = [
             ("Standard (Z-score)", "standard"),
             ("MinMax (0-1)", "minmax"),
             ("Robust (outlier-resistant)", "robust"),
-        ])
-        # TODO: Fix combo box for tuples
-        self._norm_combo.addItems(["Standard (Z-score)", "MinMax (0-1)", "Robust (outlier-resistant)"])
-        self._norm_combo.setCurrentText("Standard (Z-score)")
+        ]
+        for display_text, value in norm_options:
+            self._norm_combo.addItem(display_text, userData=value)
+        self._norm_combo.setCurrentIndex(0)
         layout.addWidget(self._norm_combo)
 
         norm_info = QtWidgets.QLabel(
@@ -413,13 +413,22 @@ class ClusteringWizardDialog(QtWidgets.QDialog):
         if self._current_step == 0:  # Features
             for feat, cb in self._feature_checkboxes.items():
                 self.config["features"][feat] = cb.isChecked()
+
+            # Validate at least one feature is selected
+            selected_features = [k for k, v in self.config["features"].items() if v]
+            if not selected_features:
+                # Re-check at least one feature (tempo as default)
+                self.config["features"]["tempo"] = True
+                self._feature_checkboxes["tempo"].setChecked(True)
+                QtWidgets.QMessageBox.warning(
+                    self,
+                    "Invalid Selection",
+                    "At least one feature must be selected. Re-enabled tempo."
+                )
         elif self._current_step == 1:  # Normalization
-            norm_map = {
-                "Standard (Z-score)": "standard",
-                "MinMax (0-1)": "minmax",
-                "Robust (outlier-resistant)": "robust",
-            }
-            self.config["normalization"] = norm_map.get(self._norm_combo.currentText(), "standard")
+            # Get normalization value from combo box userData
+            norm_value = self._norm_combo.currentData()
+            self.config["normalization"] = norm_value if norm_value else "standard"
             self.config["dimensionality_reduction"] = self._reduction_combo.currentText().split()[0].lower()
         elif self._current_step == 2:  # Algorithm
             self.config["algorithm"] = self._algo_combo.currentText().lower()

@@ -149,6 +149,33 @@ class GraphWorkspace(WorkspaceBase):
 
         lib_path = Path(self._library_path)
 
+        # Validate library path exists and is accessible
+        if not lib_path.exists():
+            self._status_lbl.setText("Library path does not exist")
+            self._status_lbl.setStyleSheet("color: #ef4444;")
+            logger.error(f"Library path not found: {lib_path}")
+            return
+
+        if not lib_path.is_dir():
+            self._status_lbl.setText("Library path is not a directory")
+            self._status_lbl.setStyleSheet("color: #ef4444;")
+            logger.error(f"Library path is not a directory: {lib_path}")
+            return
+
+        # Check read permissions
+        try:
+            list(lib_path.iterdir())
+        except PermissionError:
+            self._status_lbl.setText("No permission to read library folder")
+            self._status_lbl.setStyleSheet("color: #ef4444;")
+            logger.error(f"Permission denied reading library: {lib_path}")
+            return
+        except OSError as e:
+            self._status_lbl.setText(f"Cannot access library: {e}")
+            self._status_lbl.setStyleSheet("color: #ef4444;")
+            logger.error(f"Error accessing library: {e}")
+            return
+
         # Look for cluster data files
         cluster_info_file = lib_path / "Docs" / "cluster_info.json"
         if not cluster_info_file.exists():

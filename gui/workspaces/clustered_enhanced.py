@@ -63,13 +63,23 @@ class ClusterWorker(QtCore.QThread):
             _log(f"Found {len(tracks)} tracks")
             self.progress.emit(5, f"Scanning complete: {len(tracks)} tracks")
 
-            # Prepare parameters
+            # Prepare parameters with validation
             algorithm = self.config.get("algorithm", "kmeans")
             if algorithm == "kmeans":
-                params = {"n_clusters": self.config.get("k", 8)}
+                k = self.config.get("k", 8)
+                # Validate K against track count
+                if k > len(tracks):
+                    _log(f"⚠ K={k} exceeds track count ({len(tracks)}); reducing to {len(tracks)}")
+                    k = len(tracks)
+                params = {"n_clusters": k}
             else:
+                min_size = self.config.get("min_cluster_size", 5)
+                # Validate HDBSCAN min_cluster_size
+                if min_size > len(tracks):
+                    _log(f"⚠ min_cluster_size={min_size} exceeds track count ({len(tracks)}); reducing to {len(tracks)}")
+                    min_size = len(tracks)
                 params = {
-                    "min_cluster_size": self.config.get("min_cluster_size", 5),
+                    "min_cluster_size": min_size,
                     "min_samples": self.config.get("min_samples", 5),
                 }
 
