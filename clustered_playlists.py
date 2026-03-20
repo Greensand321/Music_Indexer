@@ -412,9 +412,9 @@ def generate_clustered_playlists(
     unique_labels = set([l for l in labels if l >= 0])
     cluster_info = {}
     for cluster_id in sorted(unique_labels):
-        cluster_tracks = [i for i, l in enumerate(labels) if l == cluster_id]
-        cluster_info[cluster_id] = {
-            "size": len(cluster_tracks),
+        track_indices = [i for i, l in enumerate(labels) if l == cluster_id]
+        cluster_info[int(cluster_id)] = {
+            "size": len(track_indices),
             "genres": [],  # Could extract from tracks if metadata available
             "tempo": [0, 0],  # Could compute from features if available
         }

@@ -72,8 +72,8 @@ class ClusterWorker(QtCore.QThread):
 
             features = [k for k, v in self.config.get("features", {}).items() if v]
             if not features:
-                self.finished.emit(False, "No features selected", {})
-                return
+                # Use all features if none specified
+                features = ["tempo", "mfcc", "chroma", "spectral", "energy"]
 
             _log(f"Using algorithm: {algorithm.upper()}")
             _log(f"Using features: {', '.join(features)}")
@@ -85,7 +85,6 @@ class ClusterWorker(QtCore.QThread):
                 self.library_path,
                 method=algorithm,
                 params=params,
-                features=features,
                 log_callback=_log,
             )
 
