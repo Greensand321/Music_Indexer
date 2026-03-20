@@ -215,15 +215,27 @@ Compare two libraries and execute a copy/move plan.
 
 | Element | Type | Purpose |
 |---|---|---|
-| Source path entry + Browse | Row | Pick the incoming library folder |
-| Target path entry + Browse | Row | Pick the destination library folder |
-| Copy / Move radio | Radio buttons | Whether to copy or move matched files |
-| Scan progress | Two progress bars | Source scan + Target scan |
+| Source path entry + Browse | Row | Pick the existing library folder |
+| Incoming path entry + Browse | Row | Pick the incoming library folder |
+| Threshold override | Input field | Fingerprint matching threshold (0.0–1.0) |
+| Scan progress | Two progress bars | Existing lib scan + Incoming lib scan |
 | Start Scan | Button (primary) | Launches `SyncScanWorker` |
-| Plan summary card | Card | Shows counts: new / matched / conflicts |
-| Execute Plan | Button (primary) | Runs the plan, writes report |
+| **Incoming Tracks table** | Tree | Displays incoming files with metadata |
+| Table columns | | Track name, Status, Distance, **Flag, Note** |
+| **Right-click context menu** | Menu | 📋 Copy, ↻ Replace, ✕ Clear flag, 📝 Add note |
+| Plan summary card | Card | Shows counts and status distribution |
+| Build Plan | Button (primary) | Computes move/copy plan |
+| Preview Plan | Button | Opens HTML preview in browser |
+| Execute Plan | Button (primary) | Runs the plan, writes execution report |
+| Copy / Move toggle | Toggle | Whether to copy or move files |
 
-Worker calls `library_sync.compare_libraries()`.
+**User interactions:**
+- Right-click incoming track to flag for copy/replace
+- Add notes to explain flagging decisions
+- Flags override auto-decisions when plan is built
+- Preview HTML shows how flags affect the plan
+
+Worker calls `library_sync.compare_libraries()` and `library_sync.build_library_sync_preview()`.
 
 ### 6.4 Similarity Inspector (`similarity.py`)
 

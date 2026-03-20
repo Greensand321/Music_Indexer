@@ -297,5 +297,5 @@ See [`docs/project_documentation.html`](docs/project_documentation.html) for tec
 
 - **Tidal-dl sync**: `tidal-dl` is listed in `requirements.txt`, but there is no UI or workflow wired up yet.
 - **Metadata provider breadth**: only AcoustID + Last.fm are fully wired end-to-end; Spotify/Gracenote listed in config but not implemented.
-- **Library Sync per-item flags**: per-file copy/replace/skip decisions are tracked in code (`library_sync_review_state.py`) but not exposed in the UI—users cannot currently set individual file dispositions.
+- **Library Sync per-item flags**: ✅ IMPLEMENTED — Users can now right-click incoming tracks to flag for copy/replace or add notes. Flags override auto-decisions during plan building.
 - **Library Sync Export Report**: export helper functions exist but the Export Report button is not wired to a user-accessible control.
