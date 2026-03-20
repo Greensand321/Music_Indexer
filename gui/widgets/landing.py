@@ -252,41 +252,26 @@ class _CTACard(QtWidgets.QFrame):
         lay.addWidget(tag_lbl)
         lay.addSpacing(36)
 
-        # ── "Continue" button (existing library) ──────────────────────────
+        # ── Single smart button ────────────────────────────────────────────
+        # Button text and behavior depends on whether a library is saved:
+        # - Saved library: "Go" → uses saved library
+        # - No saved library: "Choose Library Folder" → opens file dialog
         if self._saved:
-            short = Path(self._saved).name or self._saved
-            reuse_btn = QtWidgets.QPushButton(f"Continue  ·  {short}")
-            reuse_btn.setFixedHeight(38)
-            reuse_btn.setCursor(
-                QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor)
-            )
-            reuse_btn.setStyleSheet(f"""
-                QPushButton {{
-                    background: rgba(255,255,255,0.07);
-                    color: {text_muted};
-                    border: 1px solid rgba(255,255,255,0.10);
-                    border-radius: 8px;
-                    font-family: '{UI_FAMILY}';
-                    font-size: 12px;
-                    padding: 0 18px;
-                }}
-                QPushButton:hover {{
-                    background: rgba(255,255,255,0.13);
-                    color: {text_primary};
-                    border-color: rgba(255,255,255,0.18);
-                }}
-            """)
-            reuse_btn.clicked.connect(self.reuse_clicked.emit)
-            lay.addWidget(reuse_btn)
-            lay.addSpacing(8)
+            btn_text = "Go"
+            btn_tooltip = f"Open saved library: {self._saved}"
+            btn_action = self.reuse_clicked.emit
+        else:
+            btn_text = "Choose Library Folder"
+            btn_tooltip = "Select a music library folder"
+            btn_action = self.open_clicked.emit
 
-        # ── "Open Library" button (primary CTA) ───────────────────────────
-        open_btn = QtWidgets.QPushButton("Open Library  →")
-        open_btn.setFixedHeight(46)
-        open_btn.setCursor(
+        main_btn = QtWidgets.QPushButton(btn_text)
+        main_btn.setFixedHeight(46)
+        main_btn.setCursor(
             QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor)
         )
-        open_btn.setStyleSheet(f"""
+        main_btn.setToolTip(btn_tooltip)
+        main_btn.setStyleSheet(f"""
             QPushButton {{
                 background: {accent};
                 color: #ffffff;
@@ -301,8 +286,8 @@ class _CTACard(QtWidgets.QFrame):
             QPushButton:hover  {{ background: {_darken(accent, 12)}; }}
             QPushButton:pressed {{ background: {_darken(accent, 26)}; }}
         """)
-        open_btn.clicked.connect(self.open_clicked.emit)
-        lay.addWidget(open_btn)
+        main_btn.clicked.connect(btn_action)
+        lay.addWidget(main_btn)
 
     # ── Paint ─────────────────────────────────────────────────────────────
 
