@@ -1,7 +1,8 @@
 import pytest
 
 import library_sync
-from library_sync import MatchStatus, PerformanceProfile, TrackRecord, compute_quality_score
+from library_sync import PerformanceProfile, compute_quality_score
+from library_sync_types import MatchStatus, TrackRecord
 
 
 def _record(name: str, fp: str, ext: str = ".flac", bitrate: int | None = 320000) -> TrackRecord:

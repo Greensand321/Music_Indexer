@@ -11,7 +11,7 @@ from enum import Enum
 from typing import Callable, Dict, Iterable, Mapping, MutableMapping, Sequence
 
 import library_sync
-from library_sync import MatchResult, MatchStatus
+from library_sync_types import MatchResult, MatchStatus
 from library_sync_review_state import ReviewStateStore, quality_delta
 
 DEFAULT_REPORT_VERSION = 1
