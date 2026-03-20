@@ -104,6 +104,13 @@ class InteractiveScatterPlot(QtWidgets.QWidget):
         self._labels = labels or [f"Track {i}" for i in range(len(X))]
         self._metadata = metadata or [{} for _ in range(len(X))]
 
+        # Validate data shapes and dimensions
+        if len(self._X) == 0:
+            raise ValueError("Data is empty (0 samples)")
+
+        if self._X.ndim != 2 or self._X.shape[1] != 2:
+            raise ValueError(f"X must have shape (n_samples, 2), got {self._X.shape}")
+
         if len(self._X) != len(self._clusters):
             raise ValueError("X and clusters must have same length")
         if len(self._X) != len(self._labels):
@@ -185,17 +192,36 @@ class InteractiveScatterPlot(QtWidgets.QWidget):
         if self._X is None or len(self._X) == 0:
             return
 
+        # Validate array shape
+        if self._X.ndim != 2 or self._X.shape[1] != 2:
+            return
+
         # Get view coordinates
         view_coords = self.view_box.mapSceneToView(pos)
         x, y = view_coords.x(), view_coords.y()
 
         # Find nearest point
-        distances = np.sqrt((self._X[:, 0] - x) ** 2 + (self._X[:, 1] - y) ** 2)
-        nearest_idx = np.argmin(distances)
+        try:
+            distances = np.sqrt((self._X[:, 0] - x) ** 2 + (self._X[:, 1] - y) ** 2)
+            nearest_idx = np.argmin(distances)
+        except (ValueError, IndexError):
+            # Handle empty or invalid array
+            return
 
         # Only update if close enough
         hover_dist = distances[nearest_idx]
-        if hover_dist < 0.1 * (self._X.max() - self._X.min()):  # Proximity threshold
+
+        # Calculate proximity threshold safely
+        try:
+            x_range = self._X[:, 0].max() - self._X[:, 0].min()
+            y_range = self._X[:, 1].max() - self._X[:, 1].min()
+            data_range = max(x_range, y_range, 0.001)  # Avoid division by zero
+            proximity_threshold = 0.1 * data_range
+        except (ValueError, IndexError):
+            # If we can't compute range, use a default threshold
+            proximity_threshold = 0.1
+
+        if hover_dist < proximity_threshold:
             if self._hovered_index != nearest_idx:
                 self._hovered_index = nearest_idx
                 self.hover_changed.emit(nearest_idx)
