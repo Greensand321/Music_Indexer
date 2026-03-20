@@ -62,31 +62,54 @@ def main() -> int:
     splash.show()
     app.processEvents()
 
-    # ── Main window (built now, shown only after the landing is done) ─────────
-    from gui.main_window import AlphaDEXWindow
-    window = AlphaDEXWindow()
+    # ── Deferred main window construction ──────────────────────────────────────
+    # Window construction is deferred until after the splash has shown,
+    # preventing blocking I/O from delaying the splash animation.
+    # The window is constructed on the next event loop iteration.
+    window: object = None  # Will be set by _construct_main_window
 
-    # Compute a centred geometry shared by the landing and the main window so
-    # the cross-fade from landing → main is perfectly seamless (same rect).
+    # ── Compute shared geometry ──────────────────────────────────────────────────
+    # The landing and main window use the same geometry so cross-fade is seamless.
     screen = app.primaryScreen()
     sg = screen.availableGeometry() if screen else QtCore.QRect(0, 0, 1920, 1080)
     lw, lh = 1300, 860
     lx = sg.left() + (sg.width()  - lw) // 2
     ly = sg.top()  + (sg.height() - lh) // 2
     shared_geo = QtCore.QRect(lx, ly, lw, lh)
-    window.setGeometry(shared_geo)
 
     # ── Load saved library path for the landing's "Continue" button ───────────
     saved_lib = ""
     try:
         from config import load_config
         saved_lib = load_config().get("library_root", "")
-    except Exception:
+    except FileNotFoundError:
+        # Config doesn't exist yet; normal on first startup
         pass
+    except Exception as e:
+        # Log real errors for debugging, but continue with defaults
+        import sys
+        print(f"[Warning] Failed to load saved config: {e}", file=sys.stderr)
 
     # ── Landing page ──────────────────────────────────────────────────────────
     from gui.widgets.landing import MosaicLanding, FADE_OUT_MS
     landing = MosaicLanding(shared_geo, saved_lib)
+
+    # ── Deferred main window construction ──────────────────────────────────────
+    def _construct_main_window() -> None:
+        """Build the main window after the splash has shown.
+
+        This is scheduled for the next event loop iteration to prevent the
+        window construction from blocking the splash animation. The window is
+        not shown until the landing cross-fade completes.
+        """
+        nonlocal window
+        from gui.main_window import AlphaDEXWindow
+        window = AlphaDEXWindow()
+        window.setGeometry(shared_geo)
+        # Don't show yet; will be shown by _landing_to_main
+
+    # Schedule window construction for next idle moment (after splash.show() completes)
+    QtCore.QTimer.singleShot(0, _construct_main_window)
 
     # ── Cross-fade: splash → landing ──────────────────────────────────────────
     def _splash_to_landing() -> None:
@@ -102,8 +125,8 @@ def main() -> int:
         fade.setEasingCurve(QtCore.QEasingCurve.Type.OutCubic)
         fade.valueChanged.connect(lambda v: landing.setWindowOpacity(float(v)))
         fade.finished.connect(landing._fly_in)
-        # Keep a reference so the animation is not GC-collected
-        _splash_to_landing._anim = fade         # type: ignore[attr-defined]
+        # Self-cleanup: delete animation when finished to prevent memory leak
+        fade.finished.connect(fade.deleteLater)
         fade.start()
 
     splash.reveal_ready.connect(_splash_to_landing)
@@ -112,7 +135,18 @@ def main() -> int:
     def _landing_to_main(path: str) -> None:
         """Called when ``library_selected`` fires at the *start* of the landing's
         fade-out.  Fade the main window in over the same duration so both
-        windows cross-dissolve simultaneously."""
+        windows cross-dissolve simultaneously.
+
+        The main window may still be under construction if landing selection
+        happens very quickly; wait if needed.
+        """
+        # Wait for window to be constructed if needed
+        if window is None:
+            # Window construction should be nearly complete by now (scheduled at
+            # QTimer.singleShot(0)). If it's not ready, schedule this callback again.
+            QtCore.QTimer.singleShot(10, lambda: _landing_to_main(path))
+            return
+
         if path:
             window.set_library(path)
 
@@ -125,8 +159,8 @@ def main() -> int:
         fade.setDuration(FADE_OUT_MS)           # match landing fade-out
         fade.setEasingCurve(QtCore.QEasingCurve.Type.OutCubic)
         fade.valueChanged.connect(lambda v: window.setWindowOpacity(float(v)))
-        # Keep a reference
-        _landing_to_main._anim = fade           # type: ignore[attr-defined]
+        # Self-cleanup: delete animation when finished to prevent memory leak
+        fade.finished.connect(fade.deleteLater)
         fade.start()
 
     landing.library_selected.connect(_landing_to_main)
