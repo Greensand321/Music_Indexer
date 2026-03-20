@@ -1064,6 +1064,23 @@ class MosaicLanding(QtWidgets.QWidget):
             if not pm.isNull():
                 self._tiles[tile_index].set_pixmap(pm)
 
+    # ── Public API for splash integration ──────────────────────────────────
+
+    def wire_splash_progress(self, splash: object) -> None:
+        """Connect this landing's image loading progress to a splash screen.
+
+        The splash screen will receive updates as images are loaded, allowing
+        its progress bar to show real loading progress instead of elapsed time.
+
+        Args:
+            splash: SplashScreen instance with report_image_loaded() method.
+        """
+        if self._scanner is not None:
+            # Set the splash's target to the number of tiles we're loading
+            splash.set_image_target(len(self._tiles))  # type: ignore[attr-defined]
+            # Connect scanner's art_found signal to splash's progress reporter
+            self._scanner.art_found.connect(splash.report_image_loaded)  # type: ignore[attr-defined]
+
     # ── Background painting ────────────────────────────────────────────────
 
     def paintEvent(self, event: QtGui.QPaintEvent) -> None:  # noqa: N802

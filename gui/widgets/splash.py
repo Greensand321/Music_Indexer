@@ -2,15 +2,18 @@
 
 Sequence
 --------
-1. Fill animation plays (1 500 ms, InOutCubic).
-2. Fill completes → ``reveal_ready`` is emitted so the caller can show the
-   main window *behind* the splash while it is still visible.
-3. Fade-out animation plays (450 ms, InCubic).
-4. Fade completes → splash closes.
+1. Fast fill animation to 50% (750 ms, InOutCubic) — initial UI load.
+2. Pause and monitor image loading — progress bar tracks actual image load count.
+3. Once images are loaded (or timeout expires), complete fill from 50% to 100%.
+4. Fade-out animation plays (450 ms, InCubic).
+5. Fade completes → splash closes.
 
 Colors are taken from the currently loaded ThemeManager tokens so the splash
 matches whichever theme the user last saved.  If the manager is not yet
 initialised the hardcoded Midnight-dark palette is used as a fallback.
+
+The splash can receive image load progress updates via ``set_image_progress()``
+so the progress bar reflects actual asset loading, not just elapsed time.
 """
 from __future__ import annotations
 
@@ -18,7 +21,9 @@ import sys
 
 from gui.compat import QtCore, QtGui, QtWidgets, Signal
 
-_FILL_MS = 1500
+_FILL_PHASE1_MS = 750   # Time to load to 50%
+_FILL_PHASE2_MS = 750   # Time to load from 50% to 100%
+_IMAGE_LOAD_TIMEOUT_MS = 5000  # Max time to wait for images before continuing
 _FADE_MS = 450
 _W, _H   = 520, 300
 
@@ -66,12 +71,17 @@ def _theme_colors() -> dict[str, str]:
 
 
 class SplashScreen(QtWidgets.QWidget):
-    """Frameless branded loading screen.
+    """Frameless branded loading screen with image-aware progress.
+
+    Two-phase loading:
+    1. Phase 1 (0 → 50%): Fast fill while UI loads (750ms).
+    2. Phase 2 (50% → 100%): Monitored wait for images to load, or timeout.
 
     Usage::
 
         splash = SplashScreen()
-        splash.reveal_ready.connect(main_window.show)   # show window beneath fade
+        splash.set_image_progress.connect(scanner.art_found)  # optional
+        splash.reveal_ready.connect(main_window.show)
         splash.show()
     """
 
@@ -91,15 +101,30 @@ class SplashScreen(QtWidgets.QWidget):
         self._progress: float = 0.0
         self._colors = _theme_colors()   # snapshot once at creation
 
-        # ── Progress fill ─────────────────────────────────────────────────
-        self._fill_anim = QtCore.QVariantAnimation(self)
-        self._fill_anim.setStartValue(0.0)
-        self._fill_anim.setEndValue(1.0)
-        self._fill_anim.setDuration(_FILL_MS)
-        self._fill_anim.setEasingCurve(QtCore.QEasingCurve.Type.InOutCubic)
-        self._fill_anim.valueChanged.connect(self._on_progress)
-        self._fill_anim.finished.connect(self._start_fade)
-        self._fill_anim.start()
+        # ── Image loading progress tracking ────────────────────────────────
+        self._images_loaded: int = 0
+        self._images_target: int = 0  # Total images to expect
+        self._phase2_started: bool = False
+        self._image_load_timeout: QtCore.QTimer | None = None
+
+        # ── Phase 1: Fast fill to 50% ─────────────────────────────────────
+        self._fill_phase1 = QtCore.QVariantAnimation(self)
+        self._fill_phase1.setStartValue(0.0)
+        self._fill_phase1.setEndValue(0.5)
+        self._fill_phase1.setDuration(_FILL_PHASE1_MS)
+        self._fill_phase1.setEasingCurve(QtCore.QEasingCurve.Type.InOutCubic)
+        self._fill_phase1.valueChanged.connect(self._on_progress)
+        self._fill_phase1.finished.connect(self._on_phase1_done)
+        self._fill_phase1.start()
+
+        # ── Phase 2: Completion fill (50% → 100%) ────────────────────────
+        self._fill_phase2 = QtCore.QVariantAnimation(self)
+        self._fill_phase2.setStartValue(0.5)
+        self._fill_phase2.setEndValue(1.0)
+        self._fill_phase2.setDuration(_FILL_PHASE2_MS)
+        self._fill_phase2.setEasingCurve(QtCore.QEasingCurve.Type.InOutCubic)
+        self._fill_phase2.valueChanged.connect(self._on_progress)
+        self._fill_phase2.finished.connect(self._start_fade)
 
         # ── Window fade-out ────────────────────────────────────────────────
         self._fade_anim = QtCore.QVariantAnimation(self)
@@ -110,11 +135,52 @@ class SplashScreen(QtWidgets.QWidget):
         self._fade_anim.valueChanged.connect(self._on_fade)
         self._fade_anim.finished.connect(self._on_done)
 
+    # ── Public API ─────────────────────────────────────────────────────────
+
+    def set_image_target(self, count: int) -> None:
+        """Set the expected number of images to load (for progress calculation)."""
+        self._images_target = count
+
+    def report_image_loaded(self, index: int, _image: object = None) -> None:
+        """Report that an image has been loaded (called by art scanner).
+
+        Args:
+            index: Tile index being loaded (used to track progress).
+            _image: Unused; present for signal compatibility with art_found.
+        """
+        self._images_loaded = index + 1  # Convert 0-based index to count
+        # Update progress bar to reflect image loading during phase 2
+        if self._phase2_started and self._images_target > 0:
+            # Map image progress (0 to _images_target) to bar progress (0.5 to 1.0)
+            image_fraction = min(1.0, self._images_loaded / self._images_target)
+            phase2_progress = 0.5 + (image_fraction * 0.5)
+            self._progress = phase2_progress
+            self.update()
+
     # ── Slots ─────────────────────────────────────────────────────────────
 
     def _on_progress(self, value: object) -> None:
         self._progress = float(value)  # type: ignore[arg-type]
         self.update()
+
+    def _on_phase1_done(self) -> None:
+        """Phase 1 (0-50%) complete. Wait for images, then continue to phase 2."""
+        # Set up timeout to continue even if no images load
+        self._image_load_timeout = QtCore.QTimer()
+        self._image_load_timeout.setSingleShot(True)
+        self._image_load_timeout.timeout.connect(self._continue_to_phase2)
+        self._image_load_timeout.start(_IMAGE_LOAD_TIMEOUT_MS)
+
+    def _continue_to_phase2(self) -> None:
+        """Continue fill animation from 50% to 100% (phase 2)."""
+        # Stop timeout if still running
+        if self._image_load_timeout is not None:
+            self._image_load_timeout.stop()
+            self._image_load_timeout = None
+        # Mark phase 2 as started so progress updates during phase 2 work
+        self._phase2_started = True
+        # Start phase 2 animation
+        self._fill_phase2.start()
 
     def _start_fade(self) -> None:
         # Reveal the main window while the splash is still opaque, then fade.
