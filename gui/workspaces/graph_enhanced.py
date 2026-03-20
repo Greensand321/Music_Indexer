@@ -2,12 +2,15 @@
 from __future__ import annotations
 
 import json
+import logging
 import numpy as np
 from pathlib import Path
 from typing import Optional, Dict, List
 
 from gui.compat import QtCore, QtGui, QtWidgets, Signal, Slot
 from gui.workspaces.base import WorkspaceBase
+
+logger = logging.getLogger(__name__)
 
 try:
     from gui.widgets.interactive_scatter_plot import InteractiveScatterPlot
@@ -159,15 +162,50 @@ class GraphWorkspace(WorkspaceBase):
             return
 
         try:
-            # Load cluster info
-            with open(cluster_info_file) as f:
-                cluster_info = json.load(f)
+            # Load cluster info with error handling
+            try:
+                with open(cluster_info_file) as f:
+                    cluster_info = json.load(f)
+            except json.JSONDecodeError as e:
+                self._status_lbl.setText(f"Corrupted cluster data file: {e}")
+                self._status_lbl.setStyleSheet("color: #ef4444;")
+                logger.error(f"Failed to parse JSON from {cluster_info_file}: {e}")
+                return
+            except OSError as e:
+                self._status_lbl.setText(f"Cannot read cluster file: {e}")
+                self._status_lbl.setStyleSheet("color: #ef4444;")
+                logger.error(f"Failed to read {cluster_info_file}: {e}")
+                return
 
-            # Extract data
-            X = np.array(cluster_info.get("X", []))
-            labels = np.array(cluster_info.get("labels", []))
-            tracks = cluster_info.get("tracks", [])
-            cluster_metadata = cluster_info.get("cluster_info", {})
+            # Validate required keys exist
+            required_keys = ["X", "labels", "tracks"]
+            missing_keys = [k for k in required_keys if k not in cluster_info]
+            if missing_keys:
+                self._status_lbl.setText(f"Invalid cluster data: missing {', '.join(missing_keys)}")
+                self._status_lbl.setStyleSheet("color: #ef4444;")
+                logger.error(f"Missing required keys in cluster data: {missing_keys}")
+                return
+
+            # Extract data with type validation
+            try:
+                X = np.array(cluster_info["X"], dtype=np.float32)
+                labels = np.array(cluster_info["labels"], dtype=np.int32)
+                tracks = cluster_info.get("tracks", [])
+                cluster_metadata = cluster_info.get("cluster_info", {})
+            except (TypeError, ValueError) as e:
+                self._status_lbl.setText(f"Invalid cluster data types: {e}")
+                self._status_lbl.setStyleSheet("color: #ef4444;")
+                logger.error(f"Failed to parse cluster data types: {e}")
+                return
+
+            # Validate array lengths match
+            if len(X) != len(labels) or len(labels) != len(tracks):
+                self._status_lbl.setText(
+                    f"Mismatched cluster data lengths: X={len(X)}, labels={len(labels)}, tracks={len(tracks)}"
+                )
+                self._status_lbl.setStyleSheet("color: #ef4444;")
+                logger.error(f"Array length mismatch in cluster data")
+                return
 
             if len(X) == 0:
                 self._status_lbl.setText("No cluster data available")
@@ -244,7 +282,15 @@ class GraphWorkspace(WorkspaceBase):
     @Slot(int)
     def _on_point_clicked(self, index: int) -> None:
         """Handle point click."""
-        if self._cluster_data is None or index < 0 or index >= len(self._cluster_data["metadata"]):
+        if self._cluster_data is None or index < 0:
+            return
+
+        # Validate index is within all arrays
+        metadata_len = len(self._cluster_data.get("metadata", []))
+        tracks_len = len(self._cluster_data.get("tracks", []))
+
+        if index >= metadata_len or index >= tracks_len:
+            logger.warning(f"Point index {index} out of bounds (metadata={metadata_len}, tracks={tracks_len})")
             return
 
         metadata = self._cluster_data["metadata"][index]
@@ -261,7 +307,13 @@ class GraphWorkspace(WorkspaceBase):
                 self._details._clear_display()
             return
 
-        if index >= len(self._cluster_data["metadata"]):
+        # Validate index is within all arrays
+        metadata_len = len(self._cluster_data.get("metadata", []))
+        tracks_len = len(self._cluster_data.get("tracks", []))
+
+        if index >= metadata_len or index >= tracks_len:
+            if self._details:
+                self._details._clear_display()
             return
 
         metadata = self._cluster_data["metadata"][index]
@@ -311,18 +363,40 @@ class GraphWorkspace(WorkspaceBase):
         if not file_path:
             return
 
-        # Write CSV
+        # Write CSV with atomic write (temp file then move)
         try:
-            with open(file_path, "w") as f:
-                f.write("path\n")
-                for path in selected_paths:
-                    f.write(f"{path}\n")
-            self._log(f"Exported {len(selected_paths)} track(s) to {file_path}", "ok")
-            QtWidgets.QMessageBox.information(
-                self, "Export Complete", f"Exported {len(selected_paths)} track(s)"
-            )
+            import tempfile
+            import csv
+            from pathlib import Path as PathlibPath
+
+            # Create temp file in same directory for atomic write
+            temp_fd, temp_path = tempfile.mkstemp(dir=PathlibPath(file_path).parent, text=True)
+
+            try:
+                with open(temp_fd, 'w', newline='') as f:
+                    writer = csv.writer(f)
+                    writer.writerow(["path"])
+                    for path in selected_paths:
+                        writer.writerow([path])
+
+                # Atomic rename
+                PathlibPath(temp_path).replace(file_path)
+
+                self._log(f"Exported {len(selected_paths)} track(s) to {file_path}", "ok")
+                QtWidgets.QMessageBox.information(
+                    self, "Export Complete", f"Exported {len(selected_paths)} track(s)"
+                )
+            except Exception as write_err:
+                # Clean up temp file
+                PathlibPath(temp_path).unlink(missing_ok=True)
+                raise write_err
+
+        except OSError as e:
+            self._log(f"Export failed (disk error): {e}", "error")
+            QtWidgets.QMessageBox.critical(self, "Export Failed", f"Disk error: {e}")
         except Exception as e:
             self._log(f"Export failed: {e}", "error")
+            logger.exception("Export selection failed")
             QtWidgets.QMessageBox.critical(self, "Export Failed", str(e))
 
     @Slot()
@@ -348,22 +422,46 @@ class GraphWorkspace(WorkspaceBase):
         if not ok or not name:
             return
 
-        # Write M3U
+        # Write M3U with proper error handling
         try:
+            import tempfile
+
             playlists_dir = Path(self._library_path) / "Playlists"
-            playlists_dir.mkdir(exist_ok=True)
+            try:
+                playlists_dir.mkdir(exist_ok=True)
+            except OSError as e:
+                self._log(f"Playlist creation failed (cannot create folder): {e}", "error")
+                QtWidgets.QMessageBox.critical(self, "Playlist Creation Failed", f"Cannot create Playlists folder: {e}")
+                return
 
             playlist_path = playlists_dir / f"{name}.m3u"
-            with open(playlist_path, "w") as f:
-                f.write("#EXTM3U\n")
-                for path in selected_paths:
-                    f.write(f"{path}\n")
 
-            self._log(f"Created playlist: {playlist_path}", "ok")
-            QtWidgets.QMessageBox.information(
-                self, "Playlist Created",
-                f"Created playlist with {len(selected_paths)} track(s)"
-            )
+            # Write to temp file first
+            temp_fd, temp_path = tempfile.mkstemp(dir=playlists_dir, text=True, suffix='.m3u')
+
+            try:
+                with open(temp_fd, 'w') as f:
+                    f.write("#EXTM3U\n")
+                    for path in selected_paths:
+                        f.write(f"{path}\n")
+
+                # Atomic rename
+                Path(temp_path).replace(playlist_path)
+
+                self._log(f"Created playlist: {playlist_path}", "ok")
+                QtWidgets.QMessageBox.information(
+                    self, "Playlist Created",
+                    f"Created playlist with {len(selected_paths)} track(s)"
+                )
+            except Exception as write_err:
+                # Clean up temp file
+                Path(temp_path).unlink(missing_ok=True)
+                raise write_err
+
+        except OSError as e:
+            self._log(f"Playlist creation failed (disk error): {e}", "error")
+            QtWidgets.QMessageBox.critical(self, "Playlist Creation Failed", f"Disk error: {e}")
         except Exception as e:
             self._log(f"Playlist creation failed: {e}", "error")
+            logger.exception("Playlist creation failed")
             QtWidgets.QMessageBox.critical(self, "Playlist Creation Failed", str(e))
