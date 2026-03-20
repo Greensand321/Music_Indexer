@@ -40,7 +40,8 @@ import music_indexer_api
 importlib.reload(music_indexer_api)
 import library_sync
 importlib.reload(library_sync)
-from library_sync import compare_libraries, compute_quality_score, MatchStatus
+from library_sync import compare_libraries, compute_quality_score
+from library_sync_types import MatchStatus
 from fingerprint_cache import flush_cache
 
 

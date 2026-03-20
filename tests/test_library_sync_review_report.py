@@ -20,7 +20,7 @@ pydub_stub.silence = silence_stub
 sys.modules.setdefault("pydub", pydub_stub)
 sys.modules.setdefault("pydub.silence", silence_stub)
 
-from library_sync import MatchResult, MatchStatus, TrackRecord
+from library_sync_types import MatchResult, MatchStatus, TrackRecord
 from library_sync_review_report import (
     DEFAULT_REPORT_VERSION,
     calculate_scan_config_hash,

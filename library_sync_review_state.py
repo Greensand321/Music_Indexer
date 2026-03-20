@@ -4,7 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Dict, Iterable, List
 
-from library_sync import MatchResult, MatchStatus
+from library_sync_types import MatchResult, MatchStatus
 
 
 @dataclass

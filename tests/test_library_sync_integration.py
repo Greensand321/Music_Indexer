@@ -8,7 +8,8 @@ import pytest
 
 import library_sync
 from fingerprint_cache import flush_cache
-from library_sync import MatchStatus, PerformanceProfile
+from library_sync import PerformanceProfile
+from library_sync_types import MatchStatus
 from library_sync_review_report import ReportFormat, export_report
 from library_sync_review_state import ReviewStateStore
 import music_indexer_api

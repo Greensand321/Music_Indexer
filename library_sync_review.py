@@ -16,7 +16,7 @@ from tkinter import filedialog, messagebox, ttk
 from config import DEFAULT_FP_THRESHOLDS, FORMAT_PRIORITY, load_config, save_config
 import library_sync
 from indexer_control import IndexCancelled
-from library_sync import MatchResult, MatchStatus, TrackRecord
+from library_sync_types import MatchResult, MatchStatus, TrackRecord
 from library_sync_review_report import DEFAULT_REPORT_VERSION
 from library_sync_review_state import ReviewStateStore
 
