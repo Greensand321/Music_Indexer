@@ -7,6 +7,21 @@ from typing import Callable, Optional, List, Dict
 from gui.compat import QtCore, QtGui, QtWidgets
 
 
+class _ClusterClickableLabel(QtWidgets.QLabel):
+    """Custom label that emits a signal when clicked."""
+
+    cluster_clicked = QtCore.Signal(int)  # cluster_id
+
+    def __init__(self, text: str, cluster_id: int) -> None:
+        super().__init__(text)
+        self.cluster_id = cluster_id
+
+    def mousePressEvent(self, event: QtGui.QMouseEvent) -> None:
+        """Handle mouse press to emit cluster click signal."""
+        self.cluster_clicked.emit(self.cluster_id)
+        super().mousePressEvent(event)
+
+
 class ClusterLegendWidget(QtWidgets.QWidget):
     """Widget showing cluster list with visibility toggles.
 
@@ -77,9 +92,13 @@ class ClusterLegendWidget(QtWidgets.QWidget):
         colors : np.ndarray, optional
             Shape (n_clusters, 3) - RGB colors per cluster
         """
-        # Clear existing
+        # Clear existing widgets completely
+        # First disconnect signals and remove from layout
         while self._cluster_layout.count():
-            self._cluster_layout.takeAt(0).widget().deleteLater()
+            widget = self._cluster_layout.takeAt(0).widget()
+            if widget is not None:
+                widget.setParent(None)  # Immediate removal
+                widget.deleteLater()
 
         self._clusters = {}
 
@@ -123,7 +142,10 @@ class ClusterLegendWidget(QtWidgets.QWidget):
         # Checkbox
         checkbox = QtWidgets.QCheckBox()
         checkbox.setChecked(True)
-        checkbox.stateChanged.connect(lambda state: self._on_cluster_toggled(cluster_id, state == 2))
+        # Use functools.partial or default argument to avoid closure issues
+        checkbox.stateChanged.connect(
+            lambda state, cid=cluster_id: self._on_cluster_toggled(cid, state == 2)
+        )
         layout.addWidget(checkbox, 0)
 
         # Color indicator
@@ -146,10 +168,10 @@ class ClusterLegendWidget(QtWidgets.QWidget):
         if "tempo" in info:
             info_text += f"\nTempo: {info['tempo']}"
 
-        text_label = QtWidgets.QLabel(f"{info_text}\n({count} tracks)")
+        text_label = _ClusterClickableLabel(f"{info_text}\n({count} tracks)", cluster_id)
         text_label.setStyleSheet("font-size: 11px; color: #333;")
         text_label.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
-        text_label.mousePressEvent = lambda e: self._on_cluster_selected(cluster_id)
+        text_label.cluster_clicked.connect(self._on_cluster_selected)
         layout.addWidget(text_label, 1)
 
         return item
