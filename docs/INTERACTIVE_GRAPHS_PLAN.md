@@ -1,41 +1,36 @@
-# Interactive Graphs & Enhanced Clustering — Comprehensive Implementation Plan
+# Interactive Graphs & Enhanced Clustering — Vision Document
 
-**Status:** 🔴 Not Started (Major Gap Identified)
-**Priority:** High - Core Feature
-**Estimated Effort:** 40-60 hours
+**Status:** 🟡 Exploratory Phase
+**Priority:** High - Core User Experience
+**Scope:** TBD
 
 ---
 
-## Current Problems Identified
+## Problem Statement
 
-### 1. **Graph Visualization Not Working**
-- `cluster_graph_panel.py` exists but uses **Tkinter** (matplotlib/tkinter backend)
-- Main app is **Qt-based** (gui/workspaces using PyQt6/PySide6)
-- **Result:** Graph code unreachable from Qt, creates a mismatch
-- `gui/workspaces/graph.py` only shows placeholder messages
+Users need a way to explore and understand their clustered music library through interactive visualization. The current approach has limitations around responsiveness, user control, and integration with the broader application workflow.
 
-### 2. **Missing User Prompts & Controls**
-- Clustering UI has basic K-means/HDBSCAN selector
-- **Missing prompts for:**
-  - Feature selection (which features to use?)
-  - Feature normalization preferences
-  - Algorithm parameters (eps, samples in HDBSCAN, etc.)
-  - Post-processing options (merge small clusters, remove outliers?)
-  - Output preferences (playlists, visualization, report)
-- Users can't understand or control the clustering process
+### Key Gaps
 
-### 3. **HTML Graphs Open Externally**
-- Current design: generate HTML, open in browser
-- **Problem:** Breaks flow, separate window, can't interact with main app while viewing
-- **User preference:** Keep everything in-app, embedded visualization
+1. **Visualization Experience**
+   - Current approach has integration limitations
+   - User feedback indicates the experience doesn't match expectations
+   - Interaction model needs rethinking
 
-### 4. **Backend Gaps**
-- Feature extraction happens but no way to inspect features
-- No dimension reduction visualization (PCA, t-SNE, UMAP)
-- No cluster quality metrics shown
-- No way to adjust parameters and re-cluster interactively
-- No drill-down into cluster details
-- No export/playlist generation from graph selection
+2. **User Agency**
+   - Limited transparency into how clustering decisions are made
+   - Users want more control over the process parameters
+   - Current workflow doesn't support iterative refinement
+
+3. **Workflow Integration**
+   - Visualization should integrate seamlessly with other app features
+   - Export and playlist generation should feel natural, not bolted-on
+   - Users should be able to drill deeper into results
+
+4. **Technical Foundation**
+   - Clustering backend works but visualization layer needs overhaul
+   - Current UI patterns don't align with user expectations
+   - Performance and rendering approach needs reconsideration
 
 ---
 

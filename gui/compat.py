@@ -6,21 +6,17 @@ from importlib import import_module, util
 QtCore = None
 QtGui = None
 QtWidgets = None
-QtWebEngineWidgets = None
-QtWebChannel = None
 Signal = None
 Slot = None
 
 
 def _load() -> None:
-    global QtCore, QtGui, QtWidgets, QtWebEngineWidgets, QtWebChannel, Signal, Slot
+    global QtCore, QtGui, QtWidgets, Signal, Slot
 
     if util.find_spec("PySide6"):
         QtCore = import_module("PySide6.QtCore")
         QtGui = import_module("PySide6.QtGui")
         QtWidgets = import_module("PySide6.QtWidgets")
-        QtWebEngineWidgets = import_module("PySide6.QtWebEngineWidgets")
-        QtWebChannel = import_module("PySide6.QtWebChannel")
         Signal = QtCore.Signal
         Slot = QtCore.Slot
         return
@@ -29,8 +25,6 @@ def _load() -> None:
         QtCore = import_module("PyQt6.QtCore")
         QtGui = import_module("PyQt6.QtGui")
         QtWidgets = import_module("PyQt6.QtWidgets")
-        QtWebEngineWidgets = import_module("PyQt6.QtWebEngineWidgets")
-        QtWebChannel = import_module("PyQt6.QtWebChannel")
         Signal = QtCore.pyqtSignal
         Slot = QtCore.pyqtSlot
         return
@@ -43,4 +37,4 @@ def _load() -> None:
 
 _load()
 
-__all__ = ["QtCore", "QtGui", "QtWidgets", "QtWebEngineWidgets", "QtWebChannel", "Signal", "Slot"]
+__all__ = ["QtCore", "QtGui", "QtWidgets", "Signal", "Slot"]
