@@ -119,14 +119,16 @@ class ClusterWorker(QtCore.QThread):
             _log(f"Using algorithm: {algorithm.upper()}")
             _log(f"Using features: {', '.join(features)}")
 
-            # Run clustering
-            self.progress.emit(10, "Extracting audio features...")
+            # Run clustering (with parallel processing enabled for speed)
+            self.progress.emit(10, "Extracting audio features (parallel processing)...")
             result = generate_clustered_playlists(
                 tracks,
                 self.library_path,
                 method=algorithm,
                 params=params,
                 log_callback=_log,
+                engine="parallel",  # Enable fast parallel audio feature extraction
+                use_max_workers=True,  # Use all available CPU cores
             )
 
             if self._cancelled:

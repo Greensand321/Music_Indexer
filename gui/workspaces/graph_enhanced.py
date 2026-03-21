@@ -62,12 +62,37 @@ class GraphWorkspace(WorkspaceBase):
 
         control_layout.addStretch(1)
 
-        # View toggle (2D/3D)
+        # View toggle (2D/3D) - default to 3D for immersive exploration
         view_toggle = QtWidgets.QComboBox()
         view_toggle.addItems(["2D View", "3D View"])
+        view_toggle.setCurrentText("3D View")  # Default to 3D view!
         view_toggle.currentTextChanged.connect(self._on_view_changed)
         control_layout.addWidget(QtWidgets.QLabel("View:"))
         control_layout.addWidget(view_toggle)
+
+        # Axis control for 3D (X, Y, Z feature selection)
+        self._axis_x_combo = QtWidgets.QComboBox()
+        self._axis_y_combo = QtWidgets.QComboBox()
+        self._axis_z_combo = QtWidgets.QComboBox()
+
+        # Populate with default feature names
+        axes_options = ["Energy", "Timbre", "Complexity", "MFCC-Mean", "MFCC-Std", "Tempo"]
+        for combo in [self._axis_x_combo, self._axis_y_combo, self._axis_z_combo]:
+            combo.addItems(axes_options)
+
+        # Set defaults
+        self._axis_x_combo.setCurrentText("Energy")
+        self._axis_y_combo.setCurrentText("Timbre")
+        self._axis_z_combo.setCurrentText("Complexity")
+
+        # Connect to re-projection
+        for combo in [self._axis_x_combo, self._axis_y_combo, self._axis_z_combo]:
+            combo.currentTextChanged.connect(self._on_axes_changed)
+
+        control_layout.addWidget(QtWidgets.QLabel("3D Axes:"))
+        control_layout.addWidget(self._axis_x_combo)
+        control_layout.addWidget(self._axis_y_combo)
+        control_layout.addWidget(self._axis_z_combo)
 
         refresh_btn = QtWidgets.QPushButton("↺ Refresh")
         refresh_btn.clicked.connect(self._on_refresh)
@@ -104,6 +129,9 @@ class GraphWorkspace(WorkspaceBase):
                 self._scatter_3d.point_clicked.connect(self._on_point_clicked)
                 self._scatter_3d.hover_changed.connect(self._on_hover)
                 self._graph_stack.addWidget(self._scatter_3d)
+                # Set 3D as default view (index 1)
+                self._graph_stack.setCurrentIndex(1)
+                self._use_3d = True
             except ImportError:
                 self._scatter_3d = None
                 self._log("⚠ 3D scatter plot unavailable (PyQtGraph OpenGL required)", "warning")
@@ -402,27 +430,62 @@ class GraphWorkspace(WorkspaceBase):
         self._log("Refreshed cluster data", "info")
 
     @Slot(str)
+    def _on_axes_changed(self, axis_name: str) -> None:
+        """Handle 3D axis selection changes."""
+        if self._use_3d and self._scatter_3d is not None:
+            self._log(f"3D axes updated: X={self._axis_x_combo.currentText()}, Y={self._axis_y_combo.currentText()}, Z={self._axis_z_combo.currentText()}", "info")
+            # TODO: Implement custom axis mapping based on feature selection
+
+    @Slot(str)
     def _on_view_changed(self, view_name: str) -> None:
         """Switch between 2D and 3D views."""
         if view_name == "3D View":
             if self._scatter_3d is None:
                 self._log("⚠ 3D view not available", "warning")
                 return
+
+            # Show 3D widget
             self._graph_stack.setCurrentWidget(self._scatter_3d)
             self._use_3d = True
-            self._log("Switched to 3D view", "info")
+            self._log("Switched to 3D view (rotate with mouse, scroll to zoom)", "info")
 
-            # Load data into 3D view if not already done
-            if self._cluster_data and self._scatter_3d is not None:
+            # Load data into 3D view
+            if self._cluster_data is not None:
                 try:
-                    X_3d = np.array(self._cluster_data["X_3d"], dtype=np.float32)
+                    # Get 3D data - might be None if computation failed
+                    X_3d = self._cluster_data.get("X_3d")
+
+                    if X_3d is None:
+                        self._log("⚠ 3D data not available, computing from features…", "warning")
+                        # Try to compute on-the-fly
+                        X = np.array(self._cluster_data.get("X", []), dtype=np.float32)
+                        if len(X) > 0 and X.ndim == 2 and X.shape[1] > 3:
+                            from clustered_playlists import compute_3d_embedding
+                            X_3d = compute_3d_embedding(X, self._log)
+                            self._cluster_data["X_3d"] = X_3d
+                        else:
+                            self._log("✗ Cannot compute 3D: invalid feature data", "error")
+                            return
+
+                    # Ensure it's a numpy array
+                    X_3d = np.array(X_3d, dtype=np.float32)
+                    if X_3d.shape[1] != 3:
+                        self._log(f"✗ Invalid 3D shape: {X_3d.shape}, expected (N, 3)", "error")
+                        return
+
                     labels = np.array(self._cluster_data["labels"], dtype=np.int32)
                     tracks = self._cluster_data.get("tracks", [])
                     metadata = self._cluster_data.get("metadata", [])
 
+                    self._log(f"Loading {len(X_3d)} points into 3D view…", "info")
                     self._scatter_3d.set_data(X_3d, labels, tracks, metadata)
+                    self._log(f"✓ 3D view loaded successfully", "info")
                 except Exception as e:
-                    self._log(f"⚠ Could not load 3D data: {e}", "warning")
+                    self._log(f"✗ Failed to load 3D data: {e}", "error")
+                    import traceback
+                    logger.exception("3D view load error")
+            else:
+                self._log("No cluster data available. Run Clustered Playlists first.", "warning")
         else:
             self._graph_stack.setCurrentWidget(self._scatter)
             self._use_3d = False
