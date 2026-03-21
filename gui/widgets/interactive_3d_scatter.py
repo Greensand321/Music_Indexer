@@ -62,33 +62,53 @@ class Interactive3DScatterPlot(QtWidgets.QWidget):
         """Create the PyQtGraph OpenGL plot widget."""
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
 
         # Create OpenGL plot widget
         self.plot_widget = gl.GLViewWidget()
-        self.plot_widget.opts['distance'] = 200
+        self.plot_widget.opts['distance'] = 300
+        self.plot_widget.opts['fov'] = 45
         self.plot_widget.setWindowTitle("3D Audio Feature Space")
+        self.plot_widget.setCameraPosition(distance=300, elevation=30, azimuth=45)
 
         # Add coordinate axes
         axis = gl.GLAxisItem()
         axis.setSize(100, 100, 100)
         self.plot_widget.addItem(axis)
 
+        # Add a grid for reference
+        grid = gl.GLGridItem()
+        grid.scale(2, 2, 1)
+        self.plot_widget.addItem(grid)
+
         # Create scatter plot item
-        self.scatter = gl.GLScatterPlotItem()
-        self.scatter.setGLOptions('translucent')
+        self.scatter = gl.GLScatterPlotItem(
+            pos=np.array([[0, 0, 0]]),  # Start with one point
+            size=5.0,
+            color=(1.0, 1.0, 1.0, 1.0),
+            pxMode=False
+        )
         self.plot_widget.addItem(self.scatter)
 
         layout.addWidget(self.plot_widget)
 
         # Control panel
         control_layout = QtWidgets.QHBoxLayout()
+        control_layout.setSpacing(4)
+
+        info_label = QtWidgets.QLabel("Mouse: Drag rotate | Scroll zoom | Middle-drag pan")
+        info_label.setStyleSheet("font-size: 10px; color: #666;")
+        control_layout.addWidget(info_label)
+
+        control_layout.addSpacing(10)
 
         # Viewpoint presets
-        preset_label = QtWidgets.QLabel("Preset View:")
+        preset_label = QtWidgets.QLabel("View:")
         control_layout.addWidget(preset_label)
 
-        for name, rotation in [("XY", (0, 0)), ("XZ", (90, 0)), ("YZ", (0, 90)), ("Isometric", (45, 45))]:
+        for name, rotation in [("XY", (0, 0)), ("XZ", (90, 0)), ("YZ", (0, 90)), ("3D", (45, 45))]:
             btn = QtWidgets.QPushButton(name)
+            btn.setMaximumWidth(40)
             rx, rz = rotation
             btn.clicked.connect(lambda checked, r_x=rx, r_z=rz: self._set_view(r_x, r_z))
             control_layout.addWidget(btn)
@@ -96,7 +116,8 @@ class Interactive3DScatterPlot(QtWidgets.QWidget):
         control_layout.addStretch(1)
 
         # Reset button
-        reset_btn = QtWidgets.QPushButton("Reset View")
+        reset_btn = QtWidgets.QPushButton("↺ Reset")
+        reset_btn.setMaximumWidth(50)
         reset_btn.clicked.connect(self._reset_view)
         control_layout.addWidget(reset_btn)
 
@@ -177,36 +198,55 @@ class Interactive3DScatterPlot(QtWidgets.QWidget):
     def _render(self) -> None:
         """Render 3D scatter plot."""
         if self._X is None or len(self._X) == 0:
+            print("[3D] No data to render")
             return
 
-        # Prepare visible points
-        visible_mask = np.array([
-            self._cluster_visibility.get(int(self._clusters[i]), True)
-            for i in range(len(self._clusters))
-        ])
-        visible_indices = np.where(visible_mask)[0]
+        try:
+            # Prepare visible points
+            visible_mask = np.array([
+                self._cluster_visibility.get(int(self._clusters[i]), True)
+                for i in range(len(self._clusters))
+            ])
+            visible_indices = np.where(visible_mask)[0]
 
-        if len(visible_indices) == 0:
-            self.scatter.setData(pos=np.empty((0, 3)), color=np.empty((0, 4)), size=np.empty(0))
-            return
+            if len(visible_indices) == 0:
+                print("[3D] No visible points after filtering")
+                self.scatter.setData(pos=np.empty((0, 3), dtype=np.float32))
+                return
 
-        # Get visible data
-        visible_pos = self._X[visible_indices]
-        visible_colors = self._colors[visible_indices]
-        visible_sizes = self._sizes[visible_indices]
+            # Get visible data
+            visible_pos = self._X[visible_indices].astype(np.float32)
+            visible_colors = self._colors[visible_indices].copy()
+            visible_sizes = self._sizes[visible_indices].copy()
 
-        # Highlight selected points
-        for idx in self._selected_indices:
-            if idx in visible_indices:
-                visible_colors[np.where(visible_indices == idx)[0][0]] = (1, 0, 0, 1)  # Red
-                visible_sizes[np.where(visible_indices == idx)[0][0]] *= 2
+            # Highlight selected points
+            for idx in self._selected_indices:
+                if idx in visible_indices:
+                    match_idx = np.where(visible_indices == idx)[0][0]
+                    visible_colors[match_idx] = (1, 0, 0, 1)  # Red
+                    visible_sizes[match_idx] *= 2
 
-        # Update scatter plot
-        self.scatter.setData(
-            pos=visible_pos,
-            color=visible_colors,
-            size=visible_sizes,
-        )
+            # Ensure data types are correct
+            visible_pos = np.asarray(visible_pos, dtype=np.float32)
+            visible_colors = np.asarray(visible_colors, dtype=np.float32)
+            visible_sizes = np.asarray(visible_sizes, dtype=np.float32)
+
+            print(f"[3D] Rendering {len(visible_pos)} points, colors shape: {visible_colors.shape}, sizes shape: {visible_sizes.shape}")
+
+            # Update scatter plot - simplified approach
+            self.scatter.setData(
+                pos=visible_pos,
+                color=visible_colors,
+                size=visible_sizes,
+                pxMode=False
+            )
+
+            print("[3D] Render complete")
+
+        except Exception as e:
+            print(f"[3D] Render error: {e}")
+            import traceback
+            traceback.print_exc()
 
     def set_selection(self, indices: List[int] | None = None) -> None:
         """Set selected points.
