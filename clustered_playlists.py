@@ -523,7 +523,7 @@ def generate_clustered_playlists(
     method: str,
     params: dict,
     log_callback=None,
-    engine: str = "serial",
+    engine: str = "parallel",  # DEFAULT: Use parallel processing for speed!
     feature_engine: AudioFeatureEngine = "librosa",
     use_max_workers: bool = False,
 ) -> None:

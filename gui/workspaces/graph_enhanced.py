@@ -62,9 +62,10 @@ class GraphWorkspace(WorkspaceBase):
 
         control_layout.addStretch(1)
 
-        # View toggle (2D/3D)
+        # View toggle (2D/3D) - default to 3D for immersive exploration
         view_toggle = QtWidgets.QComboBox()
         view_toggle.addItems(["2D View", "3D View"])
+        view_toggle.setCurrentText("3D View")  # Default to 3D view!
         view_toggle.currentTextChanged.connect(self._on_view_changed)
         control_layout.addWidget(QtWidgets.QLabel("View:"))
         control_layout.addWidget(view_toggle)
@@ -128,6 +129,9 @@ class GraphWorkspace(WorkspaceBase):
                 self._scatter_3d.point_clicked.connect(self._on_point_clicked)
                 self._scatter_3d.hover_changed.connect(self._on_hover)
                 self._graph_stack.addWidget(self._scatter_3d)
+                # Set 3D as default view (index 1)
+                self._graph_stack.setCurrentIndex(1)
+                self._use_3d = True
             except ImportError:
                 self._scatter_3d = None
                 self._log("⚠ 3D scatter plot unavailable (PyQtGraph OpenGL required)", "warning")
