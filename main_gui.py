@@ -1794,6 +1794,20 @@ def create_panel_for_plugin(app, name: str, parent: tk.Widget) -> ttk.Frame:
     )
     lasso_btn.pack(side="left")
 
+    graph_3d_btn = ttk.Button(
+        btn_frame,
+        text="3D Graph",
+        command=lambda: panel and panel.open_3d_graph(),
+    )
+    graph_3d_btn.pack(side="left", padx=(10, 0))
+
+    export_csv_btn = ttk.Button(
+        btn_frame,
+        text="Export CSV",
+        command=lambda: panel and panel.export_selection_csv(),
+    )
+    export_csv_btn.pack(side="left", padx=(5, 0))
+
     placeholder: ttk.Label | None = None
 
     def _sync_cluster_controls(cluster_ready: bool, running: bool) -> None:
