@@ -208,7 +208,8 @@ class GraphWorkspace(WorkspaceBase):
 
         if not cluster_info_file.exists():
             self._status_lbl.setText("No cluster data found — run Clustered Playlists first")
-            self._scatter.scatter.clear()
+            if self._scatter and hasattr(self._scatter, 'scatter'):
+                self._scatter.scatter.clear()
             if self._legend:
                 self._legend.set_clusters(np.array([]), {})
             return
@@ -240,7 +241,23 @@ class GraphWorkspace(WorkspaceBase):
 
             # Extract data with type validation
             try:
-                X = np.array(cluster_info["X"], dtype=np.float32)
+                # Use 2D embedding if available, otherwise fall back to high-dimensional X
+                if "X_2d" in cluster_info:
+                    X = np.array(cluster_info["X_2d"], dtype=np.float32)
+                    self._log("✓ Using 2D embedding for visualization", "info")
+                else:
+                    X = np.array(cluster_info["X"], dtype=np.float32)
+                    # If X is high-dimensional, we need to compute 2D embedding
+                    if X.ndim > 1 and X.shape[1] > 2:
+                        self._log("⚠ Computing 2D visualization from high-dimensional features…", "warning")
+                        try:
+                            from clustered_playlists import compute_2d_embedding
+                            X = compute_2d_embedding(X, self._log)
+                        except Exception as e:
+                            self._log(f"⚠ Could not compute 2D embedding: {e}", "warning")
+                            # Use first 2 dimensions as fallback
+                            X = X[:, :2]
+
                 labels = np.array(cluster_info["labels"], dtype=np.int32)
                 tracks = cluster_info.get("tracks", [])
                 cluster_metadata = cluster_info.get("cluster_info", {})

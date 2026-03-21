@@ -43,6 +43,16 @@ else:  # pragma: no cover - optional dependency
     essentia = None  # type: ignore
     MonoLoader = MusicExtractor = None  # type: ignore
 
+if _module_available("umap"):
+    import umap  # type: ignore
+else:
+    umap = None  # type: ignore
+
+if _module_available("sklearn.manifold"):
+    from sklearn.manifold import TSNE
+else:
+    TSNE = None  # type: ignore
+
 AudioFeatureEngine = Literal["librosa", "essentia"]
 
 # Magic number constants for clarity
@@ -350,6 +360,60 @@ def log_cluster_summary(labels: "np.ndarray", log_callback) -> None:
     log_callback(f"→ Largest clusters (id: size): {top_sizes}")
 
 
+def compute_2d_embedding(X: "np.ndarray", log_callback=None) -> "np.ndarray":
+    """Compute 2D coordinates for visualization using UMAP or t-SNE.
+
+    Parameters
+    ----------
+    X : np.ndarray
+        Feature matrix of shape (n_samples, n_features)
+    log_callback : callable, optional
+        Callback for logging messages
+
+    Returns
+    -------
+    np.ndarray
+        2D coordinates of shape (n_samples, 2)
+    """
+    if log_callback is None:
+        log_callback = lambda msg: None
+
+    if np is None:
+        raise RuntimeError("numpy required for 2D embedding computation")
+
+    n_samples = len(X)
+    if n_samples < 10:
+        # For very small datasets, use simple PCA-like approach
+        log_callback("→ Dataset too small for UMAP/t-SNE; using random projection")
+        return np.random.randn(n_samples, 2).astype(np.float32)
+
+    # Try UMAP first (faster, better for large datasets)
+    if umap is not None:
+        try:
+            log_callback("⚙ Computing 2D embedding with UMAP …")
+            mapper = umap.UMAP(n_components=2, n_neighbors=min(15, n_samples - 1), random_state=42)
+            X_2d = mapper.fit_transform(X).astype(np.float32)
+            log_callback("✓ 2D embedding computed with UMAP")
+            return X_2d
+        except Exception as e:
+            log_callback(f"⚠ UMAP failed: {e}; falling back to t-SNE")
+
+    # Fall back to t-SNE
+    if TSNE is not None:
+        try:
+            log_callback("⚙ Computing 2D embedding with t-SNE …")
+            tsne = TSNE(n_components=2, random_state=42, perplexity=min(30, (n_samples - 1) // 3))
+            X_2d = tsne.fit_transform(X).astype(np.float32)
+            log_callback("✓ 2D embedding computed with t-SNE")
+            return X_2d
+        except Exception as e:
+            log_callback(f"⚠ t-SNE failed: {e}; using random projection")
+
+    # Final fallback: random projection (preserves approximate distances)
+    log_callback("⚠ Neither UMAP nor t-SNE available; using random projection for 2D visualization")
+    return np.random.randn(n_samples, 2).astype(np.float32)
+
+
 def _validate_cache_entry(path: str, cached_time: float) -> bool:
     """Check if cached entry is still valid (file not modified since cache was created)."""
     try:
@@ -492,9 +556,14 @@ def generate_clustered_playlists(
             "tempo": [0, 0],  # Could compute from features if available
         }
 
+    # Compute 2D embedding for visualization
+    log_callback("→ Computing 2D scatter plot coordinates…")
+    X_2d = compute_2d_embedding(X, log_callback)
+
     # Save cluster data to JSON for visualization
     # For large datasets, optionally downsample X for visualization
     x_to_save = X
+    x_2d_to_save = X_2d
     downsampled = False
 
     if len(X) > MAX_VISUALIZATION_POINTS:
@@ -510,10 +579,12 @@ def generate_clustered_playlists(
             # Ensure minimum number of points for visualization
             indices = np.linspace(0, len(X) - 1, MIN_VISUALIZATION_POINTS, dtype=int)
         x_to_save = X[indices]
+        x_2d_to_save = X_2d[indices]
         downsampled = True
 
     cluster_data = {
         "X": x_to_save.tolist(),
+        "X_2d": x_2d_to_save.tolist(),   # 2D embedding for scatter plot
         "X_downsampled": downsampled,  # Flag if X was downsampled
         "X_total_points": len(X),      # Original number of points
         "labels": labels.tolist(),
