@@ -674,6 +674,18 @@ def generate_clustered_playlists(
         log_callback(f"! Error saving cluster data: {e}")
         logger.exception("Failed to save cluster data")
 
+    # Generate interactive 3D HTML visualization
+    try:
+        from cluster_graph_3d import generate_cluster_graph_html_from_data
+
+        html_out = os.path.join(docs, "cluster_graph.html")
+        generate_cluster_graph_html_from_data(
+            cluster_data, html_out, log_callback
+        )
+    except Exception as e:
+        log_callback(f"⚠ Could not generate 3D graph HTML: {e}")
+        logger.warning("Failed to generate cluster_graph.html: %s", e)
+
     # Return full result dict for caller
     return {
         "features": feats,

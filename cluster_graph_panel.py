@@ -1,7 +1,9 @@
+import json
 import os
 import subprocess
 import sys
 import threading
+import webbrowser
 from datetime import datetime
 
 import numpy as np
@@ -696,6 +698,74 @@ class ClusterGraphPanel(ttk.Frame):
             self.temp_remove_btn.configure(text="Remove Selected")
         self._clear_selection()
 
+
+    def open_3d_graph(self):
+        """Generate and open the Three.js 3D cluster graph in the browser."""
+        if not self.library_path:
+            messagebox.showinfo("3D Graph", "Select a library first.")
+            return
+
+        docs = os.path.join(self.library_path, "Docs")
+        info_path = os.path.join(docs, "cluster_info.json")
+        html_path = os.path.join(docs, "cluster_graph.html")
+
+        # If HTML already exists, open it directly
+        if os.path.isfile(html_path):
+            webbrowser.open(f"file://{os.path.abspath(html_path)}")
+            self.log("Opened 3D cluster graph in browser")
+            return
+
+        # Try generating from cluster_info.json
+        if os.path.isfile(info_path):
+            try:
+                from cluster_graph_3d import generate_cluster_graph_html
+
+                generate_cluster_graph_html(self.library_path, log_callback=self.log)
+                webbrowser.open(f"file://{os.path.abspath(html_path)}")
+            except Exception as exc:
+                messagebox.showerror("3D Graph", f"Failed to generate graph: {exc}")
+            return
+
+        messagebox.showinfo(
+            "3D Graph",
+            "No cluster data found.\n\n"
+            "Run clustering first — the 3D graph HTML will be generated "
+            "automatically alongside cluster_info.json.",
+        )
+
+    def export_selection_csv(self):
+        """Export the currently selected tracks to a CSV file."""
+        if not self.selected_indices:
+            messagebox.showinfo("Export", "No songs selected. Use lasso to select first.")
+            return
+
+        tracks_to_export = [self.tracks[i] for i in self.selected_indices]
+        docs = os.path.join(self.library_path, "Docs") if self.library_path else "."
+        os.makedirs(docs, exist_ok=True)
+
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        default_name = f"cluster_selection_{ts}.csv"
+
+        chosen = filedialog.asksaveasfilename(
+            parent=self,
+            title="Export Selection as CSV",
+            defaultextension=".csv",
+            initialdir=docs,
+            initialfile=default_name,
+            filetypes=[("CSV Files", "*.csv"), ("All Files", "*.*")],
+        )
+        if not chosen:
+            return
+
+        try:
+            with open(chosen, "w", encoding="utf-8", newline="") as fh:
+                fh.write("track_path\n")
+                for track in tracks_to_export:
+                    escaped = track.replace('"', '""')
+                    fh.write(f'"{escaped}"\n')
+            self.log(f"Exported {len(tracks_to_export)} tracks to {chosen}")
+        except OSError as exc:
+            messagebox.showerror("Export", f"Failed to write CSV: {exc}")
 
     def open_param_dialog(self):
         """Show dialog to edit HDBSCAN parameters and redraw clusters."""
