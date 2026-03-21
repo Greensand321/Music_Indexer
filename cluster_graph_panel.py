@@ -712,7 +712,7 @@ class ClusterGraphPanel(ttk.Frame):
         # If HTML already exists, open it directly
         if os.path.isfile(html_path):
             webbrowser.open(f"file://{os.path.abspath(html_path)}")
-            self.log("Opened 3D cluster graph in browser")
+            self.log("✓ Opened 3D cluster graph in browser")
             return
 
         # Try generating from cluster_info.json
@@ -732,6 +732,54 @@ class ClusterGraphPanel(ttk.Frame):
             "Run clustering first — the 3D graph HTML will be generated "
             "automatically alongside cluster_info.json.",
         )
+
+    def open_3d_graph_demo(self):
+        """Generate and open a demo 3D graph with 10 random test points."""
+        if not self.library_path:
+            messagebox.showinfo("Demo 3D Graph", "Select a library first.")
+            return
+
+        try:
+            from cluster_graph_3d import generate_cluster_graph_html_from_data
+            import random
+
+            docs = os.path.join(self.library_path, "Docs")
+            os.makedirs(docs, exist_ok=True)
+
+            # Create demo data: 10 random points in 3D space, 2 clusters
+            random.seed(42)
+            n_points = 10
+            demo_data = {
+                "X_3d": [
+                    [random.uniform(-20, 20) for _ in range(3)]
+                    for _ in range(n_points)
+                ],
+                "labels": [i % 2 for i in range(n_points)],
+                "tracks": [f"demo_track_{i}.mp3" for i in range(n_points)],
+                "metadata": [
+                    {
+                        "title": f"Demo Track {i}",
+                        "artist": "Test Artist",
+                        "duration": 180 + i * 10,
+                    }
+                    for i in range(n_points)
+                ],
+                "cluster_info": {
+                    "0": {"size": 5},
+                    "1": {"size": 5},
+                },
+                "X_downsampled": False,
+                "X_total_points": n_points,
+            }
+
+            demo_path = os.path.join(docs, "cluster_graph_demo.html")
+            generate_cluster_graph_html_from_data(demo_data, demo_path, self.log)
+            webbrowser.open(f"file://{os.path.abspath(demo_path)}")
+            self.log("✓ Demo 3D graph opened (10 random points, 2 clusters)")
+        except Exception as exc:
+            messagebox.showerror(
+                "Demo 3D Graph", f"Failed to generate demo graph: {exc}"
+            )
 
     def export_selection_csv(self):
         """Export the currently selected tracks to a CSV file."""

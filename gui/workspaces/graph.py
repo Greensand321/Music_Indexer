@@ -49,8 +49,11 @@ class GraphWorkspace(WorkspaceBase):
         self._open_graph_btn.clicked.connect(self._on_open_graph)
         self._generate_btn = QtWidgets.QPushButton("Regenerate HTML")
         self._generate_btn.clicked.connect(self._on_regenerate)
+        self._test_btn = QtWidgets.QPushButton("Test with Demo Data")
+        self._test_btn.clicked.connect(self._on_test_demo)
         btn_row.addWidget(self._open_graph_btn)
         btn_row.addWidget(self._generate_btn)
+        btn_row.addWidget(self._test_btn)
         btn_row.addStretch(1)
         launch_layout.addLayout(btn_row)
 
@@ -121,6 +124,61 @@ class GraphWorkspace(WorkspaceBase):
         else:
             self._status_lbl.setText("Cannot regenerate — no cluster_info.json found.")
             self._status_lbl.setStyleSheet("color: #f59e0b; font-size: 12px;")
+
+    @Slot()
+    def _on_test_demo(self) -> None:
+        """Generate a demo HTML with 10 random test points."""
+        if not self._library_path:
+            self._status_lbl.setText("No library selected.")
+            return
+
+        try:
+            from cluster_graph_3d import generate_cluster_graph_html_from_data
+            import random
+            import webbrowser
+
+            # Create demo data: 10 random points in 3D space, 2 clusters
+            random.seed(42)
+            n_points = 10
+            demo_data = {
+                "X_3d": [
+                    [random.uniform(-20, 20) for _ in range(3)]
+                    for _ in range(n_points)
+                ],
+                "labels": [i % 2 for i in range(n_points)],
+                "tracks": [f"demo_track_{i}.mp3" for i in range(n_points)],
+                "metadata": [
+                    {
+                        "title": f"Demo Track {i}",
+                        "artist": "Test Artist",
+                        "duration": 180 + i * 10,
+                    }
+                    for i in range(n_points)
+                ],
+                "cluster_info": {
+                    "0": {"size": 5},
+                    "1": {"size": 5},
+                },
+                "X_downsampled": False,
+                "X_total_points": n_points,
+            }
+
+            # Generate demo HTML
+            demo_path = str(Path(self._library_path) / "Docs" / "cluster_graph_demo.html")
+            generate_cluster_graph_html_from_data(
+                demo_data, demo_path, log_callback=self._status_lbl.setText
+            )
+
+            # Open in browser
+            webbrowser.open(Path(demo_path).as_uri())
+            self._status_lbl.setText(
+                f"Demo graph opened (10 random points, 2 clusters). "
+                f"Check {demo_path}"
+            )
+            self._status_lbl.setStyleSheet("color: #3b82f6; font-size: 12px;")
+        except Exception as exc:
+            self._status_lbl.setText(f"Error generating demo: {exc}")
+            self._status_lbl.setStyleSheet("color: #ef4444; font-size: 12px;")
 
     def _do_generate(self) -> bool:
         """Regenerate HTML from cluster_info.json.  Returns True on success."""
