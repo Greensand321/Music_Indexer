@@ -19,7 +19,7 @@ from gui.workspaces.tag_fixer import TagFixerWorkspace
 from gui.workspaces.genres import GenresWorkspace
 from gui.workspaces.playlists import PlaylistsWorkspace
 from gui.workspaces.clustered_enhanced import EnhancedClusteredWorkspace as ClusteredWorkspace
-from gui.workspaces.graph_enhanced import GraphWorkspace
+# from gui.workspaces.graph_enhanced import GraphWorkspace  # TODO: Rebuild cluster graph workspace
 from gui.workspaces.player import PlayerWorkspace
 from gui.workspaces.compression import CompressionWorkspace
 from gui.workspaces.tools import ToolsWorkspace
@@ -37,7 +37,7 @@ _WORKSPACE_MAP: dict[str, type[WorkspaceBase]] = {
     "genres":       GenresWorkspace,
     "playlists":    PlaylistsWorkspace,
     "clustered":    ClusteredWorkspace,
-    "graph":        GraphWorkspace,
+    # "graph":        GraphWorkspace,  # TODO: Rebuild cluster graph workspace
     "player":       PlayerWorkspace,
     "compression":  CompressionWorkspace,
     "tools":        ToolsWorkspace,
