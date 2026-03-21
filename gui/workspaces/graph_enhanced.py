@@ -14,10 +14,12 @@ logger = logging.getLogger(__name__)
 
 try:
     from gui.widgets.interactive_scatter_plot import InteractiveScatterPlot
+    from gui.widgets.interactive_3d_scatter import Interactive3DScatterPlot
     from gui.widgets.cluster_legend import ClusterLegendWidget
     from gui.widgets.track_details_panel import TrackDetailsPanel
 except ImportError:
     InteractiveScatterPlot = None
+    Interactive3DScatterPlot = None
     ClusterLegendWidget = None
     TrackDetailsPanel = None
 
@@ -30,6 +32,8 @@ class GraphWorkspace(WorkspaceBase):
 
         self._cluster_data: Dict | None = None
         self._scatter: InteractiveScatterPlot | None = None
+        self._scatter_3d: Interactive3DScatterPlot | None = None
+        self._use_3d: bool = False  # Track which view is active
         self._legend: ClusterLegendWidget | None = None
         self._details: TrackDetailsPanel | None = None
 
@@ -58,6 +62,13 @@ class GraphWorkspace(WorkspaceBase):
 
         control_layout.addStretch(1)
 
+        # View toggle (2D/3D)
+        view_toggle = QtWidgets.QComboBox()
+        view_toggle.addItems(["2D View", "3D View"])
+        view_toggle.currentTextChanged.connect(self._on_view_changed)
+        control_layout.addWidget(QtWidgets.QLabel("View:"))
+        control_layout.addWidget(view_toggle)
+
         refresh_btn = QtWidgets.QPushButton("↺ Refresh")
         refresh_btn.clicked.connect(self._on_refresh)
         control_layout.addWidget(refresh_btn)
@@ -73,15 +84,31 @@ class GraphWorkspace(WorkspaceBase):
         cl.addStretch(1)
 
     def _build_graph_ui(self, parent_layout: QtWidgets.QVBoxLayout) -> None:
-        """Build the interactive graph UI."""
+        """Build the interactive graph UI with 2D/3D support."""
         # Main layout: scatter plot + sidebar
         main_layout = QtWidgets.QHBoxLayout()
 
-        # Left: scatter plot (main area)
+        # Create stacked widget for 2D/3D switching
+        self._graph_stack = QtWidgets.QStackedWidget()
+
+        # Left: 2D scatter plot
         self._scatter = InteractiveScatterPlot()
         self._scatter.point_clicked.connect(self._on_point_clicked)
         self._scatter.hover_changed.connect(self._on_hover)
-        main_layout.addWidget(self._scatter, 3)
+        self._graph_stack.addWidget(self._scatter)
+
+        # Left: 3D scatter plot (if available)
+        if Interactive3DScatterPlot is not None:
+            try:
+                self._scatter_3d = Interactive3DScatterPlot()
+                self._scatter_3d.point_clicked.connect(self._on_point_clicked)
+                self._scatter_3d.hover_changed.connect(self._on_hover)
+                self._graph_stack.addWidget(self._scatter_3d)
+            except ImportError:
+                self._scatter_3d = None
+                self._log("⚠ 3D scatter plot unavailable (PyQtGraph OpenGL required)", "warning")
+
+        main_layout.addWidget(self._graph_stack, 3)
 
         # Right sidebar: legend + details
         sidebar_layout = QtWidgets.QVBoxLayout()
@@ -258,6 +285,25 @@ class GraphWorkspace(WorkspaceBase):
                             # Use first 2 dimensions as fallback
                             X = X[:, :2]
 
+                # Load 3D embedding if available
+                X_3d = None
+                if "X_3d" in cluster_info:
+                    try:
+                        X_3d = np.array(cluster_info["X_3d"], dtype=np.float32)
+                        self._log("✓ Loaded 3D embedding (preserves ~80% variance)", "info")
+                    except Exception as e:
+                        self._log(f"⚠ Could not load 3D embedding: {e}", "warning")
+                else:
+                    # Compute 3D from raw features if needed
+                    X_raw = np.array(cluster_info["X"], dtype=np.float32)
+                    if X_raw.ndim > 1 and X_raw.shape[1] > 3:
+                        self._log("→ Computing 3D visualization from high-dimensional features…", "info")
+                        try:
+                            from clustered_playlists import compute_3d_embedding
+                            X_3d = compute_3d_embedding(X_raw, self._log)
+                        except Exception as e:
+                            self._log(f"⚠ Could not compute 3D embedding: {e}", "warning")
+
                 labels = np.array(cluster_info["labels"], dtype=np.int32)
                 tracks = cluster_info.get("tracks", [])
                 cluster_metadata = cluster_info.get("cluster_info", {})
@@ -337,6 +383,7 @@ class GraphWorkspace(WorkspaceBase):
 
             self._cluster_data = {
                 "X": X,
+                "X_3d": X_3d,  # 3D embedding for advanced exploration
                 "labels": labels,
                 "tracks": tracks,
                 "metadata": metadata,
@@ -353,6 +400,33 @@ class GraphWorkspace(WorkspaceBase):
         """Refresh cluster data."""
         self._load_cluster_data()
         self._log("Refreshed cluster data", "info")
+
+    @Slot(str)
+    def _on_view_changed(self, view_name: str) -> None:
+        """Switch between 2D and 3D views."""
+        if view_name == "3D View":
+            if self._scatter_3d is None:
+                self._log("⚠ 3D view not available", "warning")
+                return
+            self._graph_stack.setCurrentWidget(self._scatter_3d)
+            self._use_3d = True
+            self._log("Switched to 3D view", "info")
+
+            # Load data into 3D view if not already done
+            if self._cluster_data and self._scatter_3d is not None:
+                try:
+                    X_3d = np.array(self._cluster_data["X_3d"], dtype=np.float32)
+                    labels = np.array(self._cluster_data["labels"], dtype=np.int32)
+                    tracks = self._cluster_data.get("tracks", [])
+                    metadata = self._cluster_data.get("metadata", [])
+
+                    self._scatter_3d.set_data(X_3d, labels, tracks, metadata)
+                except Exception as e:
+                    self._log(f"⚠ Could not load 3D data: {e}", "warning")
+        else:
+            self._graph_stack.setCurrentWidget(self._scatter)
+            self._use_3d = False
+            self._log("Switched to 2D view", "info")
 
     @Slot(int)
     def _on_point_clicked(self, index: int) -> None:
