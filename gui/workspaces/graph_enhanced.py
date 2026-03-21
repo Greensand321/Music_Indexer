@@ -23,6 +23,11 @@ except ImportError:
     ClusterLegendWidget = None
     TrackDetailsPanel = None
 
+try:
+    from gui.widgets.three_js_viewer import ThreeJsViewer
+except ImportError:
+    ThreeJsViewer = None
+
 
 class GraphWorkspace(WorkspaceBase):
     """Embedded interactive cluster scatter-plot visualization."""
@@ -33,7 +38,9 @@ class GraphWorkspace(WorkspaceBase):
         self._cluster_data: Dict | None = None
         self._scatter: InteractiveScatterPlot | None = None
         self._scatter_3d: Interactive3DScatterPlot | None = None
+        self._scatter_3d_threejs: ThreeJsViewer | None = None
         self._use_3d: bool = False  # Track which view is active
+        self._current_view: str = "2D View"  # "2D View", "3D View" (PyQtGraph), or "3D View (Three.js)"
         self._legend: ClusterLegendWidget | None = None
         self._details: TrackDetailsPanel | None = None
 
@@ -62,10 +69,14 @@ class GraphWorkspace(WorkspaceBase):
 
         control_layout.addStretch(1)
 
-        # View toggle (2D/3D) - default to 3D for immersive exploration
+        # View toggle (2D/3D/Three.js) - default to Three.js for immersive exploration
         view_toggle = QtWidgets.QComboBox()
-        view_toggle.addItems(["2D View", "3D View"])
-        view_toggle.setCurrentText("3D View")  # Default to 3D view!
+        view_toggle.addItems([
+            "2D View",
+            "3D View (PyQtGraph)",
+            "3D View (Three.js)"
+        ])
+        view_toggle.setCurrentText("3D View (Three.js)")  # Default to Three.js!
         view_toggle.currentTextChanged.connect(self._on_view_changed)
         control_layout.addWidget(QtWidgets.QLabel("View:"))
         control_layout.addWidget(view_toggle)
@@ -113,28 +124,48 @@ class GraphWorkspace(WorkspaceBase):
         # Main layout: scatter plot + sidebar
         main_layout = QtWidgets.QHBoxLayout()
 
-        # Create stacked widget for 2D/3D switching
+        # Create stacked widget for 2D/3D/Three.js switching
         self._graph_stack = QtWidgets.QStackedWidget()
 
-        # Left: 2D scatter plot
+        # Index 0: 2D scatter plot
         self._scatter = InteractiveScatterPlot()
         self._scatter.point_clicked.connect(self._on_point_clicked)
         self._scatter.hover_changed.connect(self._on_hover)
         self._graph_stack.addWidget(self._scatter)
 
-        # Left: 3D scatter plot (if available)
+        # Index 1: 3D scatter plot (PyQtGraph, if available)
         if Interactive3DScatterPlot is not None:
             try:
                 self._scatter_3d = Interactive3DScatterPlot()
                 self._scatter_3d.point_clicked.connect(self._on_point_clicked)
                 self._scatter_3d.hover_changed.connect(self._on_hover)
                 self._graph_stack.addWidget(self._scatter_3d)
-                # Set 3D as default view (index 1)
-                self._graph_stack.setCurrentIndex(1)
-                self._use_3d = True
             except ImportError:
                 self._scatter_3d = None
                 self._log("⚠ 3D scatter plot unavailable (PyQtGraph OpenGL required)", "warning")
+        else:
+            # Add placeholder for 3D
+            self._scatter_3d = None
+            placeholder = QtWidgets.QLabel("3D View not available")
+            self._graph_stack.addWidget(placeholder)
+
+        # Index 2: 3D scatter plot (Three.js WebView)
+        if ThreeJsViewer is not None:
+            try:
+                self._scatter_3d_threejs = ThreeJsViewer()
+                self._scatter_3d_threejs.points_selected.connect(self._on_threejs_selection_changed)
+                self._graph_stack.addWidget(self._scatter_3d_threejs)
+                # Set Three.js as default view (index 2)
+                self._graph_stack.setCurrentIndex(2)
+                self._use_3d = True
+                self._current_view = "3D View (Three.js)"
+                self._log("✓ Three.js 3D viewer loaded", "ok")
+            except Exception as e:
+                self._scatter_3d_threejs = None
+                self._log(f"⚠ Three.js viewer unavailable: {e}", "warning")
+        else:
+            self._scatter_3d_threejs = None
+            self._log("⚠ Three.js viewer not available (WebEngine or WebChannel missing)", "warning")
 
         main_layout.addWidget(self._graph_stack, 3)
 
@@ -438,16 +469,18 @@ class GraphWorkspace(WorkspaceBase):
 
     @Slot(str)
     def _on_view_changed(self, view_name: str) -> None:
-        """Switch between 2D and 3D views."""
-        if view_name == "3D View":
+        """Switch between 2D, 3D (PyQtGraph), and 3D (Three.js) views."""
+        self._current_view = view_name
+
+        if view_name == "3D View (PyQtGraph)":
             if self._scatter_3d is None:
-                self._log("⚠ 3D view not available", "warning")
+                self._log("⚠ PyQtGraph 3D view not available", "warning")
                 return
 
-            # Show 3D widget
+            # Show PyQtGraph 3D widget
             self._graph_stack.setCurrentWidget(self._scatter_3d)
             self._use_3d = True
-            self._log("Switched to 3D view (rotate with mouse, scroll to zoom)", "info")
+            self._log("Switched to 3D view (PyQtGraph) — rotate with mouse, scroll to zoom", "info")
 
             # Load data into 3D view
             if self._cluster_data is not None:
@@ -477,19 +510,79 @@ class GraphWorkspace(WorkspaceBase):
                     tracks = self._cluster_data.get("tracks", [])
                     metadata = self._cluster_data.get("metadata", [])
 
-                    self._log(f"Loading {len(X_3d)} points into 3D view…", "info")
+                    self._log(f"Loading {len(X_3d)} points into PyQtGraph 3D view…", "info")
                     self._scatter_3d.set_data(X_3d, labels, tracks, metadata)
-                    self._log(f"✓ 3D view loaded successfully", "info")
+                    self._log(f"✓ PyQtGraph 3D view loaded successfully", "info")
                 except Exception as e:
                     self._log(f"✗ Failed to load 3D data: {e}", "error")
                     import traceback
                     logger.exception("3D view load error")
             else:
                 self._log("No cluster data available. Run Clustered Playlists first.", "warning")
-        else:
+
+        elif view_name == "3D View (Three.js)":
+            if self._scatter_3d_threejs is None:
+                self._log("⚠ Three.js 3D view not available", "warning")
+                return
+
+            # Show Three.js 3D widget
+            self._graph_stack.setCurrentWidget(self._scatter_3d_threejs)
+            self._use_3d = True
+            self._log("Switched to 3D view (Three.js) — drag to rotate, scroll to zoom, click to select", "info")
+
+            # Load data into Three.js viewer
+            if self._cluster_data is not None:
+                try:
+                    X_3d = self._cluster_data.get("X_3d")
+
+                    if X_3d is None:
+                        self._log("⚠ 3D data not available, computing from features…", "warning")
+                        X = np.array(self._cluster_data.get("X", []), dtype=np.float32)
+                        if len(X) > 0 and X.ndim == 2 and X.shape[1] > 3:
+                            from clustered_playlists import compute_3d_embedding
+                            X_3d = compute_3d_embedding(X, self._log)
+                            self._cluster_data["X_3d"] = X_3d
+                        else:
+                            self._log("✗ Cannot compute 3D: invalid feature data", "error")
+                            return
+
+                    X_3d = np.array(X_3d, dtype=np.float32)
+                    if X_3d.shape[1] != 3:
+                        self._log(f"✗ Invalid 3D shape: {X_3d.shape}, expected (N, 3)", "error")
+                        return
+
+                    labels = np.array(self._cluster_data["labels"], dtype=np.int32)
+                    tracks = self._cluster_data.get("tracks", [])
+                    metadata = self._cluster_data.get("metadata", [])
+
+                    self._log(f"Loading {len(X_3d)} points into Three.js viewer…", "info")
+                    self._scatter_3d_threejs.set_data(X_3d, labels, tracks, metadata)
+                    self._log(f"✓ Three.js viewer loaded successfully", "info")
+                except Exception as e:
+                    self._log(f"✗ Failed to load Three.js viewer: {e}", "error")
+                    import traceback
+                    logger.exception("Three.js view load error")
+            else:
+                self._log("No cluster data available. Run Clustered Playlists first.", "warning")
+
+        elif view_name == "2D View":
+            # Show 2D widget
             self._graph_stack.setCurrentWidget(self._scatter)
             self._use_3d = False
             self._log("Switched to 2D view", "info")
+
+    @Slot(list)
+    def _on_threejs_selection_changed(self, indices: List[int]) -> None:
+        """Handle Three.js selection change."""
+        if self._cluster_data is None:
+            return
+
+        # Update first selected point details
+        if indices:
+            index = indices[0]
+            self._on_point_clicked(index)
+
+        self._log(f"Selected {len(indices)} point(s) in Three.js viewer", "info")
 
     @Slot(int)
     def _on_point_clicked(self, index: int) -> None:
@@ -555,11 +648,17 @@ class GraphWorkspace(WorkspaceBase):
     @Slot()
     def _on_export_selection(self) -> None:
         """Export selected points as CSV."""
-        if self._scatter is None or self._cluster_data is None:
+        if self._cluster_data is None:
             QtWidgets.QMessageBox.warning(self, "No Selection", "Please select points first")
             return
 
-        selected_paths = self._scatter.export_selection_paths()
+        # Get selection from active viewer
+        selected_paths = []
+        if self._current_view == "3D View (Three.js)" and self._scatter_3d_threejs:
+            selected_paths = self._scatter_3d_threejs.export_selection_paths()
+        elif self._scatter:
+            selected_paths = self._scatter.export_selection_paths()
+
         if not selected_paths:
             QtWidgets.QMessageBox.warning(self, "No Selection", "Please select points first")
             return
@@ -618,11 +717,17 @@ class GraphWorkspace(WorkspaceBase):
     @Slot()
     def _on_create_playlist(self) -> None:
         """Create M3U playlist from selection."""
-        if self._scatter is None or self._cluster_data is None:
+        if self._cluster_data is None:
             QtWidgets.QMessageBox.warning(self, "No Selection", "Please select points first")
             return
 
-        selected_paths = self._scatter.export_selection_paths()
+        # Get selection from active viewer
+        selected_paths = []
+        if self._current_view == "3D View (Three.js)" and self._scatter_3d_threejs:
+            selected_paths = self._scatter_3d_threejs.export_selection_paths()
+        elif self._scatter:
+            selected_paths = self._scatter.export_selection_paths()
+
         if not selected_paths:
             QtWidgets.QMessageBox.warning(self, "No Selection", "Please select points first")
             return
