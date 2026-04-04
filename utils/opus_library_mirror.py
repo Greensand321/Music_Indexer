@@ -36,6 +36,7 @@ def mirror_library(
     overwrite: bool,
     progress_callback: ProgressCallback | None = None,
     log_callback: LogCallback | None = None,
+    bitrate_kbps: int = 96,
 ) -> dict[str, object]:
     total_files = 0
     counters = {"total": 0, "converted": 0, "copied": 0, "skipped": 0, "errors": 0}
@@ -60,14 +61,14 @@ def mirror_library(
                     counters["skipped"] += 1
                     skipped_files.append((src_path, "Destination already exists."))
                     continue
-                tasks.append(("convert", src_path, dest_path))
+                tasks.append(("convert", src_path, dest_path, bitrate_kbps))
             else:
                 dest_path = os.path.join(dest_root, filename)
                 if os.path.exists(dest_path) and not overwrite:
                     counters["skipped"] += 1
                     skipped_files.append((src_path, "Destination already exists."))
                     continue
-                tasks.append(("copy", src_path, dest_path))
+                tasks.append(("copy", src_path, dest_path, 0))
 
     total_tasks = len(tasks)
     if progress_callback:
@@ -80,12 +81,13 @@ def mirror_library(
             counters["errors"],
         )
 
-    def _process_task(task: tuple[str, str, str]) -> None:
-        action, src_path, dest_path = task
+    def _process_task(task: tuple[str, str, str, int]) -> None:
+        action, src_path, dest_path, task_bitrate = task
         try:
             if action == "convert":
                 result, error = convert_flac_to_opus(
-                    src_path, dest_path, overwrite, log_callback=log_callback
+                    src_path, dest_path, overwrite, log_callback=log_callback,
+                    bitrate_kbps=task_bitrate,
                 )
                 with lock:
                     counters["total"] += 1
@@ -144,6 +146,7 @@ def convert_flac_to_opus(
     dest_path: str,
     overwrite: bool,
     log_callback: LogCallback | None = None,
+    bitrate_kbps: int = 96,
 ) -> tuple[bool, str | None]:
     tags, pictures, metadata_error = _load_flac_metadata(
         source_path, log_callback=log_callback
@@ -162,7 +165,7 @@ def convert_flac_to_opus(
         "-c:a",
         "libopus",
         "-b:a",
-        "96k",
+        f"{bitrate_kbps}k",
     ]
     cmd.append("-y" if overwrite else "-n")
     cmd.append(ensure_long_path(dest_path))
@@ -354,6 +357,19 @@ def write_mirror_report(report_path: str, summary: Mapping[str, object]) -> None
         return "\n".join(entries)
 
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    _table_head = "<table><thead><tr><th>File</th><th>Reason</th></tr></thead><tbody>"
+    _table_tail = "</tbody></table>"
+    _empty_p = '<p class="empty">'
+    errors_html = (
+        _table_head + format_rows(error_files) + _table_tail
+        if error_files
+        else _empty_p + "No errors.</p>"
+    )
+    skipped_html = (
+        _table_head + format_rows(skipped_files) + _table_tail
+        if skipped_files
+        else _empty_p + "No skipped audio files.</p>"
+    )
     html_content = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -380,11 +396,9 @@ def write_mirror_report(report_path: str, summary: Mapping[str, object]) -> None
     <li>Errors: {summary.get("errors", 0)}</li>
   </ul>
   <h2>Errors</h2>
-  {"<table><thead><tr><th>File</th><th>Reason</th></tr></thead><tbody>"
-   + format_rows(error_files) + "</tbody></table>" if error_files else "<p class=\"empty\">No errors.</p>"}
+  {errors_html}
   <h2>Skipped Audio Files</h2>
-  {"<table><thead><tr><th>File</th><th>Reason</th></tr></thead><tbody>"
-   + format_rows(skipped_files) + "</tbody></table>" if skipped_files else "<p class=\"empty\">No skipped audio files.</p>"}
+  {skipped_html}
 </body>
 </html>
 """

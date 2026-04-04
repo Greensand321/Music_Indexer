@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(C:/Users/alexa/miniconda3/python.exe -c \"import sys; sys.path.insert\\(0, '.'\\); from gui.workspaces.tools import ToolsWorkspace, ArtistTitleWorker; print\\('OK'\\)\")",
+      "Bash(C:/Users/alexa/miniconda3/python.exe -c \"import sys; sys.path.insert\\(0, '.'\\); from gui.workspaces.tools import ToolsWorkspace, ArtistTitleWorker, FileCleanupWorker; print\\('OK'\\)\")",
+      "Bash(C:/Users/alexa/miniconda3/python.exe -c \"import sys; sys.path.insert\\(0, '.'\\); from gui.workspaces.compression import CompressionWorkspace, MirrorWorker; print\\('OK'\\)\")"
+    ]
+  }
+}

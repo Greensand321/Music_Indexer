@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3 -c \"from utils.opus_library_mirror import mirror_library, convert_flac_to_opus, write_mirror_report; print\\('backend OK'\\)\")",
+      "Bash(py -c \"from utils.opus_library_mirror import mirror_library, convert_flac_to_opus, write_mirror_report; print\\('backend OK'\\)\")",
+      "Bash(where python.exe)",
+      "Bash(where python3.exe)",
+      "Bash(C:/Users/alexa/miniconda3/python.exe -c \"import sys; sys.path.insert\\(0, '.'\\); from utils.opus_library_mirror import mirror_library, convert_flac_to_opus, write_mirror_report; print\\('backend OK'\\)\")",
+      "Bash(C:/Users/alexa/miniconda3/python.exe -c \"import sys; sys.path.insert\\(0, '.'\\); from gui.workspaces.compression import CompressionWorkspace, MirrorWorker; print\\('workspace OK'\\)\")"
+    ]
+  }
+}

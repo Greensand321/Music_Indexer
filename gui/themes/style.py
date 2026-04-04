@@ -812,6 +812,16 @@ class AlphaDEXStyle(QtWidgets.QProxyStyle):
             f.setWeight(W(TypeScale.W_REGULAR))
             widget.setFont(_soft(f))
 
+        elif name == "statNumber":
+            f = QtGui.QFont(UI_FAMILY, TypeScale.SMALL)
+            f.setWeight(W(TypeScale.W_SEMIBOLD))
+            widget.setFont(_soft(f))
+
+        elif name == "statUnit":
+            f = QtGui.QFont(UI_FAMILY, TypeScale.SMALL)
+            f.setWeight(W(TypeScale.W_REGULAR))
+            widget.setFont(_soft(f))
+
         elif name == "logText":
             f = QtGui.QFont(MONO_FAMILY, TypeScale.MONO)
             f.setWeight(W(TypeScale.W_REGULAR))
