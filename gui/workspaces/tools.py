@@ -610,6 +610,18 @@ class ToolTile(QtWidgets.QFrame):
         self._footer_buttons.append(btn)
         return btn
 
+    def add_icon_button(self, icon: str, tooltip: str = "") -> QtWidgets.QPushButton:
+        """Add a small square icon-only button and return it."""
+        from gui.themes.animations import AnimatedButton
+        btn = AnimatedButton(icon)
+        btn.setFixedSize(34, 34)
+        btn.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
+        if tooltip:
+            btn.setToolTip(tooltip)
+        self._footer_l.addWidget(btn)
+        self._footer_buttons.append(btn)
+        return btn
+
     def finish_footer(self) -> None:
         """Add trailing stretch after all buttons. Call last."""
         self._footer_l.addStretch(1)
@@ -692,7 +704,7 @@ class TileGrid(QtWidgets.QWidget):
         self._tile_grid.add_tile(self._build_new_tile(), full_width=False)
     """
 
-    _TILE_MIN_WIDTH = 420   # px — 2 columns from ~900 px wide, 1 column on narrow windows
+    _TILE_MIN_WIDTH = 500   # px — 2 columns from ~1050 px wide, 1 column on narrow windows
 
     def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(parent)
@@ -859,7 +871,9 @@ class ToolsWorkspace(WorkspaceBase):
         self._cleanup_worker: FileCleanupWorker | None = None
         self._at_worker: ArtistTitleWorker | None = None
         self._at_open_connected: bool = False
+        self._at_folder_connected: bool = False
         self._codec_open_connected: bool = False
+        self._codec_folder_connected: bool = False
         # Tile references (assigned by _build_*_tile helpers)
         self._at_tile: ToolTile | None = None
         self._cleanup_tile: ToolTile | None = None
@@ -910,6 +924,8 @@ class ToolsWorkspace(WorkspaceBase):
         tile.set_run_button("Export", self._on_export_at)
         self._at_open = tile.add_secondary_button("Open File")
         self._at_open.setEnabled(False)
+        self._at_folder = tile.add_icon_button("\U0001f4c1", "Open folder")
+        self._at_folder.setEnabled(False)
         tile.finish_footer()
         return tile
 
@@ -941,6 +957,8 @@ class ToolsWorkspace(WorkspaceBase):
         tile.set_run_button("Export", self._on_export_codec)
         self._codec_open = tile.add_secondary_button("Open File")
         self._codec_open.setEnabled(False)
+        self._codec_folder = tile.add_icon_button("\U0001f4c1", "Open folder")
+        self._codec_folder.setEnabled(False)
         tile.finish_footer()
         return tile
 
@@ -961,50 +979,95 @@ class ToolsWorkspace(WorkspaceBase):
         tile.finish_footer()
         return tile
 
-    def _build_diag_tile(self) -> ToolTile:
+    @staticmethod
+    def _make_diag_button(
+        label: str,
+        icon_sp: "QtWidgets.QStyle.StandardPixmap",
+        slot,
+    ) -> QtWidgets.QPushButton:
+        """Return a square diagnostic button: label on top, Qt standard icon below."""
         from gui.themes.animations import AnimatedButton
 
+        SP = QtWidgets.QStyle.StandardPixmap
+        btn = AnimatedButton("", None)
+        btn.setFixedHeight(72)
+        btn.setMinimumWidth(80)
+        btn.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Fixed,
+        )
+        btn.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
+        btn.clicked.connect(slot)
+
+        # Inner layout: text label on top, icon label on bottom
+        inner = QtWidgets.QVBoxLayout(btn)
+        inner.setContentsMargins(4, 8, 4, 8)
+        inner.setSpacing(4)
+
+        text_lbl = QtWidgets.QLabel(label)
+        text_lbl.setAlignment(
+            QtCore.Qt.AlignmentFlag.AlignHCenter | QtCore.Qt.AlignmentFlag.AlignTop
+        )
+        text_lbl.setWordWrap(True)
+        text_lbl.setStyleSheet("font-size: 10px; background: transparent;")
+        text_lbl.setAttribute(QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+
+        icon_lbl = QtWidgets.QLabel()
+        icon_lbl.setAlignment(
+            QtCore.Qt.AlignmentFlag.AlignHCenter | QtCore.Qt.AlignmentFlag.AlignVCenter
+        )
+        icon_lbl.setAttribute(QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        icon_lbl.setStyleSheet("background: transparent;")
+        px = QtWidgets.QApplication.style().standardIcon(icon_sp).pixmap(22, 22)
+        icon_lbl.setPixmap(px)
+
+        inner.addWidget(text_lbl, 1)
+        inner.addWidget(icon_lbl, 0)
+        return btn
+
+    def _build_diag_tile(self) -> ToolTile:
         tile = ToolTile(
             "\u2699", "Diagnostics",
             "Media testing, duplicate analysis tools, and system utilities.",
         )
 
-        media_row = QtWidgets.QHBoxLayout()
-        media_row.setSpacing(8)
-        for label, slot in (
-            ("M4A Tester\u2026",  self._on_m4a_tester),
-            ("Opus Tester\u2026", self._on_opus_tester),
-        ):
-            btn = AnimatedButton(label)
-            btn.setMinimumHeight(34)
-            btn.clicked.connect(slot)
-            media_row.addWidget(btn)
-        media_row.addStretch(1)
-        tile.add_option_layout(media_row)
+        SP = QtWidgets.QStyle.StandardPixmap
+        _entries = [
+            ("M4A Tester\u2026",     SP.SP_MediaPlay,              self._on_m4a_tester),
+            ("Opus Tester\u2026",    SP.SP_MediaVolume,            self._on_opus_tester),
+            ("Bucketing POC\u2026",  SP.SP_FileDialogContentsView, self._on_bucketing_poc),
+            ("Scan Engine\u2026",    SP.SP_BrowserReload,          self._on_scan_engine),
+            ("Fuzzy Finder\u2026",   SP.SP_FileDialogListView,     self._on_fuzzy_dupes),
+            ("Pair Review\u2026",    SP.SP_FileDialogDetailedView, self._on_pair_review),
+            ("View Crash Log\u2026", SP.SP_MessageBoxWarning,      self._on_crash_log),
+        ]
 
-        dupe_row = QtWidgets.QHBoxLayout()
-        dupe_row.setSpacing(8)
-        for label, slot in (
-            ("Bucketing POC\u2026", self._on_bucketing_poc),
-            ("Scan Engine\u2026",   self._on_scan_engine),
-            ("Fuzzy Finder\u2026",  self._on_fuzzy_dupes),
-            ("Pair Review\u2026",   self._on_pair_review),
-        ):
-            btn = AnimatedButton(label)
-            btn.setMinimumHeight(34)
-            btn.clicked.connect(slot)
-            dupe_row.addWidget(btn)
-        dupe_row.addStretch(1)
-        tile.add_option_layout(dupe_row)
+        _COLS = 4
+        grid = QtWidgets.QGridLayout()
+        grid.setSpacing(8)
+        for col in range(_COLS):
+            grid.setColumnStretch(col, 1)
 
-        crash_btn = AnimatedButton("View Crash Log\u2026")
-        crash_btn.setMinimumHeight(34)
-        crash_btn.clicked.connect(self._on_crash_log)
-        crash_row = QtWidgets.QHBoxLayout()
-        crash_row.addWidget(crash_btn)
-        crash_row.addStretch(1)
-        tile.add_option_layout(crash_row)
+        for idx, (label, icon_sp, slot) in enumerate(_entries):
+            row, col = divmod(idx, _COLS)
+            btn = self._make_diag_button(label, icon_sp, slot)
+            grid.addWidget(btn, row, col)
 
+        # Fill remaining cells in last row with spacers so buttons don't stretch oddly
+        last_count = len(_entries) % _COLS
+        if last_count:
+            last_row = len(_entries) // _COLS
+            for col in range(last_count, _COLS):
+                grid.addItem(
+                    QtWidgets.QSpacerItem(
+                        0, 0,
+                        QtWidgets.QSizePolicy.Policy.Expanding,
+                        QtWidgets.QSizePolicy.Policy.Minimum,
+                    ),
+                    last_row, col,
+                )
+
+        tile.add_option_layout(grid)
         tile.hide_footer()
         return tile
 
@@ -1044,10 +1107,10 @@ class ToolsWorkspace(WorkspaceBase):
                 f"QCheckBox {{"
                 f" background: {_rgba(t.accent, 0.16)};"
                 f" border: 1px solid {t.accent};"
-                f" border-radius: 10px;"
-                f" padding: 3px 10px;"
+                f" border-radius: 11px;"
+                f" padding: 4px 12px;"
                 f" color: {t.accent};"
-                f" font-size: 12px;"
+                f" font-size: 13px;"
                 f"}}"
                 f"QCheckBox::indicator {{ width: 0; height: 0; }}"
             )
@@ -1056,10 +1119,10 @@ class ToolsWorkspace(WorkspaceBase):
                 f"QCheckBox {{"
                 f" background: transparent;"
                 f" border: 1px solid {t.card_border};"
-                f" border-radius: 10px;"
-                f" padding: 3px 10px;"
+                f" border-radius: 11px;"
+                f" padding: 4px 12px;"
                 f" color: {t.text_secondary};"
-                f" font-size: 12px;"
+                f" font-size: 13px;"
                 f"}}"
                 f"QCheckBox::indicator {{ width: 0; height: 0; }}"
             )
@@ -1111,6 +1174,7 @@ class ToolsWorkspace(WorkspaceBase):
         self._at_status.setStyleSheet("color: inherit; font-size: 12px;")
         self._at_prog.setValue(0)
         self._at_open.setEnabled(False)
+        self._at_folder.setEnabled(False)
         if self._at_tile is not None:
             self._at_tile.open_drawer()
 
@@ -1152,6 +1216,15 @@ class ToolsWorkspace(WorkspaceBase):
         self._at_open.clicked.connect(lambda: self._open_file(out_path))
         self._at_open_connected = True
         self._at_open.setEnabled(True)
+
+        if self._at_folder_connected:
+            try:
+                self._at_folder.clicked.disconnect()
+            except RuntimeError:
+                pass
+        self._at_folder.clicked.connect(lambda: self._open_folder(out_path))
+        self._at_folder_connected = True
+        self._at_folder.setEnabled(True)
         self._log(f"Artist/title export complete: {entry_count} entries \u2192 {out_path}", "ok")
         self._at_worker = None
 
@@ -1214,6 +1287,15 @@ class ToolsWorkspace(WorkspaceBase):
             self._codec_open.clicked.connect(lambda: self._open_file(str(out)))
             self._codec_open_connected = True
             self._codec_open.setEnabled(True)
+
+            if self._codec_folder_connected:
+                try:
+                    self._codec_folder.clicked.disconnect()
+                except RuntimeError:
+                    pass
+            self._codec_folder.clicked.connect(lambda: self._open_folder(str(out)))
+            self._codec_folder_connected = True
+            self._codec_folder.setEnabled(True)
             self._log(f"Codec list exported: {total} files \u2192 {out}", "ok")
 
         except Exception as exc:  # noqa: BLE001
@@ -1345,3 +1427,16 @@ class ToolsWorkspace(WorkspaceBase):
             subprocess.Popen(["open", path])
         else:
             subprocess.Popen(["xdg-open", path])
+
+    def _open_folder(self, path: str) -> None:
+        """Open the folder containing *path* in the system file manager."""
+        import subprocess
+        import sys
+        folder = str(Path(path).parent)
+        if sys.platform == "win32":
+            # /select highlights the file inside the folder
+            subprocess.Popen(["explorer", f"/select,{path}"])
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", "-R", path])
+        else:
+            subprocess.Popen(["xdg-open", folder])
