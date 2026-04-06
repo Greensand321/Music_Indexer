@@ -559,6 +559,17 @@ class _ArtScanner(QtCore.QThread):
 
         if audio is not None:
 
+            # 0. Opus fast-path — delegate to the dedicated reader which correctly
+            #    decodes METADATA_BLOCK_PICTURE and COVERART tags.
+            if path.lower().endswith(".opus"):
+                try:
+                    from utils.opus_metadata_reader import read_opus_metadata
+                    _tags, cover_payloads, _err = read_opus_metadata(path)
+                    if cover_payloads:
+                        return ("opus_reader", cover_payloads[0])
+                except Exception:
+                    pass
+
             # 1. FLAC / OGG Vorbis / OGG Opus — .pictures property
             try:
                 for pic in audio.pictures:
@@ -676,6 +687,25 @@ class _ArtScanner(QtCore.QThread):
                 return (method, dirpath, raw)
             if tried >= self._MAX_FILES_PER_DIR:
                 break
+
+        # Fallback: look for a standalone cover image file in the directory.
+        # Many converted/Opus libraries store art as cover.jpg rather than
+        # embedding it in every track.
+        _COVER_NAMES = (
+            "cover.jpg", "folder.jpg", "album.jpg", "artwork.jpg",
+            "front.jpg", "cover.png", "folder.png", "album.png",
+        )
+        for img_name in _COVER_NAMES:
+            img_path = os.path.join(dirpath, img_name)
+            try:
+                if os.path.isfile(img_path):
+                    with open(img_path, "rb") as fh:
+                        raw = fh.read()
+                    if raw:
+                        return ("folder_image", dirpath, raw)
+            except OSError:
+                pass
+
         return None
 
     # ── Orchestration + emit ──────────────────────────────────────────────
