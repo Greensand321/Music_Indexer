@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import os
 import re
-import webbrowser
 from collections import Counter
 from pathlib import Path
 
@@ -13,6 +12,21 @@ from gui.workspaces.base import WorkspaceBase
 
 _SUPPORTED_EXTS = {".mp3", ".flac", ".m4a", ".aac", ".ogg", ".wav", ".opus"}
 
+
+# ── Helpers ────────────────────────────────────────────────────────────────────
+
+def _rgba(hex_color: str, alpha: float) -> str:
+    """Convert a 6-digit hex colour + alpha float to a CSS rgba() string.
+
+    Qt stylesheets do not reliably support 8-digit hex (#rrggbbaa), so
+    this helper is used everywhere an alpha-tinted colour is needed.
+    """
+    h = hex_color.lstrip("#")
+    r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+    return f"rgba({r}, {g}, {b}, {alpha:.2f})"
+
+
+# ── Background workers ─────────────────────────────────────────────────────────
 
 class FileCleanupWorker(QtCore.QThread):
     log_line = Signal(str)
@@ -43,12 +57,12 @@ class FileCleanupWorker(QtCore.QThread):
                 src = os.path.join(root, filename)
                 dst = os.path.join(root, new_name)
                 if os.path.exists(dst):
-                    self.log_line.emit(f"! Conflict: {filename} → {new_name} already exists")
+                    self.log_line.emit(f"! Conflict: {filename} \u2192 {new_name} already exists")
                     conflicts += 1
                     continue
                 try:
                     os.rename(src, dst)
-                    self.log_line.emit(f"→ {filename} → {new_name}")
+                    self.log_line.emit(f"\u2192 {filename} \u2192 {new_name}")
                     rename_map[src] = dst
                     renamed += 1
                 except OSError as exc:
@@ -59,7 +73,7 @@ class FileCleanupWorker(QtCore.QThread):
             try:
                 from playlist_generator import update_playlists
                 update_playlists(rename_map)
-                self.log_line.emit("✓ Updated playlists")
+                self.log_line.emit("\u2713 Updated playlists")
             except Exception as exc:  # noqa: BLE001
                 self.log_line.emit(f"! Playlist update failed: {exc}")
 
@@ -89,8 +103,6 @@ class ArtistTitleWorker(QtCore.QThread):
         self.exclude_flac = exclude_flac
         self.add_album_duplicates = add_album_duplicates
 
-    # ── Tag cleaning (mirrors _clean_tag_text from the legacy GUI) ────────
-
     @staticmethod
     def _clean(value: object) -> str | None:
         if value is None:
@@ -103,7 +115,6 @@ class ArtistTitleWorker(QtCore.QThread):
                     continue
             return value.decode("utf-8", errors="replace").strip() or None
         if isinstance(value, (list, tuple)):
-            # mutagen often returns lists — take the first non-empty item
             for item in value:
                 cleaned = ArtistTitleWorker._clean(item)
                 if cleaned:
@@ -122,7 +133,6 @@ class ArtistTitleWorker(QtCore.QThread):
         from utils.audio_metadata_reader import read_tags
         from utils.opus_metadata_reader import read_opus_metadata
 
-        # ── Collect audio files ───────────────────────────────────────────
         audio_files: list[str] = []
         for dirpath, _, files in os.walk(self.library_path):
             for filename in files:
@@ -135,7 +145,6 @@ class ArtistTitleWorker(QtCore.QThread):
         total = len(audio_files)
         self.log_line.emit(f"Found {total} audio files to process.")
 
-        # ── Read tags and build raw entry data ────────────────────────────
         entry_data: list[tuple[str, str, str | None, str | None]] = []
         error_count = 0
 
@@ -152,8 +161,8 @@ class ArtistTitleWorker(QtCore.QThread):
                 tags = read_tags(full_path)
 
             artist = self._clean(tags.get("artist") or tags.get("albumartist"))
-            title = self._clean(tags.get("title"))
-            album = self._clean(tags.get("album"))
+            title  = self._clean(tags.get("title"))
+            album  = self._clean(tags.get("album"))
             track_raw = self._clean(tags.get("tracknumber") or tags.get("track"))
             if track_raw and "/" in track_raw:
                 track_raw = track_raw.split("/", 1)[0].strip() or None
@@ -168,7 +177,6 @@ class ArtistTitleWorker(QtCore.QThread):
             if idx == 1 or idx % 50 == 0 or idx == total:
                 self.progress.emit(idx, total)
 
-        # ── Build entries with optional album-duplicate disambiguation ────
         entries: list[str] = []
         duplicate_counts = Counter(
             (artist, title) for artist, title, _album, _track in entry_data
@@ -190,7 +198,6 @@ class ArtistTitleWorker(QtCore.QThread):
 
         entries = sorted(set(entries), key=str.lower)
 
-        # ── Write output ──────────────────────────────────────────────────
         out = Path(self.library_path) / "Docs" / "artist_title_list.txt"
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text("\n".join(entries), encoding="utf-8")
@@ -198,21 +205,664 @@ class ArtistTitleWorker(QtCore.QThread):
         self.finished.emit(str(out), len(entries), error_count)
 
 
+class _GlassBadge(QtWidgets.QWidget):
+    def __init__(self, icon: str, size: int = 40, parent=None):
+        super().__init__(parent)
+        self._icon = icon
+        self.setFixedSize(size, size)
+        from gui.themes.manager import get_manager
+        get_manager().theme_changed.connect(lambda _: self.update())
+
+    def set_size(self, size: int) -> None:
+        self.setFixedSize(size, size)
+        self.update()
+
+    def paintEvent(self, e):  # noqa: N802
+        t = get_manager().current
+        p = QtGui.QPainter(self)
+        p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+        sz  = float(self.width())
+        r   = QtCore.QRectF(0, 0, sz, sz)
+        rad = sz * 0.28
+        ac  = QtGui.QColor(t.accent)
+
+        fill = QtGui.QColor(ac.red(), ac.green(), ac.blue(), 55)
+        p.setBrush(fill); p.setPen(QtCore.Qt.PenStyle.NoPen)
+        p.drawRoundedRect(r, rad, rad)
+
+        spec = QtGui.QLinearGradient(0, 0, 0, sz * 0.55)
+        s1 = QtGui.QColor(255, 255, 255); s1.setAlphaF(0.38)
+        s2 = QtGui.QColor(255, 255, 255); s2.setAlphaF(0.0)
+        spec.setColorAt(0.0, s1); spec.setColorAt(1.0, s2)
+        p.setBrush(spec)
+        p.drawRoundedRect(r, rad, rad)
+
+        tint = QtGui.QColor(ac.red(), ac.green(), ac.blue(), 70)
+        p.setBrush(tint)
+        p.drawRoundedRect(r, rad, rad)
+
+        rim = QtGui.QLinearGradient(0, 0, 0, sz)
+        r1 = QtGui.QColor(255, 255, 255); r1.setAlphaF(0.65)
+        r2 = QtGui.QColor(ac.red(), ac.green(), ac.blue()); r2.setAlphaF(0.35)
+        rim.setColorAt(0.0, r1); rim.setColorAt(1.0, r2)
+        p.setBrush(QtCore.Qt.BrushStyle.NoBrush)
+        p.setPen(QtGui.QPen(QtGui.QBrush(rim), 1.1))
+        p.drawRoundedRect(r.adjusted(0.55, 0.55, -0.55, -0.55), rad, rad)
+
+        p.setPen(QtGui.QColor(t.text_inverse))
+        font = QtGui.QFont(self.font().family(), int(sz * 0.42))
+        font.setBold(True)
+        p.setFont(font)
+        p.drawText(self.rect(), QtCore.Qt.AlignmentFlag.AlignCenter, self._icon)
+        p.end()
+
+
+class _GlassResultChip(QtWidgets.QWidget):
+    NEUTRAL = 0
+    SUCCESS = 1
+    ERROR   = 2
+
+    _COLOR = {
+        NEUTRAL: "#94a3b8",   
+        SUCCESS: "#22c55e",   
+        ERROR:   "#ef4444",   
+    }
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._text  = "\u29d6  Idle"
+        self._state = self.NEUTRAL
+        self._opacity = 1.0
+        self._anim: QtCore.QVariantAnimation | None = None
+        self.setFixedHeight(26)
+        self._resize()
+        from gui.themes.manager import get_manager
+        get_manager().theme_changed.connect(lambda _: self.update())
+
+    def _resize(self):
+        fm = QtGui.QFontMetrics(self.font())
+        self.setFixedWidth(fm.horizontalAdvance(self._text) + 34)
+
+    def set_text_fast(self, text: str, state: int | None = None):
+        self._text = text
+        if state is not None:
+            self._state = state
+        self._resize()
+        self.update()
+
+    def show_neutral(self, text: str = "\u29d6  Idle"):
+        self._transition(text, self.NEUTRAL)
+
+    def show_success(self, text: str = "\u2713  Done"):
+        self._transition(text, self.SUCCESS)
+
+    def show_error(self, text: str = "\u2717  Error"):
+        self._transition(text, self.ERROR)
+
+    def _transition(self, text: str, state: int):
+        if self._anim:
+            self._anim.stop()
+        a = QtCore.QVariantAnimation(self)
+        a.setStartValue(self._opacity)
+        a.setEndValue(0.0)
+        a.setDuration(160)
+        a.setEasingCurve(QtCore.QEasingCurve.Type.OutCubic)
+        a.valueChanged.connect(lambda v: self._set_op(float(v)))
+
+        def _swap():
+            self._text  = text
+            self._state = state
+            self._resize()
+            b = QtCore.QVariantAnimation(self)
+            b.setStartValue(0.0)
+            b.setEndValue(1.0)
+            b.setDuration(260)
+            b.setEasingCurve(QtCore.QEasingCurve.Type.OutCubic)
+            b.valueChanged.connect(lambda v: self._set_op(float(v)))
+            b.start(QtCore.QAbstractAnimation.DeletionPolicy.DeleteWhenStopped)
+            self._anim = b
+
+        a.finished.connect(_swap)
+        a.start(QtCore.QAbstractAnimation.DeletionPolicy.DeleteWhenStopped)
+        self._anim = a
+
+    def _set_op(self, v: float):
+        self._opacity = v
+        self.update()
+
+    def paintEvent(self, e):  # noqa: N802
+        p = QtGui.QPainter(self)
+        p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+        p.setOpacity(self._opacity)
+
+        w, h = float(self.width()), float(self.height())
+        r    = QtCore.QRectF(0, 0, w, h)
+        rad  = h / 2.0
+        ac   = QtGui.QColor(self._COLOR[self._state])
+
+        fill = QtGui.QColor(ac.red(), ac.green(), ac.blue(), 38)
+        p.setBrush(fill); p.setPen(QtCore.Qt.PenStyle.NoPen)
+        p.drawRoundedRect(r, rad, rad)
+
+        spec = QtGui.QLinearGradient(0, 0, 0, h * 0.58)
+        s1 = QtGui.QColor(255, 255, 255); s1.setAlphaF(0.28)
+        s2 = QtGui.QColor(255, 255, 255); s2.setAlphaF(0.0)
+        spec.setColorAt(0.0, s1); spec.setColorAt(1.0, s2)
+        p.setBrush(spec)
+        p.drawRoundedRect(r, rad, rad)
+
+        bdr = QtGui.QColor(ac.red(), ac.green(), ac.blue(), 170)
+        p.setBrush(QtCore.Qt.BrushStyle.NoBrush)
+        p.setPen(QtGui.QPen(bdr, 1.0))
+        p.drawRoundedRect(r.adjusted(0.5, 0.5, -0.5, -0.5), rad, rad)
+
+        p.setPen(ac)
+        f = p.font(); f.setPointSize(10); f.setBold(True); p.setFont(f)
+        p.drawText(self.rect(), QtCore.Qt.AlignmentFlag.AlignCenter, self._text)
+        p.end()
+
+
+# ── ToolTile ───────────────────────────────────────────────────────────────────
+
+class ToolTile(QtWidgets.QFrame):
+    """Self-contained tool card: header ▸ options ▸ footer ▸ animated drawer.
+
+    Usage
+    -----
+    tile = ToolTile("↗", "My Tool", "Short description.")
+    tile.add_option(some_checkbox)
+    tile.set_run_button("Run", self._my_slot)
+    secondary = tile.add_secondary_button("Open File")
+    tile.finish_footer()
+
+    When an operation starts call tile.open_drawer() to reveal the progress
+    area and tile.set_running(True/False) to lock/unlock footer buttons.
+    """
+
+    def __init__(
+        self,
+        icon: str,
+        title: str,
+        description: str,
+        *,
+        log_height: int = 110,
+        parent: QtWidgets.QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setObjectName("liquidGlassTile")
+        self.setStyleSheet("QFrame#liquidGlassTile { background: transparent; border: none; }")
+        self.setMouseTracking(True)
+        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_Hover, True)
+        self._hover_t = 0.0
+        self._time = 0.0
+        self._target_pos = QtCore.QPointF(200, 100)
+        self._glow_pos = QtCore.QPointF(200, 100)
+        self._is_hovered = False
+
+        self._footer_buttons: list[QtWidgets.QPushButton] = []
+        self._drawer_open = False
+
+        self._timer = QtCore.QTimer(self)
+        self._timer.setInterval(16)
+        self._timer.timeout.connect(self._tick)
+        self._timer.start()
+
+        outer = QtWidgets.QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        # ── Header ────────────────────────────────────────────────────────
+        header = QtWidgets.QWidget()
+        header_l = QtWidgets.QVBoxLayout(header)
+        header_l.setContentsMargins(18, 16, 18, 12)
+        header_l.setSpacing(4)
+
+        title_row = QtWidgets.QHBoxLayout()
+        title_row.setSpacing(12)
+        
+        self._badge = _GlassBadge(icon, size=40)
+        title_row.addWidget(self._badge, 0, QtCore.Qt.AlignmentFlag.AlignTop)
+        
+        info = QtWidgets.QVBoxLayout()
+        info.setSpacing(6)
+        
+        self._title_lbl = QtWidgets.QLabel(title)
+        self._title_lbl.setObjectName("cardTitle")
+        info.addWidget(self._title_lbl)
+
+        self._desc_lbl: QtWidgets.QLabel | None = None
+        if description:
+            self._desc_lbl = QtWidgets.QLabel(description)
+            self._desc_lbl.setObjectName("sectionSubtitle")
+            self._desc_lbl.setWordWrap(True)
+            self._desc_lbl.setContentsMargins(0, 2, 0, 2)
+            info.addWidget(self._desc_lbl)
+            
+        title_row.addLayout(info, 1)
+
+        self.status_chip = _GlassResultChip()
+        self.status_chip.show_neutral("Ready.")
+        title_row.addWidget(self.status_chip, 0, QtCore.Qt.AlignmentFlag.AlignTop)
+
+        header_l.addLayout(title_row)
+        outer.addWidget(header)
+
+        # ── Options area ──────────────────────────────────────────────────
+        self._options = QtWidgets.QWidget()
+        self._opts_l = QtWidgets.QVBoxLayout(self._options)
+        self._opts_l.setContentsMargins(18, 0, 18, 12)
+        self._opts_l.setSpacing(8)
+        outer.addWidget(self._options)
+
+        # ── Footer ────────────────────────────────────────────────────────
+        self._footer = QtWidgets.QWidget()
+        self._footer_l = QtWidgets.QHBoxLayout(self._footer)
+        self._footer_l.setContentsMargins(18, 8, 18, 16)
+        self._footer_l.setSpacing(8)
+        outer.addWidget(self._footer)
+
+        # ── Separator (hidden until drawer opens) ─────────────────────────
+        self._sep = QtWidgets.QFrame()
+        self._sep.setFrameShape(QtWidgets.QFrame.Shape.HLine)
+        self._sep.setFrameShadow(QtWidgets.QFrame.Shadow.Plain)
+        self._sep.setVisible(False)
+        outer.addWidget(self._sep)
+
+        # ── Drawer ────────────────────────────────────────────────────────
+        self._drawer = QtWidgets.QWidget()
+        drawer_l = QtWidgets.QVBoxLayout(self._drawer)
+        drawer_l.setContentsMargins(18, 10, 18, 16)
+        drawer_l.setSpacing(6)
+
+        self.progress_bar = QtWidgets.QProgressBar()
+        self.progress_bar.setFixedHeight(6)
+        self.progress_bar.setTextVisible(False)
+
+        # Hidden but retained so existing tool logic doesn't crash on .setText()
+        self.status_label = QtWidgets.QLabel("Ready.")
+        self.status_label.setVisible(False)
+
+        self.log_box = QtWidgets.QPlainTextEdit()
+        self.log_box.setReadOnly(True)
+        self.log_box.setFixedHeight(log_height)
+        self.log_box.setObjectName("logBox")
+        self.log_box.setStyleSheet("QPlainTextEdit { background: rgba(0, 0, 0, 0.1); border-radius: 6px; }")
+
+        drawer_l.addWidget(self.progress_bar)
+        drawer_l.addWidget(self.status_label)
+        drawer_l.addWidget(self.log_box)
+
+        self._drawer.setMinimumHeight(0)
+        self._drawer.setMaximumHeight(0)
+        outer.addWidget(self._drawer)
+
+        # ── Theme ─────────────────────────────────────────────────────────
+        self._apply_sep_color(get_manager().current)
+        get_manager().theme_changed.connect(self._on_theme_changed)
+
+    def mouseMoveEvent(self, e):
+        self._target_pos = e.position()
+        super().mouseMoveEvent(e)
+
+    def enterEvent(self, e):
+        self._is_hovered = True
+        super().enterEvent(e)
+
+    def leaveEvent(self, e):
+        self._is_hovered = False
+        super().leaveEvent(e)
+
+    def _tick(self):
+        target_h = 1.0 if self._is_hovered else 0.0
+        hover_delta = (target_h - self._hover_t) * 0.15
+        self._hover_t += hover_delta
+
+        if not self._is_hovered:
+            self._target_pos = QtCore.QPointF(self.width() / 2, self.height() / 2)
+
+        dx = self._target_pos.x() - self._glow_pos.x()
+        dy = self._target_pos.y() - self._glow_pos.y()
+        self._glow_pos.setX(self._glow_pos.x() + dx * 0.15)
+        self._glow_pos.setY(self._glow_pos.y() + dy * 0.15)
+
+        # Skip repaint when nothing is animating
+        if abs(hover_delta) < 0.001 and abs(dx) < 0.5 and abs(dy) < 0.5:
+            return
+        self.update()
+
+    def paintEvent(self, e):  # noqa: N802
+        t = get_manager().current
+        p = QtGui.QPainter(self)
+        p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+        p.setRenderHint(QtGui.QPainter.RenderHint.SmoothPixmapTransform)
+        rect = QtCore.QRectF(self.rect())
+        inner = rect.adjusted(2, 2, -2, -2)
+        radius = 16.0
+        ht = self._hover_t
+        ac = QtGui.QColor(t.accent)
+
+        path = QtGui.QPainterPath()
+        path.addRoundedRect(inner, radius, radius)
+        p.save()
+        p.setClipPath(path)
+
+        p.setPen(QtCore.Qt.PenStyle.NoPen)
+        bg_alpha = 0.05 + ht * 0.03
+        p.setBrush(QtGui.QColor(255, 255, 255, int(bg_alpha * 255)))
+        p.drawRect(inner)
+
+        t_alpha = 0.1 + ht * 0.05
+        is_dark = getattr(t, "is_dark", True)
+        if is_dark:
+            tint_color = QtGui.QColor(0, 0, 0, int(t_alpha * 255))
+        else:
+            tint_color = QtGui.QColor(255, 255, 255, int(t_alpha * 255))
+        p.setBrush(tint_color)
+        p.drawRect(inner)
+
+        glow_rad = inner.width() * 0.8
+        glow = QtGui.QRadialGradient(self._glow_pos, glow_rad)
+        c1 = QtGui.QColor(ac); c1.setAlphaF(0.15 + ht * 0.15)
+        c2 = QtGui.QColor(ac); c2.setAlphaF(0.0)
+        glow.setColorAt(0.0, c1)
+        glow.setColorAt(1.0, c2)
+        p.setBrush(glow)
+        p.drawRect(inner)
+
+        spec = QtGui.QLinearGradient(0, inner.top(), 0, inner.bottom())
+        spec.setColorAt(0.0, QtGui.QColor(255, 255, 255, int((0.15 + ht * 0.05) * 255)))
+        spec.setColorAt(0.4, QtGui.QColor(255, 255, 255, 0))
+        p.setBrush(spec)
+        p.drawRect(inner)
+        p.restore()
+        
+        p.end()
+
+    # ── Public API ────────────────────────────────────────────────────────
+
+    def add_option(self, widget: QtWidgets.QWidget) -> None:
+        """Add a widget to the options section."""
+        self._opts_l.addWidget(widget)
+
+    def add_option_layout(self, layout: QtWidgets.QLayout) -> None:
+        """Add a sub-layout to the options section."""
+        self._opts_l.addLayout(layout)
+
+    def set_run_button(self, label: str, slot) -> QtWidgets.QPushButton:
+        """Add the primary (accent-coloured) action button and return it."""
+        from gui.themes.animations import AnimatedButton
+        btn = AnimatedButton(label)
+        btn.setObjectName("primaryBtn")
+        btn.setMinimumHeight(34)
+        btn.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
+        btn.clicked.connect(slot)
+        self._footer_l.addWidget(btn)
+        self._footer_buttons.append(btn)
+        return btn
+
+    def add_secondary_button(self, label: str) -> QtWidgets.QPushButton:
+        """Add a secondary (default-style) button and return it."""
+        from gui.themes.animations import AnimatedButton
+        btn = AnimatedButton(label)
+        btn.setMinimumHeight(34)
+        btn.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
+        self._footer_l.addWidget(btn)
+        self._footer_buttons.append(btn)
+        return btn
+
+    def finish_footer(self) -> None:
+        """Add trailing stretch after all buttons. Call last."""
+        self._footer_l.addStretch(1)
+
+    def hide_footer(self) -> None:
+        """Hide the footer row entirely (e.g. for tiles with no run action)."""
+        self._footer.setVisible(False)
+
+    def open_drawer(self) -> None:
+        """Animate the log drawer from 0 → its natural height (once)."""
+        if self._drawer_open:
+            return
+        self._drawer_open = True
+        self._sep.setVisible(True)
+        target = max(self._drawer.sizeHint().height(), 100)
+        anim = QtCore.QPropertyAnimation(self._drawer, b"maximumHeight", self)
+        anim.setDuration(250)
+        anim.setStartValue(0)
+        anim.setEndValue(target)
+        anim.setEasingCurve(QtCore.QEasingCurve.Type.OutCubic)
+        anim.finished.connect(lambda: self._drawer.setMaximumHeight(16777215))
+        anim.start(QtCore.QAbstractAnimation.DeletionPolicy.DeleteWhenStopped)
+
+    def set_running(self, running: bool) -> None:
+        """Enable or disable all footer buttons (call during long operations)."""
+        for btn in self._footer_buttons:
+            btn.setEnabled(not running)
+
+    def flash_status(self, from_hex: str, duration: int = 1600) -> None:
+        """Animate status_label colour from from_hex → theme text_secondary."""
+        t = get_manager().current
+        anim = QtCore.QVariantAnimation(self)
+        anim.setStartValue(QtGui.QColor(from_hex))
+        anim.setEndValue(QtGui.QColor(t.text_secondary))
+        anim.setDuration(duration)
+        anim.setEasingCurve(QtCore.QEasingCurve.Type.OutCubic)
+        anim.valueChanged.connect(
+            lambda c: self.status_label.setStyleSheet(f"color: {c.name()};")
+        )
+        anim.start(QtCore.QAbstractAnimation.DeletionPolicy.DeleteWhenStopped)
+
+    # ── Text scale ────────────────────────────────────────────────────────
+
+    _TITLE_PT = {1: 10, 2: 11, 3: 12, 4: 14, 5: 16}
+    _DESC_PT  = {1:  8, 2:  9, 3: 10, 4: 11, 5: 13}
+    _BADGE_SZ = {1: 30, 2: 34, 3: 40, 4: 46, 5: 52}
+
+    def set_text_scale(self, level: int) -> None:
+        """Adjust font sizes and badge icon to match the given 1–5 level."""
+        if level not in self._TITLE_PT:
+            return
+        f = self._title_lbl.font()
+        f.setPointSize(self._TITLE_PT[level])
+        self._title_lbl.setFont(f)
+        if self._desc_lbl is not None:
+            f2 = self._desc_lbl.font()
+            f2.setPointSize(self._DESC_PT[level])
+            self._desc_lbl.setFont(f2)
+        self._badge.set_size(self._BADGE_SZ[level])
+
+    # ── Internal ──────────────────────────────────────────────────────────
+
+    def _apply_sep_color(self, tokens) -> None:
+        self._sep.setStyleSheet(f"QFrame {{ color: {tokens.card_border}; }}")
+
+    def _on_theme_changed(self, tokens) -> None:
+        self._apply_sep_color(tokens)
+
+
+
+# ── TileGrid ───────────────────────────────────────────────────────────────────
+
+class TileGrid(QtWidgets.QWidget):
+    """Responsive grid container for ToolTile instances.
+
+    Column count is computed from available width divided by _TILE_MIN_WIDTH.
+    Full-width tiles span all columns and always start a fresh row.
+
+    Adding a new tool tile:
+        self._tile_grid.add_tile(self._build_new_tile(), full_width=False)
+    """
+
+    _TILE_MIN_WIDTH = 420   # px — 2 columns from ~900 px wide, 1 column on narrow windows
+
+    def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._tiles: list[tuple[ToolTile, bool]] = []   # (tile, is_full_width)
+        self._current_cols: int = 2                      # default; updated on resize
+
+        self._grid = QtWidgets.QGridLayout(self)
+        self._grid.setSpacing(16)
+        self._grid.setContentsMargins(0, 0, 0, 0)
+
+    def add_tile(self, tile: ToolTile, full_width: bool = False) -> None:
+        """Register a tile and add it to the current grid layout."""
+        self._tiles.append((tile, full_width))
+        self._reflow()
+
+    def set_size_level(self, level: int) -> None:
+        for tile, _ in self._tiles:
+            tile.set_text_scale(level)
+
+    def resizeEvent(self, event: QtGui.QResizeEvent) -> None:  # noqa: N802
+        new_cols = max(1, event.size().width() // self._TILE_MIN_WIDTH)
+        if new_cols != self._current_cols:
+            self._current_cols = new_cols
+            self._reflow()
+        super().resizeEvent(event)
+
+    def _reflow(self) -> None:
+        """Re-place all tiles in the grid with the current column count."""
+        cols = self._current_cols
+
+        # Detach every tile from the layout without destroying it
+        for tile, _ in self._tiles:
+            self._grid.removeWidget(tile)
+
+        col = row = 0
+        for tile, full_width in self._tiles:
+            if full_width:
+                if col > 0:          # push to a new row first
+                    row += 1
+                    col = 0
+                self._grid.addWidget(tile, row, 0, 1, cols)
+                row += 1
+            else:
+                self._grid.addWidget(tile, row, col)
+                col += 1
+                if col >= cols:
+                    col = 0
+                    row += 1
+
+        for c in range(cols):
+            self._grid.setColumnStretch(c, 1)
+
+
+# ── _PillToggle ────────────────────────────────────────────────────────────────
+
+class _PillToggle(QtWidgets.QAbstractButton):
+    """Animated iOS-style pill toggle switch.
+
+    Drop-in replacement for QCheckBox for single on/off options.
+    isChecked() / toggled signal / setChecked() all work identically.
+    """
+
+    _TRACK_W = 38
+    _TRACK_H = 22
+    _KNOB_D  = 16
+    _GAP     = 10   # px between track right edge and label text
+
+    def __init__(self, label: str = "", parent: QtWidgets.QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setCheckable(True)
+        self.setText(label)
+        self._knob_x: float = 0.0          # 0.0 = off, 1.0 = on
+        self._anim = QtCore.QVariantAnimation(self)
+        self._anim.setDuration(150)
+        self._anim.setEasingCurve(QtCore.QEasingCurve.Type.OutCubic)
+        self._anim.valueChanged.connect(lambda v: self._set_knob(float(v)))
+        self.toggled.connect(self._start_anim)
+        self.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
+        get_manager().theme_changed.connect(lambda _: self.update())
+
+    # ── Animation ──────────────────────────────────────────────────────────
+
+    def _start_anim(self, checked: bool) -> None:
+        self._anim.stop()
+        self._anim.setStartValue(self._knob_x)
+        self._anim.setEndValue(1.0 if checked else 0.0)
+        self._anim.start()
+
+    def _set_knob(self, v: float) -> None:
+        self._knob_x = v
+        self.update()
+
+    # ── Sizing ─────────────────────────────────────────────────────────────
+
+    def sizeHint(self) -> QtCore.QSize:
+        label = self.text()
+        w = self._TRACK_W
+        h = self._TRACK_H
+        if label:
+            fm = self.fontMetrics()
+            w += self._GAP + fm.horizontalAdvance(label)
+            h = max(h, fm.height() + 4)
+        return QtCore.QSize(w, h)
+
+    def minimumSizeHint(self) -> QtCore.QSize:
+        return self.sizeHint()
+
+    # ── Paint ──────────────────────────────────────────────────────────────
+
+    def paintEvent(self, e) -> None:  # noqa: N802
+        t = get_manager().current
+        p = QtGui.QPainter(self)
+        p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+
+        tw = float(self._TRACK_W)
+        th = float(self._TRACK_H)
+        kd = float(self._KNOB_D)
+        cy = self.height() / 2.0
+
+        # Track
+        tr = QtCore.QRectF(0, cy - th / 2, tw, th)
+        if self.isChecked():
+            ac = QtGui.QColor(t.accent)
+            track_col = QtGui.QColor(ac.red(), ac.green(), ac.blue(), 220)
+        else:
+            track_col = QtGui.QColor(t.card_border)
+        p.setBrush(track_col)
+        p.setPen(QtCore.Qt.PenStyle.NoPen)
+        p.drawRoundedRect(tr, th / 2, th / 2)
+
+        # Knob (white circle)
+        margin = (th - kd) / 2.0
+        travel = tw - kd - 2 * margin
+        kx = margin + self._knob_x * travel
+        ky = cy - kd / 2.0
+        p.setBrush(QtGui.QColor(255, 255, 255))
+        p.drawEllipse(QtCore.QRectF(kx, ky, kd, kd))
+
+        # Label text
+        label = self.text()
+        if label:
+            p.setPen(QtGui.QColor(t.text_primary))
+            f = p.font()
+            f.setPointSize(10)
+            p.setFont(f)
+            lx = int(tw) + self._GAP
+            p.drawText(
+                lx, 0, self.width() - lx, self.height(),
+                int(QtCore.Qt.AlignmentFlag.AlignVCenter | QtCore.Qt.AlignmentFlag.AlignLeft),
+                label,
+            )
+        p.end()
+
+
+# ── ToolsWorkspace ─────────────────────────────────────────────────────────────
+
 class ToolsWorkspace(WorkspaceBase):
     """All export, diagnostic, and utility tools in one place."""
 
-    def __init__(self, library_path: str = "", parent: QtWidgets.QWidget | None = None) -> None:
+    def __init__(
+        self, library_path: str = "", parent: QtWidgets.QWidget | None = None
+    ) -> None:
         super().__init__(library_path, parent)
         self._cleanup_worker: FileCleanupWorker | None = None
         self._at_worker: ArtistTitleWorker | None = None
-        self._at_open_connected = False
-        self._codec_open_connected = False
-        # Tab bar state
-        self._tab_btns: list[QtWidgets.QPushButton] = []
-        self._stacked: QtWidgets.QStackedWidget | None = None
-        # Collapsible progress cards (start at maxHeight=0)
-        self._at_prog_card: QtWidgets.QWidget | None = None
-        self._cleanup_prog_card: QtWidgets.QWidget | None = None
+        self._at_open_connected: bool = False
+        self._codec_open_connected: bool = False
+        # Tile references (assigned by _build_*_tile helpers)
+        self._at_tile: ToolTile | None = None
+        self._cleanup_tile: ToolTile | None = None
         # Codec chip checkboxes for theme-refresh
         self._codec_chips: dict[str, QtWidgets.QCheckBox] = {}
         self._build_ui()
@@ -220,8 +870,6 @@ class ToolsWorkspace(WorkspaceBase):
     # ── Build ─────────────────────────────────────────────────────────────
 
     def _build_ui(self) -> None:
-        from gui.themes.animations import AnimatedTabButton
-
         cl = self.content_layout
         cl.addWidget(self._make_section_title("Export & Utilities"))
         cl.addWidget(self._make_subtitle(
@@ -229,173 +877,48 @@ class ToolsWorkspace(WorkspaceBase):
             "All export files land in Docs/ inside your library folder."
         ))
 
-        # ── Animated tab bar ──────────────────────────────────────────────
-        tab_card = self._make_card()
-        tab_row = QtWidgets.QHBoxLayout(tab_card)
-        tab_row.setContentsMargins(10, 8, 10, 8)
-        tab_row.setSpacing(4)
-
-        for i, label in enumerate([
-            "Artist / Title", "Codec Export", "File Cleanup", "Diagnostics", "Validator",
-        ]):
-            btn = AnimatedTabButton(label)
-            btn.setAutoExclusive(False)   # we manage exclusive state manually
-            btn.clicked.connect(lambda _checked=False, idx=i: self._switch_tab(idx))
-            tab_row.addWidget(btn)
-            self._tab_btns.append(btn)
-        tab_row.addStretch(1)
-        cl.addWidget(tab_card)
-
-        # ── Stacked pages ─────────────────────────────────────────────────
-        self._stacked = QtWidgets.QStackedWidget()
-        self._stacked.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
-        self._stacked.addWidget(self._build_at_page())
-        self._stacked.addWidget(self._build_codec_page())
-        self._stacked.addWidget(self._build_cleanup_page())
-        self._stacked.addWidget(self._build_diag_page())
-        self._stacked.addWidget(self._build_validator_page())
-        cl.addWidget(self._stacked, 1)
-
+        grid = TileGrid()
+        grid.add_tile(self._build_at_tile())
+        grid.add_tile(self._build_codec_tile())
+        grid.add_tile(self._build_cleanup_tile())
+        grid.add_tile(self._build_diag_tile(), full_width=True)
+        grid.add_tile(self._build_validator_tile())
+        cl.addWidget(grid, 1)
         cl.addStretch(1)
 
-        # Activate first tab without animation
-        self._switch_tab(0, animated=False)
+    # ── Tile builders ──────────────────────────────────────────────────────
 
-    # ── Tab navigation ────────────────────────────────────────────────────
-
-    def _switch_tab(self, index: int, animated: bool = True) -> None:
-        """Switch the visible page; crossfade when animated=True."""
-        # Keep checked state in sync
-        for i, btn in enumerate(self._tab_btns):
-            btn.setChecked(i == index)
-
-        if self._stacked is None:
-            return
-
-        if not animated:
-            self._stacked.setCurrentIndex(index)
-            return
-
-        if index == self._stacked.currentIndex():
-            return
-
-        outgoing = self._stacked.currentWidget()
-
-        # Fade out the outgoing page
-        fx_out = QtWidgets.QGraphicsOpacityEffect(outgoing)
-        outgoing.setGraphicsEffect(fx_out)
-        anim_out = QtCore.QPropertyAnimation(fx_out, b"opacity", self)
-        anim_out.setDuration(100)
-        anim_out.setStartValue(1.0)
-        anim_out.setEndValue(0.0)
-
-        def _show_incoming() -> None:
-            outgoing.setGraphicsEffect(None)
-            self._stacked.setCurrentIndex(index)
-            incoming = self._stacked.currentWidget()
-            fx_in = QtWidgets.QGraphicsOpacityEffect(incoming)
-            incoming.setGraphicsEffect(fx_in)
-            fx_in.setOpacity(0.0)
-            anim_in = QtCore.QPropertyAnimation(fx_in, b"opacity", self)
-            anim_in.setDuration(180)
-            anim_in.setStartValue(0.0)
-            anim_in.setEndValue(1.0)
-            anim_in.setEasingCurve(QtCore.QEasingCurve.Type.OutCubic)
-            anim_in.finished.connect(lambda: incoming.setGraphicsEffect(None))
-            anim_in.start(QtCore.QAbstractAnimation.DeletionPolicy.DeleteWhenStopped)
-
-        anim_out.finished.connect(_show_incoming)
-        anim_out.start(QtCore.QAbstractAnimation.DeletionPolicy.DeleteWhenStopped)
-
-    # ── Page builders ─────────────────────────────────────────────────────
-
-    def _build_at_page(self) -> QtWidgets.QWidget:
-        from gui.themes.animations import AnimatedButton
-
-        page = QtWidgets.QWidget()
-        layout = QtWidgets.QVBoxLayout(page)
-        layout.setContentsMargins(0, 12, 0, 0)
-        layout.setSpacing(12)
-
-        # Options card
-        opts_card = self._make_card()
-        opts_l = QtWidgets.QVBoxLayout(opts_card)
-        opts_l.setContentsMargins(16, 14, 16, 14)
-        opts_l.setSpacing(10)
-        opts_l.addWidget(self._make_card_title("Options"))
-        opts_l.addWidget(self._make_subtitle(
+    def _build_at_tile(self) -> ToolTile:
+        tile = ToolTile(
+            "\u2197", "Artist / Title Export",
             "Scan the library and write Docs/artist_title_list.txt "
-            "with every Artist – Title pair."
-        ))
-        opts_row = QtWidgets.QHBoxLayout()
-        opts_row.setSpacing(20)
-        self._exclude_flac_cb = QtWidgets.QCheckBox("Exclude FLAC files")
-        self._dupe_tracks_cb = QtWidgets.QCheckBox("Include per-album duplicate titles")
-        opts_row.addWidget(self._exclude_flac_cb)
-        opts_row.addWidget(self._dupe_tracks_cb)
-        opts_row.addStretch(1)
-        opts_l.addLayout(opts_row)
-        layout.addWidget(opts_card)
+            "with every Artist \u2013 Title pair.",
+        )
+        self._at_tile = tile
 
-        # Action card
-        action_card = self._make_card()
-        action_l = QtWidgets.QHBoxLayout(action_card)
-        action_l.setContentsMargins(16, 12, 16, 12)
-        action_l.setSpacing(8)
-        at_run = AnimatedButton("Export Artist / Title List")
-        at_run.setObjectName("primaryBtn")
-        at_run.setMinimumHeight(34)
-        at_run.clicked.connect(self._on_export_at)
-        self._at_open = AnimatedButton("Open File")
-        self._at_open.setMinimumHeight(34)
+        self._exclude_flac_cb = _PillToggle("Exclude FLAC files")
+        self._dupe_tracks_cb  = _PillToggle("Include per-album duplicate titles")
+        tile.add_option(self._exclude_flac_cb)
+        tile.add_option(self._dupe_tracks_cb)
+
+        # Wire drawer widgets to the same attribute names used by the slots
+        tile.status_label.setVisible(True)
+        self._at_status = tile.status_label
+        self._at_log    = tile.log_box
+        self._at_prog   = tile.progress_bar
+
+        tile.set_run_button("Export", self._on_export_at)
+        self._at_open = tile.add_secondary_button("Open File")
         self._at_open.setEnabled(False)
-        action_l.addWidget(at_run)
-        action_l.addWidget(self._at_open)
-        action_l.addStretch(1)
-        layout.addWidget(action_card)
+        tile.finish_footer()
+        return tile
 
-        # Progress card — starts collapsed (maxHeight=0)
-        prog_card = self._make_card()
-        prog_l = QtWidgets.QVBoxLayout(prog_card)
-        prog_l.setContentsMargins(16, 12, 16, 12)
-        prog_l.setSpacing(6)
-        self._at_prog = QtWidgets.QProgressBar()
-        self._at_prog.setFixedHeight(8)
-        self._at_prog.setTextVisible(False)
-        self._at_status = QtWidgets.QLabel("Ready.")
-        self._at_status.setObjectName("statusLabel")
-        self._at_log = QtWidgets.QPlainTextEdit()
-        self._at_log.setReadOnly(True)
-        self._at_log.setFixedHeight(110)
-        self._at_log.setObjectName("logBox")
-        prog_l.addWidget(self._at_prog)
-        prog_l.addWidget(self._at_status)
-        prog_l.addWidget(self._at_log)
-        self._at_prog_card = prog_card
-        prog_card.setMinimumHeight(0)
-        prog_card.setMaximumHeight(0)
-        layout.addWidget(prog_card)
+    def _build_codec_tile(self) -> ToolTile:
+        tile = ToolTile(
+            "\u2261", "Codec List Export",
+            "Export a grouped list of all tracks by codec format.",
+        )
 
-        layout.addStretch(1)
-        return page
-
-    def _build_codec_page(self) -> QtWidgets.QWidget:
-        from gui.themes.animations import AnimatedButton
-
-        page = QtWidgets.QWidget()
-        layout = QtWidgets.QVBoxLayout(page)
-        layout.setContentsMargins(0, 12, 0, 0)
-        layout.setSpacing(12)
-
-        # Codec chips card
-        chips_card = self._make_card()
-        chips_l = QtWidgets.QVBoxLayout(chips_card)
-        chips_l.setContentsMargins(16, 14, 16, 14)
-        chips_l.setSpacing(10)
-        chips_l.addWidget(self._make_card_title("Include Codecs"))
-        chips_l.addWidget(self._make_subtitle(
-            "Export a grouped list of all tracks by codec format."
-        ))
         chips_row = QtWidgets.QHBoxLayout()
         chips_row.setSpacing(6)
         self._codec_ext_cbs: dict[str, QtWidgets.QCheckBox] = {}
@@ -404,218 +927,109 @@ class ToolsWorkspace(WorkspaceBase):
             self._codec_ext_cbs[ext] = cb
             chips_row.addWidget(cb)
         chips_row.addStretch(1)
-        chips_l.addLayout(chips_row)
-        self._omit_paths_cb = QtWidgets.QCheckBox("Filenames only (no full paths)")
-        chips_l.addWidget(self._omit_paths_cb)
-        layout.addWidget(chips_card)
+        tile.add_option_layout(chips_row)
 
-        # Action card
-        action_card = self._make_card()
-        action_l = QtWidgets.QHBoxLayout(action_card)
-        action_l.setContentsMargins(16, 12, 16, 12)
-        action_l.setSpacing(8)
-        codec_run = AnimatedButton("Export Codec List")
-        codec_run.setObjectName("primaryBtn")
-        codec_run.setMinimumHeight(34)
-        codec_run.clicked.connect(self._on_export_codec)
-        self._codec_open = AnimatedButton("Open File")
-        self._codec_open.setMinimumHeight(34)
-        self._codec_open.setEnabled(False)
-        action_l.addWidget(codec_run)
-        action_l.addWidget(self._codec_open)
-        action_l.addStretch(1)
-        layout.addWidget(action_card)
+        self._omit_paths_cb = _PillToggle("Filenames only (no full paths)")
+        tile.add_option(self._omit_paths_cb)
 
-        # Status card (always visible — codec export runs synchronously)
-        status_card = self._make_card()
-        status_l = QtWidgets.QVBoxLayout(status_card)
-        status_l.setContentsMargins(16, 10, 16, 10)
-        status_l.setSpacing(6)
-        self._codec_prog = QtWidgets.QProgressBar()
-        self._codec_prog.setFixedHeight(8)
-        self._codec_prog.setTextVisible(False)
-        self._codec_prog.setValue(0)
+        # Status label always visible in options area (export is synchronous)
         self._codec_status = QtWidgets.QLabel("Ready.")
         self._codec_status.setObjectName("statusLabel")
-        status_l.addWidget(self._codec_prog)
-        status_l.addWidget(self._codec_status)
-        layout.addWidget(status_card)
+        tile.add_option(self._codec_status)
+        self._codec_prog = tile.progress_bar   # available but drawer stays closed
 
-        layout.addStretch(1)
-        return page
+        tile.set_run_button("Export", self._on_export_codec)
+        self._codec_open = tile.add_secondary_button("Open File")
+        self._codec_open.setEnabled(False)
+        tile.finish_footer()
+        return tile
 
-    def _build_cleanup_page(self) -> QtWidgets.QWidget:
-        from gui.themes.animations import AnimatedButton
-
-        page = QtWidgets.QWidget()
-        layout = QtWidgets.QVBoxLayout(page)
-        layout.setContentsMargins(0, 12, 0, 0)
-        layout.setSpacing(12)
-
-        # Info card
-        info_card = self._make_card()
-        info_l = QtWidgets.QVBoxLayout(info_card)
-        info_l.setContentsMargins(16, 14, 16, 14)
-        info_l.setSpacing(6)
-        info_l.addWidget(self._make_card_title("File Cleanup"))
-        info_l.addWidget(self._make_subtitle(
+    def _build_cleanup_tile(self) -> ToolTile:
+        tile = ToolTile(
+            "\u2736", "File Cleanup",
             "Remove trailing \u2018 (1)\u2019, \u2018 (2)\u2019, \u2018 copy\u2019 suffixes "
             "from audio filenames left by macOS Finder and Windows Explorer. "
-            "Playlists referencing renamed files are updated automatically."
-        ))
-        layout.addWidget(info_card)
+            "Playlists referencing renamed files are updated automatically.",
+        )
+        self._cleanup_tile = tile
 
-        # Action card
-        action_card = self._make_card()
-        action_l = QtWidgets.QHBoxLayout(action_card)
-        action_l.setContentsMargins(16, 12, 16, 12)
-        self._cleanup_run_btn = AnimatedButton("Run File Cleanup")
-        self._cleanup_run_btn.setObjectName("primaryBtn")
-        self._cleanup_run_btn.setMinimumHeight(34)
-        self._cleanup_run_btn.clicked.connect(self._on_file_cleanup)
-        action_l.addWidget(self._cleanup_run_btn)
-        action_l.addStretch(1)
-        layout.addWidget(action_card)
+        tile.status_label.setVisible(True)
+        self._cleanup_status = tile.status_label
+        self._cleanup_log    = tile.log_box
 
-        # Progress card — starts collapsed
-        prog_card = self._make_card()
-        prog_l = QtWidgets.QVBoxLayout(prog_card)
-        prog_l.setContentsMargins(16, 12, 16, 12)
-        prog_l.setSpacing(6)
-        self._cleanup_status = QtWidgets.QLabel("Ready.")
-        self._cleanup_status.setObjectName("statusLabel")
-        self._cleanup_log = QtWidgets.QPlainTextEdit()
-        self._cleanup_log.setReadOnly(True)
-        self._cleanup_log.setFixedHeight(130)
-        self._cleanup_log.setObjectName("logBox")
-        prog_l.addWidget(self._cleanup_status)
-        prog_l.addWidget(self._cleanup_log)
-        self._cleanup_prog_card = prog_card
-        prog_card.setMinimumHeight(0)
-        prog_card.setMaximumHeight(0)
-        layout.addWidget(prog_card)
+        self._cleanup_run_btn = tile.set_run_button("Run Cleanup", self._on_file_cleanup)
+        tile.finish_footer()
+        return tile
 
-        layout.addStretch(1)
-        return page
-
-    def _build_diag_page(self) -> QtWidgets.QWidget:
+    def _build_diag_tile(self) -> ToolTile:
         from gui.themes.animations import AnimatedButton
 
-        page = QtWidgets.QWidget()
-        layout = QtWidgets.QVBoxLayout(page)
-        layout.setContentsMargins(0, 12, 0, 0)
-        layout.setSpacing(12)
+        tile = ToolTile(
+            "\u2699", "Diagnostics",
+            "Media testing, duplicate analysis tools, and system utilities.",
+        )
 
-        # Media testing card
-        media_card = self._make_card()
-        media_l = QtWidgets.QVBoxLayout(media_card)
-        media_l.setContentsMargins(16, 14, 16, 14)
-        media_l.setSpacing(10)
-        media_l.addWidget(self._make_card_title("Media Testing"))
-        media_l.addWidget(self._make_subtitle(
-            "Open codec-specific test dialogs to verify playback and metadata reading."
-        ))
-        media_btn_row = QtWidgets.QHBoxLayout()
-        media_btn_row.setSpacing(8)
+        media_row = QtWidgets.QHBoxLayout()
+        media_row.setSpacing(8)
         for label, slot in (
-            ("M4A Tester\u2026", self._on_m4a_tester),
+            ("M4A Tester\u2026",  self._on_m4a_tester),
             ("Opus Tester\u2026", self._on_opus_tester),
         ):
             btn = AnimatedButton(label)
             btn.setMinimumHeight(34)
             btn.clicked.connect(slot)
-            media_btn_row.addWidget(btn)
-        media_btn_row.addStretch(1)
-        media_l.addLayout(media_btn_row)
-        layout.addWidget(media_card)
+            media_row.addWidget(btn)
+        media_row.addStretch(1)
+        tile.add_option_layout(media_row)
 
-        # Duplicate tools card
-        dupe_card = self._make_card()
-        dupe_l = QtWidgets.QVBoxLayout(dupe_card)
-        dupe_l.setContentsMargins(16, 14, 16, 14)
-        dupe_l.setSpacing(10)
-        dupe_l.addWidget(self._make_card_title("Duplicate Tools"))
-        dupe_l.addWidget(self._make_subtitle(
-            "Advanced tools for inspecting and resolving duplicate detection results."
-        ))
-        dupe_btn_row = QtWidgets.QHBoxLayout()
-        dupe_btn_row.setSpacing(8)
+        dupe_row = QtWidgets.QHBoxLayout()
+        dupe_row.setSpacing(8)
         for label, slot in (
             ("Bucketing POC\u2026", self._on_bucketing_poc),
-            ("Scan Engine\u2026", self._on_scan_engine),
-            ("Fuzzy Finder\u2026", self._on_fuzzy_dupes),
-            ("Pair Review\u2026", self._on_pair_review),
+            ("Scan Engine\u2026",   self._on_scan_engine),
+            ("Fuzzy Finder\u2026",  self._on_fuzzy_dupes),
+            ("Pair Review\u2026",   self._on_pair_review),
         ):
             btn = AnimatedButton(label)
             btn.setMinimumHeight(34)
             btn.clicked.connect(slot)
-            dupe_btn_row.addWidget(btn)
-        dupe_btn_row.addStretch(1)
-        dupe_l.addLayout(dupe_btn_row)
-        layout.addWidget(dupe_card)
+            dupe_row.addWidget(btn)
+        dupe_row.addStretch(1)
+        tile.add_option_layout(dupe_row)
 
-        # System card
-        sys_card = self._make_card()
-        sys_l = QtWidgets.QVBoxLayout(sys_card)
-        sys_l.setContentsMargins(16, 14, 16, 14)
-        sys_l.setSpacing(10)
-        sys_l.addWidget(self._make_card_title("System"))
-        sys_btn_row = QtWidgets.QHBoxLayout()
         crash_btn = AnimatedButton("View Crash Log\u2026")
         crash_btn.setMinimumHeight(34)
         crash_btn.clicked.connect(self._on_crash_log)
-        sys_btn_row.addWidget(crash_btn)
-        sys_btn_row.addStretch(1)
-        sys_l.addLayout(sys_btn_row)
-        layout.addWidget(sys_card)
+        crash_row = QtWidgets.QHBoxLayout()
+        crash_row.addWidget(crash_btn)
+        crash_row.addStretch(1)
+        tile.add_option_layout(crash_row)
 
-        layout.addStretch(1)
-        return page
+        tile.hide_footer()
+        return tile
 
-    def _build_validator_page(self) -> QtWidgets.QWidget:
-        from gui.themes.animations import AnimatedButton
+    def _build_validator_tile(self) -> ToolTile:
+        tile = ToolTile(
+            "\u2713", "Library Validator",
+            "Verify that your library folder layout matches AlphaDEX conventions.",
+        )
 
-        page = QtWidgets.QWidget()
-        layout = QtWidgets.QVBoxLayout(page)
-        layout.setContentsMargins(0, 12, 0, 0)
-        layout.setSpacing(12)
-
-        # Action card
-        action_card = self._make_card()
-        action_l = QtWidgets.QVBoxLayout(action_card)
-        action_l.setContentsMargins(16, 14, 16, 14)
-        action_l.setSpacing(10)
-        action_l.addWidget(self._make_card_title("Library Validator"))
-        action_l.addWidget(self._make_subtitle(
-            "Verify that your library folder layout matches AlphaDEX conventions."
-        ))
-        val_run = AnimatedButton("Run Validator")
-        val_run.setObjectName("primaryBtn")
-        val_run.setMinimumHeight(34)
-        val_run.clicked.connect(self._on_validate)
-        action_l.addWidget(val_run)
-        layout.addWidget(action_card)
-
-        # Results card
-        results_card = self._make_card()
-        results_l = QtWidgets.QVBoxLayout(results_card)
-        results_l.setContentsMargins(16, 12, 16, 12)
-        results_l.setSpacing(6)
-        results_l.addWidget(self._make_card_title("Results"))
         self._val_log = QtWidgets.QPlainTextEdit()
         self._val_log.setReadOnly(True)
-        self._val_log.setMinimumHeight(180)
+        self._val_log.setFixedHeight(160)
         self._val_log.setObjectName("logBox")
-        results_l.addWidget(self._val_log)
-        layout.addWidget(results_card)
+        self._val_log.setStyleSheet(
+            "QPlainTextEdit { background: rgba(0,0,0,0.1); border-radius: 6px; }"
+        )
+        tile.add_option(self._val_log)
 
-        layout.addStretch(1)
-        return page
+        tile.set_run_button("Run Validator", self._on_validate)
+        tile.finish_footer()
+        return tile
 
-    # ── UI helpers ────────────────────────────────────────────────────────
+    # ── Codec chip helpers ─────────────────────────────────────────────────
 
     def _make_chip(self, label: str) -> QtWidgets.QCheckBox:
-        """Create a toggleable codec chip that re-styles itself on state change."""
         cb = QtWidgets.QCheckBox(label)
         cb.setChecked(True)
         self._codec_chips[label] = cb
@@ -628,7 +1042,7 @@ class ToolsWorkspace(WorkspaceBase):
         if cb.isChecked():
             style = (
                 f"QCheckBox {{"
-                f" background: {t.accent}28;"
+                f" background: {_rgba(t.accent, 0.16)};"
                 f" border: 1px solid {t.accent};"
                 f" border-radius: 10px;"
                 f" padding: 3px 10px;"
@@ -652,26 +1066,18 @@ class ToolsWorkspace(WorkspaceBase):
         cb.setStyleSheet(style)
 
     def _reveal_card(self, card: QtWidgets.QWidget) -> None:
-        """Animate a collapsed card from maxHeight=0 to its natural size."""
         if card.maximumHeight() > 0:
-            return  # already open
+            return
         target = max(card.sizeHint().height(), 80)
         anim = QtCore.QPropertyAnimation(card, b"maximumHeight", self)
         anim.setDuration(220)
         anim.setStartValue(0)
         anim.setEndValue(target)
         anim.setEasingCurve(QtCore.QEasingCurve.Type.OutCubic)
-        # After animation ends, lift the constraint so the card can resize freely
         anim.finished.connect(lambda: card.setMaximumHeight(16777215))
         anim.start(QtCore.QAbstractAnimation.DeletionPolicy.DeleteWhenStopped)
 
-    def _flash_label(
-        self,
-        label: QtWidgets.QLabel,
-        from_hex: str,
-        duration: int = 1600,
-    ) -> None:
-        """Animate label color from from_hex → theme text_secondary."""
+    def _flash_label(self, label: QtWidgets.QLabel, from_hex: str, duration: int = 1600) -> None:
         t = get_manager().current
         anim = QtCore.QVariantAnimation(self)
         anim.setStartValue(QtGui.QColor(from_hex))
@@ -683,14 +1089,14 @@ class ToolsWorkspace(WorkspaceBase):
         )
         anim.start(QtCore.QAbstractAnimation.DeletionPolicy.DeleteWhenStopped)
 
-    # ── Theme refresh ─────────────────────────────────────────────────────
+    # ── Theme refresh ──────────────────────────────────────────────────────
 
     def _on_theme_changed_base(self, tokens: object) -> None:
         super()._on_theme_changed_base(tokens)
         for cb in self._codec_chips.values():
             self._refresh_chip(cb)
 
-    # ── Slots ─────────────────────────────────────────────────────────────
+    # ── Slots: Artist / Title ──────────────────────────────────────────────
 
     @Slot()
     def _on_export_at(self) -> None:
@@ -700,19 +1106,19 @@ class ToolsWorkspace(WorkspaceBase):
         if self._at_worker and self._at_worker.isRunning():
             return
 
-        exclude_flac = self._exclude_flac_cb.isChecked()
-        add_dupes = self._dupe_tracks_cb.isChecked()
-
         self._at_log.clear()
         self._at_status.setText("Scanning\u2026")
         self._at_status.setStyleSheet("color: inherit; font-size: 12px;")
         self._at_prog.setValue(0)
         self._at_open.setEnabled(False)
-        if self._at_prog_card is not None:
-            self._reveal_card(self._at_prog_card)
+        if self._at_tile is not None:
+            self._at_tile.open_drawer()
 
         self._at_worker = ArtistTitleWorker(
-            self._library_path, exclude_flac, add_dupes, parent=self
+            self._library_path,
+            self._exclude_flac_cb.isChecked(),
+            self._dupe_tracks_cb.isChecked(),
+            parent=self,
         )
         self._at_worker.progress.connect(self._on_at_progress)
         self._at_worker.log_line.connect(self._at_log.appendPlainText)
@@ -735,12 +1141,9 @@ class ToolsWorkspace(WorkspaceBase):
         self._at_log.appendPlainText(f"Export complete: {out_path}")
         if error_count:
             self._at_log.appendPlainText(f"Skipped {error_count} files due to read errors.")
-
-        # Flash status green → neutral
         t = get_manager().current
         self._flash_label(self._at_status, t.success)
 
-        # Reconnect Open button (disconnect old first)
         if self._at_open_connected:
             try:
                 self._at_open.clicked.disconnect()
@@ -749,7 +1152,6 @@ class ToolsWorkspace(WorkspaceBase):
         self._at_open.clicked.connect(lambda: self._open_file(out_path))
         self._at_open_connected = True
         self._at_open.setEnabled(True)
-
         self._log(f"Artist/title export complete: {entry_count} entries \u2192 {out_path}", "ok")
         self._at_worker = None
 
@@ -762,6 +1164,8 @@ class ToolsWorkspace(WorkspaceBase):
         self._log(f"Artist/title export failed: {message}", "error")
         self._at_worker = None
 
+    # ── Slots: Codec Export ────────────────────────────────────────────────
+
     @Slot()
     def _on_export_codec(self) -> None:
         if not self._library_path:
@@ -771,10 +1175,12 @@ class ToolsWorkspace(WorkspaceBase):
         if not selected_exts:
             QtWidgets.QMessageBox.warning(self, "No Codecs", "Select at least one codec.")
             return
+
         omit_paths = self._omit_paths_cb.isChecked()
         self._codec_prog.setValue(0)
         self._codec_status.setText("Scanning\u2026")
         self._log("Starting codec list export\u2026", "info")
+
         try:
             by_ext: dict[str, list[str]] = {e: [] for e in sorted(selected_exts)}
             total = 0
@@ -785,6 +1191,7 @@ class ToolsWorkspace(WorkspaceBase):
                         path = f if omit_paths else os.path.join(dirpath, f)
                         by_ext[ext].append(path)
                         total += 1
+
             out = Path(self._library_path) / "Docs" / "codec_file_list.txt"
             out.parent.mkdir(parents=True, exist_ok=True)
             lines: list[str] = []
@@ -793,12 +1200,12 @@ class ToolsWorkspace(WorkspaceBase):
                 lines.extend(sorted(by_ext[ext]))
                 lines.append("")
             out.write_text("\n".join(lines), encoding="utf-8")
+
             self._codec_prog.setValue(100)
             self._codec_status.setText(f"Written: {out}  ({total} files)")
-            # Flash status green → neutral
             t = get_manager().current
             self._flash_label(self._codec_status, t.success)
-            # Wire Open File (disconnect previous connection first)
+
             if self._codec_open_connected:
                 try:
                     self._codec_open.clicked.disconnect()
@@ -808,11 +1215,14 @@ class ToolsWorkspace(WorkspaceBase):
             self._codec_open_connected = True
             self._codec_open.setEnabled(True)
             self._log(f"Codec list exported: {total} files \u2192 {out}", "ok")
+
         except Exception as exc:  # noqa: BLE001
             t = get_manager().current
             self._codec_status.setText(str(exc))
             self._flash_label(self._codec_status, t.danger)
             self._log(str(exc), "error")
+
+    # ── Slots: File Cleanup ────────────────────────────────────────────────
 
     @Slot()
     def _on_file_cleanup(self) -> None:
@@ -826,13 +1236,15 @@ class ToolsWorkspace(WorkspaceBase):
         )
         if reply != QtWidgets.QMessageBox.StandardButton.Yes:
             return
+
         self._cleanup_log.clear()
         self._cleanup_status.setText("Running\u2026")
         self._cleanup_status.setStyleSheet("color: inherit; font-size: 12px;")
         self._cleanup_run_btn.setEnabled(False)
-        if self._cleanup_prog_card is not None:
-            self._reveal_card(self._cleanup_prog_card)
+        if self._cleanup_tile is not None:
+            self._cleanup_tile.open_drawer()
         self._log("Starting file cleanup\u2026", "info")
+
         self._cleanup_worker = FileCleanupWorker(self._library_path)
         self._cleanup_worker.log_line.connect(self._cleanup_log.appendPlainText)
         self._cleanup_worker.finished.connect(self._on_cleanup_finished)
@@ -846,6 +1258,28 @@ class ToolsWorkspace(WorkspaceBase):
         self._cleanup_run_btn.setEnabled(True)
         self._log(message, "ok" if success else "error")
         self._cleanup_worker = None
+
+    # ── Slots: Validator ───────────────────────────────────────────────────
+
+    @Slot()
+    def _on_validate(self) -> None:
+        if not self._library_path:
+            QtWidgets.QMessageBox.warning(self, "No Library", "Select a library folder first.")
+            return
+        try:
+            import validator
+            valid, errors = validator.validate_soundvault_structure(self._library_path)
+            if valid:
+                self._val_log.setPlainText("\u2713 Library structure is valid.")
+                self._log("Validation complete \u2014 structure OK.", "ok")
+            else:
+                self._val_log.setPlainText("\n".join(errors))
+                self._log("Validation found issues.", "error")
+        except Exception as exc:  # noqa: BLE001
+            self._val_log.setPlainText(str(exc))
+            self._log(str(exc), "error")
+
+    # ── Slots: Diagnostics ─────────────────────────────────────────────────
 
     @Slot()
     def _on_m4a_tester(self) -> None:
@@ -861,11 +1295,15 @@ class ToolsWorkspace(WorkspaceBase):
 
     @Slot()
     def _on_bucketing_poc(self) -> None:
-        self._log("Duplicate Bucketing POC — open from Tools menu or run directly.", "info")
+        from gui.dialogs.bucketing_poc_dialog import BucketingPocDialog
+        dlg = BucketingPocDialog(self._library_path, self)
+        dlg.exec()
 
     @Slot()
     def _on_scan_engine(self) -> None:
-        self._log("Duplicate Scan Engine — not yet wired to Qt dialog.", "info")
+        from gui.dialogs.scan_engine_dialog import ScanEngineDialog
+        dlg = ScanEngineDialog(self._library_path, self)
+        dlg.exec()
 
     @Slot()
     def _on_crash_log(self) -> None:
@@ -881,27 +1319,28 @@ class ToolsWorkspace(WorkspaceBase):
 
     @Slot()
     def _on_pair_review(self) -> None:
-        self._log("Duplicate Pair Review — launch from Fuzzy Duplicate Finder results.", "info")
-
-    @Slot()
-    def _on_validate(self) -> None:
         if not self._library_path:
             QtWidgets.QMessageBox.warning(self, "No Library", "Select a library folder first.")
             return
-        try:
-            import validator
-            result = validator.validate(self._library_path)
-            self._val_log.setPlainText(str(result))
-            self._log("Validation complete.", "ok")
-        except Exception as exc:  # noqa: BLE001
-            self._val_log.setPlainText(str(exc))
-            self._log(str(exc), "error")
+        from gui.dialogs.pair_review_dialog import PairReviewDialog, load_pairs
+        if not load_pairs(self._library_path):
+            QtWidgets.QMessageBox.information(
+                self, "Duplicate Pair Review",
+                "No duplicate preview found.\n\n"
+                "Run Duplicate Finder first to generate paired results.",
+            )
+            return
+        dlg = PairReviewDialog(self._library_path, self)
+        dlg.exec()
+
+    # ── Utility ───────────────────────────────────────────────────────────
 
     def _open_file(self, path: str) -> None:
         import subprocess
         import sys
         if sys.platform == "win32":
-            subprocess.Popen(["explorer", path])
+            import os as _os
+            _os.startfile(path)
         elif sys.platform == "darwin":
             subprocess.Popen(["open", path])
         else:

@@ -6,7 +6,9 @@
       "Bash(where python.exe)",
       "Bash(where python3.exe)",
       "Bash(C:/Users/alexa/miniconda3/python.exe -c \"import sys; sys.path.insert\\(0, '.'\\); from utils.opus_library_mirror import mirror_library, convert_flac_to_opus, write_mirror_report; print\\('backend OK'\\)\")",
-      "Bash(C:/Users/alexa/miniconda3/python.exe -c \"import sys; sys.path.insert\\(0, '.'\\); from gui.workspaces.compression import CompressionWorkspace, MirrorWorker; print\\('workspace OK'\\)\")"
+      "Bash(C:/Users/alexa/miniconda3/python.exe -c \"import sys; sys.path.insert\\(0, '.'\\); from gui.workspaces.compression import CompressionWorkspace, MirrorWorker; print\\('workspace OK'\\)\")",
+      "Bash(C:/Users/alexa/miniconda3/python.exe -m py_compile gui/workspaces/tools.py)",
+      "Bash(C:/Users/alexa/miniconda3/python.exe -c ':*)"
     ]
   }
 }
