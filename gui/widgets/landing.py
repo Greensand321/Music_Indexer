@@ -533,21 +533,58 @@ class _ArtScanner(QtCore.QThread):
         return names
 
     @staticmethod
+    def _vorbis_get(audio: object, key: str) -> list | None:
+        """Case-insensitive tag lookup for OGG/Vorbis dict-like mutagen objects.
+
+        mutagen's VComment.__getitem__ is documented as case-insensitive, but
+        the behaviour of .get() has varied across mutagen releases.  This helper
+        tries the supplied key first (letting mutagen's own normalisation run),
+        then falls back to a manual case-insensitive scan of audio.items() so
+        that METADATA_BLOCK_PICTURE is found regardless of whether it was written
+        as uppercase, lowercase, or any mixed variant.
+
+        Returns a list of string values, or None if the key is not present.
+        """
+        # First attempt: let mutagen handle it (covers most cases)
+        try:
+            result = audio.get(key)  # type: ignore[attr-defined]
+            if result:
+                return result if isinstance(result, list) else [result]
+        except Exception:
+            pass
+
+        # Fallback: manual case-insensitive scan over all tag items
+        key_lower = key.lower()
+        try:
+            values = []
+            for k, v in audio.items():  # type: ignore[attr-defined]
+                if k.lower() == key_lower:
+                    if isinstance(v, list):
+                        values.extend(v)
+                    else:
+                        values.append(v)
+            return values if values else None
+        except Exception:
+            return None
+
+    @staticmethod
     def _cover_from_file(path: str) -> tuple[str, bytes] | None:
         """Return ``(method, image_bytes)`` for the first embedded cover found,
         or ``None`` if the file has no cover mutagen can read.
 
-        Each extraction attempt is isolated in its own try/except so a failure
-        in one path does not prevent the others from running.
+        Each extraction attempt is isolated in its own try/except (and where
+        possible in per-item try/excepts) so that one malformed tag or picture
+        block does not prevent other methods or items from being tried.
 
         Order tried:
-          1. .pictures  — FLAC, OGG Vorbis, OGG Opus
-          2. APIC       — ID3 frames: MP3, WAV, AIFF
-          3. covr       — MP4 atom: M4A, AAC
-          4. mbp        — OGG metadata_block_picture (base64 + FLAC Picture)
-          5. coverart   — OGG simpler base64 blob
+          1. .pictures  — FLAC, OGG Vorbis, OGG Opus (mutagen ≥ 1.45 native property)
+          2. mbp        — OGG METADATA_BLOCK_PICTURE, explicit fallback for older
+                          mutagen or files where .pictures fails (malformed header,
+                          non-standard key casing, whitespace in base64 payload)
+          3. APIC       — ID3 frames: MP3, WAV, AIFF
+          4. covr       — MP4 atom: M4A, AAC
+          5. coverart   — OGG simpler raw-base64 blob (less common)
         """
-        # Mutagen module is loaded at module level; if None, can't proceed
         if mutagen is None:
             return None
 
@@ -557,74 +594,75 @@ class _ArtScanner(QtCore.QThread):
         except Exception:
             pass
 
-        if audio is not None:
+        if audio is None:
+            return None
 
-            # 0. Opus fast-path — delegate to the dedicated reader which correctly
-            #    decodes METADATA_BLOCK_PICTURE and COVERART tags.
-            if path.lower().endswith(".opus"):
-                try:
-                    from utils.opus_metadata_reader import read_opus_metadata
-                    _tags, cover_payloads, _err = read_opus_metadata(path)
-                    if cover_payloads:
-                        return ("opus_reader", cover_payloads[0])
-                except Exception:
-                    pass
+        # 1. FLAC / OGG Vorbis / OGG Opus — .pictures property.
+        #    OggOpus.pictures (mutagen ≥ 1.45) decodes METADATA_BLOCK_PICTURE
+        #    from Vorbis Comments natively.  getattr guards against older mutagen
+        #    where the property didn't exist on the Opus subclass.
+        try:
+            for pic in getattr(audio, "pictures", None) or []:
+                if getattr(pic, "data", None):   # guard: empty bytes is falsy
+                    return ("pictures", pic.data)
+        except Exception:
+            pass
 
-            # 1. FLAC / OGG Vorbis / OGG Opus — .pictures property
+        # 2. OGG METADATA_BLOCK_PICTURE — explicit fallback.
+        #    Catches: mutagen < 1.45 (no .pictures on OggOpus), files where
+        #    .pictures raises, non-standard key casing, and base64 payloads with
+        #    leading/trailing whitespace from certain encoders.
+        #    Each item is decoded in its own try/except so one bad block does not
+        #    skip a valid one that may appear later in the tag list.
+        if MutagenPicture is not None:
             try:
-                for pic in audio.pictures:
-                    if pic.data:
-                        return ("pictures", pic.data)
-            except Exception:
-                pass
-
-            # 2. ID3 APIC frames (MP3, WAV, AIFF …)
-            try:
-                tags = audio.tags
-                if tags is not None and hasattr(tags, "getall"):
-                    for frame in tags.getall("APIC:") or tags.getall("APIC"):
-                        if getattr(frame, "data", None):
-                            return ("APIC", frame.data)
-            except Exception:
-                pass
-
-            # 3. MP4 / M4A / AAC — covr atom
-            try:
-                tags = audio.tags
-                if tags is not None:
-                    covr = tags.get("covr")
-                    if covr:
-                        data = bytes(covr[0])
-                        if data:
-                            return ("covr", data)
-            except Exception:
-                pass
-
-            # 4. OGG metadata_block_picture (base64-encoded FLAC Picture)
-            #    OGG files are dict-like — use audio.get(), not audio.tags.get()
-            try:
-                if MutagenPicture is not None:
-                    mbp = audio.get("metadata_block_picture") or []
-                    if not isinstance(mbp, list):
-                        mbp = [mbp]
-                    for item in mbp:
-                        pic = MutagenPicture(base64.b64decode(str(item)))
+                raw = _ArtScanner._vorbis_get(audio, "METADATA_BLOCK_PICTURE") or []
+                for item in raw:
+                    try:
+                        payload = base64.b64decode(str(item).strip())
+                        pic = MutagenPicture(payload)
                         if pic.data:
                             return ("mbp", pic.data)
+                    except Exception:
+                        pass
             except Exception:
                 pass
 
-            # 5. OGG coverart (raw base64 image bytes, no Picture wrapper)
-            try:
-                ca = audio.get("coverart") or []
-                if not isinstance(ca, list):
-                    ca = [ca]
-                for item in ca:
-                    data = base64.b64decode(str(item))
+        # 3. ID3 APIC frames (MP3, WAV, AIFF …)
+        try:
+            tags = audio.tags
+            if tags is not None and hasattr(tags, "getall"):
+                for frame in tags.getall("APIC:") or tags.getall("APIC"):
+                    if getattr(frame, "data", None):
+                        return ("APIC", frame.data)
+        except Exception:
+            pass
+
+        # 4. MP4 / M4A / AAC — covr atom
+        try:
+            tags = audio.tags
+            if tags is not None:
+                covr = tags.get("covr")
+                if covr:
+                    data = bytes(covr[0])
+                    if data:
+                        return ("covr", data)
+        except Exception:
+            pass
+
+        # 5. OGG coverart — raw base64 image bytes with no FLAC Picture wrapper.
+        #    Less common; written by some older OGG/Opus taggers.
+        try:
+            ca = _ArtScanner._vorbis_get(audio, "COVERART") or []
+            for item in ca:
+                try:
+                    data = base64.b64decode(str(item).strip())
                     if data:
                         return ("coverart", data)
-            except Exception:
-                pass
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
         return None
 

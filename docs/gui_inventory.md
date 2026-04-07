@@ -8,6 +8,17 @@ Plain-English reference for every screen, panel, control, and dialog in the
 
 ---
 
+## 0. Startup Sequence (`splash.py`, `landing.py`)
+
+Handles the initial application loading and library selection before showing the main window.
+
+| Component | Purpose |
+|---|---|
+| `SplashScreen` (`splash.py`) | Displays the initial AlphaDEX logo and handles theme initialization. Features a progressive loading bar that responds to actual art loading events. |
+| `MosaicLanding` (`landing.py`) | Presents a grid of album art from the user's previously selected library. Validates the library path, builds the mosaic (with fast-path for Opus album art and folder-image fallback), and provides a "Continue" button to launch the main application. |
+
+---
+
 ## 1. Application Window (`AlphaDEXWindow`)
 
 `QMainWindow`, default size 1300 × 860 px, minimum 900 × 600 px.
@@ -331,14 +342,14 @@ Library-wide format conversion and archiving.
 
 ### 6.12 Export & Utilities (`tools.py`)
 
-Five-tab panel of miscellaneous tools.
+Five-tab panel of miscellaneous tools. Minimum tile width is 500 px for better card proportions.
 
 | Tab | Contents |
 |---|---|
-| Artist/Title Export | Path entry, delimiter selector, Export button — writes text file of all artist · title pairs |
-| Codec List Export | Export button — writes text file of all file paths grouped by codec |
+| Artist/Title Export | Path entry, delimiter selector, Export button, 📁 Open Folder button — writes text file of all artist · title pairs |
+| Codec List Export | Export button, 📁 Open Folder button — writes text file of all file paths grouped by codec (chips use 13 px font, 4/12 px padding) |
 | File Cleanup | Finds and lists non-audio files in the library; Move to Trash / Delete buttons |
-| Diagnostics | Library health check: missing tags, unexpected folder structures, orphaned files |
+| Diagnostics | Responsive 4-column grid of square buttons (with Qt standard icons) launching diagnostic dialogs: M4A Tester, Opus Tester, Bucketing POC, Scan Engine, Fuzzy Finder, Pair Review, and View Crash Log |
 | Validator | Runs `validator.py` against the library and displays the result report |
 
 ### 6.13 Help (`help.py`)
@@ -374,6 +385,19 @@ See §5.3.
 ### 7.3 AutoThemeDialog
 
 See §5.4.
+
+### 7.4 Diagnostics Dialogs
+
+Various dialogs launched from the Export & Utilities workspace.
+
+| Dialog | Purpose |
+|---|---|
+| `MediaTesterDialog` | Tests file decoding for specific codecs (e.g., M4A, Opus). |
+| `BucketingPocDialog` | Minimal UI for testing duplicate bucketing strategies. |
+| `ScanEngineDialog` | UI for the duplicate scan engine. |
+| `FuzzyDupeDialog` | Fuzzy duplicate finder UI. |
+| `PairReviewDialog` | Reviews and resolves duplicate pairs. |
+| `CrashLogDialog` | Displays the most recent application crash log. |
 
 ---
 
