@@ -9,6 +9,7 @@ from gui.themes.manager import get_manager
 from gui.widgets.top_bar import TopBar
 from gui.widgets.sidebar import Sidebar
 from gui.widgets.log_drawer import LogDrawer
+from gui.widgets.now_playing_bar import NowPlayingBar
 
 # ── Workspace imports ─────────────────────────────────────────────────────────
 from gui.workspaces.indexer import IndexerWorkspace
@@ -104,6 +105,10 @@ class AlphaDEXWindow(QtWidgets.QMainWindow):
         self._stack = QtWidgets.QStackedWidget()
         content_layout.addWidget(self._stack, stretch=1)
 
+        # ── Now Playing bar (persistent, above log drawer) ─────────────────
+        self._now_playing_bar = NowPlayingBar()
+        content_layout.addWidget(self._now_playing_bar)
+
         # ── Log drawer (inside content area, bottom) ───────────────────────
         self._log_drawer = LogDrawer()
         content_layout.addWidget(self._log_drawer)
@@ -127,6 +132,26 @@ class AlphaDEXWindow(QtWidgets.QMainWindow):
             ws.status_changed.connect(self._on_status_changed)
             self._stack.addWidget(ws)
             self._workspaces[key] = ws
+
+        # ── Wire PlayerWorkspace ↔ NowPlayingBar ────────────────────────
+        player_ws = self._workspaces.get("player")
+        if isinstance(player_ws, PlayerWorkspace):
+            npb = self._now_playing_bar
+            # Player → bar
+            player_ws.now_playing_changed.connect(npb.update_now_playing)
+            player_ws.playback_state_changed.connect(npb.set_playing)
+            player_ws.position_changed.connect(npb.update_position)
+            # Bar → player
+            npb.play_pause_requested.connect(player_ws._on_play_pause)
+            npb.next_requested.connect(player_ws.play_next)
+            npb.prev_requested.connect(player_ws.play_prev)
+            npb.seek_requested.connect(self._on_bar_seek)
+            npb.volume_changed.connect(self._on_bar_volume)
+            # Keep bar volume knob in sync with the workspace slider
+            player_ws._vol_slider.sliderMoved.connect(npb.set_volume)
+            player_ws._vol_slider.sliderReleased.connect(
+                lambda: npb.set_volume(player_ws._vol_slider.value())
+            )
 
     # ── Shortcuts ─────────────────────────────────────────────────────────
 
@@ -240,6 +265,25 @@ class AlphaDEXWindow(QtWidgets.QMainWindow):
             return
         self._top_bar.set_library(path)
         self._on_library_changed(path)
+
+    def play_directory(self, dirpath: str) -> None:
+        """Switch to the Player workspace and start playing all tracks in *dirpath*."""
+        self._on_nav_changed("player")
+        player_ws = self._workspaces.get("player")
+        if isinstance(player_ws, PlayerWorkspace):
+            player_ws.load_directory_and_play(dirpath)
+
+    @Slot(int)
+    def _on_bar_seek(self, ms: int) -> None:
+        player_ws = self._workspaces.get("player")
+        if isinstance(player_ws, PlayerWorkspace):
+            player_ws.seek_to_ms(ms)
+
+    @Slot(int)
+    def _on_bar_volume(self, value: int) -> None:
+        player_ws = self._workspaces.get("player")
+        if isinstance(player_ws, PlayerWorkspace):
+            player_ws.set_volume(value)
 
     # ── Helpers ───────────────────────────────────────────────────────────
 

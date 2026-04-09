@@ -19,6 +19,7 @@ Sequence
 from __future__ import annotations
 
 import concurrent.futures
+import hashlib
 import json
 import os
 import random
@@ -27,18 +28,6 @@ import time
 from pathlib import Path
 
 from gui.compat import QtCore, QtGui, QtWidgets, Signal
-
-# ── Optional module imports ────────────────────────────────────────────────────
-# Import mutagen once at module level to avoid repeated import attempts.
-try:
-    import mutagen
-    from mutagen.flac import Picture as MutagenPicture
-except ImportError:
-    mutagen = None  # type: ignore[assignment]
-    MutagenPicture = None  # type: ignore[assignment]
-
-# base64 is standard library and safe to import at module level
-import base64
 
 # ── Grid constants ─────────────────────────────────────────────────────────────
 _COLS      = 7
@@ -66,6 +55,11 @@ _SCAN_DEPTH = 7   # max folder depth searched for art (root = 0)
 # Set True to print per-file extraction results to the terminal on startup.
 # Flip to False once you have confirmed which extraction path your library uses.
 _ART_SCAN_DEBUG: bool = True
+
+# Pause between the window finishing its fade-in and the tiles starting to fly.
+# During this window the CTA card ("AlphaDEX") is the only visible element —
+# this is the merged "logo moment" that replaces the old SplashScreen.
+_LOGO_PAUSE_MS: int = 600
 
 # ── Colour pool — diagonal gradient pairs for placeholder tiles ───────────────
 _GRADS: list[tuple[str, str]] = [
@@ -109,6 +103,8 @@ def _darken(hex_color: str, pct: int) -> str:
 class _Tile(QtWidgets.QWidget):
     """Single album-art placeholder tile — a colourful diagonal gradient square."""
 
+    clicked = Signal(str)   # emitted on click; payload is the directory path
+
     def __init__(
         self,
         parent: QtWidgets.QWidget,
@@ -118,6 +114,7 @@ class _Tile(QtWidgets.QWidget):
         super().__init__(parent)
         self._grad        = grad          # kept for lazy placeholder bake
         self._target      = target
+        self._dirpath:    str             = ""   # set when art scanner assigns this tile
         self._ready_pm:   QtGui.QPixmap | None = None
         self._placeholder: QtGui.QPixmap | None = None  # baked on first paintEvent
         self.setFixedSize(_TILE_SZ, _TILE_SZ)
@@ -125,11 +122,21 @@ class _Tile(QtWidgets.QWidget):
         # the parent's gradient through them.
         self.setAutoFillBackground(False)
         self.setAttribute(QtCore.Qt.WidgetAttribute.WA_NoSystemBackground)
+        self.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
 
     def set_pixmap(self, pm: QtGui.QPixmap) -> None:
         """Store the pre-baked pixmap (baking done off-thread); tile repaints."""
         self._ready_pm = pm
         self.update()
+
+    def set_dirpath(self, path: str) -> None:
+        """Record which library directory this tile's cover came from."""
+        self._dirpath = path
+
+    def mousePressEvent(self, event: QtGui.QMouseEvent) -> None:  # noqa: N802
+        if event.button() == QtCore.Qt.MouseButton.LeftButton and self._dirpath:
+            self.clicked.emit(self._dirpath)
+        super().mousePressEvent(event)
 
     # ── Bake helpers ───────────────────────────────────────────────────────
 
@@ -229,7 +236,7 @@ class _CTACard(QtWidgets.QFrame):
 
         # ── App name ──────────────────────────────────────────────────────
         name_lbl = QtWidgets.QLabel("AlphaDEX")
-        nf = QtGui.QFont(UI_FAMILY, 34)
+        nf = QtGui.QFont(UI_FAMILY, 42)
         nf.setWeight(QtGui.QFont.Weight.Bold)
         nf.setHintingPreference(QtGui.QFont.HintingPreference.PreferNoHinting)
         name_lbl.setFont(nf)
@@ -240,7 +247,7 @@ class _CTACard(QtWidgets.QFrame):
 
         # ── Tagline ───────────────────────────────────────────────────────
         tag_lbl = QtWidgets.QLabel("Your library, organized.")
-        tf = QtGui.QFont(UI_FAMILY, 12)
+        tf = QtGui.QFont(UI_FAMILY, 15)
         tag_lbl.setFont(tf)
         tag_lbl.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         tag_lbl.setStyleSheet(
@@ -257,7 +264,7 @@ class _CTACard(QtWidgets.QFrame):
         # - Saved library: "Go" → uses saved library
         # - No saved library: "Choose Library Folder" → opens file dialog
         if self._saved:
-            btn_text = "Go"
+            btn_text = "Initialize"
             btn_tooltip = f"Open saved library: {self._saved}"
             btn_action = self.reuse_clicked.emit
         else:
@@ -278,7 +285,7 @@ class _CTACard(QtWidgets.QFrame):
                 border: none;
                 border-radius: 10px;
                 font-family: '{UI_FAMILY}';
-                font-size: 14px;
+                font-size: 15px;
                 font-weight: 600;
                 padding: 0 28px;
                 letter-spacing: 0.3px;
@@ -429,51 +436,39 @@ class _ArtHistory:
 # ─────────────────────────────────────────────────────────────────────────────
 
 class _ArtScanner(QtCore.QThread):
-    """Scan *library_path* for embedded album art and emit one image per tile.
+    """Scan *library_path* for album art and emit one image per tile.
 
     Cover extraction
     ----------------
-    ``_cover_from_file()`` reads embedded covers directly from audio tags
-    without relying on sidecar image files.  It tries mutagen first (pure
-    Python, fast, no subprocess) and falls back to an ``ffmpeg`` subprocess
-    for any format mutagen cannot handle.  Supported formats include:
+    ``_first_cover_in_dir()`` checks each directory in two stages:
 
-    * **FLAC** — ``mutagen.File().pictures``
-    * **MP3 / WAV / AIFF** — ID3 ``APIC`` frames via ``mutagen``
-    * **M4A / AAC** — ``covr`` atom via ``mutagen``
-    * **OGG Vorbis / OGG Opus** — ``metadata_block_picture`` (base64 + FLAC
-      Picture) via ``mutagen``
-    * **Everything else** — ``ffmpeg -an -vframes 1 -vcodec copy -f image2pipe``
+    1. **Sidecar images** (fast path) — looks for ``cover.jpg``, ``folder.jpg``,
+       etc. before touching any audio file.  Zero mutagen overhead for
+       well-organised libraries.
+    2. **Embedded art** — delegates to ``utils.audio_metadata_reader.read_metadata``
+       (the canonical extractor for the whole app) for up to ``_MAX_FILES_PER_DIR``
+       audio files.  Handles FLAC, MP3, OGG Vorbis, OGG Opus, M4A/AAC, WAV,
+       AIFF, and WMA; applies ``ensure_long_path`` for Windows paths > 260 chars.
 
     Directory ordering — fresh-first with history
     ---------------------------------------------
     ``_ordered_dirs()`` collects all directories up to ``_SCAN_DEPTH`` levels
-    and splits them into two independently-shuffled buckets:
+    (including the library root itself for flat libraries) and splits them into
+    two independently-shuffled buckets:
 
     * **Fresh** — not in ``_ArtHistory`` (never shown, or log was reset).
     * **Used**  — appeared in a previous run's selection.
 
     Fresh directories come first.  Within each directory the file list is also
-    shuffled, so every launch reads a different track from each folder — giving
-    variety even when multiple albums share a directory.
+    shuffled, so every launch reads a different track from each folder.
 
-    Pool + selection
-    ----------------
-    ``_collect_covers()`` walks the ordered list, reading one audio file per
-    directory until it finds a cover.  Unique covers (deduplicated by first
-    64 bytes) are kept; duplicates are skipped and the next file tried.
-    Scanning stops when ``_pool_cap`` (≥ ``tile_count × 5``, min 128) unique
-    covers are gathered, or when the library is exhausted.
-
-    ``random.sample(pool, tile_count)`` picks a fresh random subset each
-    launch.  After emitting, the source directories are saved to
-    ``_ArtHistory`` so the next run explores different folders first.
+    After emitting, the source directories are saved to ``_ArtHistory`` so the
+    next run explores different folders first.
     """
 
-    art_found = Signal(int, QtGui.QImage)  # (tile_index, image) — QImage is thread-safe
+    art_found = Signal(int, QtGui.QImage, str)  # (tile_index, image, dirpath) — QImage is thread-safe
 
     _MAX_SCAN_WORKERS   = 6  # parallel cover-extraction threads
-    _MAX_FILES_PER_DIR  = 2  # audio files tried per directory before giving up
     _IN_FLIGHT          = _MAX_SCAN_WORKERS * 3  # futures kept active at once
 
     def __init__(self, library_path: str, tile_count: int) -> None:
@@ -533,137 +528,23 @@ class _ArtScanner(QtCore.QThread):
         return names
 
     @staticmethod
-    def _vorbis_get(audio: object, key: str) -> list | None:
-        """Case-insensitive tag lookup for OGG/Vorbis dict-like mutagen objects.
-
-        mutagen's VComment.__getitem__ is documented as case-insensitive, but
-        the behaviour of .get() has varied across mutagen releases.  This helper
-        tries the supplied key first (letting mutagen's own normalisation run),
-        then falls back to a manual case-insensitive scan of audio.items() so
-        that METADATA_BLOCK_PICTURE is found regardless of whether it was written
-        as uppercase, lowercase, or any mixed variant.
-
-        Returns a list of string values, or None if the key is not present.
-        """
-        # First attempt: let mutagen handle it (covers most cases)
-        try:
-            result = audio.get(key)  # type: ignore[attr-defined]
-            if result:
-                return result if isinstance(result, list) else [result]
-        except Exception:
-            pass
-
-        # Fallback: manual case-insensitive scan over all tag items
-        key_lower = key.lower()
-        try:
-            values = []
-            for k, v in audio.items():  # type: ignore[attr-defined]
-                if k.lower() == key_lower:
-                    if isinstance(v, list):
-                        values.extend(v)
-                    else:
-                        values.append(v)
-            return values if values else None
-        except Exception:
-            return None
-
-    @staticmethod
     def _cover_from_file(path: str) -> tuple[str, bytes] | None:
         """Return ``(method, image_bytes)`` for the first embedded cover found,
-        or ``None`` if the file has no cover mutagen can read.
+        or ``None`` if the file has no cover art.
 
-        Each extraction attempt is isolated in its own try/except (and where
-        possible in per-item try/excepts) so that one malformed tag or picture
-        block does not prevent other methods or items from being tried.
-
-        Order tried:
-          1. .pictures  — FLAC, OGG Vorbis, OGG Opus (mutagen ≥ 1.45 native property)
-          2. mbp        — OGG METADATA_BLOCK_PICTURE, explicit fallback for older
-                          mutagen or files where .pictures fails (malformed header,
-                          non-standard key casing, whitespace in base64 payload)
-          3. APIC       — ID3 frames: MP3, WAV, AIFF
-          4. covr       — MP4 atom: M4A, AAC
-          5. coverart   — OGG simpler raw-base64 blob (less common)
+        Delegates to ``utils.audio_metadata_reader.read_metadata`` which is the
+        canonical cover extractor for the entire application.  It handles FLAC,
+        MP3, OGG Vorbis, OGG Opus, M4A/AAC, WAV, AIFF, and WMA; applies
+        ``ensure_long_path`` for Windows paths > 260 chars; and falls back to
+        per-track sidecar files (``<track>.jpg``, ``<track>.artwork``, etc.).
         """
-        if mutagen is None:
-            return None
-
-        audio = None
         try:
-            audio = mutagen.File(path, easy=False)
+            from utils.audio_metadata_reader import read_metadata
+            _tags, covers, _err, _hint = read_metadata(path, include_cover=True)
+            if covers:
+                return ("read_metadata", covers[0])
         except Exception:
             pass
-
-        if audio is None:
-            return None
-
-        # 1. FLAC / OGG Vorbis / OGG Opus — .pictures property.
-        #    OggOpus.pictures (mutagen ≥ 1.45) decodes METADATA_BLOCK_PICTURE
-        #    from Vorbis Comments natively.  getattr guards against older mutagen
-        #    where the property didn't exist on the Opus subclass.
-        try:
-            for pic in getattr(audio, "pictures", None) or []:
-                if getattr(pic, "data", None):   # guard: empty bytes is falsy
-                    return ("pictures", pic.data)
-        except Exception:
-            pass
-
-        # 2. OGG METADATA_BLOCK_PICTURE — explicit fallback.
-        #    Catches: mutagen < 1.45 (no .pictures on OggOpus), files where
-        #    .pictures raises, non-standard key casing, and base64 payloads with
-        #    leading/trailing whitespace from certain encoders.
-        #    Each item is decoded in its own try/except so one bad block does not
-        #    skip a valid one that may appear later in the tag list.
-        if MutagenPicture is not None:
-            try:
-                raw = _ArtScanner._vorbis_get(audio, "METADATA_BLOCK_PICTURE") or []
-                for item in raw:
-                    try:
-                        payload = base64.b64decode(str(item).strip())
-                        pic = MutagenPicture(payload)
-                        if pic.data:
-                            return ("mbp", pic.data)
-                    except Exception:
-                        pass
-            except Exception:
-                pass
-
-        # 3. ID3 APIC frames (MP3, WAV, AIFF …)
-        try:
-            tags = audio.tags
-            if tags is not None and hasattr(tags, "getall"):
-                for frame in tags.getall("APIC:") or tags.getall("APIC"):
-                    if getattr(frame, "data", None):
-                        return ("APIC", frame.data)
-        except Exception:
-            pass
-
-        # 4. MP4 / M4A / AAC — covr atom
-        try:
-            tags = audio.tags
-            if tags is not None:
-                covr = tags.get("covr")
-                if covr:
-                    data = bytes(covr[0])
-                    if data:
-                        return ("covr", data)
-        except Exception:
-            pass
-
-        # 5. OGG coverart — raw base64 image bytes with no FLAC Picture wrapper.
-        #    Less common; written by some older OGG/Opus taggers.
-        try:
-            ca = _ArtScanner._vorbis_get(audio, "COVERART") or []
-            for item in ca:
-                try:
-                    data = base64.b64decode(str(item).strip())
-                    if data:
-                        return ("coverart", data)
-                except Exception:
-                    pass
-        except Exception:
-            pass
-
         return None
 
     # ── Directory ordering ────────────────────────────────────────────────
@@ -696,7 +577,11 @@ class _ArtScanner(QtCore.QThread):
                 bucket.append(subdirpath)
                 _walk(subdirpath, depth + 1)
 
-        # Start walk from library root
+        # Include the library root itself so flat libraries (all files in one
+        # folder) are not silently skipped.
+        root_bucket = used if self._library in history else fresh
+        root_bucket.append(self._library)
+
         _walk(self._library, 0)
         random.shuffle(fresh)
         random.shuffle(used)
@@ -704,35 +589,35 @@ class _ArtScanner(QtCore.QThread):
 
     # ── Per-directory cover helper ────────────────────────────────────────
 
-    def _first_cover_in_dir(
+    def _covers_in_dir(
         self, dirpath: str
-    ) -> tuple[str, str, bytes] | None:
-        """Return ``(method, dirpath, raw_bytes)`` for the first cover found,
-        or ``None``.  Gives up after ``_MAX_FILES_PER_DIR`` audio files.
+    ) -> list[tuple[str, str, bytes]]:
+        """Return every unique cover found in *dirpath* as a list of
+        ``(method, dirpath, raw_bytes)`` tuples.  Returns ``[]`` if none found.
+
+        Returning a list (rather than stopping at the first hit) is what allows
+        flat libraries — where every song lives in one folder — to populate
+        multiple tiles with different album covers.  For a normal album folder
+        the list will contain exactly one entry (the shared cover art); for a
+        flat folder it will contain one entry per uniquely-covered track.
+
+        Deduplication within the directory is done here via a local md5 set so
+        that tracks sharing the same embedded art (the typical album case) only
+        contribute one result.  Cross-directory deduplication is handled by
+        ``seen_sigs`` in ``run()``.
 
         Workers do I/O only — no Qt calls.  Baking happens in the scanner
-        QThread (``run()``) so only one background thread ever touches Qt
-        APIs, keeping GIL contention with the main thread minimal.
+        QThread (``run()``) so only one background thread ever touches Qt APIs.
         """
-        tried = 0
-        for name in self._scandir_files(dirpath):
-            if not _is_audio_file(name):
-                continue
-            result = self._cover_from_file(os.path.join(dirpath, name))
-            tried += 1
-            if result:
-                method, raw = result
-                return (method, dirpath, raw)
-            if tried >= self._MAX_FILES_PER_DIR:
-                break
+        results:     list[tuple[str, str, bytes]] = []
+        local_sigs:  set[bytes]                   = set()
 
-        # Fallback: look for a standalone cover image file in the directory.
-        # Many converted/Opus libraries store art as cover.jpg rather than
-        # embedding it in every track.
         _COVER_NAMES = (
             "cover.jpg", "folder.jpg", "album.jpg", "artwork.jpg",
             "front.jpg", "cover.png", "folder.png", "album.png",
         )
+
+        # ── 1. Sidecar image ───────────────────────────────────────────────
         for img_name in _COVER_NAMES:
             img_path = os.path.join(dirpath, img_name)
             try:
@@ -740,11 +625,26 @@ class _ArtScanner(QtCore.QThread):
                     with open(img_path, "rb") as fh:
                         raw = fh.read()
                     if raw:
-                        return ("folder_image", dirpath, raw)
+                        sig = hashlib.md5(raw).digest()
+                        local_sigs.add(sig)
+                        results.append(("folder_image", dirpath, raw))
+                    break  # at most one sidecar per directory
             except OSError:
                 pass
 
-        return None
+        # ── 2. Embedded art — every audio file in the directory ────────────
+        for name in self._scandir_files(dirpath):
+            if not _is_audio_file(name):
+                continue
+            result = self._cover_from_file(os.path.join(dirpath, name))
+            if result:
+                method, raw = result
+                sig = hashlib.md5(raw).digest()
+                if sig not in local_sigs:
+                    local_sigs.add(sig)
+                    results.append((method, dirpath, raw))
+
+        return results
 
     # ── Orchestration + emit ──────────────────────────────────────────────
 
@@ -757,11 +657,13 @@ class _ArtScanner(QtCore.QThread):
         if self.isInterruptionRequested():
             return
 
-        selected:      list[str]        = []
-        seen_sigs:     set[bytes]       = set()
-        tile_index:    int              = 0
-        method_counts: dict[str, int]   = {}
-        no_cover_dirs: int              = 0
+        selected:       list[str]              = []
+        seen_sigs:      set[tuple[int, ...]]   = set()   # visual fingerprints — catches same cover re-encoded
+        found_images:   list[QtGui.QImage]    = []      # baked images for fill-cycle fallback
+        found_dirpaths: list[str]             = []      # dirpath paired with each found_image entry
+        tile_index:     int                   = 0
+        method_counts:  dict[str, int]        = {}
+        no_cover_dirs:  int                   = 0
 
         # Rolling pool: keep _IN_FLIGHT futures active at all times.
         # As each completes we immediately submit the next directory.
@@ -778,7 +680,7 @@ class _ArtScanner(QtCore.QThread):
             while len(pending) < self._IN_FLIGHT:
                 try:
                     d = next(dir_iter)
-                    pending[executor.submit(self._first_cover_in_dir, d)] = None
+                    pending[executor.submit(self._covers_in_dir, d)] = None
                 except StopIteration:
                     break
 
@@ -793,21 +695,40 @@ class _ArtScanner(QtCore.QThread):
                 for f in done:
                     del pending[f]
                     try:
-                        hit = f.result()
+                        hits = f.result()
                     except Exception:
-                        hit = None
-                    if hit is None:
+                        hits = []
+                    if not hits:
                         no_cover_dirs += 1
                     else:
-                        method, dirpath, raw = hit
-                        sig = raw[:64]
-                        if sig not in seen_sigs:
-                            seen_sigs.add(sig)
-                            # Bake here in the scanner QThread — one thread,
-                            # no GIL war with the 6 I/O workers or main thread.
+                        for method, dirpath, raw in hits:
+                            if tile_index >= self._n:
+                                break
+                            # Bake first — normalises to 110×110 ARGB32 regardless
+                            # of source encoding.  The visual sig is then derived
+                            # from the baked pixels, so the same cover re-saved at
+                            # a different JPEG quality or by a different tool still
+                            # produces the same fingerprint and gets deduplicated.
                             img = self._bake_image(raw)
-                            if img is not None:
-                                self.art_found.emit(tile_index, img)
+                            if img is None:
+                                continue
+                            # 9-point visual fingerprint: sample a 3×3 grid at
+                            # ~30 / 50 / 70 % of the tile width (inset from edges
+                            # to avoid crop differences between different source
+                            # aspect ratios).  Mask the 6 low bits of each channel
+                            # (tolerance ±63) so interpolation differences caused
+                            # by the same image existing at different source
+                            # resolutions collapse to the same value.
+                            _S = (33, 55, 77)
+                            sig = tuple(
+                                img.pixel(x, y) & 0xC0C0C0C0
+                                for x in _S for y in _S
+                            )
+                            if sig not in seen_sigs:
+                                seen_sigs.add(sig)
+                                self.art_found.emit(tile_index, img, dirpath)
+                                found_images.append(img)
+                                found_dirpaths.append(dirpath)
                                 selected.append(dirpath)
                                 method_counts[method] = method_counts.get(method, 0) + 1
                                 tile_index += 1
@@ -815,8 +736,26 @@ class _ArtScanner(QtCore.QThread):
         finally:
             executor.shutdown(wait=False, cancel_futures=True)
 
+        # ── Fill-cycle: fewer unique covers than tiles ─────────────────────
+        # If the library has fewer unique albums than tile slots, cycle through
+        # the covers we did find (shuffled so repeats are distributed randomly)
+        # rather than leaving tiles as colour placeholders.
+        fill_count = 0
+        if tile_index < self._n and found_images and not self.isInterruptionRequested():
+            fill_pairs = list(zip(found_images, found_dirpaths))
+            random.shuffle(fill_pairs)
+            pool_len = len(fill_pairs)
+            while tile_index < self._n and not self.isInterruptionRequested():
+                fill_img, fill_dir = fill_pairs[fill_count % pool_len]
+                self.art_found.emit(tile_index, fill_img, fill_dir)
+                tile_index += 1
+                fill_count += 1
+
         if _ART_SCAN_DEBUG:
+            unique = tile_index - fill_count
             parts = [f"tiles={tile_index}/{self._n}"]
+            if fill_count:
+                parts.append(f"unique={unique}, fill={fill_count}")
             parts += [f"{m}={c}" for m, c in sorted(method_counts.items())]
             if no_cover_dirs:
                 parts.append(f"no-cover={no_cover_dirs}")
@@ -847,6 +786,7 @@ class MosaicLanding(QtWidgets.QWidget):
 
     library_selected = Signal(str)   # emitted at start of fade-out; path is ready
     finished         = Signal()      # emitted after window is hidden
+    tile_clicked     = Signal(str)   # emitted when user clicks a tile; payload is dirpath
 
     def __init__(
         self,
@@ -949,6 +889,9 @@ class MosaicLanding(QtWidgets.QWidget):
                 self._tiles.append(tile)
                 i += 1
 
+        for tile in self._tiles:
+            tile.clicked.connect(self._on_tile_clicked)
+
         if self._saved:
             self._start_art_scanner()
 
@@ -965,7 +908,15 @@ class MosaicLanding(QtWidgets.QWidget):
     # ── Public API ────────────────────────────────────────────────────────
 
     def show_animated(self) -> None:
-        """Fade the window in, then start the tile mosaic fly-in animation."""
+        """Fade the window in, pause on the logo, then start the tile fly-in.
+
+        Sequence
+        --------
+        1. Window fades in over ``_FADE_IN_MS`` — only the CTA card ("AlphaDEX")
+           is visible; all tiles are still off-screen.  This is the logo moment.
+        2. ``_LOGO_PAUSE_MS`` pause — user reads the brand name.
+        3. Tile fly-in begins (``_fly_in``).
+        """
         self.setWindowOpacity(0.0)
         self.show()
         anim = QtCore.QVariantAnimation(self)
@@ -974,7 +925,9 @@ class MosaicLanding(QtWidgets.QWidget):
         anim.setDuration(_FADE_IN_MS)
         anim.setEasingCurve(QtCore.QEasingCurve.Type.OutCubic)
         anim.valueChanged.connect(lambda v: self.setWindowOpacity(float(v)))
-        anim.finished.connect(self._fly_in)
+        anim.finished.connect(
+            lambda: QtCore.QTimer.singleShot(_LOGO_PAUSE_MS, self._fly_in)
+        )
         self._fade_in_anim = anim
         anim.start()
 
@@ -1102,6 +1055,19 @@ class MosaicLanding(QtWidgets.QWidget):
         self.hide()
         self.finished.emit()
 
+    # ── Tile click handler ────────────────────────────────────────────────
+
+    def _on_tile_clicked(self, dirpath: str) -> None:
+        """User clicked an album-art tile — begin the exit sequence and signal
+        the caller to navigate to the player and start playing *dirpath*."""
+        if not dirpath:
+            return
+        self.tile_clicked.emit(dirpath)
+        # Reuse the same exit flow as clicking Initialize.
+        # If no saved library is set we have no library to open, so guard.
+        if self._saved:
+            self._accept(self._saved)
+
     # ── Art scanner ───────────────────────────────────────────────────────
 
     def _start_art_scanner(self) -> None:
@@ -1110,29 +1076,15 @@ class MosaicLanding(QtWidgets.QWidget):
         self._scanner = scanner
         scanner.start()
 
-    def _on_art_found(self, tile_index: int, image: QtGui.QImage) -> None:
+    def _on_art_found(self, tile_index: int, image: QtGui.QImage, dirpath: str) -> None:
         # We are back on the main thread here; QPixmap conversion is safe.
         if 0 <= tile_index < len(self._tiles):
             pm = QtGui.QPixmap.fromImage(image)
             if not pm.isNull():
-                self._tiles[tile_index].set_pixmap(pm)
+                tile = self._tiles[tile_index]
+                tile.set_pixmap(pm)
+                tile.set_dirpath(dirpath)
 
-    # ── Public API for splash integration ──────────────────────────────────
-
-    def wire_splash_progress(self, splash: object) -> None:
-        """Connect this landing's image loading progress to a splash screen.
-
-        The splash screen will receive updates as images are loaded, allowing
-        its progress bar to show real loading progress instead of elapsed time.
-
-        Args:
-            splash: SplashScreen instance with report_image_loaded() method.
-        """
-        if self._scanner is not None:
-            # Set the splash's target to the number of tiles we're loading
-            splash.set_image_target(len(self._tiles))  # type: ignore[attr-defined]
-            # Connect scanner's art_found signal to splash's progress reporter
-            self._scanner.art_found.connect(splash.report_image_loaded)  # type: ignore[attr-defined]
 
     # ── Background painting ────────────────────────────────────────────────
 
