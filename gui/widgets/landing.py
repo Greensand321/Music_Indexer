@@ -60,6 +60,7 @@ _ART_SCAN_DEBUG: bool = True
 # During this window the CTA card ("AlphaDEX") is the only visible element —
 # this is the merged "logo moment" that replaces the old SplashScreen.
 _LOGO_PAUSE_MS: int = 600
+_ART_SCAN_START_DELAY_MS: int = 30_000
 
 # ── Colour pool — diagonal gradient pairs for placeholder tiles ───────────────
 _GRADS: list[tuple[str, str]] = [
@@ -810,6 +811,9 @@ class MosaicLanding(QtWidgets.QWidget):
         self._fade_in_anim:  object = None
         self._fade_out_anim: object = None
         self._scanner: object = None   # _ArtScanner | None
+        self._scan_start_timer = QtCore.QTimer(self)
+        self._scan_start_timer.setSingleShot(True)
+        self._scan_start_timer.timeout.connect(self._start_art_scanner)
         self._art_history: _ArtHistory | None = None  # Track for deferred save
 
         self._compute_grid()
@@ -891,8 +895,6 @@ class MosaicLanding(QtWidgets.QWidget):
 
         for tile in self._tiles:
             tile.clicked.connect(self._on_tile_clicked)
-        if self._saved:
-            self._start_art_scanner()
 
     def _build_cta(self) -> None:
         self._cta = _CTACard(self, self._saved)
@@ -918,6 +920,10 @@ class MosaicLanding(QtWidgets.QWidget):
         """
         self.setWindowOpacity(0.0)
         self.show()
+        if self._saved:
+            # Delay art scanning to keep startup I/O quieter while launch
+            # animations and main-window construction are in progress.
+            self._scan_start_timer.start(_ART_SCAN_START_DELAY_MS)
         anim = QtCore.QVariantAnimation(self)
         anim.setStartValue(0.0)
         anim.setEndValue(1.0)
@@ -987,6 +993,7 @@ class MosaicLanding(QtWidgets.QWidget):
         if not path:
             return
         self._pending = path
+        self._scan_start_timer.stop()
         # Stop scanner immediately when the user commits to Initialize so
         # disk-heavy directory work does not compete with transition animation.
         self._stop_art_scanner()
@@ -1065,6 +1072,8 @@ class MosaicLanding(QtWidgets.QWidget):
     # ── Art scanner ───────────────────────────────────────────────────────
 
     def _start_art_scanner(self) -> None:
+        if not self._saved or self._scanner is not None:
+            return
         scanner = _ArtScanner(self._saved, len(self._tiles))
         scanner.art_found.connect(self._on_art_found)
         self._scanner = scanner
