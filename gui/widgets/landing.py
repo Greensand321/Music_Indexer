@@ -60,12 +60,6 @@ _ART_SCAN_DEBUG: bool = True
 # During this window the CTA card ("AlphaDEX") is the only visible element —
 # this is the merged "logo moment" that replaces the old SplashScreen.
 _LOGO_PAUSE_MS: int = 600
-# Delay heavy art scanning so startup stays responsive.
-# Start scan on whichever comes first:
-#  - 30s after landing shows
-#  - 3s after user presses Initialize
-_ART_SCAN_DELAY_ON_SHOW_MS: int = 30_000
-_ART_SCAN_DELAY_AFTER_INIT_MS: int = 3_000
 
 # ── Colour pool — diagonal gradient pairs for placeholder tiles ───────────────
 _GRADS: list[tuple[str, str]] = [
@@ -817,9 +811,6 @@ class MosaicLanding(QtWidgets.QWidget):
         self._fade_out_anim: object = None
         self._scanner: object = None   # _ArtScanner | None
         self._art_history: _ArtHistory | None = None  # Track for deferred save
-        self._art_scan_started: bool = False
-        self._show_delay_timer: QtCore.QTimer | None = None
-        self._init_delay_timer: QtCore.QTimer | None = None
 
         self._compute_grid()
         self._build_tiles()
@@ -902,10 +893,7 @@ class MosaicLanding(QtWidgets.QWidget):
             tile.clicked.connect(self._on_tile_clicked)
 
         if self._saved:
-            # Delay heavy scanner startup to prevent splash-time lag.
-            self._show_delay_timer = QtCore.QTimer(self)
-            self._show_delay_timer.setSingleShot(True)
-            self._show_delay_timer.timeout.connect(self._maybe_start_art_scanner)
+            self._start_art_scanner()
 
     def _build_cta(self) -> None:
         self._cta = _CTACard(self, self._saved)
@@ -942,8 +930,6 @@ class MosaicLanding(QtWidgets.QWidget):
         )
         self._fade_in_anim = anim
         anim.start()
-        if self._saved and self._show_delay_timer is not None:
-            self._show_delay_timer.start(_ART_SCAN_DELAY_ON_SHOW_MS)
 
     # ── Fly-in ────────────────────────────────────────────────────────────
 
@@ -1003,15 +989,6 @@ class MosaicLanding(QtWidgets.QWidget):
             return
         self._pending = path
 
-        # User explicitly initialized; arm a shorter delayed scanner start.
-        # Whichever timer fires first (show-delay or init-delay) wins.
-        if self._saved and not self._art_scan_started:
-            if self._init_delay_timer is None:
-                self._init_delay_timer = QtCore.QTimer(self)
-                self._init_delay_timer.setSingleShot(True)
-                self._init_delay_timer.timeout.connect(self._maybe_start_art_scanner)
-            self._init_delay_timer.start(_ART_SCAN_DELAY_AFTER_INIT_MS)
-
         # Stop any running fly-in and snap all tiles to their resting positions
         if (
             self._fly_in_grp is not None
@@ -1066,10 +1043,6 @@ class MosaicLanding(QtWidgets.QWidget):
         anim.start()
 
     def _done(self) -> None:
-        if self._show_delay_timer is not None:
-            self._show_delay_timer.stop()
-        if self._init_delay_timer is not None:
-            self._init_delay_timer.stop()
         if self._scanner is not None:
             # Disconnect signals before cleanup to prevent race conditions
             self._scanner.art_found.disconnect()
@@ -1096,13 +1069,6 @@ class MosaicLanding(QtWidgets.QWidget):
             self._accept(self._saved)
 
     # ── Art scanner ───────────────────────────────────────────────────────
-
-    def _maybe_start_art_scanner(self) -> None:
-        """Start the art scanner at most once, and only when a saved path exists."""
-        if self._art_scan_started or not self._saved or self._scanner is not None:
-            return
-        self._art_scan_started = True
-        self._start_art_scanner()
 
     def _start_art_scanner(self) -> None:
         scanner = _ArtScanner(self._saved, len(self._tiles))
