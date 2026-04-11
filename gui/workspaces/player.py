@@ -84,16 +84,20 @@ def _load_row(path: str) -> dict:
 # ─────────────────────────────────────────────────────────────────────────────
 
 class _LibraryScanner(QtCore.QThread):
-    """Walk a library folder and emit batches of metadata rows."""
+    """Walk a library folder and emit batches of metadata rows with auto-throttling."""
 
     tracks_ready  = Signal(list)   # list[dict]
     scan_complete = Signal(int)    # total count
 
-    _BATCH = 50
-
     def __init__(self, library_path: str) -> None:
         super().__init__()
         self._path = library_path
+        self._ui_latency_ms = 0
+        self._current_batch_size = 50
+        self._sleep_ms = 0
+
+    def report_ui_latency(self, elapsed_ms: int) -> None:
+        self._ui_latency_ms = elapsed_ms
 
     def run(self) -> None:
         batch: list[dict] = []
@@ -109,9 +113,21 @@ class _LibraryScanner(QtCore.QThread):
                         continue
                     batch.append(_load_row(os.path.join(root, fname)))
                     total += 1
-                    if len(batch) >= self._BATCH:
+                    
+                    if len(batch) >= self._current_batch_size:
                         self.tracks_ready.emit(list(batch))
                         batch.clear()
+                        
+                        latency = self._ui_latency_ms
+                        if latency > 15:
+                            self._current_batch_size = max(10, self._current_batch_size - 10)
+                            self._sleep_ms = min(50, self._sleep_ms + 5)
+                        elif latency < 5:
+                            self._current_batch_size = min(500, self._current_batch_size + 20)
+                            self._sleep_ms = max(0, self._sleep_ms - 2)
+                            
+                        if self._sleep_ms > 0:
+                            self.msleep(self._sleep_ms)
         finally:
             if batch:
                 self.tracks_ready.emit(batch)
@@ -263,20 +279,11 @@ class _BgArtWidget(QtWidgets.QWidget):
 # CoverFlowWidget — 3-D Cover Flow display
 # ─────────────────────────────────────────────────────────────────────────────
 
-class CoverFlowWidget(QtWidgets.QWidget):
-    """3-D Cover Flow panel.
+class CoverFlowWidget(QtWidgets.QGraphicsView):
+    """3-D Cover Flow panel (Optimized 2.5D).
 
     * Front cover (currently playing): centered, full-size, facing the viewer.
-    * Back cover (single-clicked track): slides in from one side as a
-      perspective-projected trapezoid — inner edge full height, outer edge
-      slightly shorter, the whole thing horizontally compressed.  Mimics the
-      iPod nano / iTunes Cover Flow aesthetic.
-
-    Public API
-    ----------
-    set_front(pm)               — update the playing track's cover
-    set_back(pm, right=True)    — animate a selected cover in from the side
-    clear_back()                — dismiss the side cover
+    * Back cover (single-clicked track): slides in from one side.
     """
 
     _FRONT      = 160     # front cover square size (px)
@@ -290,6 +297,26 @@ class CoverFlowWidget(QtWidgets.QWidget):
 
     def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(parent)
+        self.setRenderHints(
+            QtGui.QPainter.RenderHint.Antialiasing |
+            QtGui.QPainter.RenderHint.SmoothPixmapTransform
+        )
+        self.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        self.setStyleSheet("background: transparent;")
+        self.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+
+        self._scene = QtWidgets.QGraphicsScene(self)
+        self.setScene(self._scene)
+
+        # Create Items
+        self._back_item = QtWidgets.QGraphicsPixmapItem()
+        self._front_item = QtWidgets.QGraphicsPixmapItem()
+        
+        # Add to scene
+        self._scene.addItem(self._back_item)
+        self._scene.addItem(self._front_item)
+
         self._front_pm: QtGui.QPixmap | None = None
         self._back_pm:  QtGui.QPixmap | None = None
         self._back_right: bool = True
@@ -301,29 +328,39 @@ class CoverFlowWidget(QtWidgets.QWidget):
 
         side_vis = int(self._BACK_W * self._DRAW_RATIO)
         self.setMinimumSize(self._FRONT + 2 * side_vis + 24, self._FRONT + 20)
+        
+        self._bake_front()
+        self._back_item.hide()
 
     def sizeHint(self) -> QtCore.QSize:
         side_vis = int(self._BACK_W * self._DRAW_RATIO)
         return QtCore.QSize(self._FRONT + 2 * side_vis + 24, self._FRONT + 20)
+
+    def resizeEvent(self, event: QtGui.QResizeEvent) -> None:
+        super().resizeEvent(event)
+        self._scene.setSceneRect(0, 0, self.width(), self.height())
+        self._update_layout()
 
     def _get_sp(self) -> float:
         return self._slide_val
 
     def _set_sp(self, v: float) -> None:
         self._slide_val = v
-        self.update()
+        self._update_layout()
 
     slide_progress = QtCore.Property(float, _get_sp, _set_sp)
 
     def set_front(self, pm: QtGui.QPixmap | None) -> None:
         self._front_pm = pm
-        self.update()
+        self._bake_front()
+        self._update_layout()
 
     def set_back(self, pm: QtGui.QPixmap | None, right_side: bool = True) -> None:
         side_changed = (right_side != self._back_right)
         self._back_pm    = pm
         self._back_right = right_side
         if pm:
+            self._bake_back()
             start = 0.0 if (side_changed or self._slide_val < 0.05) else self._slide_val
             self._anim.stop()
             self._slide_val = start
@@ -333,175 +370,169 @@ class CoverFlowWidget(QtWidgets.QWidget):
         else:
             self._anim.stop()
             self._slide_val = 0.0
-        self.update()
+            self._back_item.hide()
+        self._update_layout()
 
     def clear_back(self) -> None:
         self._anim.stop()
         self._back_pm   = None
         self._slide_val = 0.0
-        self.update()
+        self._back_item.hide()
+        self._update_layout()
 
-    # ── Painting ──────────────────────────────────────────────────────────────
-
-    def paintEvent(self, event: QtGui.QPaintEvent) -> None:  # noqa: N802
-        p = QtGui.QPainter(self)
-        p.setRenderHints(
-            QtGui.QPainter.RenderHint.Antialiasing |
-            QtGui.QPainter.RenderHint.SmoothPixmapTransform
-        )
-        cx = self.width()  // 2
-        cy = self.height() // 2
-
-        # Back cover first (it lives behind the front)
-        if self._back_pm and self._slide_val > 0.001:
-            self._draw_back(p, cx, cy)
-        self._draw_front(p, cx, cy)
-        p.end()
-
-    def _draw_front(self, p: QtGui.QPainter, cx: int, cy: int) -> None:
+    def _bake_front(self) -> None:
         sz = self._FRONT
-        x  = cx - sz // 2
-        y  = cy - sz // 2
-
+        pm = QtGui.QPixmap(sz + 20, sz + 20)
+        pm.fill(QtCore.Qt.GlobalColor.transparent)
+        
+        p = QtGui.QPainter(pm)
+        p.setRenderHints(QtGui.QPainter.RenderHint.Antialiasing | QtGui.QPainter.RenderHint.SmoothPixmapTransform)
+        
         # Drop shadow
-        p.save()
         p.setPen(QtCore.Qt.PenStyle.NoPen)
         p.setBrush(QtGui.QColor(0, 0, 0, 95))
-        p.drawRoundedRect(x + 5, y + 7, sz, sz, 10, 10)
-        p.restore()
+        p.drawRoundedRect(15, 17, sz, sz, 10, 10)
 
         if self._front_pm:
-            pm = self._front_pm.scaled(
+            scaled = self._front_pm.scaled(
                 sz, sz,
                 QtCore.Qt.AspectRatioMode.KeepAspectRatio,
                 QtCore.Qt.TransformationMode.SmoothTransformation,
             )
             clip = QtGui.QPainterPath()
-            clip.addRoundedRect(QtCore.QRectF(x, y, pm.width(), pm.height()), 8, 8)
-            p.save()
+            clip.addRoundedRect(QtCore.QRectF(10, 10, scaled.width(), scaled.height()), 8, 8)
             p.setClipPath(clip)
-            p.drawPixmap(x, y, pm)
-            p.restore()
+            p.drawPixmap(10, 10, scaled)
         else:
-            p.save()
             p.setBrush(QtGui.QColor(30, 33, 48))
-            p.setPen(QtCore.Qt.PenStyle.NoPen)
-            p.drawRoundedRect(x, y, sz, sz, 8, 8)
+            p.drawRoundedRect(10, 10, sz, sz, 8, 8)
             p.setPen(QtGui.QColor(71, 85, 105))
             fnt = self.font()
             fnt.setPointSize(30)
             p.setFont(fnt)
-            p.drawText(
-                QtCore.QRect(x, y, sz, sz),
-                QtCore.Qt.AlignmentFlag.AlignCenter, "♪",
-            )
-            p.restore()
+            p.drawText(QtCore.QRect(10, 10, sz, sz), QtCore.Qt.AlignmentFlag.AlignCenter, "♪")
+        
+        p.end()
+        self._front_item.setPixmap(pm)
 
-    def _draw_back(self, p: QtGui.QPainter, cx: int, cy: int) -> None:
-        a       = self._slide_val
+    def _bake_back(self) -> None:
+        # Pre-compute the exact 3D distorted shape and shadow ONCE
         bw, bh  = self._BACK_W, self._BACK_H
         drawn_w = int(bw * self._DRAW_RATIO)
-
         inner_hh = int(bh * self._V_INNER)
         outer_hh = int(bh * self._V_OUTER)
-
-        # Slide: starts further out and eases into resting position
-        slide_extra = int((1.0 - a) * (drawn_w + 28))
-        fsz = self._FRONT
-
-        if self._back_right:
-            inner_x = cx + fsz // 2 + self._GAP + slide_extra
-        else:
-            inner_x = cx - fsz // 2 - self._GAP - drawn_w - slide_extra
-        outer_x = inner_x + drawn_w
-
+        
         pm = self._back_pm.scaled(
             bw, bh,
             QtCore.Qt.AspectRatioMode.IgnoreAspectRatio,
             QtCore.Qt.TransformationMode.SmoothTransformation,
         )
-
-        # Source rectangle quad
+        
+        out_pm = QtGui.QPixmap(drawn_w, inner_hh * 2)
+        out_pm.fill(QtCore.Qt.GlobalColor.transparent)
+        
+        p = QtGui.QPainter(out_pm)
+        p.setRenderHints(QtGui.QPainter.RenderHint.Antialiasing | QtGui.QPainter.RenderHint.SmoothPixmapTransform)
+        
+        cy_local = inner_hh
+        
         src = QtGui.QPolygonF([
             QtCore.QPointF(0,  0),
             QtCore.QPointF(bw, 0),
             QtCore.QPointF(bw, bh),
             QtCore.QPointF(0,  bh),
         ])
-
-        # Destination: perspective trapezoid.
-        # For right-side cover the inner (near-viewer) edge is on the left.
+        
         if self._back_right:
+            inner_x, outer_x = 0, drawn_w
             dst = QtGui.QPolygonF([
-                QtCore.QPointF(inner_x, cy - inner_hh),  # TL inner-top
-                QtCore.QPointF(outer_x, cy - outer_hh),  # TR outer-top
-                QtCore.QPointF(outer_x, cy + outer_hh),  # BR outer-bottom
-                QtCore.QPointF(inner_x, cy + inner_hh),  # BL inner-bottom
+                QtCore.QPointF(inner_x, cy_local - inner_hh),
+                QtCore.QPointF(outer_x, cy_local - outer_hh),
+                QtCore.QPointF(outer_x, cy_local + outer_hh),
+                QtCore.QPointF(inner_x, cy_local + inner_hh),
             ])
         else:
-            # Mirror: inner edge is on the right side
+            inner_x, outer_x = drawn_w, 0
             dst = QtGui.QPolygonF([
-                QtCore.QPointF(outer_x, cy - outer_hh),  # TL outer-top
-                QtCore.QPointF(inner_x, cy - inner_hh),  # TR inner-top
-                QtCore.QPointF(inner_x, cy + inner_hh),  # BR inner-bottom
-                QtCore.QPointF(outer_x, cy + outer_hh),  # BL outer-bottom
+                QtCore.QPointF(outer_x, cy_local - outer_hh),
+                QtCore.QPointF(inner_x, cy_local - inner_hh),
+                QtCore.QPointF(inner_x, cy_local + inner_hh),
+                QtCore.QPointF(outer_x, cy_local + outer_hh),
             ])
-
-        # Compute perspective transform via quadToQuad
-        t   = QtGui.QTransform()
-        ok  = False
+            
+        t = QtGui.QTransform()
+        ok = False
         try:
-            # PySide6: output param is modified in-place; some builds return (bool, QTransform)
-            result = QtGui.QTransform.quadToQuad(src, dst, t)
-            ok = result if isinstance(result, bool) else (result[0] if result else False)
+            result = QtGui.QTransform.quadToQuad(src, dst)
             if isinstance(result, tuple) and len(result) == 2:
                 ok, t = result
+            elif isinstance(result, bool):
+                ok = result
+            elif result is not None:
+                ok = True
+                t = result
         except Exception:
-            pass
-
+            try:
+                result = QtGui.QTransform.quadToQuad(src, dst, t)
+                ok = result if isinstance(result, bool) else (result[0] if result else False)
+                if isinstance(result, tuple) and len(result) == 2:
+                    ok, t = result
+            except Exception:
+                pass
+                
         if not ok:
-            # Fallback: simple horizontal-scale approximation
             t = QtGui.QTransform()
             if self._back_right:
-                t.translate(float(inner_x), float(cy - bh // 2))
+                t.translate(0, float(cy_local - bh // 2))
             else:
-                t.translate(float(outer_x - drawn_w), float(cy - bh // 2))
+                t.translate(0, float(cy_local - bh // 2))
             t.scale(self._DRAW_RATIO, 1.0)
-
-        p.save()
-        p.setOpacity(0.88 * a)
+            
         p.setTransform(t)
         p.drawPixmap(0, 0, pm)
         p.resetTransform()
-
-        # Gradient shadow over back cover: darker toward outer edge (facing away)
+        
+        # Apply shadow
         clip_path = QtGui.QPainterPath()
         clip_path.addPolygon(dst)
         clip_path.closeSubpath()
         p.setClipPath(clip_path)
-        p.setOpacity(a)
+        
+        grad = QtGui.QLinearGradient(QtCore.QPointF(inner_x, cy_local), QtCore.QPointF(outer_x, cy_local))
+        grad.setColorAt(0.0, QtGui.QColor(0, 0, 0, 0))
+        grad.setColorAt(0.55, QtGui.QColor(0, 0, 0, 70))
+        grad.setColorAt(1.0, QtGui.QColor(0, 0, 0, 190))
+        
+        p.fillRect(QtCore.QRectF(0, 0, float(drawn_w), float(inner_hh * 2)), grad)
+        p.end()
+        
+        self._back_item.setPixmap(out_pm)
+        self._back_item.show()
 
-        grad = QtGui.QLinearGradient()
-        if self._back_right:
-            grad.setStart(QtCore.QPointF(inner_x, cy))
-            grad.setFinalStop(QtCore.QPointF(outer_x, cy))
-            grad.setColorAt(0.0, QtGui.QColor(0, 0, 0, 0))
-            grad.setColorAt(0.55, QtGui.QColor(0, 0, 0, 70))
-            grad.setColorAt(1.0, QtGui.QColor(0, 0, 0, 190))
+    def _update_layout(self) -> None:
+        cx = self.width() // 2
+        cy = self.height() // 2
+        
+        self._front_item.setPos(cx - self._FRONT // 2 - 10, cy - self._FRONT // 2 - 10)
+        self._front_item.setZValue(10)
+        
+        if self._back_pm and self._slide_val > 0.001:
+            a = self._slide_val
+            drawn_w = int(self._BACK_W * self._DRAW_RATIO)
+            slide_extra = int((1.0 - a) * (drawn_w + 28))
+            inner_hh = int(self._BACK_H * self._V_INNER)
+            
+            if self._back_right:
+                x_pos = cx + self._FRONT // 2 + self._GAP + slide_extra
+            else:
+                x_pos = cx - self._FRONT // 2 - self._GAP - drawn_w - slide_extra
+                
+            self._back_item.setPos(x_pos, cy - inner_hh)
+            self._back_item.setOpacity(0.88 * a)
+            self._back_item.setZValue(5)
+            self._back_item.show()
         else:
-            grad.setStart(QtCore.QPointF(outer_x, cy))
-            grad.setFinalStop(QtCore.QPointF(inner_x, cy))
-            grad.setColorAt(0.0, QtGui.QColor(0, 0, 0, 190))
-            grad.setColorAt(0.45, QtGui.QColor(0, 0, 0, 70))
-            grad.setColorAt(1.0, QtGui.QColor(0, 0, 0, 0))
-
-        min_x = min(inner_x, outer_x)
-        p.fillRect(
-            QtCore.QRectF(min_x, cy - inner_hh, float(drawn_w), float(inner_hh * 2)),
-            grad,
-        )
-        p.setClipping(False)
-        p.restore()
+            self._back_item.hide()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -548,12 +579,7 @@ class PlayerWorkspace(WorkspaceBase):
         self._all_rows: list[dict] = []      # full scan results
 
         # Progressive render state
-        self._pending_rows:  list[dict] = []  # rows buffered from scanner, not yet in table
         self._scan_finished: bool       = False
-        self._render_batch:  int        = 15  # adaptive rows-per-tick (5–30)
-        self._render_timer   = QtCore.QTimer()
-        self._render_timer.setInterval(60)    # ~16 fps render cadence
-        self._render_timer.timeout.connect(self._render_tick)
 
         # Workers
         self._lib_scanner:    _LibraryScanner | None = None
@@ -925,16 +951,13 @@ class PlayerWorkspace(WorkspaceBase):
         if not self._library_path:
             self._status_lbl.setText("No library selected.")
             return
-        # Stop any running scanner and render timer
+        # Stop any running scanner
         if self._lib_scanner and self._lib_scanner.isRunning():
             self._lib_scanner.requestInterruption()
             self._lib_scanner.wait(1000)
-        self._render_timer.stop()
 
         self._all_rows.clear()
-        self._pending_rows.clear()
         self._scan_finished = False
-        self._render_batch = 15
 
         self._lib_table.setSortingEnabled(False)
         self._lib_table.setRowCount(0)
@@ -955,12 +978,31 @@ class PlayerWorkspace(WorkspaceBase):
 
     @Slot(list)
     def _on_tracks_ready(self, batch: list) -> None:
-        """Buffer incoming scanner rows; the render timer drains them to the table."""
+        """Add incoming rows to the table immediately and report latency for auto-throttling."""
+        t0 = QtCore.QElapsedTimer()
+        t0.start()
+        
         self._all_rows.extend(batch)
-        self._pending_rows.extend(batch)
-        if not self._render_timer.isActive():
-            self._render_timer.start()
-
+        
+        # Turn off sorting during bulk insert to prevent lag
+        self._lib_table.setSortingEnabled(False)
+        
+        start_row = self._lib_table.rowCount()
+        self._lib_table.setRowCount(start_row + len(batch))
+        
+        for i, row in enumerate(batch):
+            self._set_table_row(start_row + i, row)
+            
+        # Update progress labels
+        loaded = self._lib_table.rowCount()
+        self._status_lbl.setText(f"Loading… {loaded} tracks found")
+        
+        if self._scan_progress.maximum() > 0:
+            self._scan_progress.setValue(loaded)
+            
+        # Report latency back to scanner for dynamic backpressure
+        if self._lib_scanner:
+            self._lib_scanner.report_ui_latency(t0.elapsed())
 
     def _set_table_row(self, r: int, row: dict) -> None:
         def _item(text: str) -> QtWidgets.QTableWidgetItem:
@@ -976,68 +1018,20 @@ class PlayerWorkspace(WorkspaceBase):
 
     @Slot(int)
     def _on_scan_complete(self, total: int) -> None:
-        """Scanner has finished walking the directory. Switch progress bar from
-        indeterminate pulsing to a determinate fill as rows drain into the table."""
+        """Scanner has finished walking the directory."""
         self._scan_finished = True
-        # Switch to determinate mode now that the total is known
-        self._scan_progress.setRange(0, max(total, 1))
-        self._scan_progress.setValue(self._lib_table.rowCount())
-        # Restart the render timer in case the buffer was empty when the last
-        # scan_complete signal arrived — guarantees the completion path fires.
-        if not self._render_timer.isActive():
-            self._render_timer.start()
-
-    def _render_tick(self) -> None:
-        """Drain _pending_rows into the table at a pace the system can sustain.
-
-        Runs every 60ms (~16fps). Each tick inserts a small, adaptive batch of
-        rows. Sort and filter are deferred until the last row is written so the
-        table is never re-sorted mid-load.
-        """
-        if not self._pending_rows:
-            if self._scan_finished:
-                # Everything is in the table — do the one-time completion work.
-                self._render_timer.stop()
-                self._reload_btn.setEnabled(True)
-                self._lib_table.setSortingEnabled(True)
-                self._apply_filter(self._search.text())
-                n = len(self._all_rows)
-                suffix = "track" if n == 1 else "tracks"
-                self._status_lbl.setText(f"Loaded {n} {suffix}.")
-                self._scan_progress.setVisible(False)
-                self._scan_progress.setRange(0, 0)
-            else:
-                # Buffer ran dry between scanner batches — pause the timer until
-                # the next batch arrives via _on_tracks_ready.
-                self._render_timer.stop()
-            return
-
-        t0 = QtCore.QElapsedTimer()
-        t0.start()
-
-        batch = self._pending_rows[:self._render_batch]
-        self._pending_rows = self._pending_rows[self._render_batch:]
-
-        self._lib_table.setSortingEnabled(False)
-        for row in batch:
-            r = self._lib_table.rowCount()
-            self._lib_table.insertRow(r)
-            self._set_table_row(r, row)
-
-        # Advance progress bar if it is in determinate mode
-        if self._scan_progress.maximum() > 0:
-            self._scan_progress.setValue(self._lib_table.rowCount())
-
-        # Adaptive pacing
-        elapsed = t0.elapsed()
-        if elapsed > 40:
-            self._render_batch = max(5, self._render_batch - 3)
-        elif elapsed < 10 and self._render_batch < 30:
-            self._render_batch += 2
-
-        loaded = self._lib_table.rowCount()
-        total_known = len(self._all_rows)
-        self._status_lbl.setText(f"Loading… {loaded} / {total_known} tracks")
+        self._reload_btn.setEnabled(True)
+        
+        # Final cleanup and sort
+        self._lib_table.setSortingEnabled(True)
+        self._apply_filter(self._search.text())
+        
+        n = len(self._all_rows)
+        suffix = "track" if n == 1 else "tracks"
+        self._status_lbl.setText(f"Loaded {n} {suffix}.")
+        
+        self._scan_progress.setVisible(False)
+        self._scan_progress.setRange(0, 0)
 
     def _apply_filter(self, text: str) -> None:
         query = text.strip().lower()
