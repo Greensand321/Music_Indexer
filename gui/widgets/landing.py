@@ -891,7 +891,6 @@ class MosaicLanding(QtWidgets.QWidget):
 
         for tile in self._tiles:
             tile.clicked.connect(self._on_tile_clicked)
-
         if self._saved:
             self._start_art_scanner()
 
@@ -988,6 +987,9 @@ class MosaicLanding(QtWidgets.QWidget):
         if not path:
             return
         self._pending = path
+        # Stop scanner immediately when the user commits to Initialize so
+        # disk-heavy directory work does not compete with transition animation.
+        self._stop_art_scanner()
 
         # Stop any running fly-in and snap all tiles to their resting positions
         if (
@@ -1043,15 +1045,7 @@ class MosaicLanding(QtWidgets.QWidget):
         anim.start()
 
     def _done(self) -> None:
-        if self._scanner is not None:
-            # Disconnect signals before cleanup to prevent race conditions
-            self._scanner.art_found.disconnect()
-            self._scanner.requestInterruption()
-            if not self._scanner.wait(2000):
-                # Thread did not exit cleanly; force termination
-                self._scanner.terminate()
-                self._scanner.wait()
-            self._scanner = None
+        self._stop_art_scanner()
         self.hide()
         self.finished.emit()
 
@@ -1075,6 +1069,18 @@ class MosaicLanding(QtWidgets.QWidget):
         scanner.art_found.connect(self._on_art_found)
         self._scanner = scanner
         scanner.start()
+
+    def _stop_art_scanner(self) -> None:
+        if self._scanner is None:
+            return
+        # Disconnect signals before cleanup to prevent race conditions
+        self._scanner.art_found.disconnect()
+        self._scanner.requestInterruption()
+        if not self._scanner.wait(2000):
+            # Thread did not exit cleanly; force termination
+            self._scanner.terminate()
+            self._scanner.wait()
+        self._scanner = None
 
     def _on_art_found(self, tile_index: int, image: QtGui.QImage, dirpath: str) -> None:
         # We are back on the main thread here; QPixmap conversion is safe.

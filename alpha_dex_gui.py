@@ -24,6 +24,14 @@ from __future__ import annotations
 import sys
 import os
 
+
+# Defer heavy workspace scans so landing/main cross-fade animations stay smooth.
+# Rule: initialize scans at whichever comes first:
+#   1) 30s after the landing first appears, or
+#   2) 3s after the user presses Initialize.
+_INIT_SCAN_MAX_DELAY_MS = 30_000
+_INIT_SCAN_AFTER_CLICK_MS = 3_000
+
 # Ensure the repo root is on sys.path so backend modules are importable
 _REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
 if _REPO_ROOT not in sys.path:
@@ -97,6 +105,8 @@ def main() -> int:
 
     # Show the landing immediately — it handles its own fade-in + logo pause
     # + tile fly-in sequence internally via show_animated().
+    startup_clock = QtCore.QElapsedTimer()
+    startup_clock.start()
     landing.show_animated()
 
     # ── Cross-fade: landing → main window ─────────────────────────────────────
@@ -116,7 +126,16 @@ def main() -> int:
             return
 
         if path:
-            window.set_library(path)
+            elapsed_ms = max(0, startup_clock.elapsed())
+            remaining_to_max = max(0, _INIT_SCAN_MAX_DELAY_MS - elapsed_ms)
+            init_delay_ms = min(remaining_to_max, _INIT_SCAN_AFTER_CLICK_MS)
+
+            # Keep the main-window transition responsive: defer expensive
+            # library initialization/scanning until shortly after Initialize.
+            QtCore.QTimer.singleShot(
+                init_delay_ms,
+                lambda p=path: window.set_library(p),
+            )
 
         # If the user clicked a tile, navigate to Player and start playing
         # before the window fades in so it's ready when it appears.
