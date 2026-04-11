@@ -45,8 +45,6 @@ _WORKSPACE_MAP: dict[str, type[WorkspaceBase]] = {
     "help":         HelpWorkspace,
 }
 
-_LIBRARY_STATS_DELAY_MS = 3_000
-
 
 class AlphaDEXWindow(QtWidgets.QMainWindow):
     """Main application window."""
@@ -60,10 +58,6 @@ class AlphaDEXWindow(QtWidgets.QMainWindow):
         self._library_path: str = ""
         self._workspaces: dict[str, WorkspaceBase] = {}
         self._theme_picker = None   # keep reference so dialog stays open
-        self._pending_stats_path: str = ""
-        self._stats_timer = QtCore.QTimer(self)
-        self._stats_timer.setSingleShot(True)
-        self._stats_timer.timeout.connect(self._run_scheduled_stats)
 
         # Apply persisted theme before building UI
         get_manager().load_persisted()
@@ -210,7 +204,7 @@ class AlphaDEXWindow(QtWidgets.QMainWindow):
         self.statusBar().showMessage(f"Library: {path}")
 
         # Update stats in background
-        self._schedule_library_stats(path)
+        self._update_library_stats(path)
 
         # Persist
         try:
@@ -311,17 +305,7 @@ class AlphaDEXWindow(QtWidgets.QMainWindow):
         worker.setParent(self)
         # Keep reference so it doesn't get GC'd
         self._stats_worker = worker
-        worker.start(QtCore.QThread.Priority.LowPriority)
-
-    def _schedule_library_stats(self, path: str) -> None:
-        """Delay expensive full-library stat walk to keep startup animation smooth."""
-        self._pending_stats_path = path
-        self._stats_timer.start(_LIBRARY_STATS_DELAY_MS)
-
-    @Slot()
-    def _run_scheduled_stats(self) -> None:
-        if self._pending_stats_path:
-            self._update_library_stats(self._pending_stats_path)
+        worker.start()
 
     @Slot(int, float, int)
     def _on_stats_ready(self, tracks: int, size_gb: float, artists: int) -> None:
