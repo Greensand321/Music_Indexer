@@ -135,9 +135,15 @@ class _LibraryScanner(QtCore.QThread):
 
 
 class _ArtLoader(QtCore.QThread):
-    """Load and scale album art for one track off the GUI thread."""
+    """Load and scale album art for one track off the GUI thread.
 
-    art_ready = Signal(object, str)   # QPixmap | None,  path
+    Emits a ``QImage`` (NOT a QPixmap) so the caller can convert to
+    QPixmap on the main/GUI thread.  Creating QPixmap off the GUI thread
+    is undefined behaviour in Qt and silently produces null or broken
+    pixmaps on Windows.
+    """
+
+    art_ready = Signal(object, str)   # QImage | None,  path
 
     def __init__(self, path: str, size: int = _ART_SIZE) -> None:
         super().__init__()
@@ -161,9 +167,8 @@ class _ArtLoader(QtCore.QThread):
                         img = img.copy((img.width() - s) // 2, 0, s, s)
                     elif img.height() > s:
                         img = img.copy(0, (img.height() - s) // 2, s, s)
-                    pm = QtGui.QPixmap.fromImage(img)
-                    if not pm.isNull():
-                        self.art_ready.emit(pm, self._path)
+                    if not img.isNull():
+                        self.art_ready.emit(img, self._path)
                         return
         except Exception:
             pass
@@ -276,263 +281,257 @@ class _BgArtWidget(QtWidgets.QWidget):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# CoverFlowWidget — 3-D Cover Flow display
+# NowPlayingCovers — prev / current / next album-art strip
 # ─────────────────────────────────────────────────────────────────────────────
 
-class CoverFlowWidget(QtWidgets.QGraphicsView):
-    """3-D Cover Flow panel (Optimized 2.5D).
+class NowPlayingCovers(QtWidgets.QWidget):
+    """Three-panel cover display: [prev] [current] [next].
 
-    * Front cover (currently playing): centered, full-size, facing the viewer.
-    * Back cover (single-clicked track): slides in from one side.
+    * *Current* (center) is drawn larger.
+    * *Prev* / *Next* (sides) are drawn smaller and slightly faded.
+    * Dark placeholder with a ♪ icon when no art is available.
     """
 
-    _FRONT      = 160     # front cover square size (px)
-    _BACK_W     = 152     # back cover source width
-    _BACK_H     = 145     # back cover source height
-    _DRAW_RATIO = 0.44    # fraction of _BACK_W visible after perspective
-    _V_INNER    = 0.455   # inner-edge half-height fraction of _BACK_H
-    _V_OUTER    = 0.370   # outer-edge half-height fraction (perspective taper)
-    _GAP        = 10      # px gap between front and back inner edges
-    _SLIDE_MS   = 430
+    _SIDE = 80       # side cover size
+    _MAIN = 130      # center cover size
+    _RAD  = 8        # corner radius
 
     def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setRenderHints(
-            QtGui.QPainter.RenderHint.Antialiasing |
-            QtGui.QPainter.RenderHint.SmoothPixmapTransform
+        self._prev_pm:    QtGui.QPixmap | None = None
+        self._current_pm: QtGui.QPixmap | None = None
+        self._next_pm:    QtGui.QPixmap | None = None
+        total_w = self._SIDE * 2 + self._MAIN + 24
+        self.setMinimumSize(total_w, self._MAIN + 16)
+        self.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Fixed,
         )
-        self.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
-        self.setStyleSheet("background: transparent;")
-        self.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-
-        self._scene = QtWidgets.QGraphicsScene(self)
-        self.setScene(self._scene)
-
-        # Create Items
-        self._back_item = QtWidgets.QGraphicsPixmapItem()
-        self._front_item = QtWidgets.QGraphicsPixmapItem()
-        
-        # Add to scene
-        self._scene.addItem(self._back_item)
-        self._scene.addItem(self._front_item)
-
-        self._front_pm: QtGui.QPixmap | None = None
-        self._back_pm:  QtGui.QPixmap | None = None
-        self._back_right: bool = True
-        self._slide_val: float = 0.0
-
-        self._anim = QtCore.QPropertyAnimation(self, b"slide_progress")
-        self._anim.setDuration(self._SLIDE_MS)
-        self._anim.setEasingCurve(QtCore.QEasingCurve.Type.OutCubic)
-
-        side_vis = int(self._BACK_W * self._DRAW_RATIO)
-        self.setMinimumSize(self._FRONT + 2 * side_vis + 24, self._FRONT + 20)
-        
-        self._bake_front()
-        self._back_item.hide()
 
     def sizeHint(self) -> QtCore.QSize:
-        side_vis = int(self._BACK_W * self._DRAW_RATIO)
-        return QtCore.QSize(self._FRONT + 2 * side_vis + 24, self._FRONT + 20)
+        total_w = self._SIDE * 2 + self._MAIN + 24
+        return QtCore.QSize(total_w, self._MAIN + 16)
 
-    def resizeEvent(self, event: QtGui.QResizeEvent) -> None:
-        super().resizeEvent(event)
-        self._scene.setSceneRect(0, 0, self.width(), self.height())
-        self._update_layout()
+    def set_current(self, pm: QtGui.QPixmap | None) -> None:
+        self._current_pm = pm
+        self.update()
 
-    def _get_sp(self) -> float:
-        return self._slide_val
+    def set_prev(self, pm: QtGui.QPixmap | None) -> None:
+        self._prev_pm = pm
+        self.update()
 
-    def _set_sp(self, v: float) -> None:
-        self._slide_val = v
-        self._update_layout()
+    def set_next(self, pm: QtGui.QPixmap | None) -> None:
+        self._next_pm = pm
+        self.update()
 
-    slide_progress = QtCore.Property(float, _get_sp, _set_sp)
+    def clear_neighbors(self) -> None:
+        self._prev_pm = None
+        self._next_pm = None
+        self.update()
 
-    def set_front(self, pm: QtGui.QPixmap | None) -> None:
-        self._front_pm = pm
-        self._bake_front()
-        self._update_layout()
+    def clear_all(self) -> None:
+        self._prev_pm = None
+        self._current_pm = None
+        self._next_pm = None
+        self.update()
 
-    def set_back(self, pm: QtGui.QPixmap | None, right_side: bool = True) -> None:
-        side_changed = (right_side != self._back_right)
-        self._back_pm    = pm
-        self._back_right = right_side
-        if pm:
-            self._bake_back()
-            start = 0.0 if (side_changed or self._slide_val < 0.05) else self._slide_val
-            self._anim.stop()
-            self._slide_val = start
-            self._anim.setStartValue(start)
-            self._anim.setEndValue(1.0)
-            self._anim.start()
-        else:
-            self._anim.stop()
-            self._slide_val = 0.0
-            self._back_item.hide()
-        self._update_layout()
+    # ── painting ────────────────────────────────────────────────────────
 
-    def clear_back(self) -> None:
-        self._anim.stop()
-        self._back_pm   = None
-        self._slide_val = 0.0
-        self._back_item.hide()
-        self._update_layout()
+    def paintEvent(self, event: QtGui.QPaintEvent) -> None:  # noqa: N802
+        p = QtGui.QPainter(self)
+        p.setRenderHints(
+            QtGui.QPainter.RenderHint.Antialiasing
+            | QtGui.QPainter.RenderHint.SmoothPixmapTransform,
+        )
+        w = self.width()
+        h = self.height()
+        cy = h // 2
 
-    def _bake_front(self) -> None:
-        sz = self._FRONT
-        pm = QtGui.QPixmap(sz + 20, sz + 20)
-        pm.fill(QtCore.Qt.GlobalColor.transparent)
-        
-        p = QtGui.QPainter(pm)
-        p.setRenderHints(QtGui.QPainter.RenderHint.Antialiasing | QtGui.QPainter.RenderHint.SmoothPixmapTransform)
-        
-        # Drop shadow
+        # Positions
+        main_x = (w - self._MAIN) // 2
+        main_y = (h - self._MAIN) // 2
+        side_gap = 6
+        prev_x = main_x - self._SIDE - side_gap
+        prev_y = (h - self._SIDE) // 2
+        next_x = main_x + self._MAIN + side_gap
+        next_y = prev_y
+
+        # Draw prev
+        self._draw_cover(p, self._prev_pm, prev_x, prev_y, self._SIDE, 0.60)
+        # Draw next
+        self._draw_cover(p, self._next_pm, next_x, next_y, self._SIDE, 0.60)
+        # Draw current (on top)
+        self._draw_shadow(p, main_x, main_y, self._MAIN)
+        self._draw_cover(p, self._current_pm, main_x, main_y, self._MAIN, 1.0)
+
+        p.end()
+
+    def _draw_shadow(self, p: QtGui.QPainter, x: int, y: int, sz: int) -> None:
         p.setPen(QtCore.Qt.PenStyle.NoPen)
-        p.setBrush(QtGui.QColor(0, 0, 0, 95))
-        p.drawRoundedRect(15, 17, sz, sz, 10, 10)
+        p.setBrush(QtGui.QColor(0, 0, 0, 80))
+        p.drawRoundedRect(x + 3, y + 4, sz, sz, self._RAD, self._RAD)
 
-        if self._front_pm:
-            scaled = self._front_pm.scaled(
+    def _draw_cover(
+        self,
+        p: QtGui.QPainter,
+        pm: QtGui.QPixmap | None,
+        x: int, y: int, sz: int,
+        opacity: float,
+    ) -> None:
+        p.save()
+        p.setOpacity(opacity)
+
+        if pm and not pm.isNull():
+            scaled = pm.scaled(
                 sz, sz,
-                QtCore.Qt.AspectRatioMode.KeepAspectRatio,
+                QtCore.Qt.AspectRatioMode.KeepAspectRatioByExpanding,
                 QtCore.Qt.TransformationMode.SmoothTransformation,
             )
+            # Center-crop to square
+            if scaled.width() > sz or scaled.height() > sz:
+                sx = max(0, (scaled.width() - sz) // 2)
+                sy = max(0, (scaled.height() - sz) // 2)
+                scaled = scaled.copy(sx, sy, sz, sz)
             clip = QtGui.QPainterPath()
-            clip.addRoundedRect(QtCore.QRectF(10, 10, scaled.width(), scaled.height()), 8, 8)
+            clip.addRoundedRect(QtCore.QRectF(x, y, sz, sz), self._RAD, self._RAD)
             p.setClipPath(clip)
-            p.drawPixmap(10, 10, scaled)
+            p.drawPixmap(x, y, scaled)
         else:
-            p.setBrush(QtGui.QColor(30, 33, 48))
-            p.drawRoundedRect(10, 10, sz, sz, 8, 8)
-            p.setPen(QtGui.QColor(71, 85, 105))
-            fnt = self.font()
-            fnt.setPointSize(30)
+            # Placeholder
+            p.setPen(QtCore.Qt.PenStyle.NoPen)
+            p.setBrush(QtGui.QColor(25, 30, 42))
+            p.drawRoundedRect(x, y, sz, sz, self._RAD, self._RAD)
+            p.setPen(QtGui.QColor(60, 72, 90))
+            fnt = p.font()
+            fnt.setPointSize(max(10, sz // 5))
             p.setFont(fnt)
-            p.drawText(QtCore.QRect(10, 10, sz, sz), QtCore.Qt.AlignmentFlag.AlignCenter, "♪")
-        
-        p.end()
-        self._front_item.setPixmap(pm)
+            p.drawText(QtCore.QRect(x, y, sz, sz), QtCore.Qt.AlignmentFlag.AlignCenter, "♪")
 
-    def _bake_back(self) -> None:
-        # Pre-compute the exact 3D distorted shape and shadow ONCE
-        bw, bh  = self._BACK_W, self._BACK_H
-        drawn_w = int(bw * self._DRAW_RATIO)
-        inner_hh = int(bh * self._V_INNER)
-        outer_hh = int(bh * self._V_OUTER)
-        
-        pm = self._back_pm.scaled(
-            bw, bh,
-            QtCore.Qt.AspectRatioMode.IgnoreAspectRatio,
-            QtCore.Qt.TransformationMode.SmoothTransformation,
+        p.restore()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# _TrackHoverPopup — album-art + metadata popup near cursor
+# ─────────────────────────────────────────────────────────────────────────────
+
+class _TrackHoverPopup(QtWidgets.QFrame):
+    """Floating popup shown after hovering a table row for 1.5 s.
+
+    Displays the track's album art at a reasonable size together with
+    title / artist / album metadata, styled to match the dark UI.
+    """
+
+    _ART_SZ = 120
+    _DELAY_MS = 1500
+
+    def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
+        super().__init__(parent, QtCore.Qt.WindowType.Popup | QtCore.Qt.WindowType.FramelessWindowHint)
+        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setFixedWidth(self._ART_SZ + 200)
+        self.setObjectName("trackHoverPopup")
+        self.setStyleSheet("""
+            #trackHoverPopup {
+                background: #1c2128;
+                border: 1px solid #30363d;
+                border-radius: 10px;
+            }
+        """)
+
+        lay = QtWidgets.QHBoxLayout(self)
+        lay.setContentsMargins(12, 12, 12, 12)
+        lay.setSpacing(12)
+
+        self._art_lbl = QtWidgets.QLabel()
+        self._art_lbl.setFixedSize(self._ART_SZ, self._ART_SZ)
+        self._art_lbl.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        self._art_lbl.setStyleSheet(
+            "background: #0d1117; border-radius: 8px;"
         )
-        
-        out_pm = QtGui.QPixmap(drawn_w, inner_hh * 2)
-        out_pm.fill(QtCore.Qt.GlobalColor.transparent)
-        
-        p = QtGui.QPainter(out_pm)
-        p.setRenderHints(QtGui.QPainter.RenderHint.Antialiasing | QtGui.QPainter.RenderHint.SmoothPixmapTransform)
-        
-        cy_local = inner_hh
-        
-        src = QtGui.QPolygonF([
-            QtCore.QPointF(0,  0),
-            QtCore.QPointF(bw, 0),
-            QtCore.QPointF(bw, bh),
-            QtCore.QPointF(0,  bh),
-        ])
-        
-        if self._back_right:
-            inner_x, outer_x = 0, drawn_w
-            dst = QtGui.QPolygonF([
-                QtCore.QPointF(inner_x, cy_local - inner_hh),
-                QtCore.QPointF(outer_x, cy_local - outer_hh),
-                QtCore.QPointF(outer_x, cy_local + outer_hh),
-                QtCore.QPointF(inner_x, cy_local + inner_hh),
-            ])
-        else:
-            inner_x, outer_x = drawn_w, 0
-            dst = QtGui.QPolygonF([
-                QtCore.QPointF(outer_x, cy_local - outer_hh),
-                QtCore.QPointF(inner_x, cy_local - inner_hh),
-                QtCore.QPointF(inner_x, cy_local + inner_hh),
-                QtCore.QPointF(outer_x, cy_local + outer_hh),
-            ])
-            
-        t = QtGui.QTransform()
-        ok = False
-        try:
-            result = QtGui.QTransform.quadToQuad(src, dst)
-            if isinstance(result, tuple) and len(result) == 2:
-                ok, t = result
-            elif isinstance(result, bool):
-                ok = result
-            elif result is not None:
-                ok = True
-                t = result
-        except Exception:
-            try:
-                result = QtGui.QTransform.quadToQuad(src, dst, t)
-                ok = result if isinstance(result, bool) else (result[0] if result else False)
-                if isinstance(result, tuple) and len(result) == 2:
-                    ok, t = result
-            except Exception:
-                pass
-                
-        if not ok:
-            t = QtGui.QTransform()
-            if self._back_right:
-                t.translate(0, float(cy_local - bh // 2))
-            else:
-                t.translate(0, float(cy_local - bh // 2))
-            t.scale(self._DRAW_RATIO, 1.0)
-            
-        p.setTransform(t)
-        p.drawPixmap(0, 0, pm)
-        p.resetTransform()
-        
-        # Apply shadow
-        clip_path = QtGui.QPainterPath()
-        clip_path.addPolygon(dst)
-        clip_path.closeSubpath()
-        p.setClipPath(clip_path)
-        
-        grad = QtGui.QLinearGradient(QtCore.QPointF(inner_x, cy_local), QtCore.QPointF(outer_x, cy_local))
-        grad.setColorAt(0.0, QtGui.QColor(0, 0, 0, 0))
-        grad.setColorAt(0.55, QtGui.QColor(0, 0, 0, 70))
-        grad.setColorAt(1.0, QtGui.QColor(0, 0, 0, 190))
-        
-        p.fillRect(QtCore.QRectF(0, 0, float(drawn_w), float(inner_hh * 2)), grad)
-        p.end()
-        
-        self._back_item.setPixmap(out_pm)
-        self._back_item.show()
+        lay.addWidget(self._art_lbl)
 
-    def _update_layout(self) -> None:
-        cx = self.width() // 2
-        cy = self.height() // 2
-        
-        self._front_item.setPos(cx - self._FRONT // 2 - 10, cy - self._FRONT // 2 - 10)
-        self._front_item.setZValue(10)
-        
-        if self._back_pm and self._slide_val > 0.001:
-            a = self._slide_val
-            drawn_w = int(self._BACK_W * self._DRAW_RATIO)
-            slide_extra = int((1.0 - a) * (drawn_w + 28))
-            inner_hh = int(self._BACK_H * self._V_INNER)
-            
-            if self._back_right:
-                x_pos = cx + self._FRONT // 2 + self._GAP + slide_extra
+        info = QtWidgets.QVBoxLayout()
+        info.setSpacing(4)
+        self._title_lbl = QtWidgets.QLabel("")
+        self._title_lbl.setWordWrap(True)
+        self._title_lbl.setStyleSheet(
+            "color: #e6edf3; font-size: 13px; font-weight: 600;"
+        )
+        self._artist_lbl = QtWidgets.QLabel("")
+        self._artist_lbl.setStyleSheet("color: #8b949e; font-size: 11px;")
+        self._album_lbl = QtWidgets.QLabel("")
+        self._album_lbl.setWordWrap(True)
+        self._album_lbl.setStyleSheet("color: #64748b; font-size: 11px;")
+        info.addWidget(self._title_lbl)
+        info.addWidget(self._artist_lbl)
+        info.addWidget(self._album_lbl)
+        info.addStretch()
+        lay.addLayout(info, 1)
+
+        # Hover delay timer
+        self._timer = QtCore.QTimer(self)
+        self._timer.setSingleShot(True)
+        self._timer.setInterval(self._DELAY_MS)
+        self._pending_path: str = ""
+
+    def schedule(self, path: str, cursor_pos: QtCore.QPoint) -> None:
+        """Start the hover countdown for *path*."""
+        self._pending_path = path
+        self._cursor_pos = cursor_pos
+        self._timer.start()
+
+    def cancel(self) -> None:
+        """Abort the countdown and hide."""
+        self._timer.stop()
+        self.hide()
+        self._pending_path = ""
+
+    def show_for(self, path: str, cursor_pos: QtCore.QPoint) -> None:
+        """Immediately populate and show the popup."""
+        from utils.audio_metadata_reader import read_metadata
+        row = _load_row(path)
+
+        self._title_lbl.setText(row.get("title") or Path(path).stem)
+        self._artist_lbl.setText(row.get("artist", ""))
+        self._album_lbl.setText(row.get("album", ""))
+
+        # Load cover art synchronously (small delay is fine for popup)
+        try:
+            _, covers, _, _ = read_metadata(path, include_cover=True)
+            if covers:
+                img = QtGui.QImage()
+                if img.loadFromData(covers[0]):
+                    pm = QtGui.QPixmap.fromImage(img.scaled(
+                        self._ART_SZ, self._ART_SZ,
+                        QtCore.Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                        QtCore.Qt.TransformationMode.SmoothTransformation,
+                    ))
+                    # Center-crop
+                    if pm.width() > self._ART_SZ or pm.height() > self._ART_SZ:
+                        sx = max(0, (pm.width() - self._ART_SZ) // 2)
+                        sy = max(0, (pm.height() - self._ART_SZ) // 2)
+                        pm = pm.copy(sx, sy, self._ART_SZ, self._ART_SZ)
+                    self._art_lbl.setPixmap(pm)
+                else:
+                    self._art_lbl.setText("♪")
             else:
-                x_pos = cx - self._FRONT // 2 - self._GAP - drawn_w - slide_extra
-                
-            self._back_item.setPos(x_pos, cy - inner_hh)
-            self._back_item.setOpacity(0.88 * a)
-            self._back_item.setZValue(5)
-            self._back_item.show()
-        else:
-            self._back_item.hide()
+                self._art_lbl.setText("♪")
+        except Exception:
+            self._art_lbl.setText("♪")
+
+        self.adjustSize()
+        # Position near cursor but keep on-screen
+        screen = QtGui.QGuiApplication.screenAt(cursor_pos)
+        if screen is None:
+            screen = QtGui.QGuiApplication.primaryScreen()
+        geo = screen.availableGeometry() if screen else QtCore.QRect()
+        x = cursor_pos.x() + 16
+        y = cursor_pos.y() + 16
+        if x + self.width() > geo.right():
+            x = cursor_pos.x() - self.width() - 8
+        if y + self.height() > geo.bottom():
+            y = cursor_pos.y() - self.height() - 8
+        self.move(x, y)
+        self.show()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -575,16 +574,23 @@ class PlayerWorkspace(WorkspaceBase):
         self._repeat:       int        = _REPEAT_OFF
         self._recent_plays: list[dict] = []   # most-recent first, capped at 30
 
+        # Shuffle history for prev/next cover awareness
+        self._shuffle_history: list[int] = []  # indices played in shuffle order
+        self._shuffle_next_idx: int | None = None  # pre-picked next shuffle index
+
         # Library cache
         self._all_rows: list[dict] = []      # full scan results
 
         # Progressive render state
         self._scan_finished: bool       = False
 
-        # Workers
-        self._lib_scanner:    _LibraryScanner | None = None
-        self._art_loader:     _ArtLoader | None      = None
-        self._sel_art_loader: _ArtLoader | None      = None  # art for single-clicked row
+        # Workers — all art loaders stored as instance vars to prevent GC
+        # while the thread is running (QThread destroyed while running = crash).
+        self._lib_scanner:      _LibraryScanner | None = None
+        self._art_loader:       _ArtLoader | None      = None
+        self._sel_art_loader:   _ArtLoader | None      = None
+        self._prev_art_loader:  _ArtLoader | None      = None
+        self._next_art_loader:  _ArtLoader | None      = None
 
         # Position / highlight timers
         self._pos_timer = QtCore.QTimer()
@@ -717,6 +723,15 @@ class PlayerWorkspace(WorkspaceBase):
         )
         self._lib_table.customContextMenuRequested.connect(self._on_table_context_menu)
 
+        # Hover popup for album art preview (1.5 s dwell)
+        self._hover_popup = _TrackHoverPopup()
+        self._hover_timer = QtCore.QTimer(self)
+        self._hover_timer.setSingleShot(True)
+        self._hover_timer.setInterval(1500)
+        self._hover_timer.timeout.connect(self._on_hover_timeout)
+        self._hover_path: str = ""
+        self._lib_table.viewport().installEventFilter(self)
+
         # Wrap the table in the background-art container
         self._bg_art = _BgArtWidget()
         self._bg_art.layout().addWidget(self._lib_table)
@@ -730,9 +745,9 @@ class PlayerWorkspace(WorkspaceBase):
         rl.setContentsMargins(12, 10, 12, 10)
         rl.setSpacing(8)
 
-        # Cover Flow widget (replaces static art label)
-        self._cflow = CoverFlowWidget()
-        rl.addWidget(self._cflow)
+        # Now-playing covers: prev / current / next
+        self._covers = NowPlayingCovers()
+        rl.addWidget(self._covers)
 
         # Now-playing metadata
         self._np_title = QtWidgets.QLabel("—")
@@ -1162,6 +1177,12 @@ class PlayerWorkspace(WorkspaceBase):
         # Record in recently played
         self._push_recent(row)
 
+        # Track shuffle history
+        if self._shuffle:
+            self._shuffle_history.append(self._queue_index)
+            if len(self._shuffle_history) > 200:
+                self._shuffle_history = self._shuffle_history[-100:]
+
         # Load art async
         self._load_art(path)
 
@@ -1302,7 +1323,11 @@ class PlayerWorkspace(WorkspaceBase):
         if self._repeat == _REPEAT_TRACK:
             pass  # stay on same index
         elif self._shuffle:
-            self._queue_index = random.randrange(n)
+            if self._shuffle_next_idx is not None:
+                self._queue_index = self._shuffle_next_idx
+            else:
+                self._queue_index = random.randrange(n)
+            self._shuffle_next_idx = random.randrange(n) if n > 1 else None
         else:
             self._queue_index = (self._queue_index + 1) % n
             if self._queue_index == 0 and self._repeat == _REPEAT_OFF:
@@ -1316,11 +1341,17 @@ class PlayerWorkspace(WorkspaceBase):
             return
         self._highlight_timer.stop()
         if self._media_player and self._media_player.get_time() > 3000:
-            # Restart current track
             self._media_player.set_time(0)
             return
         n = len(self._queue)
-        self._queue_index = (self._queue_index - 1) % n
+        if self._shuffle:
+            if len(self._shuffle_history) >= 2:
+                self._shuffle_history.pop()
+                self._queue_index = self._shuffle_history[-1]
+            else:
+                self._queue_index = (self._queue_index - 1) % n
+        else:
+            self._queue_index = (self._queue_index - 1) % n
         self._play_current()
 
     # ── Shuffle / Repeat ───────────────────────────────────────────────────
@@ -1328,6 +1359,18 @@ class PlayerWorkspace(WorkspaceBase):
     @Slot(bool)
     def _on_shuffle_toggled(self, checked: bool) -> None:
         self._shuffle = checked
+        if checked:
+            self._shuffle_history = (
+                [self._queue_index] if self._queue_index >= 0 else []
+            )
+            if self._queue and len(self._queue) > 1:
+                self._shuffle_next_idx = random.randrange(len(self._queue))
+            else:
+                self._shuffle_next_idx = None
+        else:
+            self._shuffle_history.clear()
+            self._shuffle_next_idx = None
+        self._load_neighbor_art()
 
     def _cycle_repeat(self) -> None:
         self._repeat = (self._repeat + 1) % 3
@@ -1365,8 +1408,7 @@ class PlayerWorkspace(WorkspaceBase):
         self._refresh_queue_list()
         self._np_title.setText("—")
         self._np_artist.setText("")
-        self._cflow.set_front(None)
-        self._cflow.clear_back()
+        self._covers.clear_all()
 
     def _refresh_queue_list(self) -> None:
         self._queue_list.clear()
@@ -1487,25 +1529,34 @@ class PlayerWorkspace(WorkspaceBase):
 
     # ── Album art ──────────────────────────────────────────────────────────
 
+    @staticmethod
+    def _cancel_loader(loader: _ArtLoader | None) -> None:
+        """Safely interrupt and wait for an art-loader thread to finish."""
+        if loader is not None and loader.isRunning():
+            loader.requestInterruption()
+            loader.wait(2000)
+
     def _load_art(self, path: str) -> None:
-        # Cancel any running loader
-        if self._art_loader and self._art_loader.isRunning():
-            self._art_loader.requestInterruption()
+        # Cancel ALL running art loaders before starting a new one
+        self._cancel_loader(self._art_loader)
+        self._cancel_loader(self._prev_art_loader)
+        self._cancel_loader(self._next_art_loader)
         loader = _ArtLoader(path, _ART_SIZE)
         loader.art_ready.connect(self._on_art_ready)
         self._art_loader = loader
         loader.start()
 
     @Slot(object, str)
-    def _on_art_ready(self, pm, path: str) -> None:
+    def _on_art_ready(self, img_or_none, path: str) -> None:
         # Only apply if this is still the current track
         if self._queue_index < 0 or self._queue_index >= len(self._queue):
             return
         if self._queue[self._queue_index]["path"] != path:
             return
-        if pm and not pm.isNull():
-            self._cflow.set_front(pm)
-            self._cflow.clear_back()        # playing track is now the front — dismiss back
+        if img_or_none is not None and not img_or_none.isNull():
+            # _ArtLoader emits QImage — convert to QPixmap on the GUI thread
+            pm = QtGui.QPixmap.fromImage(img_or_none)
+            self._covers.set_current(pm)
             self._bg_art.set_art(pm)
             # Re-emit now_playing with art
             row = self._queue[self._queue_index]
@@ -1516,29 +1567,77 @@ class PlayerWorkspace(WorkspaceBase):
                 pm,
             )
         else:
-            self._cflow.set_front(None)
+            self._covers.set_current(None)
+        # Load prev/next neighbor art
+        self._load_neighbor_art()
+
+    def _get_prev_next_indices(self) -> tuple[int | None, int | None]:
+        """Return (prev_index, next_index) accounting for shuffle mode.
+
+        * Linear mode: prev = queue_index - 1, next = queue_index + 1.
+        * Shuffle mode: prev = last item in shuffle_history (before current),
+          next = pre-picked _shuffle_next_idx.
+        """
+        if not self._queue or self._queue_index < 0:
+            return None, None
+        n = len(self._queue)
+
+        if self._shuffle:
+            # Prev: look back in shuffle history
+            prev_idx = None
+            if len(self._shuffle_history) >= 2:
+                prev_idx = self._shuffle_history[-2]
+            # Next: use pre-picked index, or pick one now
+            next_idx = self._shuffle_next_idx
+            if next_idx is None and n > 1:
+                next_idx = random.randrange(n)
+                self._shuffle_next_idx = next_idx
+            return prev_idx, next_idx
+        else:
+            prev_idx = (self._queue_index - 1) if self._queue_index > 0 else None
+            next_idx = (self._queue_index + 1) if self._queue_index + 1 < n else None
+            return prev_idx, next_idx
+
+    def _load_neighbor_art(self) -> None:
+        """Load art for prev and next tracks in the queue (shuffle-aware)."""
+        prev_idx, next_idx = self._get_prev_next_indices()
+
+        # Prev art
+        self._cancel_loader(self._prev_art_loader)
+        if prev_idx is not None and 0 <= prev_idx < len(self._queue):
+            prev_path = self._queue[prev_idx]["path"]
+            loader = _ArtLoader(prev_path, 100)
+            loader.art_ready.connect(self._on_prev_art_ready)
+            self._prev_art_loader = loader
+            loader.start()
+        else:
+            self._covers.set_prev(None)
+
+        # Next art
+        self._cancel_loader(self._next_art_loader)
+        if next_idx is not None and 0 <= next_idx < len(self._queue):
+            next_path = self._queue[next_idx]["path"]
+            loader = _ArtLoader(next_path, 100)
+            loader.art_ready.connect(self._on_next_art_ready)
+            self._next_art_loader = loader
+            loader.start()
+        else:
+            self._covers.set_next(None)
 
     @Slot(object, str)
-    def _on_sel_art_ready(self, pm, path: str) -> None:
+    def _on_prev_art_ready(self, img_or_none, path: str) -> None:
+        if img_or_none is not None and not img_or_none.isNull():
+            self._covers.set_prev(QtGui.QPixmap.fromImage(img_or_none))
+
+    @Slot(object, str)
+    def _on_next_art_ready(self, img_or_none, path: str) -> None:
+        if img_or_none is not None and not img_or_none.isNull():
+            self._covers.set_next(QtGui.QPixmap.fromImage(img_or_none))
+
+    @Slot(object, str)
+    def _on_sel_art_ready(self, img_or_none, path: str) -> None:
         """Art loaded for a single-clicked (selected but not playing) track."""
-        if pm is None or pm.isNull():
-            return
-        # Determine which side: compare selected row to the currently playing
-        # visible row index in the table (right if selection is below playing).
-        sel_row = -1
-        play_row = -1
-        for r in range(self._lib_table.rowCount()):
-            item = self._lib_table.item(r, 1)
-            if item is None:
-                continue
-            p = item.data(QtCore.Qt.ItemDataRole.UserRole)
-            if p == path:
-                sel_row = r
-            if (self._queue_index >= 0 and self._queue_index < len(self._queue)
-                    and p == self._queue[self._queue_index]["path"]):
-                play_row = r
-        right_side = sel_row >= play_row  # default True if play_row unknown
-        self._cflow.set_back(pm, right_side=right_side)
+        pass  # No-op: old cover-flow back-cover logic removed
 
     # ── M3U playlist ───────────────────────────────────────────────────────
 
@@ -1621,6 +1720,8 @@ class PlayerWorkspace(WorkspaceBase):
         self._on_stop()
         self._queue = [_load_row(p) for p in paths]
         self._queue_index = 0
+        self._shuffle_history.clear()
+        self._shuffle_next_idx = None
         self._refresh_queue_list()
         if label:
             self._status_lbl.setText(f"Now playing: {label}  ({len(paths)} tracks)")
@@ -1628,6 +1729,34 @@ class PlayerWorkspace(WorkspaceBase):
 
     def toggle_shuffle(self) -> None:
         self._shuffle_btn.setChecked(not self._shuffle)
+
+    # ── Event filter for hover popup ────────────────────────────────────
+
+    def eventFilter(self, obj, event):  # noqa: N802
+        if obj is self._lib_table.viewport():
+            if event.type() == QtCore.QEvent.Type.MouseMove:
+                row = self._lib_table.rowAt(event.pos().y())
+                if row >= 0:
+                    item = self._lib_table.item(row, 1)
+                    if item:
+                        path = item.data(QtCore.Qt.ItemDataRole.UserRole)
+                        if path and path != self._hover_path:
+                            self._hover_popup.cancel()
+                            self._hover_path = path
+                            self._hover_timer.start()
+                else:
+                    self._hover_timer.stop()
+                    self._hover_popup.cancel()
+                    self._hover_path = ""
+            elif event.type() == QtCore.QEvent.Type.Leave:
+                self._hover_timer.stop()
+                self._hover_popup.cancel()
+                self._hover_path = ""
+        return super().eventFilter(obj, event)
+
+    def _on_hover_timeout(self) -> None:
+        if self._hover_path:
+            self._hover_popup.show_for(self._hover_path, QtGui.QCursor.pos())
 
     def toggle_repeat(self) -> None:
         self._cycle_repeat()
