@@ -33,7 +33,7 @@ def count_audio_files(root: str, progress_callback: Callable[[int], None] | None
     if progress_callback is None:
         def progress_callback(_c: int) -> None:
             pass
-    exts = {".flac", ".m4a", ".aac", ".mp3", ".wav", ".ogg"}
+    exts = {".flac", ".m4a", ".aac", ".mp3", ".wav", ".ogg", ".opus"}
     count = 0
     for dirpath, _, files in os.walk(root):
         for fname in files:

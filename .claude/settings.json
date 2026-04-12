@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(C:/Users/alexa/miniconda3/python.exe -c \"import sys; sys.path.insert\\(0, '.'\\); from gui.workspaces.tools import ToolsWorkspace, ArtistTitleWorker; print\\('OK'\\)\")",
+      "Bash(C:/Users/alexa/miniconda3/python.exe -c \"import sys; sys.path.insert\\(0, '.'\\); from gui.workspaces.tools import ToolsWorkspace, ArtistTitleWorker, FileCleanupWorker; print\\('OK'\\)\")",
+      "Bash(C:/Users/alexa/miniconda3/python.exe -c \"import sys; sys.path.insert\\(0, '.'\\); from gui.workspaces.compression import CompressionWorkspace, MirrorWorker; print\\('OK'\\)\")",
+      "Bash(C:/Users/alexa/miniconda3/python.exe -c ':*)",
+      "Bash(C:/Users/alexa/miniconda3/python.exe -m py_compile demo_tile_proposals.py)",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('demo_tile_proposals.py'\\).read\\(\\)\\); print\\('Syntax OK'\\)\")",
+      "Bash(python3 -c \"import ast; ast.parse\\(open\\('demo_tile_proposals.py'\\).read\\(\\)\\); print\\('Syntax OK'\\)\")",
+      "Bash(.venv/Scripts/python.exe -c \"import ast; ast.parse\\(open\\('demo_tile_proposals.py'\\).read\\(\\)\\); print\\('Syntax OK'\\)\")",
+      "Read(//c/Users/alexa/AppData/Local/Programs/**)"
+    ]
+  }
+}

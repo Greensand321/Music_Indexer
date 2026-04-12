@@ -1,27 +1,21 @@
 import os
-import logging
 from typing import List
 
 import requests
-from mutagen import File as MutagenFile
+from utils.audio_metadata_reader import read_tags
 from utils.path_helpers import ensure_long_path
 
 from plugins.base import MetadataPlugin
 
 API_KEY = os.getenv("LASTFM_API_KEY")
-if not API_KEY:
-    logging.getLogger(__name__).warning("LASTFM_API_KEY not set; Last.fm plugin disabled")
 
 class LastfmPlugin(MetadataPlugin):
     def identify(self, file_path: str) -> dict:
         if not API_KEY:
             return {}
-        try:
-            audio = MutagenFile(ensure_long_path(file_path), easy=True)
-        except Exception:
-            return {}
-        artist = (audio.tags.get("artist") or [None])[0] if audio and audio.tags else None
-        title = (audio.tags.get("title") or [None])[0] if audio and audio.tags else None
+        tags = read_tags(ensure_long_path(file_path))
+        artist = tags.get("artist")
+        title = tags.get("title")
         if not artist or not title:
             return {}
 

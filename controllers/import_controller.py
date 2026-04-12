@@ -3,13 +3,12 @@ import shutil
 import tempfile
 import hashlib
 from typing import Callable, Dict, Any
-from mutagen import File as MutagenFile
-from mutagen.id3 import ID3NoHeaderError
 
 from validator import validate_soundvault_structure
 import music_indexer_api as idx
+from utils.audio_metadata_reader import read_metadata
 
-SUPPORTED_EXTS = {".flac", ".m4a", ".aac", ".mp3", ".wav", ".ogg"}
+SUPPORTED_EXTS = {".flac", ".m4a", ".aac", ".mp3", ".wav", ".ogg", ".opus"}
 
 
 def build_import_preview_html(
@@ -97,24 +96,12 @@ def import_new_files(
         tags = idx.get_tags(path)
         cover_hash = None
         try:
-            audio_file = MutagenFile(path)
-            img_data = None
-            if hasattr(audio_file, "tags") and audio_file.tags is not None:
-                for key in audio_file.tags.keys():
-                    if key.startswith("APIC"):
-                        img_data = audio_file.tags[key].data
-                        break
-            if img_data is None and audio_file.__class__.__name__ == "FLAC":
-                pics = getattr(audio_file, "pictures", [])
-                if pics:
-                    img_data = pics[0].data
-            if img_data:
-                sha1 = hashlib.sha1(img_data).hexdigest()
-                cover_hash = sha1[:10]
-        except ID3NoHeaderError:
-            pass
+            _tags, cover_payloads, _error, _reader = read_metadata(path, include_cover=True)
         except Exception:
-            pass
+            cover_payloads = []
+        if cover_payloads:
+            sha1 = hashlib.sha1(cover_payloads[0]).hexdigest()
+            cover_hash = sha1[:10]
 
         tags["cover_hash"] = cover_hash
 
