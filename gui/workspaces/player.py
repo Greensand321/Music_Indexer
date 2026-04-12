@@ -570,8 +570,12 @@ class PlayerWorkspace(WorkspaceBase):
         # Queue / playback state
         self._queue:        list[dict] = []
         self._queue_index:  int        = -1
+        self._direct_row:   dict | None = None  # track played directly (not from queue)
         self._shuffle:      bool       = False
         self._repeat:       int        = _REPEAT_OFF
+        self._keyboard_mode: bool      = False  # arrow-key navigation mode
+        self._kb_target: str           = "library"  # "library" or "queue"
+        self._lib_kb_row: int          = -1  # last-played row in library table for kb nav
         self._recent_plays: list[dict] = []   # most-recent first, capped at 30
 
         # Shuffle history for prev/next cover awareness
@@ -731,6 +735,8 @@ class PlayerWorkspace(WorkspaceBase):
         self._hover_timer.timeout.connect(self._on_hover_timeout)
         self._hover_path: str = ""
         self._lib_table.viewport().installEventFilter(self)
+        # Track which panel was last interacted with for keyboard mode targeting
+        self._lib_table.viewport().installEventFilter(self._make_focus_tracker("library"))
 
         # Wrap the table in the background-art container
         self._bg_art = _BgArtWidget()
@@ -784,6 +790,8 @@ class PlayerWorkspace(WorkspaceBase):
             QtCore.Qt.ContextMenuPolicy.CustomContextMenu
         )
         self._queue_list.customContextMenuRequested.connect(self._on_queue_context_menu)
+        # Track keyboard mode focus on queue panel
+        self._queue_list.viewport().installEventFilter(self._make_focus_tracker("queue"))
         rl.addWidget(self._queue_list, 1)
 
         # Queue action buttons
@@ -947,8 +955,6 @@ class PlayerWorkspace(WorkspaceBase):
         _sc("Space",       self._on_play_pause)
         _sc("N",           self.play_next)
         _sc("P",           self.play_prev)
-        _sc("Right",       lambda: self._seek_relative(+5000))
-        _sc("Left",        lambda: self._seek_relative(-5000))
         _sc("Shift+Right", lambda: self._seek_relative(+30000))
         _sc("Shift+Left",  lambda: self._seek_relative(-30000))
 
@@ -1073,8 +1079,7 @@ class PlayerWorkspace(WorkspaceBase):
         if not path:
             return
         # Don't show a back cover when the user clicks the currently playing track
-        if (self._queue_index >= 0 and self._queue_index < len(self._queue)
-                and self._queue[self._queue_index]["path"] == path):
+        if self._is_currently_playing(path):
             return
         # Cancel any previous selection loader
         if self._sel_art_loader and self._sel_art_loader.isRunning():
@@ -1094,14 +1099,14 @@ class PlayerWorkspace(WorkspaceBase):
             path = (self._lib_table.item(index.row(), 1) or row).data(
                 QtCore.Qt.ItemDataRole.UserRole
             )
-        self._play_path_now(path)
+        self._play_directly(path)
 
     def _on_table_context_menu(self, pos: QtCore.QPoint) -> None:
         rows = self._get_selected_paths()
         if not rows:
             return
         menu = QtWidgets.QMenu(self)
-        menu.addAction("▶  Play now",         lambda: self._play_path_now(rows[0]))
+        menu.addAction("▶  Play now",         lambda: self._play_directly(rows[0]))
         menu.addAction("+ Add to queue",      lambda: self._add_paths_to_queue(rows))
         menu.addSeparator()
         menu.addAction("📂  Open folder",      lambda: self._open_in_explorer(rows[0]))
@@ -1125,14 +1130,80 @@ class PlayerWorkspace(WorkspaceBase):
 
     # ── Playback ───────────────────────────────────────────────────────────
 
-    def _play_path_now(self, path: str) -> None:
-        """Immediately play a single path, inserting it as the next queue item."""
+    def _play_directly(self, path: str) -> None:
+        """Play a track immediately without adding it to the queue.
+
+        The queue (waiting room) is untouched — only the ``+ Add Selected``
+        button modifies it.  This is the handler for double-click, context
+        menu "Play now", Browse, and Recently Played double-click.
+        """
         row = _load_row(path)
-        self._queue.insert(self._queue_index + 1 if self._queue_index >= 0 else 0, row)
-        self._queue_index = self._queue_index + 1 if self._queue_index >= 0 else 0
-        self._play_current()
+        self._direct_row = row
+
+        if self._media_player and self._vlc_instance:
+            try:
+                media = self._vlc_instance.media_new(path)
+                self._media_player.set_media(media)
+                self._media_player.play()
+                vol = self._vol_slider.value()
+                QtCore.QTimer.singleShot(
+                    250, lambda v=vol: self._apply_volume(v)
+                )
+            except Exception as exc:
+                self._log(f"VLC error: {exc}", "error")
+                return
+
+        self._play_btn.setEnabled(True)
+        self._play_btn.setText("⏸")
+        self._stop_btn.setEnabled(True)
+        self._seek_slider.setValue(0)
+        self._pos_timer.start()
+
+        # Highlight mode
+        if self._highlight_chk.isChecked():
+            QtCore.QTimer.singleShot(300, self._start_highlight_timer)
+
+        # Update metadata display
+        self._np_title.setText(row.get("title") or Path(path).stem)
+        artist = row.get("artist", "")
+        album  = row.get("album", "")
+        sub = "  ·  ".join(p for p in [artist, album] if p)
+        self._np_artist.setText(sub)
+
+        # Record in recently played
+        self._push_recent(row)
+
+        # Load art async
+        self._load_art(path)
+
+        # Emit for NowPlayingBar
+        self.now_playing_changed.emit(
+            row.get("title") or Path(path).stem,
+            artist, album, None,
+        )
+        self.playback_state_changed.emit(True)
+        self._log(f"Playing: {row.get('title') or Path(path).name}", "ok")
+
+    # ── Helper: current playing state ─────────────────────────────────────
+
+    def _current_playing_row(self) -> dict | None:
+        """Return the currently playing track row, whether from queue or direct play."""
+        if self._direct_row is not None:
+            return self._direct_row
+        if 0 <= self._queue_index < len(self._queue):
+            return self._queue[self._queue_index]
+        return None
+
+    def _is_currently_playing(self, path: str) -> bool:
+        """Check if *path* matches the currently playing track."""
+        row = self._current_playing_row()
+        return row is not None and row["path"] == path
+
+    # ── Playback ───────────────────────────────────────────────────────────
 
     def _play_current(self) -> None:
+        """Play the track at ``_queue_index`` (queue-based playback)."""
+        self._direct_row = None  # playing from queue — clear direct-play state
         if not (0 <= self._queue_index < len(self._queue)):
             return
         row = self._queue[self._queue_index]
@@ -1215,7 +1286,7 @@ class PlayerWorkspace(WorkspaceBase):
             self._pos_timer.stop()
             self.playback_state_changed.emit(False)
         else:
-            if self._queue_index < 0 and self._queue:
+            if self._direct_row is None and self._queue_index < 0 and self._queue:
                 self._queue_index = 0
                 self._play_current()
             else:
@@ -1228,6 +1299,7 @@ class PlayerWorkspace(WorkspaceBase):
     def _on_stop(self) -> None:
         if self._media_player:
             self._media_player.stop()
+        self._direct_row = None
         self._play_btn.setText("▶")
         self._play_btn.setEnabled(bool(self._queue))
         self._stop_btn.setEnabled(False)
@@ -1307,7 +1379,14 @@ class PlayerWorkspace(WorkspaceBase):
             and self._media_player.get_state() == self._vlc_state_ended
         ):
             self._pos_timer.stop()
-            if self._repeat == _REPEAT_TRACK:
+            if self._direct_row is not None:
+                # Direct play ended — clear it and advance to queue if available
+                self._direct_row = None
+                if self._queue:
+                    QtCore.QTimer.singleShot(50, self.play_next)
+                else:
+                    self._on_stop()
+            elif self._repeat == _REPEAT_TRACK:
                 QtCore.QTimer.singleShot(50, self._play_current)
             else:
                 QtCore.QTimer.singleShot(50, self.play_next)
@@ -1497,7 +1576,7 @@ class PlayerWorkspace(WorkspaceBase):
         if item:
             path = item.data(QtCore.Qt.ItemDataRole.UserRole)
             if path:
-                self._play_path_now(path)
+                self._play_directly(path)
 
     # ── File browser ───────────────────────────────────────────────────────
 
@@ -1509,7 +1588,7 @@ class PlayerWorkspace(WorkspaceBase):
             "Audio (*.flac *.mp3 *.m4a *.aac *.wav *.ogg *.opus);;All Files (*)"
         )
         if path:
-            self._play_path_now(path)
+            self._play_directly(path)
 
     # ── Open in Explorer ───────────────────────────────────────────────────
 
@@ -1548,10 +1627,9 @@ class PlayerWorkspace(WorkspaceBase):
 
     @Slot(object, str)
     def _on_art_ready(self, img_or_none, path: str) -> None:
-        # Only apply if this is still the current track
-        if self._queue_index < 0 or self._queue_index >= len(self._queue):
-            return
-        if self._queue[self._queue_index]["path"] != path:
+        # Only apply if this is still the current track (queue or direct play)
+        current_row = self._current_playing_row()
+        if current_row is None or current_row["path"] != path:
             return
         if img_or_none is not None and not img_or_none.isNull():
             # _ArtLoader emits QImage — convert to QPixmap on the GUI thread
@@ -1559,11 +1637,10 @@ class PlayerWorkspace(WorkspaceBase):
             self._covers.set_current(pm)
             self._bg_art.set_art(pm)
             # Re-emit now_playing with art
-            row = self._queue[self._queue_index]
             self.now_playing_changed.emit(
-                row.get("title") or Path(path).stem,
-                row.get("artist", ""),
-                row.get("album", ""),
+                current_row.get("title") or Path(path).stem,
+                current_row.get("artist", ""),
+                current_row.get("album", ""),
                 pm,
             )
         else:
@@ -1757,6 +1834,146 @@ class PlayerWorkspace(WorkspaceBase):
     def _on_hover_timeout(self) -> None:
         if self._hover_path:
             self._hover_popup.show_for(self._hover_path, QtGui.QCursor.pos())
+
+    def _make_focus_tracker(self, target: str):
+        """Return an event filter that sets ``_kb_target`` on mouse press."""
+        ws = self
+        class _Tracker(QtCore.QObject):
+            def eventFilter(self, obj, event):  # noqa: N802
+                if event.type() == QtCore.QEvent.Type.MouseButtonPress:
+                    ws._kb_target = target
+                return False
+        return _Tracker(self)
+
+    def set_keyboard_mode(self, active: bool) -> None:
+        """Enable or disable arrow-key navigation mode (toggled from NowPlayingBar)."""
+        self._keyboard_mode = active
+        if active:
+            self._log("Keyboard mode ON: ↓ preview  → next  ← prev  ↑ restart", "ok")
+        else:
+            self._log("Keyboard mode OFF", "info")
+
+    # ── Keyboard-mode: library navigation ──────────────────────────────────
+
+    def kb_target(self) -> str:
+        """Return the current keyboard navigation target ('library' or 'queue')."""
+        return self._kb_target
+
+    def _get_lib_path_at(self, row: int) -> str | None:
+        """Return the file path for a visible library table row, or None."""
+        if row < 0 or row >= self._lib_table.rowCount():
+            return None
+        item = self._lib_table.item(row, 1)
+        if item is None:
+            return None
+        return item.data(QtCore.Qt.ItemDataRole.UserRole)
+
+    def _play_lib_row(self, row: int, preview: bool = False) -> None:
+        """Play a library table row by index, optionally as a one-shot preview."""
+        path = self._get_lib_path_at(row)
+        if not path:
+            return
+        self._lib_kb_row = row
+        self._play_directly(path)
+        if preview:
+            QtCore.QTimer.singleShot(300, self._start_one_shot_preview)
+
+    def kb_lib_down(self) -> None:
+        """↓ Preview next library track from the last-played position."""
+        total = self._lib_table.rowCount()
+        if total == 0:
+            return
+        start = self._lib_kb_row if self._lib_kb_row >= 0 else -1
+        # Skip hidden rows
+        for offset in range(1, total + 1):
+            r = (start + offset) % total
+            if not self._lib_table.isRowHidden(r):
+                self._play_lib_row(r, preview=True)
+                return
+
+    def kb_lib_right(self) -> None:
+        """→ Play next library track in full."""
+        total = self._lib_table.rowCount()
+        if total == 0:
+            return
+        start = self._lib_kb_row if self._lib_kb_row >= 0 else -1
+        for offset in range(1, total + 1):
+            r = (start + offset) % total
+            if not self._lib_table.isRowHidden(r):
+                self._play_lib_row(r, preview=False)
+                return
+
+    def kb_lib_left(self) -> None:
+        """← Play previous library track."""
+        total = self._lib_table.rowCount()
+        if total == 0:
+            return
+        start = self._lib_kb_row if self._lib_kb_row >= 0 else 0
+        for offset in range(1, total + 1):
+            r = (start - offset) % total
+            if not self._lib_table.isRowHidden(r):
+                self._play_lib_row(r, preview=False)
+                return
+
+    def kb_lib_up(self) -> None:
+        """↑ Restart current track (same for library and queue)."""
+        self._restart_current()
+
+    # ── Keyboard mode arrow-key handling ───────────────────────────────────
+
+    def keyPressEvent(self, event: QtGui.QKeyEvent) -> None:  # noqa: N802
+        """Handle arrow keys when keyboard mode is active.
+
+        • Down  — play next track as a one-shot 30 s preview
+        • Right — skip to next track (full play)
+        • Left  — go to previous track
+        • Up    — restart current track from the beginning
+        """
+        if self._keyboard_mode:
+            key = event.key()
+            if key == QtCore.Qt.Key.Key_Down:
+                self._preview_next()
+                return
+            elif key == QtCore.Qt.Key.Key_Right:
+                self.play_next()
+                return
+            elif key == QtCore.Qt.Key.Key_Left:
+                self.play_prev()
+                return
+            elif key == QtCore.Qt.Key.Key_Up:
+                self._restart_current()
+                return
+        super().keyPressEvent(event)
+
+    def _preview_next(self) -> None:
+        """Advance to the next queue track with a one-shot 30 s preview.
+
+        Temporarily enables highlight mode without toggling the checkbox UI.
+        """
+        if not self._queue:
+            self._log("Queue is empty — nothing to preview.", "warn")
+            return
+        # Advance track
+        self.play_next()
+        # One-shot preview: seek to 30s and auto-advance after 15s
+        QtCore.QTimer.singleShot(300, self._start_one_shot_preview)
+
+    def _start_one_shot_preview(self) -> None:
+        """Seek to 30s and set the auto-advance timer for one-shot preview."""
+        if self._media_player:
+            try:
+                self._media_player.set_time(_HIGHLIGHT_START_MS)
+            except Exception:
+                pass
+        self._highlight_timer.start(_HIGHLIGHT_DURATION_MS)
+
+    def _restart_current(self) -> None:
+        """Restart the current track from 0:00."""
+        if self._media_player:
+            try:
+                self._media_player.set_time(0)
+            except Exception:
+                pass
 
     def toggle_repeat(self) -> None:
         self._cycle_repeat()
