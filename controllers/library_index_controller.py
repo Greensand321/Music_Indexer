@@ -52,8 +52,6 @@ def extract_tags(path: str) -> dict:
 
 def generate_index(folder_path: str) -> str:
     """Generate library_index.html for ``folder_path`` and return its path."""
-    docs_dir = os.path.join(folder_path, "Docs")
-    os.makedirs(docs_dir, exist_ok=True)
     entries = []
     for dirpath, _, files in os.walk(folder_path):
         for fname in files:
@@ -95,7 +93,7 @@ def generate_index(folder_path: str) -> str:
     html_lines.append("</table>")
     html_lines.append("</body></html>")
 
-    out_path = os.path.join(docs_dir, "library_index.html")
+    out_path = os.path.join(folder_path, "library_index.html")
     with open(out_path, "w", encoding="utf-8") as f:
         f.write("\n".join(html_lines))
     messagebox.showinfo(
