@@ -8,7 +8,24 @@ Project context and working conventions for Claude Code sessions.
 
 **AlphaDEX** is a Python desktop application for organizing large music
 libraries. It is a single-user tool; there is no server, no API surface, and
-no database other than SQLite caches. The entry point is `python main_gui.py`.
+no database other than SQLite caches.
+
+**Two GUI entry points exist (read this carefully):**
+
+- `python alpha_dex_gui.py` — **PySide6 / Qt rebuild. This is the active,
+  primary app** and where new feature work lands. It uses an Option A
+  Navigator + Workspace layout (`gui/` package: `main_window.py` plus ~14
+  user-facing workspaces under `gui/workspaces/`). Most "implemented" features
+  described below — clustering wizard, interactive graph, Library Sync per-item
+  flags, splash/landing — live here.
+- `python main_gui.py` — **Tkinter app (~11,600 lines). Legacy.** Still
+  functional and kept as a fallback/reference, but no longer the development
+  target. (`alpha_dex_gui.py`'s own docstring notes "the original Tkinter app
+  remains available at `python main_gui.py`.")
+
+When a doc or task says "the app" without qualifying, assume the **Qt** app.
+Plain-English, concept-driven documentation for the whole system lives in
+`docs/` — start at `docs/overview.md` and `docs/architecture.md`.
 
 The core workflows, in order of user importance:
 
@@ -29,7 +46,15 @@ The core workflows, in order of user importance:
 ## Repository layout
 
 ```
-main_gui.py                  # Tkinter entry point (~11 600 lines)
+alpha_dex_gui.py             # PySide6/Qt entry point — ACTIVE app (landing → main window)
+main_gui.py                  # Tkinter entry point (~11 600 lines) — LEGACY
+gui/                         # Qt app: main_window.py, qt_launcher.py, theme/icons
+gui/workspaces/              # ~14 user-facing workspaces (indexer, library_sync,
+                             #   duplicates, similarity, tag_fixer, genres, playlists,
+                             #   clustered, clustered_enhanced, graph, player,
+                             #   compression, tools, help); base.py is the shared template
+gui/widgets/                 # Qt widgets (interactive scatter plots, cluster legend, etc.)
+gui/dialogs/                 # Qt dialogs (clustering wizard, quality report, settings)
 music_indexer_api.py         # Core scan / relocation logic
 duplicate_consolidation.py   # Duplicate plan builder (dry-run)
 duplicate_consolidation_executor.py  # Plan executor
@@ -190,26 +215,43 @@ All user settings are read/written through `config.load_config()` /
 
 ## Docs to check before making changes
 
+The `docs/` suite was rewritten (2026-06-25) as plain-English, concept-driven
+documentation. Start here:
+
 | File | When to read it |
 |---|---|
-| `docs/gui_inventory.md` | Before any GUI work — full plain-English map of every screen and control |
-| `docs/library_sync_redesign.md` | Before touching Library Sync — current gaps and acceptance criteria |
-| `docs/library_sync_per_item_review.md` | Per-item flag implementation (vision, architecture, phases) |
-| `docs/library_sync_per_item_review_testing.md` | Manual testing guide for per-item flags |
-| `docs/project_documentation.html` | Broad technical overview |
-| `README.md` | User-facing feature list and known gaps |
+| `docs/README.md` | Index / reading order for the whole docs suite |
+| `docs/overview.md` | First read — what the app is, core principles, key concepts, the two GUIs |
+| `docs/architecture.md` | How the layers, workers, preview contract, cache, and workspaces fit together |
+| `docs/features/indexer.md` | Before touching the Indexer |
+| `docs/features/duplicate_finder.md` | Before touching the Duplicate Finder |
+| `docs/features/library_sync.md` | Before touching Library Sync |
+| `docs/features/playlists_and_clustering.md` | Before touching playlists, clustering, or the graph |
+| `docs/ROADMAP.md` | What's planned but not yet built (single source of truth for gaps) |
+| `docs/gui_inventory.md` | Detailed map of every screen and control in the Qt app |
+| `docs/archive/` | Superseded planning notes / audit snapshots — history only, not current |
 
 ---
 
 ## Known gaps (do not assume these are complete)
 
-- **Metadata provider breadth:** Only AcoustID + Last.fm are fully wired end-to-end.
-  Spotify and Gracenote are listed in `config.SUPPORTED_SERVICES` but have no
-  backend implementation.
-- **Tidal-dl sync:** `tidal-dl` is in `requirements.txt` but has no UI or workflow.
-- **Library Sync per-item flags:** ✅ IMPLEMENTED — Users can now right-click incoming
-  tracks to flag for copy/replace or add notes. Flags override auto-decisions during
-  plan building. See `docs/library_sync_per_item_review.md` for implementation details.
-- **Library Sync Export Report:** Export helper functions exist in
-  `library_sync_review_report.py` (e.g., `export_report()`, `export_review_report_html()`)
-  but the Export Report button is not wired to a user-accessible control.
+See `docs/ROADMAP.md` for the full, maintained list. Summary:
+
+- **Metadata provider breadth:** Only AcoustID, MusicBrainz, and Last.fm are fully
+  wired end-to-end. Spotify and Gracenote are listed in `config.SUPPORTED_SERVICES`
+  and have stub functions in `metadata_service.py` that return `{}` (placeholders,
+  not implementations). Discogs is roadmap-only.
+- **Tidal-dl sync:** referenced historically but has no UI or workflow. Dormant.
+- **Library Sync per-item flags:** ✅ IMPLEMENTED and wired in the Qt app. Right-click
+  an incoming track in `gui/workspaces/library_sync.py` to flag copy/replace/clear or
+  add a note; `ReviewStateStore` holds flags and they override auto-decisions during
+  plan building. (Older archived docs claiming this is "not exposed in the UI" are
+  stale/false.) Remaining limitation: one-at-a-time flagging; no bulk flag yet.
+- **Library Sync Export Report:** Export helpers exist and work in
+  `library_sync_review_report.py` (`export_report()`, `export_review_report_html()`),
+  but the Export Report button is not wired to a user-accessible control. Smallest
+  outstanding win in the project.
+- **Clustering features:** the engine currently clusters on timbre (MFCC) + tempo;
+  the wizard's chroma/spectral/onset checkboxes are UI scaffolding not yet wired into
+  feature extraction. Interactive-graph Phases 4–8 (live tuning, advanced selection,
+  in-map cluster editing, report export) are unbuilt — see `docs/ROADMAP.md`.
