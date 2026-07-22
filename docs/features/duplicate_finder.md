@@ -106,14 +106,86 @@ and an **execution**:
 - The **dry run** scans the library, computes fingerprints, groups the duplicates,
   picks winners and losers, and assembles a complete plan — all without touching a
   single file. You get a readable report of every group and every proposed action.
-- The **execution**, only after your approval, carries the plan out: it updates your
-  playlists so they point at the surviving copy instead of the removed one, carries
-  over useful extras like embedded album art from a loser to the winner, moves the
-  losers into quarantine (or deletes them, if you explicitly asked), and writes a
-  final report of everything it did.
+- The **execution**, only after your approval, carries the plan out in a strict,
+  intentionally conservative order — described next — and writes a final report of
+  everything it did.
 
 This split is why you never have to trust the finder blindly. You always see the full
 plan before any file moves.
+
+### The execution order, and why it's fixed
+
+The executor's own design statement is worth quoting directly, because it explains
+exactly what "intentionally conservative" means in practice:
+
+> "Playlists are backed up before edits and validated after rewrites. A cancellation
+> request stops processing after the current operation. Errors stop subsequent steps
+> while preserving any backups already written. Every run produces machine-readable
+> and human-readable reports."
+
+Concretely, execution always happens in the same seven steps, in the same order:
+
+```
+1. Back up any playlist that will change
+2. Rewrite those playlists to point at the surviving copy
+3. Validate the rewrite (every referenced file must still exist)
+4. Apply artwork transfers
+5. Apply metadata normalization
+6. Quarantine or delete the losers
+7. Clean up now-unnecessary numeric suffixes on the winners
+```
+
+The ordering is not arbitrary: playlists are fixed and *checked* **before** any loser
+is touched, specifically so a mid-run failure can never leave a playlist pointing at
+a file that's already gone. If a playlist rewrite still references a file about to be
+quarantined, the executor refuses to continue rather than risk a dangling reference.
+
+Deletion carries an extra, deliberate double gate — it only happens if the caller
+both allows deletion in general *and* explicitly confirms this specific run, and the
+executor separately checks that the plan being executed still matches the plan you
+previewed (rejecting a run if the library visibly changed underneath it since the
+preview was generated). This is the same "no silent data loss" discipline described
+in **architecture.md**, applied concretely here.
+
+### A few specific trade-offs worth knowing about
+
+A handful of policy choices only show up as log messages inside the app, but they're
+worth stating plainly since they explain behavior you might otherwise find puzzling:
+
+- **Missing artwork never blocks a match.** If one copy has no embedded cover art,
+  that alone doesn't stop it from being grouped and consolidated with its duplicates
+  — a track is "kept in its artwork variant, but missing art does not block
+  consolidation."
+- **Different artwork on musically-identical tracks is treated as intentional, not
+  as noise.** If two files are audio-identical but carry different cover art, the
+  finder keeps them as **separate consolidation groups** rather than merging them and
+  picking one image — the reasoning given is to preserve what might be a deliberate
+  variant (a single vs. an album cut with different sleeve art) rather than erase it.
+- **Artwork never migrates across different releases.** If a winner and loser belong
+  to different multi-track releases (two different albums, say), the finder
+  deliberately skips copying artwork between them "to avoid cross-album
+  contamination" — it won't paste one album's cover onto tracks from another.
+
+### A known, honest limitation: duration/tempo-shifted edits
+
+The near-duplicate matching that groups album tracks does not currently normalize for
+differences in duration or tempo before comparing fingerprints. The scan's own log
+summary states this directly: gating decisions happen with "duration/tempo
+normalization deferred." In practice, this means a significantly time-stretched or
+trimmed edit of a track — a radio edit built by speeding up the original, for
+instance — may not reliably match its full-length counterpart as a near-duplicate.
+This is a known, named gap rather than an unnoticed bug; see **ROADMAP.md**.
+
+### A tool that's currently broken: the Duplicate Pair Report
+
+Worth flagging plainly rather than leaving you to discover it the hard way: the
+"inspect this specific pair" diagnostic tool (reachable from the legacy app's
+Duplicate Finder pair-review flow) currently **crashes every time it's used** — it
+raises an unhandled error internally before it can produce a report, due to a type
+mismatch in how it looks up which metadata bucket each track belongs to. This does
+not affect the main scan-group-execute workflow described above, only the standalone
+per-pair inspection report. It's tracked as a bug fix in **ROADMAP.md**, not
+something you should expect to work today.
 
 ## Why the second scan is so much faster: the cache
 

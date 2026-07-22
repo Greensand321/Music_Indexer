@@ -1,32 +1,97 @@
 # AlphaDEX — Roadmap (What's Planned but Not Yet Built)
 
 *This is the honest "what's left" document. Everything below is either partially built,
-designed but not wired up, or planned for the future. It is written in plain language
-so anyone can understand the state of the project at a glance. Items are grouped by
-area and, within each area, roughly ordered from "smallest / most ready" to "largest /
-most speculative."*
+designed but not wired up, or planned for the future — plus a short list of actual
+bugs found while re-verifying this document against the code. It is written in plain
+language so anyone can understand the state of the project at a glance. Items are
+grouped by area and, within each area, roughly ordered from "smallest / most ready" to
+"largest / most speculative."*
 
-*Last reviewed: 2026-06-25.*
+*Last reviewed: 2026-07-22.*
 
 ---
 
 ## Quick status legend
 
+- **Bug** — this used to work, or was believed to work, and currently doesn't. Fixing
+  it restores existing functionality rather than building something new.
 - **Backend ready, not connected** — the engine exists and works; only the visible
   button or final wiring is missing. These are the cheapest wins.
 - **Partially built** — some of it works; meaningful pieces remain.
 - **Designed, not started** — there's a clear vision but no working code yet.
 
+## Recently completed
+
+Two items that used to appear on this list are done and have been removed from the
+body below:
+
+- **Library Sync's Export Report button** is wired — a real "📤 Export Report" button
+  in the Library Sync workspace saves HTML, JSON, or CSV reports.
+- **Metadata settings honesty** — the Settings dialog now shows Spotify and Gracenote
+  visibly but disabled, with a tooltip explaining they aren't implemented, instead of
+  silently omitting them or listing them as if they worked.
+
+---
+
+## Known bugs (fix before building anything new here)
+
+- **The Duplicate Pair Report tool crashes every time it's used** *(Bug).* The
+  function that inspects a specific pair of duplicate files
+  (`build_duplicate_pair_report` in `duplicate_consolidation.py`) raises an
+  unhandled `AttributeError` internally — it calls `.items()` on a list, expecting a
+  dict, when looking up which metadata bucket each track belongs to. This doesn't
+  affect the main scan → group → execute duplicate-finding workflow, only the
+  standalone "inspect this pair" diagnostic reachable from the legacy app.
+
+- **The Cluster Quality Report dialog crashes on real data** *(Bug).* The dialog
+  meant to show Silhouette / Davies-Bouldin / Calinski-Harabasz scores plus a
+  per-cluster breakdown (`ClusterQualityReportDialog` in
+  `gui/dialogs/cluster_quality_report_dialog.py`) calls a method,
+  `_create_cluster_card`, that doesn't exist — the real method is named
+  `_build_cluster_card`. The dialog will fail to render its per-cluster section any
+  time it's opened against an actual (non-empty) clustering result, which is the
+  normal case. The scoring math itself is unaffected; only this display is broken.
+
+- **`plugins/acoustid_plugin.py` imports `tkinter` directly**, and so does
+  `controllers/library_index_controller.py` *(Bug / architecture-rule violation).*
+  Both are backend/plugin modules that this project's own conventions say should be
+  importable without a GUI toolkit attached — `plugins/` in particular is meant to
+  be pure lookup logic. In practice this means importing `plugins.acoustid_plugin`
+  fails outright in any environment without Tkinter installed (this is not
+  theoretical — it currently breaks `tests/test_musicbrainz_service.py` on any
+  machine without a system Tkinter), and it silently ties a "backend" module to a
+  GUI toolkit that the modern Qt app doesn't otherwise use at all.
+
 ---
 
 ## Library Sync
 
-- **Export Report button** *(Backend ready, not connected).* Library Sync can already
-  generate a complete, shareable report of a review session — every match, its status,
-  confidence, quality verdict, and your flags and notes — as a web page or data file.
-  The report machinery is built and tested. The only missing piece is a button in the
-  interface to trigger it. This is the single most "almost done" item in the whole
-  project.
+- **Reconcile the vendored indexer engine** *(Housekeeping / architecture debt).*
+  Library Sync runs its own separately-maintained copy of the
+  scanning/fingerprinting engine (`library_sync_indexer_engine/`) rather than the
+  same modules the Indexer and Duplicate Finder use. The two copies have already
+  drifted — most notably, the vendored fingerprint cache has none of the background
+  writer thread, WAL mode, or extended metadata columns the main cache has grown.
+  No comment or commit anywhere explains why the split exists. At minimum, this
+  should be documented as a load-bearing decision (if it's meant to stay that way)
+  or unified into one engine (if it isn't). See **architecture.md** for the full
+  detail.
+
+- **Wire or remove the "Replace All" / "Replace with Better" report actions**
+  *(Backend ready, not connected — but only half-built).* The exported HTML review
+  report renders three action buttons styled to look clickable; none of them do
+  anything. The `ReviewAction` enum and `build_review_replacement_plan()` function
+  that look like they were built to back these buttons exist in `library_sync.py`
+  but have no caller anywhere in either app. Either wire the buttons to that
+  function, or remove both the buttons and the dead backend function so the report
+  doesn't imply a capability that isn't there.
+
+- **Decide the fate of the two Library Sync front-ends** *(Housekeeping).* A
+  feature-flagged legacy Tkinter review panel (`library_sync_review.py`) and the
+  modern Qt workspace both exist as separate, non-shared implementations of the same
+  review-first workflow. If the Tkinter one is no longer meant to be used, retiring
+  it removes a second place bugs can hide; if it's meant to stay as a fallback, that
+  should be a stated decision rather than an accident of history.
 
 - **Bulk flagging** *(Designed, not started).* Today you flag incoming tracks for
   copy/replace one at a time. A natural enhancement is to select many tracks at once
@@ -47,10 +112,29 @@ most speculative."*
 
 ## Playlists, Clustering & the Visual Music Graph
 
-This is the area with the largest gap between vision and current reality. The original
-design imagined a deeply interactive analysis studio; today the foundation (feature
-extraction, two clustering methods, quality scores, and a visual map) is built, and the
-richer interactive layer is the outstanding work.
+This is the area with the largest gap between vision and current reality — larger
+than previously documented, now that a full re-verification found the in-app graph
+widgets are built but entirely unreachable.
+
+- **Wire the built-but-orphaned in-app 2-D interactive graph** *(Backend ready, not
+  connected — the single biggest "almost done" item in the whole project now that
+  Export Report is finished).* Four real, working widgets exist —
+  `InteractiveScatterPlot` (lasso/rectangle selection, hover tooltips),
+  `Interactive3DScatterPlot`, `ClusterLegendWidget` (per-cluster show/hide), and
+  `TrackDetailsPanel` — and none of them are imported by the Music Graph workspace or
+  anything else you can reach from the sidebar. Today, "Music Graph" only opens a
+  browser-based 3-D view. Connecting these widgets to the workspace requires no new
+  feature work, only wiring.
+
+- **Fix the "Open Visual Graph" button's navigation** *(Bug-adjacent housekeeping).*
+  The button inside the Clustered workspace's Results tab doesn't navigate to the
+  Music Graph workspace — it shows a message box asking you to click the sidebar
+  yourself, with a `TODO` marking the unbuilt cross-workspace signal.
+
+- **Retire the dead `clustered.py` workspace** *(Housekeeping).* An older, simpler
+  clustering workspace still exists in the repository but is unreachable — the
+  sidebar wires to `clustered_enhanced.py` instead. Leaving the old file in place
+  risks a future contributor editing it and wondering why nothing changes.
 
 - **More sound features in clustering** *(Partially built).* The clustering wizard
   shows checkboxes for harmonic content, brightness, and percussive density, but the
@@ -69,7 +153,9 @@ richer interactive layer is the outstanding work.
 
 - **Advanced selection tools** *(Designed, not started).* Richer ways to pick tracks off
   the visual map: free-form lasso, rectangle, distance-from-a-point, and filtering by
-  metadata (artist, genre).
+  metadata (artist, genre). (Note: the lasso/rectangle selection logic already exists
+  inside the orphaned `InteractiveScatterPlot` widget above — wiring that widget in is
+  a prerequisite for this item, not a separate build.)
 
 - **In-map cluster editing** *(Designed, not started).* Hands-on refinement of the
   groups after the fact: merging two clusters, moving a track from one cluster to
@@ -80,28 +166,80 @@ richer interactive layer is the outstanding work.
   them."
 
 - **One-click quality-report export** *(Designed, not started).* Saving the clustering
-  quality report as a shareable document (web page or PDF).
+  quality report as a shareable document (web page or PDF) — worth sequencing after
+  the Cluster Quality Report bug fix above, since there's little point exporting a
+  report that currently fails to render.
+
+- **A genuine chronological/"year-gap" playlist tool doesn't exist** *(Designed, not
+  started).* Earlier documentation described a "year-gap assistant" that helps build
+  playlists telling a chronological story. No such feature exists in either app. If
+  this is still wanted, it needs to be designed and built from scratch — it is not
+  hiding somewhere unwired. (Don't confuse it with the legacy app's "Year Assistant,"
+  which fills in *missing* year tags and has no relationship to playlist ordering.)
 
 ## Metadata lookups (Tag Fixer & Genres)
 
+- **Bring MusicBrainz into the Tag Fixer's automatic scan as an independent source**
+  *(Backend ready, not connected).* `MusicBrainzService` is a complete, working
+  lookup implementation, but it doesn't inherit from the same plugin base class the
+  Tag Fixer's automatic-discovery scan looks for, so it never contributes an
+  independent identification — today it only ever appears nested inside an AcoustID
+  match's enrichment step. Making it a first-class, independently-discoverable
+  plugin would let the Tag Fixer fall back to MusicBrainz when AcoustID doesn't
+  recognize a file.
+
+- **Bring canonical genre-mapping into the modern app** *(Designed, not started, but
+  a working reference implementation already exists in the legacy app).* The
+  legacy Tkinter app has a real "map messy raw genres to a clean, chosen vocabulary"
+  workflow (paste your raw genres into an LLM prompt, paste back a JSON mapping,
+  apply it library-wide). The modern app's "Genre Normalizer" workspace does
+  something much simpler — pick MusicBrainz's top 3 popular tags — and doesn't do
+  any canonicalization at all. Porting the legacy mapping system forward (or
+  designing a modern-app equivalent) is a real, user-visible gap; see
+  **features/tag_fixer.md** for the full explanation of the naming collision.
+
 - **Spotify integration** *(Designed, not started).* Spotify appears as an option in
-  the settings, and the supporting library is already installed, but the connection is
-  an empty placeholder that returns nothing. Bringing it to life is future work — and
+  the settings (now honestly marked unavailable — see "Recently completed" above),
+  and the supporting library is already installed, but the connection is an empty
+  placeholder that returns nothing. Bringing it to life is future work — and
   is more involved than the others because it requires authenticated, partnership-style
   access rather than the open access the working providers enjoy.
 
 - **Gracenote integration** *(Designed, not started).* Same situation as Spotify: listed
-  as an option, but currently an empty placeholder.
+  as an option, now honestly marked unavailable, but currently an empty placeholder.
 
 - **Discogs integration** *(Designed, not started).* Mentioned as a desirable future
   source; no work started.
 
 > The providers that **do** work fully today are AcoustID, MusicBrainz, and Last.fm.
-> A worthwhile near-term task, separate from building the missing providers, is simply
-> to make the settings screen *honest* — clearly marking Spotify and Gracenote as
-> unavailable so they don't appear to be working options.
+> The Settings screen is now honest about which of the five listed services are
+> real — the remaining work here is building Spotify/Gracenote/Discogs themselves,
+> not disclosure.
 
 ## Other / housekeeping
+
+- **Fix known docstring/behavior mismatches** *(Housekeeping, low priority, low
+  risk).* A handful of functions' docstrings no longer match what the code actually
+  does — most notably `config.load_config()`, whose docstring claims it "returns an
+  empty dict" on failure when it actually returns a specific ~25-key fallback
+  dictionary that can drift out of sync with the normal-path defaults. Two separate
+  `ensure_tool()` helpers (`fingerprint_generator.py`, `chromaprint_utils.py`) both
+  claim in their docstring to raise `RuntimeError` but actually raise a custom
+  `FingerprintError` — and the two modules each define their *own*, unrelated
+  `FingerprintError` class with the same name, so `except FingerprintError` in code
+  written against one module silently won't catch an error raised by the other.
+
+- **Make the test suite's shared-dependency stubbing real** *(Housekeeping).*
+  `CLAUDE.md` used to state that `tests/conftest.py` stubs `pydub`, `tkinter`, and
+  "other heavy dependencies." In fact it only stubs `pydub` — there is no `tkinter`
+  stub anywhere, and more than a dozen test files each build their own inline,
+  near-duplicate fake `mutagen` module rather than sharing the dedicated
+  (currently-unused) `mutagen_stub/` package. This also means the suite's pass/fail
+  result can depend on execution order, since the ad-hoc stubs mutate global
+  `sys.modules` state that bleeds between test files. `tests/test_cache.py` also has
+  a real, order-independent race condition in its background cache-warming test.
+  None of this blocks development, but a "the tests are green" claim currently
+  depends on which files ran first.
 
 - **Tidal-dl sync** *(Designed, not started).* An old idea to pull music from the Tidal
   service was referenced in early notes, but no interface or workflow for it exists.
@@ -112,8 +250,12 @@ richer interactive layer is the outstanding work.
   deferred. None of them block normal use; they are nice-to-haves.
 
 - **Small loose ends** *(Designed, not started).* Minor conveniences noted during
-  development, such as automatically jumping to the visual map right after a clustering
-  run finishes.
+  development, plus a few small dead ends worth cleaning up when someone's already in
+  the area: `Sidebar.set_badge()` is fully built but never called by anything; the
+  "View Playlists" folder-open button in the Clustered workspace only works on
+  Linux (no Windows/macOS branch); a Help-screen documentation link points at an
+  archived file that no longer exists at that path; automatically jumping to the
+  visual map right after a clustering run finishes is still just an idea.
 
 ---
 
@@ -121,11 +263,16 @@ richer interactive layer is the outstanding work.
 
 If you've been away and want the shortest path back to momentum:
 
-1. **Start with the "Backend ready, not connected" items** — chiefly the Library Sync
-   Export Report button. They deliver visible value for very little effort because the
-   hard part is already done.
-2. **Then make the metadata settings honest** — mark the non-working providers as
-   unavailable so the app stops implying capabilities it doesn't have.
-3. **Treat the Visual Music Graph interactivity as the big, deliberate project** — it's
-   the area with the most outstanding work and the most upside, and it deserves to be
-   scheduled as real feature work rather than squeezed in.
+1. **Fix the two known bugs first** (Duplicate Pair Report, Cluster Quality Report) —
+   both are small, isolated, and currently mean a tool silently fails the moment you
+   try to use it.
+2. **Wire the in-app 2-D interactive graph.** It's now the single largest "everything
+   is already built, it just isn't connected" item in the project, having taken over
+   that role from the (now-finished) Export Report button.
+3. **Treat the rest of the Visual Music Graph's deeper interactivity — live tuning,
+   advanced selection, cluster editing — as the big, deliberate project it always
+   was.** It's still the area with the most outstanding work and the most upside; it
+   deserves to be scheduled as real feature work rather than squeezed in.
+4. **Everything under "Other / housekeeping" is safe to ignore indefinitely** — none
+   of it blocks normal use of the app. Pick it up only when you're already touching
+   the relevant file for another reason.

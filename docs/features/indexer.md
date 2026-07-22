@@ -135,6 +135,31 @@ it.** A track parked in Manual Review is easy to find and fix; a track silently 
 under "Unknown Artist / Unknown Album" can be lost for years. Once you've corrected
 its tags, you simply feed it back through and it gets filed properly.
 
+## What the Indexer deliberately does not do
+
+It's worth being explicit about a boundary that's easy to assume away: **the Indexer
+does not detect or remove duplicates.** It treats every file independently and files
+it on its own merits — it does not compare two files to each other to decide which
+one is "better." The code itself states this as a deliberate design choice, not an
+oversight:
+
+> "Duplicate detection and keep/winner ranking are intentionally excluded from the
+> indexer. The indexer treats every file independently and relies on deterministic
+> routing plus collision handling (suffixing/buckets)."
+
+So if two copies of the same song land in the same album folder, the Indexer will
+happily file both of them — side by side, disambiguated with a numeric suffix if
+their names collide — rather than trying to pick a winner. That job belongs entirely
+to the **Duplicate Finder** (next document). If you run the Indexer on a library full
+of duplicates and expect them to be thinned out, they won't be; run the Duplicate
+Finder afterward for that.
+
+*(One more thing worth knowing if you also use Library Sync: that feature runs its
+own, separately-maintained copy of this same routing/fingerprinting logic rather than
+calling this module directly. See **architecture.md**'s note on the "two indexer
+engines" if you're changing indexer behavior and wondering why Library Sync doesn't
+seem to have picked up your fix.)*
+
 ## Why a web-page preview?
 
 You might wonder why the plan is an HTML page rather than just a list inside the app.

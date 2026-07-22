@@ -49,13 +49,43 @@ a set where the transitions feel smooth rather than jarring. Under the hood it j
 "similar in feel" using a compact sound-summary of each track, but you don't need to
 think about that; you just hear a set that hangs together.
 
-### Helpers: genre normalization and year gaps
+### Auto-DJ, in a bit more technical detail
 
-Two smaller assistants round out this level. **Genre normalization** tidies the messy,
-inconsistent genre labels in your files by looking each track up in an online music
-encyclopedia and writing back a small set of agreed-upon genres — so your library
-stops having forty spellings of "Hip-Hop." A **year-gap assistant** helps build
-playlists that tell a chronological story across your collection.
+Under the hood, Auto-DJ's "similar in feel" judgment reuses the exact same
+27-dimensional sound-summary (mean and spread of the track's timbre, plus its tempo)
+that the clustering engine below is built on — so a track's position for Auto-DJ
+purposes and its position for clustering purposes are the same measurement. The
+chaining algorithm itself is a simple, greedy "always pick the closest next track"
+walk: starting from your seed track, it repeatedly picks whichever *remaining* track
+is closest (by plain distance in that 27-dimensional space) to the track it just
+added, then moves on from there. It has no lookahead and doesn't try to avoid
+"painting itself into a corner" late in a long playlist — it's a nearest-neighbor
+tour, not an optimized route. One detail worth knowing if a queued set feels uneven:
+this distance calculation does not currently apply the same feature-scaling step the
+clustering wizard uses (see the "honest note on features" below), so a feature with
+naturally larger numbers can end up dominating the "how similar is this" judgment
+more than a listener's ear might expect.
+
+### A smaller helper: genre normalization
+
+**Genre normalization** tidies the messy, inconsistent genre labels in your files by
+looking each track up in an online music encyclopedia and writing back a small set of
+tags — so your library moves toward fewer stray spellings of "Hip-Hop." Worth being
+precise about what this does today, though: the Playlist Creator side of the app
+performs a straightforward "ask MusicBrainz, take its three most popular tags, write
+them if the file doesn't already have at least two genres" pass — it does not map
+messy variants to one clean, chosen vocabulary. A genuinely canonical genre-mapping
+system does exist in the codebase, but only in the legacy Tkinter app; see
+**features/tag_fixer.md** for the full explanation of why "genre normalizer" means
+two different things depending on which app you're in.
+
+*(An earlier version of this document also described a "year-gap assistant" that
+built playlists telling a chronological story across your collection. That feature
+does not exist. The closest thing in the codebase is a differently-purposed "Year
+Assistant," legacy-app-only, that fills in *missing* year tags via a copy-paste-to-an-LLM
+workflow — it has no connection to playlist ordering. If chronological playlist
+pacing is something you want, it's a genuine gap, not a documentation oversight; see
+**ROADMAP.md**.)*
 
 ## Level 2: Clustering — letting the music sort itself
 
@@ -174,43 +204,78 @@ for this flattening (favoring a fast modern technique when it's available, and f
 back to a slower but vivid alternative otherwise), so the map you see is a faithful
 two-dimensional shadow of the true high-dimensional arrangement of your music.
 
-### Two graphs: the in-app map and the 3-D browser view
+### What actually opens today: a 3-D browser view
 
-There are actually two flavors of the visualization, and they serve different moods:
+The "Music Graph" room in the sidebar is, today, a **launcher**: it checks whether
+cluster data is available, and when you click through, it opens a standalone web page
+in your default browser — a Three.js/WebGL 3-D scatter plot you can orbit, generated
+fresh from your most recent clustering run. That part is real and works.
 
-- **The in-app 2-D map** is built directly into the application window. It's
-  immediate, responsive, and lets you interact with your clusters without ever leaving
-  the app — hover, click, select, and spin selections off into playlists.
-- **A separate 3-D view** is generated as a standalone web page that opens in your
-  browser, where you can orbit around your collection in three dimensions. The extra
-  dimension reveals relationships that a flat map can flatten away, at the cost of
-  living in a browser tab rather than inside the app.
+### The in-app 2-D map: built, but not actually reachable
 
-### Why build the map into the app at all?
+This is worth being direct about, because the vision and the reality have diverged
+here more than anywhere else in the app. An **in-app, native 2-D interactive scatter
+plot** was designed and fully built — a PyQtGraph-based widget with lasso/rectangle
+selection, hover tooltips, a cluster legend with per-cluster show/hide toggles, and a
+companion panel that shows a track's details when you hover or select it. All four
+pieces of that widget exist as real, working code.
 
-It would have been easier to just generate a web page and call it done — and indeed
-that's what the 3-D view does. But the in-app 2-D map was deliberately built to live
-*inside* the application, so that exploring your clusters and acting on them (making a
-playlist from a selection) happens in one continuous flow, without bouncing out to a
-browser and back. Keeping the interactive experience in one place was judged worth the
-extra effort of building a native, in-app graph rather than offloading everything to an
-external web page.
+**None of it is wired into anything you can currently reach from the sidebar.** The
+"Music Graph" workspace never imports or displays these widgets; nothing in the app
+currently opens them. The only place they're exercised at all is a stale,
+non-pytest integration script at the repository root, which itself hasn't been
+updated to match a workspace rename that happened after it was written. In practical
+terms: if you're picturing "hover over a dot inside the app, lasso a region, spin it
+into a playlist without ever leaving the window" — that experience does not exist
+today, even though every individual piece needed to build it already does. Wiring
+these widgets into the Music Graph workspace is one of the highest-value, lowest-risk
+items on **ROADMAP.md**, since none of the hard work remains — only the connection.
+
+A second, smaller navigation gap sits right next to this one: the "Open Visual
+Graph" button inside the clustering workspace doesn't currently navigate anywhere —
+it shows a message box telling you to click the sidebar entry yourself. The code
+comment marking this is direct about its own incompleteness: a `TODO` left in place
+of the intended cross-workspace signal.
+
+## Two workspaces exist; only one is live
+
+If you go looking at the code, you'll find two clustering workspaces:
+`clustered.py`, an older, simpler room, and `clustered_enhanced.py`, the
+three-tab (Quick Start / Advanced / Results) workspace this document has been
+describing. Only the enhanced one is reachable — the sidebar's "Clustered" entry
+is wired to it, and the older workspace is unreferenced dead code left in the
+repository. If you're reading the source to understand this feature, ignore
+`clustered.py`; it doesn't run.
+
+## A bug worth knowing about: the quality report can crash
+
+The **Cluster Quality Report** dialog — the one meant to show your Silhouette /
+Davies-Bouldin / Calinski-Harabasz scores plus a per-cluster breakdown — currently
+has a broken internal reference: the section that builds the per-cluster breakdown
+calls a method that doesn't exist under that name. In practice, this means the
+dialog will raise an error and fail to fully render whenever it's opened against a
+real (non-empty) clustering result — which is to say, in the normal case where you
+actually have clusters to look at. This is tracked as a bug fix in **ROADMAP.md**,
+not a feature gap; the scoring math itself is fine, only the dialog that displays the
+per-cluster detail is affected.
 
 ## What's real today, and what's still ahead
 
 In the spirit of an honest, up-to-date resource:
 
-**Working today:** rule-based playlists and Auto-DJ; genre normalization; clustering by
-timbre and tempo with both K-Means and HDBSCAN; the configuration wizard; the quality
-scores; automatic playlist creation from clusters; the flattening of high-dimensional
-data into both a 2-D in-app map and a 3-D browser view; and basic interaction with the
-map (hover, click, select).
+**Working today:** rule-based playlists and Auto-DJ; MusicBrainz-based genre
+tag-filling (see the caveat above on what "normalization" means here); clustering by
+timbre and tempo with both K-Means and HDBSCAN; the five-step configuration wizard;
+the quality *scoring math* (the summary dialog that displays it has the bug noted
+above); automatic playlist creation from clusters; and the 3-D browser visualization.
 
-**Still ahead (see ROADMAP.md):** bringing the additional sound features (harmonic
-content, brightness, percussive density) into the actual clustering rather than just
-the checkboxes; live re-tuning of a clustering without recomputing everything from
-scratch; richer selection and editing tools on the graph (merging groups, moving a
-track from one group to another); and a one-click way to export the quality report.
+**Still ahead (see ROADMAP.md):** wiring the already-built in-app 2-D interactive
+graph widgets into the Music Graph workspace (the single biggest gap between vision
+and reality in this feature area); fixing the Cluster Quality Report crash; fixing
+the "Open Visual Graph" button's navigation; bringing the additional sound features
+(harmonic content, brightness, percussive density) into the actual clustering rather
+than just the checkboxes; live re-tuning of a clustering without recomputing
+everything from scratch; and a one-click way to export the quality report.
 
 ---
 

@@ -6,39 +6,43 @@ below.
 
 ## Known Gaps — What Still Needs Work
 
-A quick-reference list of what is **not yet built**, ordered by how close each item is
-to done. See **[ROADMAP.md](ROADMAP.md)** for the full details and effort estimates.
+A quick-reference list of what's broken or not yet built, ordered by how urgent or
+close-to-done each item is. See **[ROADMAP.md](ROADMAP.md)** for the full list,
+including lower-priority housekeeping items.
 
-- **Library Sync — Export Report button** *(Backend ready, not connected — smallest
-  outstanding win).* The report-generation code already exists and works
-  (`export_report()` / `export_review_report_html()` in `library_sync_review_report.py`).
-  Only the button to trigger it is missing.
+- **Two confirmed crash bugs** *(Bug — fix these first).* The Duplicate Pair Report
+  tool and the Cluster Quality Report dialog both raise an unhandled error and fail
+  every time they're opened against real data, due to small internal mistakes (a
+  list treated as a dict; a call to a method that doesn't exist under that name).
+  Neither affects the main duplicate-scan or clustering workflows — only these two
+  specific report/inspection views.
+
+- **Visual Music Graph — the in-app 2-D interactive map is built but entirely
+  unreachable** *(Backend ready, not connected — now the single biggest "almost
+  done" item in the project).* Four real widgets exist — an interactive scatter
+  plot with lasso/rectangle selection, a 3-D OpenGL scatter, a cluster legend, and a
+  track-details panel — and none of them are wired into the Music Graph workspace.
+  Today, that workspace only opens a separate browser-based 3-D view.
 
 - **Clustering — extra sound features** *(Partially built).* The wizard shows
   checkboxes for harmonic content, brightness, and percussive density, but the engine
   currently clusters on **timbre (MFCC) and tempo only**. Those checkboxes are UI
   scaffolding not yet wired into feature extraction.
 
-- **Visual Music Graph — dimensionality-reduction selector** *(Partially built).* The
-  app already computes PCA / t-SNE / UMAP reductions internally; what's missing is a
-  control in the graph UI to choose and switch between them without re-running the whole
-  clustering.
-
-- **Visual Music Graph — interactive Phases 4–8** *(Designed, not started).* The 2D
-  in-app and 3D browser visualizations are built, but the richer interaction layer is
-  not: live parameter tuning, advanced selection tools (lasso, rectangle, metadata
-  filter), in-map cluster editing (merge, re-assign, sub-cluster), a suggestion engine,
-  and one-click quality-report export.
-
-- **Metadata providers — Spotify & Gracenote** *(Designed, not started).* Both appear
-  in Settings and `config.SUPPORTED_SERVICES`, and `spotipy` is installed, but the
-  underlying functions in `metadata_service.py` return `{}`. Discogs is roadmap-only.
-  Short-term fix: mark them as unavailable in the Settings UI so they stop looking like
-  working options.
+- **Genre canonicalization only exists in the legacy app** *(Designed, not started
+  in the modern app).* The Qt "Genre Normalizer" workspace just picks MusicBrainz's
+  top 3 popular tags per track — it doesn't map messy genre variants to a clean,
+  chosen vocabulary. That real mapping workflow only exists in the legacy Tkinter
+  app today.
 
 - **Library Sync — bulk flagging & session persistence** *(Designed, not started).*
   Tracks can only be flagged one at a time; there is no multi-select batch flag. Review
   flags also live in memory only and are cleared when you re-scan or restart.
+
+- **Metadata providers — Spotify & Gracenote remain unbuilt** *(Designed, not
+  started; the Settings UI is already honest about this).* Both are visibly listed
+  and clearly disabled in Settings rather than pretending to work, but the
+  underlying lookup functions still just return nothing. Discogs is roadmap-only.
 
 ## Read in this order
 
@@ -57,6 +61,8 @@ to done. See **[ROADMAP.md](ROADMAP.md)** for the full details and effort estima
   the same song by sound, and safely clearing the extras.
 - **[features/library_sync.md](features/library_sync.md)** — Merging an incoming folder
   into your library, with per-item review flags.
+- **[features/tag_fixer.md](features/tag_fixer.md)** — Looking up correct tags online
+  and proposing corrections, plus the honest story on genre normalization.
 - **[features/playlists_and_clustering.md](features/playlists_and_clustering.md)** —
   Rule-based playlists, machine-learning clustering, and the Visual Music Graph.
 

@@ -6,16 +6,49 @@ Plain-English reference for every screen, panel, control, and dialog in the
 > The legacy Tkinter interface (`main_gui.py`) is still functional but is no
 > longer the primary GUI. This document describes the PySide6 replacement only.
 
+> **Verified against the code 2026-07-22.** The previous version of this document
+> had drifted significantly from the actual app in several sections (startup
+> sequence, Player, Compression, Utilities, Duplicates, Clustered Playlists,
+> Settings). Every section below has been re-checked against the source; places
+> where a control looks wired but currently has no effect are called out
+> explicitly rather than silently omitted, since knowing a checkbox is decorative
+> is as useful as knowing what a real one does.
+
 ---
 
-## 0. Startup Sequence (`splash.py`, `landing.py`)
+## 0. Startup Sequence
 
-Handles the initial application loading and library selection before showing the main window.
+Handles the initial application loading and library selection before showing the
+main window.
+
+**The `SplashScreen` class (`gui/widgets/splash.py`) is dead code.** It's fully
+built — a branded two-phase loading bar with a spinner — but nothing in the app
+instantiates or shows it any more. A comment left in the landing screen's code
+confirms this was intentional, not an oversight: a short pause between the
+landing window's fade-in and its tiles beginning to animate is described as
+"the merged 'logo moment' that replaces the old SplashScreen." The splash
+screen was superseded by the mosaic landing described below and simply never
+removed from the repository.
+
+**What actually runs**, in order:
 
 | Component | Purpose |
 |---|---|
-| `SplashScreen` (`splash.py`) | Displays the initial AlphaDEX logo and handles theme initialization. Features a progressive loading bar that responds to actual art loading events. |
-| `MosaicLanding` (`landing.py`) | Presents a grid of album art from the user's previously selected library. Validates the library path, builds the mosaic (with fast-path for Opus album art and folder-image fallback), and provides a "Continue" button to launch the main application. |
+| `MosaicLanding` (`gui/widgets/landing.py`) | The real first thing you see. Presents an animated grid of album art tiles built from your previously selected library (or lets you pick a new one if none is saved). Validates the library path, builds the mosaic with a "logo moment" pause before the tiles fly in, and shows a call-to-action button. |
+| `AlphaDEXWindow` (`gui/main_window.py`) | Constructed on a deferred timer tick (scheduled for the very next event-loop cycle) specifically so the landing screen can appear and start its fade-in before the heavier main-window import runs. The two windows then cross-fade into each other. |
+
+The landing's call-to-action button is **not** labeled "Continue" — it reads
+**"Initialize"** if you have a previously saved library, or **"Choose Library
+Folder"** if you don't. Clicking directly on one of the mosaic's individual
+album-art tiles skips the button entirely: it accepts that library *and*
+navigates straight into the Player workspace, already playing that folder — a
+"click the art to play it" shortcut with no equivalent mention anywhere else in
+the app.
+
+The genuinely expensive work (scanning and fingerprinting your library) is
+deliberately postponed until whichever comes first: 30 seconds after the
+landing screen first appears, or 3 seconds after you press the call-to-action
+button — so the opening animation never stutters behind a frozen progress bar.
 
 ---
 
@@ -31,13 +64,24 @@ Layout (top → bottom, left → right):
 ├──────────────┬──────────────────────────────────────────────┤
 │              │                                              │
 │   Sidebar    │           Workspace (stacked)                │
-│   (220 px)   │                                              │
+│   (360 px)   │                                              │
+│              ├──────────────────────────────────────────────┤
+│              │  Now Playing bar (hidden until a track loads)│
 │              ├──────────────────────────────────────────────┤
 │              │  Log Drawer (slide-up, collapsed by default) │
 ├──────────────┴──────────────────────────────────────────────┤
 │  Status Bar                                                  │
 └─────────────────────────────────────────────────────────────┘
 ```
+
+The **Now Playing bar** (`gui/widgets/now_playing_bar.py`) is a persistent
+transport strip — art thumbnail, title/artist, prev/play-pause/next, seek
+slider, volume slider — that sits above the log drawer and stays visible no
+matter which workspace you're in once a track has started playing. It is
+two-way wired to the Player workspace (now-playing/position/state signals one
+direction, transport commands and volume the other), including a
+shared-volume-slider trick so the two volume controls never fight each other
+when one is adjusted programmatically.
 
 ---
 
@@ -50,24 +94,30 @@ Fixed height 64 px. Always visible.
 | App title "AlphaDEX" | Label (`#appTitle`) | Brand / identity |
 | Library path | Label (`#libraryPath`) | Full path of the currently open library |
 | Library stats | Label (`#libStats`) | Track count · GB · artist count (populated after background scan) |
-| 📁 Change Library | Button | Opens a `QFileDialog` folder picker; emits `library_changed(path)` |
-| 🎨 Theme | Button | Opens `ThemePickerDialog` (non-modal swatch grid) |
-| ⚙ Settings | Button | Opens `SettingsDrawer` dialog |
+| "Change Library" | Button | Opens a `QFileDialog` folder picker; emits `library_changed(path)` |
+| "Theme" | Button | Opens `ThemePickerDialog` (non-modal swatch grid) |
+| "Settings" | Button | Opens `SettingsDrawer` dialog |
+
+The three action buttons are plain text labels — there are no emoji glyphs
+baked into them, unlike the sidebar's nav items. (A small `⌂` glyph does
+appear as a separate prefix on the library-path label itself, but not on any
+button.)
 
 **Signals emitted**
 
 | Signal | When |
 |---|---|
 | `library_changed(str)` | User selects a new library folder |
-| `settings_requested()` | User clicks ⚙ Settings |
-| `theme_requested()` | User clicks 🎨 Theme |
+| `settings_requested()` | User clicks Settings |
+| `theme_requested()` | User clicks Theme |
 
 ---
 
 ## 3. Sidebar (`gui/widgets/sidebar.py`)
 
-Fixed width 220 px. Dark background (token `sidebar_bg`). Contains a `QScrollArea`
-so the nav list can scroll on small displays.
+Fixed width **360 px** (not 220 px as an earlier version of this document
+claimed). Dark background (token `sidebar_bg`). Contains a `QScrollArea` so
+the nav list can scroll on small displays.
 
 ### 3.1 Logo label
 
@@ -75,35 +125,49 @@ Static "AlphaDEX" label at the top.
 
 ### 3.2 Navigation items
 
-Grouped into five sections. Each item is an `AnimatedNavButton` (150 ms hover
-easing, badge support). Clicking emits `nav_changed(key)` to the main window
-which switches the active workspace.
+Grouped into five sections, plus a separate **Exit** control pinned below a
+divider at the bottom of the list — not part of the five workspace sections,
+and easy to miss if you're only looking at the `NAV_STRUCTURE` groups. Each
+item is an `AnimatedNavButton` (150 ms hover easing, badge support — though
+see the note below). Clicking a workspace item emits `nav_changed(key)` to
+the main window which switches the active workspace; clicking Exit emits
+`exit_requested` and closes the app.
 
-| Section | Key | Label |
+| Section | Key | Sidebar label |
 |---|---|---|
 | **ORGANIZE** | `indexer` | Indexer |
 | | `library_sync` | Library Sync |
 | **CLEAN UP** | `duplicates` | Duplicates |
-| | `similarity` | Similarity Inspector |
+| | `similarity` | **Similarity** |
 | | `tag_fixer` | Tag Fixer |
 | | `genres` | Genre Normalizer |
-| **PLAYLISTS** | `playlists` | Playlist Generator |
-| | `clustered` | Clustered Playlists |
-| | `graph` | Visual Music Graph |
+| **PLAYLISTS** | `playlists` | **Playlists** |
+| | `clustered` | **Clustered** |
+| | `graph` | **Music Graph** |
 | **PLAYER** | `player` | Player |
 | | `compression` | Compression |
-| **TOOLS** | `tools` | Export & Utilities |
+| **TOOLS** | `tools` | **Utilities** |
 | | `help` | Help |
+| *(below divider)* | `exit` | Exit |
 
-Active item renders with accent fill (`sidebar_active` token). Badges (numeric
-counts) appear at the trailing edge and are set via `Sidebar.set_badge(key, n)`.
+A handful of these labels are shorter than the underlying feature name might
+suggest (e.g. "Similarity" rather than "Similarity Inspector," "Utilities"
+rather than "Export & Utilities") — worth knowing since other documents in
+this suite, and the app's own Help screen, sometimes refer to the fuller
+feature name.
+
+Active item renders with accent fill (`sidebar_active` token). `Sidebar.set_badge(key, n)`
+exists and is built to show a numeric badge at an item's trailing edge, but
+nothing in the app currently calls it — no workspace posts a badge count
+today, so this is a built, currently-unused capability rather than a visible
+feature.
 
 **Keyboard shortcuts** (set in `main_window.py`):
 
 | Shortcut | Action |
 |---|---|
-| Ctrl+1 … Ctrl+9 | Switch to workspace 1–9 in sidebar order |
-| Ctrl+O | Change library (same as 📁 button) |
+| Ctrl+1 … Ctrl+9 | Switch to the first 9 workspaces in sidebar order (Indexer → Music Graph). Player, Compression, Utilities, and Help have no shortcut. |
+| Ctrl+O | Change library (same as the Top Bar button) |
 | Ctrl+, | Open Settings |
 | Ctrl+L | Toggle log drawer |
 | Ctrl+W | Clear log |
@@ -112,19 +176,22 @@ counts) appear at the trailing edge and are set via `Sidebar.set_badge(key, n)`.
 
 ## 4. Log Drawer (`gui/widgets/log_drawer.py`)
 
-A slide-up panel anchored to the bottom of the content area. Collapsed by
-default (0 px); expands to ~200 px on toggle or automatically when an
-error/warning message arrives.
+A slide-up panel anchored to the bottom of the content area, below the Now
+Playing bar. Collapsed by default (0 px); expands to **220 px** on toggle or
+automatically when an error/warning message arrives.
 
 | Element | Type | Purpose |
 |---|---|---|
 | Handle bar | Clickable strip | Shows current status chip; click to toggle open/close |
 | Status chip | Label (coloured) | One-line summary of the last operation status |
-| Log text area | `QPlainTextEdit` (read-only) | Colour-coded log: green = ok, amber = warn, red = err |
+| Log text area | `QPlainTextEdit` (read-only) | Colour-coded log |
 | Clear button | Button (in handle bar) | Clears the log text |
 
 `append(message, level)` — called by workspaces via the `log_message` signal.
-Levels: `"info"`, `"ok"`, `"warn"`, `"err"`.
+The four levels actually used across the codebase are `"info"`, `"ok"`,
+`"warn"`, and **`"error"`** (not the abbreviation `"err"` an earlier version
+of this document listed — every workspace's own logging call uses the full
+word).
 
 ---
 
@@ -142,6 +209,12 @@ Singleton `QObject`. Exposes:
 - Auto mode: monitors `QGuiApplication.styleHints().colorSchemeChanged` (Qt 6.5+);
   falls back to time-of-day (07:00–20:00 = light).
 
+A design note left in the theme engine explains why a residual stylesheet
+still exists alongside the custom `QProxyStyle`: "AlphaDEXStyle handles ALL
+widget painting. This residual [stylesheet] is only for the handful of things
+QProxyStyle cannot reach: tooltip sizing, plain-text area font, and explicit
+selection-colour anchoring."
+
 ### 5.2 Themes
 
 14 named themes persisted to config as `"theme"`.
@@ -152,7 +225,7 @@ Singleton `QObject`. Exposes:
 
 ### 5.3 ThemePickerDialog (`picker.py`)
 
-Non-modal dialog opened by the 🎨 Theme button.
+Non-modal dialog opened by the Theme button.
 
 | Element | Purpose |
 |---|---|
@@ -174,6 +247,17 @@ Modal child of `ThemePickerDialog`.
 | Day theme section | Swatch grid — select one light theme |
 | Apply Auto Theme button | Saves pair and activates auto mode |
 
+### 5.5 The shared background glow
+
+Every workspace and the sidebar paint against the same two-corner accent-glow
+background (`gui/widgets/gradient_bg.py`, `GradientWidget`), togglable in
+Settings → General → "Background gradient." A comment on the sidebar's own
+paint routine explains the intent behind this precisely: *"The
+window-spanning gradient is painted at the same coordinates used by
+GradientWidget, so the two glows read as a single canvas that stretches
+across both the sidebar and the workspace... just enough to hint at the
+panel boundary without breaking the illusion of one unified background."*
+
 ---
 
 ## 6. Workspaces
@@ -186,6 +270,10 @@ features:
 - `status_changed(str, colour)` signal updates the log drawer handle and status bar.
 - `_make_card()` returns a `QFrame` with rounded corners and a drop-shadow effect
   (shadow colour updates on theme change via `refresh_shadows()`).
+- The scroll area's inner content widget is specifically a `GradientWidget`
+  (see §5.5), not a plain `QWidget` — a comment in `base.py` notes plainly why:
+  a plain `QWidget` would be transparent and the shared background glow
+  wouldn't render.
 
 ### 6.1 Indexer (`indexer.py`)
 
@@ -193,52 +281,70 @@ Controls the file-organisation and rename pipeline.
 
 | Element | Type | Purpose |
 |---|---|---|
+| Workflow stepper | Header row | Shows the three-step flow (Configure → Preview → Execute) as active/inactive labels |
 | Configuration card | Card | Contains all run options |
 | Dry Run | Checkbox | Preview only — writes HTML report, no files moved |
 | Cross-Album Scan | Checkbox | Enables Phase C (across album boundaries) |
 | Flush Cache | Checkbox | Clears fingerprint cache before run |
 | Create Playlists | Checkbox | Generates `.m3u` playlists in `Playlists/` on full run |
 | Max Workers | SpinBox | Thread pool size (1–32) |
-| Start Indexer / Cancel | Button (primary) | Launches or cancels the background indexer |
+| Run button | Button (primary) | Label changes dynamically: **"▶ Run Preview"** while Dry Run is checked, **"▶ Execute"** when it isn't |
+| Cancel | Button | Cancels the background indexer |
 | Progress card | Card | Three labeled progress bars: Phase A / Phase B / Phase C |
 | Status label | Label | Current step description |
 | Open Report | Button | Opens `Docs/MusicIndex.html` in the system browser |
+
+Unchecking Dry Run and clicking the now-labeled "Execute" button triggers a
+confirmation `QMessageBox` before anything actually runs — an extra safety
+step not obvious from the button alone.
 
 Worker: `IndexerWorker(QThread)` calls `music_indexer_api.run_full_indexer()`.
 
 ### 6.2 Duplicates (`duplicates.py`)
 
-Review-first duplicate detection and disposal.
+Review-first duplicate detection and disposal. Also has its own workflow
+stepper header ("1. Scan & fingerprint → 2. Review groups → 3. Execute plan").
 
 | Element | Type | Purpose |
 |---|---|---|
-| Scan options card | Card | Library path entry, threshold sliders (exact / near / mixed-codec) |
+| Scan options card | Card | Library path entry, threshold fields (`QDoubleSpinBox`, not sliders — exact / near / mixed-codec) |
 | Start Scan / Cancel | Button (primary) | Launches `DupeScanWorker` |
 | Scan progress bar | Progress bar | Fingerprint generation progress |
-| Groups table | `QTreeWidget` | Lists duplicate groups; columns: Group, Files, Sizes, Codecs |
+| Groups table | `QTreeWidget` | Columns are **`#`, Winner, Losers, Review** (not "Group, Files, Sizes, Codecs") |
 | Inspector panel | Card | Shows selected group's file list with per-item details |
-| Disposition row | Radio buttons | Retain / Quarantine / Delete |
-| Execute Plan | Button (danger) | Applies dispositions — writes execution report to `Docs/` |
+| Global disposition | Radio buttons | Two options: "Quarantine duplicates (safe default)" / "Delete losers permanently" — there is no separate "Retain" radio |
+| Per-group disposition | `QComboBox` | Enabled once a group is selected, offering `Default (global) / Retain / Quarantine / Delete` — **this control currently has no change handler wired to it; selecting a value has no effect on the plan.** Treat it as not-yet-functional rather than a per-group override. |
+| Execute Plan | Button (danger) | Applies the *global* disposition — writes execution report to `Docs/` |
 
 ### 6.3 Library Sync (`library_sync.py`)
 
-Compare two libraries and execute a copy/move plan.
+Compare two libraries and execute a copy/move plan. This is one of the larger
+and richer workspaces in the app — an earlier version of this document
+significantly undersold it.
 
 | Element | Type | Purpose |
 |---|---|---|
 | Source path entry + Browse | Row | Pick the existing library folder |
 | Incoming path entry + Browse | Row | Pick the incoming library folder |
-| Threshold override | Input field | Fingerprint matching threshold (0.0–1.0) |
+| Preset name field | Input | Names a saved threshold/config preset |
+| Global threshold override | Input field | Fingerprint matching threshold (0.0–1.0) |
+| Format overrides | Multi-line text box | Per-extension threshold overrides, `ext=value` syntax (e.g. `.flac=0.3`) |
+| Recompute Matches | Button | Re-runs matching against the current thresholds without a full rescan |
+| Save Session | Button | Persists the current scan session |
 | Scan progress | Two progress bars | Existing lib scan + Incoming lib scan |
 | Start Scan | Button (primary) | Launches `SyncScanWorker` |
 | **Incoming Tracks table** | Tree | Displays incoming files with metadata |
-| Table columns | | Track name, Status, Distance, **Flag, Note** |
-| **Right-click context menu** | Menu | 📋 Copy, ↻ Replace, ✕ Clear flag, 📝 Add note |
+| **Existing Tracks table** | Tree | A second panel — columns Track / Status / Best Matches — showing your existing library side |
+| Match Inspector | Card | Text area + one-line summary describing the currently selected match in detail |
+| Table columns (Incoming) | | Track name, Status, Distance, **Flag, Note** |
+| **Right-click context menu** | Menu | Copy, Replace, Clear flag, Add note |
 | Plan summary card | Card | Shows counts and status distribution |
 | Build Plan | Button (primary) | Computes move/copy plan |
 | Preview Plan | Button | Opens HTML preview in browser |
 | Execute Plan | Button (primary) | Runs the plan, writes execution report |
 | Copy / Move toggle | Toggle | Whether to copy or move files |
+| **Export Report** | Button | Saves a report of every match, flag, and note as HTML, JSON, or CSV, once a scan has completed |
+| Export Logs… | Button | Saves the session's activity log as a plain text file |
 
 **User interactions:**
 - Right-click incoming track to flag for copy/replace
@@ -248,9 +354,9 @@ Compare two libraries and execute a copy/move plan.
 
 Worker calls `library_sync.compare_libraries()` and `library_sync.build_library_sync_preview()`.
 
-### 6.4 Similarity Inspector (`similarity.py`)
+### 6.4 Similarity (`similarity.py`)
 
-Targeted two-file duplicate diagnostic.
+Sidebar label is "Similarity"; a targeted two-file duplicate diagnostic.
 
 | Element | Type | Purpose |
 |---|---|---|
@@ -262,30 +368,37 @@ Targeted two-file duplicate diagnostic.
 
 ### 6.5 Tag Fixer (`tag_fixer.py`)
 
-AcoustID / MusicBrainz tag correction workflow.
+AcoustID-driven tag correction workflow. Notably, **there is no service
+selector in this workspace** — the automatic scan always uses the same lookup
+path regardless; see **features/tag_fixer.md** for why MusicBrainz and
+Last.fm aren't independently selectable here despite being real, working
+services elsewhere in the app.
 
 | Element | Type | Purpose |
 |---|---|---|
-| Service selector | ComboBox | AcoustID / MusicBrainz / Last.fm |
+| Dry run checkbox | Checkbox | Checked by default; blocks the Apply button with a message rather than implementing a separate write path |
+| Fix fields checkboxes | Checkboxes | Title / Artist / Album / Genre |
 | Scan Library | Button (primary) | Launches `TagFixWorker` |
-| Proposals table | `QTableWidget` | Columns: File, Field, Current, Proposed; checkbox per row |
+| Proposals table | `QTableWidget` | Columns: ✓, File, Field, Current Value, Proposed Value, **Score** |
 | Select All / Deselect All | Buttons | Bulk selection |
-| Apply Selected | Button (primary) | Writes accepted proposals to file tags |
+| Apply Selected | Button (primary) | Writes accepted proposals to file tags, after a confirmation prompt |
 
 ### 6.6 Genre Normalizer (`genres.py`)
 
-Batch genre tag update via MusicBrainz or Last.fm.
+Batch genre-tag update — see **features/tag_fixer.md** for the important
+caveat that this label describes something different from the legacy app's
+"Genre Normalizer."
 
 | Element | Type | Purpose |
 |---|---|---|
-| Service selector | ComboBox | MusicBrainz / Last.fm |
-| Dry Run | Checkbox | Preview without writing tags |
-| Overwrite Existing | Checkbox | Replace genres already tagged |
+| Service selector | ComboBox | MusicBrainz / Last.fm / Both — **currently decorative; the backend only ever queries MusicBrainz regardless of this selection** |
+| Dry Run | Checkbox | When checked, files are logged as "would process" without ever being looked up — the dry-run preview does not show what genres would actually be proposed |
+| Overwrite Existing | Checkbox | **Currently decorative; has no effect.** The real (fixed) rule is: skip any file that already has two or more genre tags |
 | Run Genre Update | Button (primary) | Launches `GenreWorker` |
 | Progress bar | Progress bar | File processing progress |
 | Results card | Card | Count summary: updated / skipped / errors |
 
-### 6.7 Playlist Generator (`playlists.py`)
+### 6.7 Playlists (`playlists.py`)
 
 Four sub-panels in a tab bar:
 
@@ -296,69 +409,130 @@ Four sub-panels in a tab bar:
 | Auto-DJ | Chains tracks for smooth transitions using similarity scoring |
 | Playlist Repair | Finds and fixes broken paths inside existing `.m3u` files |
 
+Two controls on the Tempo + Energy tab are currently decorative: the **Tempo
+range** and **Energy range** spin boxes are captured but never passed to the
+bucketing function, which always uses its own fixed tiers (see
+**features/playlists_and_clustering.md**) regardless of what you set here.
+The **"Prefer Opus when searching for missing FLAC"** checkbox is similarly
+built but not read anywhere.
+
 Each tab has a Run button that launches a `PlaylistWorker(QThread)`.
 
-### 6.8 Clustered Playlists (`clustered.py`)
+### 6.8 Clustered (`clustered_enhanced.py`)
 
-K-Means and HDBSCAN clustering over audio features.
+The workspace the sidebar's "Clustered" entry actually opens. (An older,
+simpler workspace, `clustered.py`, still exists in the repository but is dead
+code — nothing imports it any more, and it isn't reachable from the app.)
 
-| Element | Type | Purpose |
-|---|---|---|
-| Algorithm selector | ComboBox | K-Means / HDBSCAN |
-| Feature checkboxes | Checkboxes | Tempo, Energy, Danceability, Valence, Loudness, … |
-| Cluster count | SpinBox | Target cluster count (K-Means only) |
-| Run Clustering | Button (primary) | Launches `ClusterWorker` |
-| Open Visual Graph | Button | Switches to the Graph workspace with cluster data loaded |
-
-### 6.9 Visual Music Graph (`graph.py`)
-
-Status-only workspace. Checks whether cluster data is available and launches
-`ClusterGraphPanel` (the interactive matplotlib scatter plot) in a new window.
-
-### 6.10 Player (`player.py`)
-
-In-app audio playback via libVLC.
-
-| Element | Type | Purpose |
-|---|---|---|
-| Track metadata card | Card | Title, artist, album, codec, duration |
-| Waveform / album art area | Label | Placeholder for artwork or waveform display |
-| Transport controls | Buttons | ⏮ Previous, ⏪ Seek back, ⏯ Play/Pause, ⏩ Seek forward, ⏭ Next |
-| Progress slider | Slider | Scrub position; updates in real time |
-| Volume slider | Slider | 0–100 % |
-| Open File | Button | Load a single audio file |
-
-### 6.11 Compression (`compression.py`)
-
-Library-wide format conversion and archiving.
-
-| Element | Type | Purpose |
-|---|---|---|
-| Target format | ComboBox | MP3 / AAC / FLAC / OGG |
-| Bitrate | SpinBox | Output bitrate (kbps) |
-| Archive originals | Checkbox | Zip source files after conversion |
-| Start | Button (primary) | Launches compression worker |
-| Progress | Progress bar | Per-file progress |
-
-### 6.12 Export & Utilities (`tools.py`)
-
-Five-tab panel of miscellaneous tools. Minimum tile width is 500 px for better card proportions.
+Three tabs:
 
 | Tab | Contents |
 |---|---|
-| Artist/Title Export | Path entry, delimiter selector, Export button, 📁 Open Folder button — writes text file of all artist · title pairs |
-| Codec List Export | Export button, 📁 Open Folder button — writes text file of all file paths grouped by codec (chips use 13 px font, 4/12 px padding) |
-| File Cleanup | Finds and lists non-audio files in the library; Move to Trash / Delete buttons |
-| Diagnostics | Responsive 4-column grid of square buttons (with Qt standard icons) launching diagnostic dialogs: M4A Tester, Opus Tester, Bucketing POC, Scan Engine, Fuzzy Finder, Pair Review, and View Crash Log |
-| Validator | Runs `validator.py` against the library and displays the result report |
+| 🚀 Quick Start | A single fixed "recommended settings" run — one button, no configuration. |
+| ⚙ Advanced | Opens the **Clustering Wizard** dialog (see §7.2 below); shows the resulting configuration as read-only text; has its own Run button. |
+| 📊 Results | Progress bar and live log during the run, then a results panel — cluster count, silhouette score, and three buttons: "View Quality Report," "View Playlists," "Open Visual Graph." |
+
+The feature checkboxes exposed via the wizard are `tempo`, `mfcc`, `chroma`,
+`spectral`, `energy`, `onset_rate` — see **features/playlists_and_clustering.md**
+for which of these the clustering engine actually computes today.
+
+Two things worth knowing about this workspace's buttons: **"Open Visual
+Graph"** doesn't currently navigate anywhere — it pops an informational
+message box telling you to use the sidebar instead, with a `TODO` comment in
+the code marking the intended (but unbuilt) cross-workspace signal. And "View
+Playlists" opens the generated-playlists folder via a Linux-specific
+`xdg-open` call with no Windows or macOS fallback — it will not work as
+described on those platforms.
+
+### 6.9 Music Graph (`graph.py`)
+
+A status-and-launch panel, not an interactive graph in itself. It checks
+whether cluster data is available (inspecting `Docs/cluster_info.json`) and,
+via its "Open 3D Graph" button, opens a **browser-based** 3-D visualization
+(Three.js/WebGL) generated by `cluster_graph_3d.py`. Also offers "Regenerate
+HTML" and "Test with Demo Data" buttons.
+
+This workspace does **not** use the in-app `InteractiveScatterPlot`,
+`Interactive3DScatterPlot`, `ClusterLegendWidget`, or `TrackDetailsPanel`
+widgets described in §8 — those are fully built but currently orphaned; see
+**features/playlists_and_clustering.md** for the detail.
+
+### 6.10 Player (`player.py`)
+
+A full-featured, in-app audio player — considerably more elaborate than
+"transport controls plus a waveform placeholder." There is, in fact, no
+waveform anywhere in the current implementation.
+
+| Element | Type | Purpose |
+|---|---|---|
+| Library table | Sortable/filterable `QTableWidget` | Search box; right-click menu (Play now / Add to queue / Open folder / Save selection as M3U) |
+| Queue panel | List + buttons | Add Selected / Clear / Save Queue as M3U; its own right-click menu |
+| Recently Played | Collapsible list | Up to 30 entries, de-duplicated |
+| Now-playing covers | Three-panel display | Previous / current / next album art in a cover-flow arrangement |
+| Blurred background art | Full-panel backdrop | A blurred, cross-fading rendition of the current track's art behind the library table, for ambience without hurting readability |
+| Hover popup | Tooltip-like panel | Appears after a 1.5-second dwell over a table row, showing art and metadata |
+| Transport controls | Buttons | Previous, seek back, play/pause, seek forward, next |
+| Progress slider | Slider | Scrub position; updates in real time |
+| Volume slider | Slider | 0–100%, kept in sync with the Now Playing bar's own volume control |
+| Shuffle / Repeat | Toggles | Off/track/all repeat modes, with shuffle history |
+| 30-second preview mode | Toggle | Seeks to the 30-second mark and auto-advances after 15 seconds — a "highlight reel" listening mode |
+| Load M3U / Save Queue as M3U | Buttons | Playlist import/export |
+| Open File | Button | Load a single audio file |
+
+**Keyboard shortcuts** (scoped to this workspace, not in the app-wide table in
+§3.2): `Space` play/pause, `N`/`P` next/previous, `Left`/`Right` seek ±5s,
+`Shift+Left`/`Shift+Right` seek ±30s.
+
+One piece of vestigial code worth knowing about if you're reading the source:
+a background art-loading thread still fires on every single click in the
+library table, but the handler it feeds is an explicit no-op — a comment in
+the code notes it as "old cover-flow back-cover logic removed." The work
+still runs; nothing uses the result any more.
+
+### 6.11 Compression (`compression.py`)
+
+**A fixed FLAC → Opus library mirror tool** — not a general format
+converter. An earlier version of this document described a Target
+Format/Bitrate/Archive combination that does not exist in the current
+implementation; output is always Opus, and there is no zip/archive option.
+
+| Element | Type | Purpose |
+|---|---|---|
+| Source folder | Path entry + Browse | The library to mirror |
+| Destination folder | Path entry + Browse | Where the Opus copy is written — always a separate folder, never in-place |
+| Opus bitrate | SpinBox | 48–320 kbps |
+| Overwrite existing files in destination | Checkbox | Whether to re-convert files already present at the destination |
+| Estimate Space Savings | Button | Pre-computes total FLAC byte count and predicted Opus size before you commit to running anything |
+| Start Compression | Button (primary) | Gated on FFmpeg being found on `PATH`; launches the mirror worker |
+| Progress | Progress bar | Per-file progress |
+| Open Report | Button | Opens a generated HTML summary of the mirror run |
+
+### 6.12 Utilities (`tools.py`)
+
+A grid of five "liquid glass" tile cards (`TileGrid`/`ToolTile` — hover-glow,
+animated drawer), **not** a `QTabWidget` as an earlier version of this
+document stated. Minimum tile width is 500 px.
+
+| Tile | Actual contents |
+|---|---|
+| Artist/Title Export | Two toggle switches — "Exclude FLAC files" and "Include per-album duplicate titles" — and an Export button. There is no path entry or delimiter selector; output is always written to `Docs/artist_title_list.txt`. |
+| Codec List Export | Per-extension checkboxes (`.flac`/`.mp3`/`.m4a`/`.aac`/`.wav`/`.opus`/`.ogg`), a "Filenames only (no full paths)" toggle, and an Export button. |
+| **File Cleanup** | **Not** a non-audio-file trash tool. It strips duplicate-download artifacts (trailing `" (1)"`, `" (2)"`, `" copy"`) from **audio** filenames and repairs any playlist references afterward. |
+| Diagnostics | A responsive 4-column grid of buttons launching diagnostic dialogs: M4A Tester, Opus Tester, Bucketing POC, Scan Engine, Fuzzy Finder, Pair Review, View Crash Log. |
+| Validator | Runs `validator.py` against the library and displays the result report. |
 
 ### 6.13 Help (`help.py`)
 
 | Element | Purpose |
 |---|---|
-| Documentation links | Buttons linking to `docs/project_documentation.html`, `docs/gui_inventory.md`, etc. |
+| Documentation links | Buttons linking to `docs/project_documentation.html`, `docs/gui_inventory.md`, and other reference docs |
 | Keyboard shortcuts table | Full reference of all Ctrl+key shortcuts |
-| About card | Version, author, GitHub link |
+| About card | Version, author, GitHub link; also states the app's former name ("AlphaDEX (formerly SoundVault)") and the location of the config file |
+
+One of the documentation links currently points at a file that doesn't
+exist (`docs/library_sync_redesign.md`, which was archived and superseded by
+`docs/features/library_sync.md`) — clicking it produces a "Not Found"
+message box rather than opening anything.
 
 ---
 
@@ -366,42 +540,105 @@ Five-tab panel of miscellaneous tools. Minimum tile width is 500 px for better c
 
 ### 7.1 SettingsDrawer
 
-Modal `QDialog`. Opened by ⚙ Settings or Ctrl+,.
+Modal `QDialog`. Opened by the Settings button or Ctrl+,.
 
-Sections (not yet fully implemented — placeholder structure):
+**This is not a placeholder** — an earlier version of this document described
+it as "not yet fully implemented," which is no longer accurate. It has three
+real tabs:
 
-- Metadata Services (API key, service selector)
-- Library defaults (reserved folder names)
-- Fingerprint thresholds
-- Playback (VLC path)
+1. **Metadata Services** — a service dropdown populated from the app's list
+   of known services, with the not-yet-implemented ones (Spotify, Gracenote)
+   shown but disabled and tooltipped rather than hidden; an AcoustID API key
+   field; MusicBrainz app name/version/contact fields; and a "Test
+   Connection" button that runs a real background connectivity check.
+2. **General** — default library path, near-duplicate and exact-duplicate
+   threshold spin boxes, and the "Background gradient" toggle described in
+   §5.5.
+3. **Advanced** — genuinely still a stub (an empty tab), with a comment
+   noting the relevant settings currently live in the Metadata Services tab
+   instead.
+
+There is no "Library defaults (reserved folder names)" section and no VLC
+playback-path field anywhere in the current dialog, despite an earlier
+version of this document listing both.
 
 Emits `settings_saved()` when accepted; `AlphaDEXWindow` reloads the library
 path if it changed.
 
-### 7.2 ThemePickerDialog
+### 7.2 ClusteringWizardDialog
+
+A genuine 5-step wizard (`gui/dialogs/clustering_wizard_dialog.py`), reached
+from the Clustered workspace's Advanced tab, not previously documented here:
+
+| Step | Contents |
+|---|---|
+| 1. Feature Selection | Checkboxes for tempo / mfcc / chroma / spectral / energy / onset_rate, each with an explanatory tooltip, plus Fast / Balanced / Complete presets. |
+| 2. Normalization & Preprocessing | Standard / MinMax / Robust normalization choice, plus None / PCA / t-SNE / UMAP dimensionality-reduction choice. |
+| 3. Algorithm Selection | K-Means (with a cluster-count spin box) or HDBSCAN (with min-cluster-size and min-samples spin boxes). |
+| 4. Post-Processing | Optional removal of clusters below a size threshold; optional merging of small clusters into a "Miscellaneous" bucket. |
+| 5. Output Options | Create M3U playlists / generate a quality report / open the interactive graph — checkboxes. |
+
+Back/Next/Cancel navigation with a progress bar; refuses to proceed if you
+uncheck every feature.
+
+### 7.3 ClusterQualityReportDialog
+
+Shows Silhouette Score / Davies-Bouldin Index / Calinski-Harabasz Score with
+color-coded verdicts, plus a per-cluster breakdown and heuristic
+improvement suggestions. **Currently has a bug**: the method that assembles
+the per-cluster breakdown calls a helper method under the wrong name, so
+opening this dialog against a real (non-empty) clustering result raises an
+error rather than fully rendering. See **ROADMAP.md**.
+
+### 7.4 ThemePickerDialog
 
 See §5.3.
 
-### 7.3 AutoThemeDialog
+### 7.5 AutoThemeDialog
 
 See §5.4.
 
-### 7.4 Diagnostics Dialogs
+### 7.6 Diagnostics Dialogs
 
-Various dialogs launched from the Export & Utilities workspace.
+Various dialogs launched from the Utilities workspace.
 
 | Dialog | Purpose |
 |---|---|
 | `MediaTesterDialog` | Tests file decoding for specific codecs (e.g., M4A, Opus). |
 | `BucketingPocDialog` | Minimal UI for testing duplicate bucketing strategies. |
-| `ScanEngineDialog` | UI for the duplicate scan engine. |
-| `FuzzyDupeDialog` | Fuzzy duplicate finder UI. |
-| `PairReviewDialog` | Reviews and resolves duplicate pairs. |
+| `ScanEngineDialog` | Exposes all ten duplicate-scan tuning fields as text inputs (sample rate, analysis seconds, tolerances, fingerprint bands/thresholds). |
+| `FuzzyDupeDialog` | Fuzzy duplicate finder UI. Several of its controls are currently decorative — the "Search fields" checkboxes and the entire "Fingerprint Filter" group (exact/near thresholds, mixed-codec boost, two more checkboxes) are rendered but not read by the actual search. Its "Send Matches to Duplicate Pair Review" button is a stub that logs the pairs and shows a "coming soon" message rather than opening the Pair Review dialog. |
+| `PairReviewDialog` | A fuller tool than a one-line summary suggests: two-panel side-by-side comparison (cover art, winner badge, tags) with Prev/Next/Switch/"Prefer MP3"/jump-to-pair navigation, keyboard shortcuts (Enter = confirm delete, Backspace = skip, arrows = navigate), and automatic playlist repair when a file is deleted. |
 | `CrashLogDialog` | Displays the most recent application crash log. |
 
 ---
 
-## 8. Signals flow summary
+## 8. Widgets (`gui/widgets/`)
+
+| Widget | Status |
+|---|---|
+| `top_bar.py` (`TopBar`) | Live — see §2. |
+| `sidebar.py` (`Sidebar`) | Live — see §3. |
+| `log_drawer.py` (`LogDrawer`) | Live — see §4. |
+| `now_playing_bar.py` (`NowPlayingBar`) | Live — see §1. |
+| `gradient_bg.py` (`GradientWidget`) | Live — see §5.5. |
+| `landing.py` (`MosaicLanding`) | Live — see §0. |
+| `splash.py` (`SplashScreen`) | **Dead code** — built, never invoked. See §0. |
+| `interactive_scatter_plot.py` (`InteractiveScatterPlot`) | **Orphaned** — a real, working PyQtGraph 2D cluster scatter with lasso/rect selection and hover tooltips, imported nowhere except a stale integration script. See **features/playlists_and_clustering.md**. |
+| `interactive_3d_scatter.py` (`Interactive3DScatterPlot`) | **Orphaned** — a real, working OpenGL 3D cluster scatter with camera presets, imported nowhere in the live app. |
+| `cluster_legend.py` (`ClusterLegendWidget`) | **Orphaned** — a per-cluster show/hide checklist with color swatches, not wired into any live workspace. |
+| `track_details_panel.py` (`TrackDetailsPanel`) | **Orphaned** — an album-art + metadata panel meant to accompany the scatter plot above; same status. |
+| `audio_preview.py` | Lives directly under `gui/`, not `gui/widgets/`, despite the sibling naming — worth knowing if you go looking for it by directory. |
+
+`gui/qt_launcher.py` is worth a separate mention: it's a standalone,
+self-contained "AlphaDEX Qt Preview" window with placeholder/no-op behavior
+throughout (its own log even labels one action "(placeholder)"). It is not
+imported by the real entry point and is not part of the shipped app — more a
+leftover proof-of-concept than a hidden feature.
+
+---
+
+## 9. Signals flow summary
 
 ```
 TopBar.library_changed ──► AlphaDEXWindow._on_library_changed
@@ -419,6 +656,15 @@ TopBar.theme_requested ──► ThemePickerDialog (non-modal)
 Sidebar.nav_changed ─────► AlphaDEXWindow._on_nav_changed
                               └─► QStackedWidget.setCurrentWidget(ws)
 
+Sidebar.exit_requested ──► AlphaDEXWindow.close()
+
 WorkspaceBase.log_message ──► LogDrawer.append()
 WorkspaceBase.status_changed ─► LogDrawer.set_status() + QStatusBar
+
+PlayerWorkspace ⇄ NowPlayingBar   (two-way: now-playing/position/state one way,
+                                    play-pause/next/prev/seek/volume the other;
+                                    volume sliders kept in sync without echoing)
+
+MosaicLanding.tile_clicked ──► AlphaDEXWindow.play_directory()
+                              └─► navigates to Player workspace, begins playback
 ```

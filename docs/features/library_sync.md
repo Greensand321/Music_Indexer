@@ -51,6 +51,20 @@ until the very end.
 The first three stations gather and analyze; the middle station hands you the wheel;
 the last three commit, but only after you've seen the whole plan.
 
+This assembly-line shape is not the feature's original shape — it's the result of a
+deliberate redesign. Two older functions still exist in the code
+(`copy_new_tracks`/`replace_tracks`) purely as guard rails, and calling either one
+raises an error on purpose:
+
+> "Deprecated: blocked per review-first redesign." — raises `RuntimeError("File
+> operations are disabled in the Library Sync review tool.")`
+
+In other words, Library Sync used to have direct copy/replace entry points that
+skipped the plan-preview-execute pipeline, and they were intentionally disabled when
+the feature moved to the review-first design described above. If you ever see a
+reference to those two function names, know that they're deliberately dead ends, not
+bugs.
+
 ## How the matching works
 
 At the heart of stations 2 and 3 is the same **fingerprint-and-distance** idea used by
@@ -137,6 +151,24 @@ results, the app stays simple and avoids quietly acting on out-of-date instructi
 Persisting flags across sessions is a recognized future enhancement, listed in the
 roadmap, but the current trade-off favors safety and simplicity.
 
+## A note on the two interfaces
+
+Library Sync actually has **two separate front-end implementations** that both drive
+the same backend engine described above: the modern Qt workspace
+(`gui/workspaces/library_sync.py`, described throughout this document, reached from
+the sidebar) and an older, feature-flagged Tkinter panel
+(`library_sync_review.py`) that still exists in the legacy app. They are structurally
+independent pieces of UI code, not a shared component — if you're debugging a
+Library Sync issue, first confirm which of the two interfaces you're actually
+looking at, since a fix to one won't be visible in the other.
+
+*(Also worth knowing: the underlying engine Library Sync calls is a separately
+maintained copy of the Indexer's scanning/fingerprinting logic, not the same module
+the Indexer and Duplicate Finder use. See **architecture.md**'s "two indexer
+engines" note for what that means in practice — most importantly, that the
+fingerprint cache Library Sync uses has a different schema than the one the rest of
+the app uses, and the two can drift apart.)*
+
 ## Committing the changes, safely
 
 When you approve the plan, Library Sync carries it out with the same caution as the
@@ -156,18 +188,28 @@ This is the same preview-first, no-silent-loss, leave-a-recoverable-copy philoso
 that governs the Indexer and the Duplicate Finder — applied to the act of merging two
 libraries.
 
-## The Export Report (a known gap)
+## The Export Report
 
 Library Sync can produce a standalone, shareable **report of the review** — a summary
 of every match, its status, the distance and confidence, the quality verdict, and any
-flags or notes you added, available as a web page or a data file. The machinery to
-generate this report **already exists and works**.
+flags or notes you added, available as a web page, a JSON file, or a CSV file. An
+**Export Report** button in the Qt workspace's Plan & Execution panel lets you save
+one as soon as a scan has finished; it opens a save dialog defaulting into the
+library's `Docs/` folder and writes whichever format you choose based on the file
+extension you pick.
 
-What's missing is only the **button**: the report-export capability is not yet wired to
-a control you can click in the interface. So the feature is, in a sense, ninety-nine
-percent done — the engine is built and tested, it simply hasn't been connected to a
-visible switch yet. Finishing that connection is a small, well-understood task tracked
-in **ROADMAP.md**.
+The export routine states its own scope limit directly in its docstring, and it's
+worth repeating because it's a good example of the project's "compute vs. write"
+discipline: "The export routine deliberately avoids any move/replace logic and only
+writes the requested report file after the caller has previewed counts." Exporting a
+report can never itself move or replace a file — it's a read-only summary, full stop.
+
+*(One inert detail worth knowing if you ever open the HTML report format directly:
+it renders three action buttons — "Replace All," "Replace with Better," "Cancel" —
+styled to look clickable. They currently do nothing; no script wires them to
+anything, and the backend function they'd need to call exists but isn't connected to
+any live control in either app. Treat the HTML report as a read-only summary, not an
+in-report control surface.)*
 
 ---
 

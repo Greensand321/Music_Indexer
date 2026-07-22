@@ -36,10 +36,14 @@ The core workflows, in order of user importance:
    quarantine/delete plan.
 3. **Library Sync** — compares an existing library against an incoming folder,
    produces a copy/move plan, previews it, then executes.
-4. **Tag Fixer** — looks up AcoustID / MusicBrainz metadata and proposes tag
+4. **Tag Fixer** — looks up AcoustID metadata (MusicBrainz enrichment nested
+   inside an AcoustID match; MusicBrainz is not an independently-discovered
+   lookup source today — see `docs/features/tag_fixer.md`) and proposes tag
    corrections for review before writing.
 5. **Playlist Creator** — tempo/energy bucketing, Auto-DJ chaining, K-Means
-   and HDBSCAN clustering, genre normalization, year-gap assistant.
+   and HDBSCAN clustering, genre tag-filling. (A "year-gap assistant" is
+   referenced in some older material; no such feature exists — see
+   `docs/ROADMAP.md`.)
 
 ---
 
@@ -79,11 +83,22 @@ plugins/                     # Metadata service integrations
 utils/                       # Metadata readers, path helpers
 tests/                       # pytest suite (42 modules)
 docs/                        # HTML docs, design notes, GUI inventory
-mutagen_stub/                # Minimal mutagen fallback for tests
-library_sync_indexer_engine/ # Alternate indexer used by Library Sync
-third_party/                 # Prebuilt llama binaries (LLM assistant)
-bindings/                    # C++/pybind11 llama wrappers
+mutagen_stub/                # Minimal mutagen fallback for tests — currently
+                             #   unused; every test file that needs mutagen
+                             #   builds its own inline stub instead (see
+                             #   docs/ROADMAP.md housekeeping section)
+library_sync_indexer_engine/ # A SEPARATELY MAINTAINED, DRIFTED COPY of the
+                             #   indexer/fingerprint-cache engine, used only
+                             #   by library_sync.py. Not a thin re-export —
+                             #   see docs/architecture.md's "two indexer
+                             #   engines" note before assuming a fix to the
+                             #   root-level modules also applies here.
 ```
+
+`bindings/` and `third_party/` (an optional local-LLM assistant, referenced in
+older notes) **do not exist in this repository and never have** — confirmed
+against the full git history. If you're looking for that feature, there is
+nothing to resume; it would be new work from zero.
 
 ---
 
@@ -150,9 +165,18 @@ pytest -v
 - `testpaths = tests`
 - `pythonpath = .`
 
-The `tests/conftest.py` injects lightweight stubs for `pydub`, `tkinter`, and
-other heavy dependencies so the suite can run without the full GUI stack or
-audio libraries installed. Do not remove or weaken these stubs.
+The `tests/conftest.py` injects a lightweight stub for `pydub` so the suite can
+run without the real audio library installed. Do not remove or weaken this
+stub. Note that, despite older claims to the contrary, **there is no `tkinter`
+stub anywhere in the codebase** — `plugins/acoustid_plugin.py` imports
+`tkinter` directly, and any environment without a system Tkinter will fail to
+import that module (this currently breaks `tests/test_musicbrainz_service.py`
+in such environments; see `docs/ROADMAP.md`'s "Known bugs" section). Likewise,
+`mutagen` isn't centrally stubbed either — more than a dozen test files each
+build their own inline fake `mutagen` module rather than sharing one, which
+means the suite's pass/fail result can depend on execution order. Don't trust
+"the tests are green" as proof of behavior without checking which tests
+actually ran and in what order.
 
 Test files follow the `test_<module_or_feature>.py` naming convention.
 Individual tests use `monkeypatch` and `tmp_path` (pytest fixtures) — no
@@ -216,42 +240,80 @@ All user settings are read/written through `config.load_config()` /
 ## Docs to check before making changes
 
 The `docs/` suite was rewritten (2026-06-25) as plain-English, concept-driven
-documentation. Start here:
+documentation, then fully re-verified against the code (2026-07-22) — the
+second pass found and corrected substantial drift, especially in
+`gui_inventory.md`. Start here:
 
 | File | When to read it |
 |---|---|
-| `docs/README.md` | Index / reading order for the whole docs suite |
+| `docs/README.md` | Index / reading order for the whole docs suite, plus a scannable known-gaps summary |
 | `docs/overview.md` | First read — what the app is, core principles, key concepts, the two GUIs |
-| `docs/architecture.md` | How the layers, workers, preview contract, cache, and workspaces fit together |
+| `docs/architecture.md` | How the layers, workers, preview contract, cache, and workspaces fit together — includes the "two indexer engines" architecture note |
 | `docs/features/indexer.md` | Before touching the Indexer |
 | `docs/features/duplicate_finder.md` | Before touching the Duplicate Finder |
 | `docs/features/library_sync.md` | Before touching Library Sync |
+| `docs/features/tag_fixer.md` | Before touching the Tag Fixer or Genre Normalizer |
 | `docs/features/playlists_and_clustering.md` | Before touching playlists, clustering, or the graph |
-| `docs/ROADMAP.md` | What's planned but not yet built (single source of truth for gaps) |
-| `docs/gui_inventory.md` | Detailed map of every screen and control in the Qt app |
+| `docs/ROADMAP.md` | What's planned but not yet built, plus a "Known bugs" section (single source of truth for gaps) |
+| `docs/gui_inventory.md` | Detailed map of every screen and control in the Qt app, including which controls are currently decorative |
 | `docs/archive/` | Superseded planning notes / audit snapshots — history only, not current |
 
 ---
 
-## Known gaps (do not assume these are complete)
+## Known gaps and bugs (do not assume these are complete)
 
-See `docs/ROADMAP.md` for the full, maintained list. Summary:
+See `docs/ROADMAP.md` for the full, maintained list, including a "Known bugs"
+section kept separate from planned-but-unbuilt features. Summary:
 
+- **Two confirmed crash bugs:** `duplicate_consolidation.build_duplicate_pair_report()`
+  always raises `AttributeError` (calls `.items()` on a list). The Cluster Quality
+  Report dialog (`gui/dialogs/cluster_quality_report_dialog.py`) calls a
+  nonexistent method (`_create_cluster_card` instead of the real
+  `_build_cluster_card`) and fails to render its per-cluster section on any
+  real result. Fix these before adding new features in either area.
+- **`plugins/acoustid_plugin.py` and `controllers/library_index_controller.py`
+  import `tkinter` directly** — a violation of the "no Tkinter in backend
+  modules" rule above, and the reason `tests/test_musicbrainz_service.py`
+  fails on systems without a Tkinter install.
 - **Metadata provider breadth:** Only AcoustID, MusicBrainz, and Last.fm are fully
   wired end-to-end. Spotify and Gracenote are listed in `config.SUPPORTED_SERVICES`
   and have stub functions in `metadata_service.py` that return `{}` (placeholders,
-  not implementations). Discogs is roadmap-only.
+  not implementations) — but the Settings UI now shows them visibly disabled with an
+  explanatory tooltip rather than silently omitting or misrepresenting them.
+  Discogs is roadmap-only. Separately: `MusicBrainzService` doesn't subclass
+  `MetadataPlugin`, so it isn't independently discovered by the Tag Fixer's
+  automatic scan — MusicBrainz only ever contributes via nested enrichment inside
+  an AcoustID match.
 - **Tidal-dl sync:** referenced historically but has no UI or workflow. Dormant.
 - **Library Sync per-item flags:** ✅ IMPLEMENTED and wired in the Qt app. Right-click
   an incoming track in `gui/workspaces/library_sync.py` to flag copy/replace/clear or
   add a note; `ReviewStateStore` holds flags and they override auto-decisions during
-  plan building. (Older archived docs claiming this is "not exposed in the UI" are
-  stale/false.) Remaining limitation: one-at-a-time flagging; no bulk flag yet.
-- **Library Sync Export Report:** Export helpers exist and work in
-  `library_sync_review_report.py` (`export_report()`, `export_review_report_html()`),
-  but the Export Report button is not wired to a user-accessible control. Smallest
-  outstanding win in the project.
+  plan building. Remaining limitation: one-at-a-time flagging; no bulk flag yet.
+- **Library Sync Export Report:** ✅ IMPLEMENTED. A real "Export Report" button in
+  the Qt workspace writes HTML, JSON, or CSV via `library_sync_review_report.py`.
+- **Library Sync has two separately-maintained engine copies:** `library_sync.py`
+  imports its scanning/fingerprinting logic from a vendored copy under
+  `library_sync_indexer_engine/`, not from the root-level `music_indexer_api.py` /
+  `fingerprint_cache.py`. The two have already drifted (see repo layout above and
+  `docs/architecture.md`). A fix to the root modules does not automatically apply
+  to Library Sync.
+- **Genre canonicalization only exists in the legacy Tkinter app.** The Qt
+  "Genre Normalizer" workspace is a much simpler MusicBrainz top-3-tags fetcher
+  with no mapping step; two of its controls (Overwrite, Source selector) have no
+  effect. See `docs/features/tag_fixer.md`.
 - **Clustering features:** the engine currently clusters on timbre (MFCC) + tempo;
   the wizard's chroma/spectral/onset checkboxes are UI scaffolding not yet wired into
-  feature extraction. Interactive-graph Phases 4–8 (live tuning, advanced selection,
-  in-map cluster editing, report export) are unbuilt — see `docs/ROADMAP.md`.
+  feature extraction.
+- **The in-app 2-D interactive graph is fully built but entirely unwired.** Four
+  real widgets (`InteractiveScatterPlot`, `Interactive3DScatterPlot`,
+  `ClusterLegendWidget`, `TrackDetailsPanel`) exist under `gui/widgets/` but are
+  never imported by the Music Graph workspace, which today only launches a
+  browser-based 3-D view. This is now the single biggest "backend/widget ready,
+  not connected" item in the project — see `docs/ROADMAP.md`.
+- **Several UI controls across the app are decorative** (built, but not read by
+  the code they appear to control) — the Duplicates workspace's per-group
+  disposition combo, the Genre Normalizer's Overwrite/Source controls, the
+  Playlist Generator's tempo/energy range fields and "Prefer Opus" checkbox, and
+  most of the Fuzzy Duplicate Finder dialog's search/filter fields. Don't assume a
+  visible checkbox has an effect without checking its handler — see
+  `docs/gui_inventory.md` for the full list.
