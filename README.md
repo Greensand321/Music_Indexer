@@ -261,41 +261,62 @@ gui/workspaces/           - One QWidget per workflow (loaded into QStackedWidget
   tag_fixer.py            - Tag Fixer: proposals table with checkboxes
   genres.py               - Genre Normalizer: MusicBrainz/Last.fm batch update
   playlists.py            - Playlist Generator: Folder / Tempo+Energy / Auto-DJ / Repair
-  clustered.py            - Clustered Playlists: K-Means + HDBSCAN + graph launcher
-  graph.py                - Visual Music Graph launcher
+  clustered_enhanced.py   - Clustered Playlists: K-Means + HDBSCAN wizard + results
+                             (an older clustered.py also exists but is dead code —
+                             the sidebar wires to clustered_enhanced.py)
+  graph.py                - Music Graph: launches a browser-based 3-D view.
+                             (Note: a fully-built in-app 2-D interactive graph
+                             also exists under gui/widgets/ but isn't wired into
+                             this workspace — see docs/ROADMAP.md.)
   player.py               - Player: libVLC transport controls + metadata display
   compression.py          - Library Compression: format targets, bitrate, archive
   tools.py                - Export & Utilities: artist/title export, codec list, cleanup
   help.py                 - Help: doc links, keyboard shortcuts, About
 
 ── Other ─────────────────────────────────────────────────────────────────
-controllers/              - Thin wrappers wiring backend to the legacy Tkinter GUI
+controllers/              - Thin wrappers wiring backend to the GUI
 plugins/
   base.py               - Metadata plugin interface
-  acoustid_plugin.py    - Metadata lookup via AcoustID / MusicBrainz
-  assistant_plugin.py   - LLM helper integration (requires user-supplied GGUF model)
-  discogs.py            - Discogs metadata stub (not yet wired end-to-end)
-  lastfm.py             - Fetch genres from Last.fm
-  spotify.py            - Spotify metadata stub (not yet wired end-to-end)
+  api_service.py        - Base class for Settings-UI "Test Connection" services
+  acoustid_plugin.py    - Metadata lookup via AcoustID, plus a MusicBrainz
+                           service class (not independently plugged into the
+                           Tag Fixer's automatic scan — see docs/ROADMAP.md)
+  lastfm.py              - Fetch genres from Last.fm
+  test_plugin.py         - A test fixture, auto-loaded like any other plugin
 
-mutagen_stub/             - Minimal mutagen fallback used by the test suite
-bindings/                 - C++/pybind11 wrapper for llama binaries
+mutagen_stub/             - Minimal mutagen fallback; currently unused by the
+                             real test suite (each test file stubs mutagen
+                             inline instead) — see docs/ROADMAP.md
 docs/                     - Project documentation and design notes
-third_party/              - Prebuilt llama executables
 tests/                    - pytest suite (42 modules)
 ```
 
+> Note: `bindings/`, `third_party/`, and `plugins/assistant_plugin.py`
+> (an optional local-LLM assistant) do not exist in this repository and
+> never have, despite being mentioned in some older material. There is no
+> dormant LLM feature to resume — it would be new work from scratch.
+
 ## Roadmap (Upcoming Features)
 
-These items are currently under development and not yet part of the stable release.
+See [`docs/ROADMAP.md`](docs/ROADMAP.md) for the maintained, detailed list of
+what's planned, partially built, or known to be broken. Highlights:
 
-- Expanded metadata plugins beyond AcoustID/Last.fm (Discogs, Spotify)
+- Two confirmed bugs (a broken duplicate-pair report tool, a broken cluster
+  quality report dialog) — see `docs/ROADMAP.md`'s "Known bugs" section.
+- The in-app 2-D interactive cluster graph is fully built but not wired into
+  the Music Graph workspace — currently the single biggest "almost done" item.
+- Expanded metadata plugins beyond AcoustID/MusicBrainz/Last.fm (Spotify,
+  Gracenote, Discogs).
 
-See [`docs/project_documentation.html`](docs/project_documentation.html) for technical details.
+See [`docs/README.md`](docs/README.md) for the full documentation suite,
+starting with `docs/overview.md`.
 
 ## Known gaps
 
+See [`docs/ROADMAP.md`](docs/ROADMAP.md) for the maintained, detailed version
+of this list. In brief:
+
 - **Tidal-dl sync**: `tidal-dl` is listed in `requirements.txt`, but there is no UI or workflow wired up yet.
-- **Metadata provider breadth**: only AcoustID + Last.fm are fully wired end-to-end; Spotify/Gracenote listed in config but not implemented.
-- **Library Sync per-item flags**: ✅ IMPLEMENTED — Users can now right-click incoming tracks to flag for copy/replace or add notes. Flags override auto-decisions during plan building.
-- **Library Sync Export Report**: export helper functions exist but the Export Report button is not wired to a user-accessible control.
+- **Metadata provider breadth**: only AcoustID, MusicBrainz, and Last.fm are fully wired end-to-end; Spotify/Gracenote are shown, clearly disabled, in Settings, but not implemented.
+- **Library Sync per-item flags**: ✅ IMPLEMENTED — right-click incoming tracks to flag for copy/replace or add notes. Flags override auto-decisions during plan building.
+- **Library Sync Export Report**: ✅ IMPLEMENTED — a real Export Report button saves HTML, JSON, or CSV.

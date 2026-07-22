@@ -435,12 +435,20 @@ class LibrarySyncWorkspace(WorkspaceBase):
         self._execute_plan_btn.setEnabled(False)
         self._execute_plan_btn.clicked.connect(self._on_execute_plan)
 
+        self._export_report_btn = QtWidgets.QPushButton("📤  Export Report")
+        self._export_report_btn.setEnabled(False)
+        self._export_report_btn.setToolTip(
+            "Save a report of all match results, flags, and notes as HTML, JSON, or CSV."
+        )
+        self._export_report_btn.clicked.connect(self._on_export_report)
+
         self._output_playlist_cb = QtWidgets.QCheckBox("Write transfer playlist (.m3u8)")
 
         plan_btn_row.addWidget(self._build_plan_btn)
         plan_btn_row.addWidget(self._preview_plan_btn)
         plan_btn_row.addWidget(self._transfer_toggle)
         plan_btn_row.addWidget(self._execute_plan_btn)
+        plan_btn_row.addWidget(self._export_report_btn)
         plan_btn_row.addWidget(self._output_playlist_cb)
         plan_btn_row.addStretch(1)
         plan_layout.addLayout(plan_btn_row)
@@ -624,6 +632,75 @@ class LibrarySyncWorkspace(WorkspaceBase):
             except Exception as exc:  # noqa: BLE001
                 self._log(str(exc), "error")
 
+    @Slot()
+    def _on_export_report(self) -> None:
+        if not self._current_match_results:
+            return
+
+        existing_root = self._existing_entry.text().strip()
+        docs_dir = str(Path(existing_root) / "Docs") if existing_root else ""
+
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self,
+            "Export Review Report",
+            docs_dir,
+            "HTML Report (*.html);;JSON Report (*.json);;CSV Report (*.csv);;All files (*)",
+        )
+        if not path:
+            return
+
+        try:
+            from library_sync_review_report import export_report, export_review_report_html
+            from config import FORMAT_PRIORITY, MIXED_CODEC_THRESHOLD_BOOST, DEFAULT_FP_THRESHOLDS
+
+            ext = Path(path).suffix.lower()
+            if ext == ".html":
+                thresholds: dict = {}
+                try:
+                    thresholds["default"] = float(
+                        self._threshold_entry.text().strip() or "0.3"
+                    )
+                    for line in self._overrides_text.toPlainText().splitlines():
+                        line = line.strip()
+                        if "=" in line:
+                            k, v = line.split("=", 1)
+                            thresholds[k.strip()] = float(v.strip())
+                except ValueError:
+                    thresholds = DEFAULT_FP_THRESHOLDS.copy()
+
+                export_review_report_html(
+                    path,
+                    self._current_match_results,
+                    library_root=existing_root,
+                    incoming_root=self._incoming_entry.text().strip(),
+                    thresholds=thresholds,
+                    mixed_codec_threshold_boost=MIXED_CODEC_THRESHOLD_BOOST,
+                    format_priority=FORMAT_PRIORITY,
+                )
+            else:
+                fmt = "csv" if ext == ".csv" else "json"
+                scan_config: dict = {}
+                try:
+                    scan_config["default"] = float(
+                        self._threshold_entry.text().strip() or "0.3"
+                    )
+                except ValueError:
+                    scan_config["default"] = 0.3
+
+                export_report(
+                    path,
+                    self._current_match_results,
+                    self._review_state_store,
+                    scan_config,
+                    fmt=fmt,
+                )
+
+            self._log(f"Report exported to {path}", "ok")
+            if ext == ".html":
+                webbrowser.open(f"file://{Path(path).resolve()}")
+        except Exception as exc:  # noqa: BLE001
+            self._log(f"Export failed: {exc}", "error")
+
     @Slot(object, object)
     def _on_incoming_selected(self, current, previous) -> None:  # noqa: ANN001
         if current:
@@ -655,6 +732,7 @@ class LibrarySyncWorkspace(WorkspaceBase):
             self._log(message, "ok")
             self.status_changed.emit("Scan complete", "#22c55e")
             self._build_plan_btn.setEnabled(True)
+            self._export_report_btn.setEnabled(True)
             self._match_summary_lbl.setText(message)
             self._populate_results(result)
         else:

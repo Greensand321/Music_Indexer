@@ -6,11 +6,15 @@ CONFIG_PATH = os.path.expanduser("~/.soundvault_config.json")
 # List of external metadata services supported by the application.
 SUPPORTED_SERVICES = [
     "AcoustID",
+    "MusicBrainz",
     "Last.fm",
     "Spotify",
-    "MusicBrainz",
     "Gracenote",
 ]
+
+# Services listed above that are not yet implemented (stub functions only).
+# The Settings UI shows these as disabled so users aren't misled.
+UNAVAILABLE_SERVICES = {"Spotify", "Gracenote"}
 
 # Threshold for considering two tracks as near-duplicates when syncing
 NEAR_DUPLICATE_THRESHOLD = 0.1

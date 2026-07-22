@@ -54,13 +54,22 @@ class SettingsDrawer(QtWidgets.QDialog):
         )
 
         try:
-            from config import SUPPORTED_SERVICES
-            services = [s for s in SUPPORTED_SERVICES if s in ("AcoustID", "MusicBrainz")]
+            from config import SUPPORTED_SERVICES, UNAVAILABLE_SERVICES
         except ImportError:
-            services = ["AcoustID", "MusicBrainz"]
+            SUPPORTED_SERVICES = ["AcoustID", "MusicBrainz", "Last.fm"]
+            UNAVAILABLE_SERVICES = {"Spotify", "Gracenote"}
 
         self._service_combo = QtWidgets.QComboBox()
-        self._service_combo.addItems(services)
+        for svc in SUPPORTED_SERVICES:
+            if svc in UNAVAILABLE_SERVICES:
+                self._service_combo.addItem(f"{svc} (unavailable)")
+                idx = self._service_combo.count() - 1
+                self._service_combo.model().item(idx).setEnabled(False)
+                self._service_combo.model().item(idx).setToolTip(
+                    f"{svc} is not yet implemented. See ROADMAP.md."
+                )
+            else:
+                self._service_combo.addItem(svc)
         self._service_combo.currentTextChanged.connect(self._on_service_changed)
         meta_l.addRow("Service:", self._service_combo)
 
