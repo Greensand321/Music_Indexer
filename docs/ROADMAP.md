@@ -51,6 +51,21 @@ the body below:
   `navigate_requested(key)` signal that the main window connects for every
   workspace; the Clustered workspace emits it instead of showing a message box
   telling you to click the sidebar yourself.
+- **The 3-D browser graph was generating invalid JavaScript, and is fixed.**
+  `_render_html()` substituted only the `/*__CLUSTER_DATA__*/` comment, leaving
+  the template's trailing `null` in place and emitting
+  `const CLUSTER_DATA = {...}null;` — a syntax error that stopped the whole page
+  running. Substitution now consumes the `null`, `_render_html()` raises if the
+  placeholder is missing rather than silently shipping sample data, and there are
+  two new tests: one asserting the injected assignment is syntactically clean and
+  one asserting the loud failure. (Every other test in that module is a substring
+  check, which is exactly why this shipped unnoticed.)
+- **The 3-D graph template was upgraded to the `alphadex3` design.** Adds spread
+  control (slider + 1×/10×/30×/50×/100× presets), axes / grid / orbit-ring
+  toggles, a richer tooltip, a vignette, and JSON import, on top of the existing
+  orbit / hover / select / CSV+M3U export. Cluster membership is now bucketed in a
+  single pass instead of rescanning the full label array once per cluster, which
+  had made legend and centroid construction O(clusters x points).
 
 ---
 

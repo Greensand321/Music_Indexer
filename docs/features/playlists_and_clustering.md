@@ -209,7 +209,23 @@ two-dimensional shadow of the true high-dimensional arrangement of your music.
 The "Music Graph" room in the sidebar is, today, a **launcher**: it checks whether
 cluster data is available, and when you click through, it opens a standalone web page
 in your default browser — a Three.js/WebGL 3-D scatter plot you can orbit, generated
-fresh from your most recent clustering run. That part is real and works.
+fresh from your most recent clustering run.
+
+Beyond orbiting and hovering, that page gives you: **spread control** (a slider plus
+1× / 10× / 30× / 50× / 100× presets) to pull the clusters apart until the structure
+is readable; **axes, grid, and orbit-ring toggles** for spatial reference; a
+click-to-select flow that exports a selection as CSV or an `.m3u` playlist; a legend
+that doubles as per-cluster show/hide switches; and an **Import JSON** button that
+lets you drop a different cluster file onto the same viewer without regenerating it
+from the app.
+
+> **A note if you used this before and found it dead.** For some time the generated
+> page was producing invalid JavaScript — the step that inlines your library's data
+> into the page left a stray token behind, which is a syntax error, so the whole
+> visualization silently failed to run. That's fixed. It went unnoticed for a while
+> because the automated tests only checked that certain *text* appeared in the
+> generated file, never that the file's code actually parsed; there's now a test that
+> checks the latter specifically.
 
 ### The in-app 2-D map: built, but not actually reachable
 
