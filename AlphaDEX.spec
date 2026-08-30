@@ -25,6 +25,13 @@ Notes for whoever runs the first real build:
   QtWebEngine's Chromium subprocess/locale files; this is the single
   heaviest part of the build (expect several hundred MB) and there is no
   way around it while compat.py imports it unconditionally.
+- umap is deliberately NOT in requirements.txt and NOT bundled. It's a
+  guarded optional import in clustered_playlists.py (compute_2d_embedding /
+  compute_3d_embedding): if unavailable, those functions fall back to
+  sklearn.manifold.TSNE, which IS a hard requirement (scikit-learn, no
+  guard) so the fallback is always available. The clustering wizard's own
+  UI labels it "UMAP (balanced, if installed)". The app is fully
+  functional without it; only the embedding algorithm choice changes.
 """
 
 datas = [
@@ -60,6 +67,12 @@ excludes = [
     "ttkthemes",
     "sv_ttk",
     "PyQt6",  # gui/compat.py only falls back to this if PySide6 is absent
+    # tkinter is only reached via try/except-guarded imports (crash_logger.py,
+    # crash_watcher.py, both root and vendored copies -- all fall back to
+    # tk = None) or via update_genres.main(), the standalone CLI entry point
+    # that the Qt app never calls (GenresWorkspace calls process_file()
+    # directly). Nothing in the live app requires it unconditionally.
+    "tkinter",
 ]
 
 a = Analysis(
