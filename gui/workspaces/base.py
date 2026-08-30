@@ -27,6 +27,9 @@ class WorkspaceBase(QtWidgets.QWidget):
     # to navigate elsewhere (e.g. "open this result in the Music Graph").
     # Workspaces never switch themselves; the main window owns navigation.
     navigate_requested = Signal(str)
+    # Emitted with (paths, label) to hand a set of tracks to the Player. Same
+    # rule as above: the workspace asks, the main window routes.
+    play_tracks_requested = Signal(list, str)
 
     def __init__(self, library_path: str = "", parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(parent)

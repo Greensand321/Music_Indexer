@@ -625,13 +625,15 @@ def generate_clustered_playlists(
     x_to_save = X
     x_2d_to_save = X_2d
     x_3d_to_save = X_3d
+    labels_to_save = labels
+    tracks_to_save = tracks
+    vis_indices = None
     downsampled = False
 
     if len(X) > MAX_VISUALIZATION_POINTS:
-        # Downsample for visualization while keeping all labels and tracks
         log_callback(
-            f"⚠ Library has {len(X)} tracks; downsampling X to {MAX_VISUALIZATION_POINTS} "
-            f"points for visualization (labels and tracks preserved)"
+            f"⚠ Library has {len(X)} tracks; downsampling to {MAX_VISUALIZATION_POINTS} "
+            f"points for visualization"
         )
         # Keep every nth point to maintain cluster distribution
         step = max(1, len(X) // MAX_VISUALIZATION_POINTS)
@@ -642,6 +644,15 @@ def generate_clustered_playlists(
         x_to_save = X[indices]
         x_2d_to_save = X_2d[indices]
         x_3d_to_save = X_3d[indices]
+        # Every saved array has to stay index-aligned: point i of X_2d/X_3d must
+        # be labels[i] and tracks[i]. Subsetting the coordinates while writing
+        # the full-length labels/tracks left the file misaligned, which made the
+        # 3D graph generator reject it outright ("Length mismatch: X_3d has N
+        # entries but labels has M") for every library above the threshold, and
+        # would have mapped selected points to the wrong tracks.
+        labels_to_save = labels[indices]
+        tracks_to_save = [tracks[i] for i in indices]
+        vis_indices = [int(i) for i in indices]
         downsampled = True
 
     cluster_data = {
@@ -650,8 +661,9 @@ def generate_clustered_playlists(
         "X_3d": x_3d_to_save.tolist(),   # 3D embedding for advanced exploration (preserves ~80% variance)
         "X_downsampled": downsampled,  # Flag if X was downsampled
         "X_total_points": len(X),      # Original number of points
-        "labels": labels.tolist(),
-        "tracks": tracks,
+        "X_indices": vis_indices,      # Original positions of the saved points (None when not downsampled)
+        "labels": labels_to_save.tolist(),
+        "tracks": tracks_to_save,
         "cluster_info": cluster_info,
     }
 

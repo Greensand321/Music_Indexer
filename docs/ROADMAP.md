@@ -60,6 +60,21 @@ the body below:
   two new tests: one asserting the injected assignment is syntactically clean and
   one asserting the loud failure. (Every other test in that module is a substring
   check, which is exactly why this shipped unnoticed.)
+- **The in-app 2-D interactive map is built and reachable.** The Music Graph
+  workspace now embeds a live scatter plot alongside the cluster legend and a track
+  details panel, instead of only launching a browser page. Pan / rectangle / lasso
+  selection (Ctrl or Shift to add), hover to identify, click for full tags and cover
+  art, click a legend row to select a whole cluster, and send a selection straight to
+  the Player or export it as CSV or `.m3u`. The four widgets that had been sitting
+  unused were substantially reworked rather than merely connected — see the report
+  in the commit for what was wrong with each.
+- **Cluster data is no longer misaligned when downsampled.** For libraries above
+  5,000 tracks, `clustered_playlists` wrote subsetted `X_2d`/`X_3d` alongside
+  *full-length* `labels` and `tracks`. That made `cluster_info.json` internally
+  inconsistent: the 3-D generator rejected it outright ("Length mismatch"), so the
+  browser graph simply never worked on a large library, and any index-based lookup
+  would have mapped a point to the wrong song. Labels and tracks are now subset with
+  the coordinates, and the original positions are recorded in `X_indices`.
 - **The 3-D graph template was upgraded to the `alphadex3` design.** Adds spread
   control (slider + 1×/10×/30×/50×/100× presets), axes / grid / orbit-ring
   toggles, a richer tooltip, a vignette, and JSON import, on top of the existing
@@ -122,19 +137,8 @@ the body below:
 
 ## Playlists, Clustering & the Visual Music Graph
 
-This is the area with the largest gap between vision and current reality — larger
-than previously documented, now that a full re-verification found the in-app graph
-widgets are built but entirely unreachable.
-
-- **Wire the built-but-orphaned in-app 2-D interactive graph** *(Backend ready, not
-  connected — the single biggest "almost done" item in the whole project now that
-  Export Report is finished).* Four real, working widgets exist —
-  `InteractiveScatterPlot` (lasso/rectangle selection, hover tooltips),
-  `Interactive3DScatterPlot`, `ClusterLegendWidget` (per-cluster show/hide), and
-  `TrackDetailsPanel` — and none of them are imported by the Music Graph workspace or
-  anything else you can reach from the sidebar. Today, "Music Graph" only opens a
-  browser-based 3-D view. Connecting these widgets to the workspace requires no new
-  feature work, only wiring.
+The foundation and the in-app map are now built; the remaining work is the richer
+editing and tuning layer on top of them.
 
 - **Retire the dead `clustered.py` workspace** *(Housekeeping).* An older, simpler
   clustering workspace still exists in the repository but is unreachable — the
@@ -156,11 +160,9 @@ widgets are built but entirely unreachable.
   say, "make eight groups instead of six" — and watch the map re-form in near real time,
   without recomputing every track's sound profile from scratch.
 
-- **Advanced selection tools** *(Designed, not started).* Richer ways to pick tracks off
-  the visual map: free-form lasso, rectangle, distance-from-a-point, and filtering by
-  metadata (artist, genre). (Note: the lasso/rectangle selection logic already exists
-  inside the orphaned `InteractiveScatterPlot` widget above — wiring that widget in is
-  a prerequisite for this item, not a separate build.)
+- **Advanced selection tools** *(Partially built).* Lasso and rectangle selection
+  now work in the in-app map, with Ctrl/Shift to add to a selection. Still to come:
+  select-by-distance-from-a-point and filtering the map by metadata (artist, genre).
 
 - **In-map cluster editing** *(Designed, not started).* Hands-on refinement of the
   groups after the fact: merging two clusters, moving a track from one cluster to
@@ -267,18 +269,19 @@ widgets are built but entirely unreachable.
 
 If you've been away and want the shortest path back to momentum:
 
-1. **Wire the in-app 2-D interactive graph.** It's the single largest "everything is
-   already built, it just isn't connected" item in the project. (Note: a
-   further-along version of this graph exists outside the repo and is slated to be
-   brought in — check before rebuilding any of it from the orphaned widgets.)
-2. **Treat the rest of the Visual Music Graph's deeper interactivity — live tuning,
-   advanced selection, cluster editing — as the big, deliberate project it always
-   was.** It's still the area with the most outstanding work and the most upside; it
-   deserves to be scheduled as real feature work rather than squeezed in.
+1. **Wire the clustering wizard's remaining sound features into extraction.** The
+   checkboxes are already there and the clustering pipeline already accepts a
+   feature selection — this is the most visible remaining gap between what the UI
+   offers and what the engine does.
+2. **Treat the Visual Music Graph's deeper interactivity — live re-tuning, in-map
+   cluster editing, the suggestion engine — as the big, deliberate project it always
+   was.** The map itself now exists to build on, which makes these additions rather
+   than foundations.
 3. **Everything under "Other / housekeeping" is safe to ignore indefinitely** — none
    of it blocks normal use of the app. Pick it up only when you're already touching
    the relevant file for another reason.
 
-The bugs that used to head this list (Duplicate Pair Report, Cluster Quality Report,
-the Tkinter imports in `plugins/` and `controllers/`) are fixed — see "Recently
+The bugs and gaps that used to head this list (Duplicate Pair Report, Cluster
+Quality Report, the Tkinter imports in `plugins/` and `controllers/`, the broken 3-D
+graph data injection, and the unreachable in-app map) are all fixed — see "Recently
 completed" above.

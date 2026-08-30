@@ -1,202 +1,207 @@
-"""Cluster legend widget for showing/hiding clusters."""
+"""Cluster legend: colour key, track counts, and per-cluster visibility."""
 from __future__ import annotations
 
-import numpy as np
-from typing import Callable, Optional, List, Dict
+from typing import Dict, List, Mapping, Sequence
 
 from gui.compat import QtCore, QtGui, QtWidgets
 
+#: Cluster id HDBSCAN assigns to points that belong to no cluster.
+NOISE_LABEL = -1
 
-class _ClusterClickableLabel(QtWidgets.QLabel):
-    """Custom label that emits a signal when clicked."""
 
-    cluster_clicked = QtCore.Signal(int)  # cluster_id
+class _ClusterRow(QtWidgets.QWidget):
+    """One legend entry: visibility checkbox, colour swatch, clickable label."""
 
-    def __init__(self, text: str, cluster_id: int) -> None:
-        super().__init__(text)
+    toggled = QtCore.Signal(int, bool)   # cluster_id, visible
+    selected = QtCore.Signal(int)        # cluster_id
+
+    def __init__(
+        self,
+        cluster_id: int,
+        count: int,
+        colour: QtGui.QColor | None,
+        info: Mapping[str, object],
+        parent: QtWidgets.QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
         self.cluster_id = cluster_id
 
-    def mousePressEvent(self, event: QtGui.QMouseEvent) -> None:
-        """Handle mouse press to emit cluster click signal."""
-        self.cluster_clicked.emit(self.cluster_id)
+        layout = QtWidgets.QHBoxLayout(self)
+        layout.setContentsMargins(4, 2, 4, 2)
+        layout.setSpacing(8)
+
+        self.checkbox = QtWidgets.QCheckBox()
+        self.checkbox.setChecked(True)
+        self.checkbox.setToolTip("Show or hide this cluster")
+        self.checkbox.toggled.connect(
+            lambda visible: self.toggled.emit(self.cluster_id, visible)
+        )
+        layout.addWidget(self.checkbox, 0)
+
+        swatch = QtWidgets.QLabel()
+        swatch.setFixedSize(12, 12)
+        if colour is not None:
+            swatch.setStyleSheet(
+                f"background:{colour.name()};border-radius:6px;"
+            )
+        layout.addWidget(swatch, 0)
+
+        name = "Unclustered" if cluster_id == NOISE_LABEL else f"Cluster {cluster_id}"
+        text = f"{name}  ({count})"
+        detail = self._format_detail(info)
+        if detail:
+            text += f"\n{detail}"
+
+        self.label = QtWidgets.QLabel(text)
+        self.label.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
+        self.label.setToolTip("Click to select every track in this cluster")
+        layout.addWidget(self.label, 1)
+
+    @staticmethod
+    def _format_detail(info: Mapping[str, object]) -> str:
+        """Summarise whatever per-cluster facts the payload carries."""
+        parts: List[str] = []
+        genres = info.get("genres")
+        if isinstance(genres, (list, tuple)) and genres:
+            shown = ", ".join(str(g) for g in list(genres)[:2])
+            if len(genres) > 2:
+                shown += ", …"
+            parts.append(shown)
+        tempo = info.get("tempo") or info.get("avg_tempo")
+        if isinstance(tempo, (int, float)):
+            parts.append(f"{tempo:.0f} BPM")
+        return " · ".join(parts)
+
+    def mousePressEvent(self, event: QtGui.QMouseEvent) -> None:  # noqa: N802
+        # The whole row is a click target for "select this cluster", except the
+        # checkbox, which Qt delivers to the child before this ever fires.
+        self.selected.emit(self.cluster_id)
         super().mousePressEvent(event)
+
+    def set_visible_state(self, visible: bool) -> None:
+        """Update the checkbox without re-emitting ``toggled``."""
+        was = self.checkbox.blockSignals(True)
+        self.checkbox.setChecked(visible)
+        self.checkbox.blockSignals(was)
 
 
 class ClusterLegendWidget(QtWidgets.QWidget):
-    """Widget showing cluster list with visibility toggles.
+    """Colour key for the scatter plot, doubling as visibility controls."""
 
-    Features:
-    - Checkbox to show/hide each cluster
-    - Track count per cluster
-    - Cluster color indicator
-    - Genre/metadata summary
-    - Click to highlight cluster
-    """
-
-    cluster_toggled = QtCore.Signal(int, bool)  # cluster_id, visible
-    cluster_selected = QtCore.Signal(int)  # cluster_id
+    cluster_toggled = QtCore.Signal(int, bool)   # cluster_id, visible
+    cluster_selected = QtCore.Signal(int)        # cluster_id
 
     def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(parent)
-
-        self._clusters: Dict[int, dict] = {}  # cluster_id -> {size, color, genres, ...}
-
+        self._rows: Dict[int, _ClusterRow] = {}
+        self._visible: Dict[int, bool] = {}
         self._build_ui()
 
     def _build_ui(self) -> None:
-        """Build the UI layout."""
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(6)
 
-        # Title
         title = QtWidgets.QLabel("Clusters")
-        title.setStyleSheet("font-weight: bold; font-size: 12px;")
+        title.setStyleSheet("font-weight:600;")
         layout.addWidget(title)
 
-        # Scroll area for cluster list
         scroll = QtWidgets.QScrollArea()
         scroll.setWidgetResizable(True)
-        scroll.setStyleSheet("QScrollArea { border: 1px solid #ddd; }")
-
-        self._cluster_container = QtWidgets.QWidget()
-        self._cluster_layout = QtWidgets.QVBoxLayout(self._cluster_container)
-        self._cluster_layout.setContentsMargins(0, 0, 0, 0)
-        self._cluster_layout.setSpacing(4)
-        scroll.setWidget(self._cluster_container)
-
+        scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        self._container = QtWidgets.QWidget()
+        self._layout = QtWidgets.QVBoxLayout(self._container)
+        self._layout.setContentsMargins(0, 0, 0, 0)
+        self._layout.setSpacing(2)
+        scroll.setWidget(self._container)
         layout.addWidget(scroll, 1)
 
-        # Summary
-        self._summary_label = QtWidgets.QLabel("No clusters")
-        self._summary_label.setStyleSheet("color: #666; font-size: 11px;")
-        self._summary_label.setWordWrap(True)
-        layout.addWidget(self._summary_label)
+        self._summary = QtWidgets.QLabel("No clusters")
+        self._summary.setObjectName("statusHint")
+        self._summary.setWordWrap(True)
+        layout.addWidget(self._summary)
 
-        self.setLayout(layout)
+        row = QtWidgets.QHBoxLayout()
+        self._show_all_btn = QtWidgets.QPushButton("Show all")
+        self._show_all_btn.clicked.connect(lambda: self.set_all_visible(True))
+        self._hide_all_btn = QtWidgets.QPushButton("Hide all")
+        self._hide_all_btn.clicked.connect(lambda: self.set_all_visible(False))
+        row.addWidget(self._show_all_btn)
+        row.addWidget(self._hide_all_btn)
+        layout.addLayout(row)
 
     def set_clusters(
         self,
-        clusters: np.ndarray,
-        cluster_info: Dict[int, dict] | None = None,
-        colors: np.ndarray | None = None,
+        counts: Mapping[int, int],
+        order: Sequence[int],
+        colours: Mapping[int, QtGui.QColor] | None = None,
+        cluster_info: Mapping[int, dict] | None = None,
     ) -> None:
-        """Set cluster data.
+        """Rebuild the legend.
 
-        Parameters
-        ----------
-        clusters : np.ndarray
-            Shape (n_samples,) - cluster ID for each sample
-        cluster_info : Dict[int, dict], optional
-            Additional info per cluster: {cluster_id: {genres, tempo, ...}}
-        colors : np.ndarray, optional
-            Shape (n_clusters, 3) - RGB colors per cluster
+        ``cluster_info`` must be keyed by **int**. Payloads read back from
+        ``cluster_info.json`` arrive with string keys, so pass them through
+        ``cluster_graph_data.normalize_cluster_info`` first — looking them up
+        with an int key otherwise silently found nothing, which is why
+        per-cluster detail never used to appear here.
         """
-        # Clear existing widgets completely
-        # First disconnect signals and remove from layout
-        while self._cluster_layout.count():
-            widget = self._cluster_layout.takeAt(0).widget()
+        while self._layout.count():
+            item = self._layout.takeAt(0)
+            widget = item.widget()
             if widget is not None:
-                widget.setParent(None)  # Immediate removal
+                widget.setParent(None)
                 widget.deleteLater()
 
-        self._clusters = {}
-
-        unique_clusters = sorted(np.unique(clusters))
+        self._rows.clear()
+        colours = colours or {}
         cluster_info = cluster_info or {}
 
-        for i, cluster_id in enumerate(unique_clusters):
-            count = np.sum(clusters == cluster_id)
-            color = colors[i] if colors is not None and i < len(colors) else None
-            info = cluster_info.get(cluster_id, {})
+        for cluster_id in order:
+            row = _ClusterRow(
+                cluster_id,
+                int(counts.get(cluster_id, 0)),
+                colours.get(cluster_id),
+                cluster_info.get(cluster_id, {}),
+            )
+            row.set_visible_state(self._visible.get(cluster_id, True))
+            row.toggled.connect(self._on_row_toggled)
+            row.selected.connect(self.cluster_selected)
+            self._layout.addWidget(row)
+            self._rows[cluster_id] = row
 
-            self._clusters[cluster_id] = {
-                "size": count,
-                "color": color,
-                "info": info,
-                "visible": True,
-            }
+        self._layout.addStretch(1)
+        self._visible = {cid: self._visible.get(cid, True) for cid in order}
+        self._update_summary(counts, order)
 
-            # Create cluster item widget
-            item = self._create_cluster_item(cluster_id, count, color, info)
-            self._cluster_layout.addWidget(item)
+    def _on_row_toggled(self, cluster_id: int, visible: bool) -> None:
+        self._visible[cluster_id] = visible
+        self.cluster_toggled.emit(cluster_id, visible)
 
-        self._cluster_layout.addStretch()
-
-        # Update summary
-        self._update_summary()
-
-    def _create_cluster_item(
-        self,
-        cluster_id: int,
-        count: int,
-        color: tuple | None = None,
-        info: dict | None = None,
-    ) -> QtWidgets.QWidget:
-        """Create a single cluster item widget."""
-        item = QtWidgets.QWidget()
-        layout = QtWidgets.QHBoxLayout(item)
-        layout.setContentsMargins(4, 2, 4, 2)
-        layout.setSpacing(6)
-
-        # Checkbox
-        checkbox = QtWidgets.QCheckBox()
-        checkbox.setChecked(True)
-        # Use functools.partial or default argument to avoid closure issues
-        checkbox.stateChanged.connect(
-            lambda state, cid=cluster_id: self._on_cluster_toggled(cid, state == 2)
-        )
-        layout.addWidget(checkbox, 0)
-
-        # Color indicator
-        if color is not None:
-            color_label = QtWidgets.QLabel("■")
-            color_label.setStyleSheet(f"color: rgb({int(color[0])}, {int(color[1])}, {int(color[2])});")
-            color_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-            layout.addWidget(color_label, 0)
-
-        # Cluster name and info
-        info_text = f"Cluster {cluster_id}"
-        info = info or {}
-
-        if "genres" in info and info["genres"]:
-            genres_str = ", ".join(info["genres"][:2])
-            if len(info["genres"]) > 2:
-                genres_str += ", ..."
-            info_text += f"\n{genres_str}"
-
-        if "tempo" in info:
-            info_text += f"\nTempo: {info['tempo']}"
-
-        text_label = _ClusterClickableLabel(f"{info_text}\n({count} tracks)", cluster_id)
-        text_label.setStyleSheet("font-size: 11px; color: #333;")
-        text_label.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
-        text_label.cluster_clicked.connect(self._on_cluster_selected)
-        layout.addWidget(text_label, 1)
-
-        return item
-
-    def _on_cluster_toggled(self, cluster_id: int, visible: bool) -> None:
-        """Handle cluster visibility toggle."""
-        if cluster_id in self._clusters:
-            self._clusters[cluster_id]["visible"] = visible
-            self.cluster_toggled.emit(cluster_id, visible)
-
-    def _on_cluster_selected(self, cluster_id: int) -> None:
-        """Handle cluster selection."""
-        self.cluster_selected.emit(cluster_id)
-
-    def _update_summary(self) -> None:
-        """Update summary text."""
-        total_clusters = len(self._clusters)
-        total_tracks = sum(c["size"] for c in self._clusters.values())
-        self._summary_label.setText(f"{total_clusters} clusters • {total_tracks} tracks")
-
-    def get_visible_clusters(self) -> List[int]:
-        """Get list of visible cluster IDs."""
-        return [cid for cid, info in self._clusters.items() if info["visible"]]
+    def _update_summary(self, counts: Mapping[int, int], order: Sequence[int]) -> None:
+        total = sum(int(v) for v in counts.values())
+        n_clusters = len([c for c in order if c != NOISE_LABEL])
+        noise = int(counts.get(NOISE_LABEL, 0))
+        parts = [f"{n_clusters} clusters", f"{total} tracks"]
+        if noise:
+            parts.append(f"{noise} unclustered")
+        self._summary.setText(" · ".join(parts))
 
     def set_cluster_visible(self, cluster_id: int, visible: bool) -> None:
-        """Set cluster visibility programmatically."""
-        if cluster_id in self._clusters:
-            self._clusters[cluster_id]["visible"] = visible
+        """Set visibility programmatically, keeping the checkbox in step.
+
+        The checkbox used to be left untouched here, so the legend could end up
+        claiming a cluster was shown while it was hidden on the plot.
+        """
+        self._visible[cluster_id] = visible
+        row = self._rows.get(cluster_id)
+        if row is not None:
+            row.set_visible_state(visible)
+
+    def set_all_visible(self, visible: bool) -> None:
+        for cluster_id in list(self._rows):
+            if self._visible.get(cluster_id) != visible:
+                self.set_cluster_visible(cluster_id, visible)
+                self.cluster_toggled.emit(cluster_id, visible)
+
+    def visible_clusters(self) -> List[int]:
+        return [cid for cid, vis in self._visible.items() if vis]

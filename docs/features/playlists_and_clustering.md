@@ -227,25 +227,39 @@ from the app.
 > generated file, never that the file's code actually parsed; there's now a test that
 > checks the latter specifically.
 
-### The in-app 2-D map: built, but not actually reachable
+### The in-app 2-D map
 
-This is worth being direct about, because the vision and the reality have diverged
-here more than anywhere else in the app. An **in-app, native 2-D interactive scatter
-plot** was designed and fully built — a PyQtGraph-based widget with lasso/rectangle
-selection, hover tooltips, a cluster legend with per-cluster show/hide toggles, and a
-companion panel that shows a track's details when you hover or select it. All four
-pieces of that widget exist as real, working code.
+The Music Graph workspace also draws the map **inside the app**, which is where the
+hands-on work happens. The window is split between the plot itself and a side column
+holding the cluster legend and a details panel.
 
-**None of it is wired into anything you can currently reach from the sidebar.** The
-"Music Graph" workspace never imports or displays these widgets; nothing in the app
-currently opens them. The only place they're exercised at all is a stale,
-non-pytest integration script at the repository root, which itself hasn't been
-updated to match a workspace rename that happened after it was written. In practical
-terms: if you're picturing "hover over a dot inside the app, lasso a region, spin it
-into a playlist without ever leaving the window" — that experience does not exist
-today, even though every individual piece needed to build it already does. Wiring
-these widgets into the Music Graph workspace is one of the highest-value, lowest-risk
-items on **ROADMAP.md**, since none of the hard work remains — only the connection.
+Three interaction modes sit above the plot:
+
+- **Pan** — drag to move around, the ordinary way to browse.
+- **Rectangle** — drag a box; everything inside it is selected.
+- **Lasso** — draw a freehand loop around an irregular region, which is usually what
+  you actually want, since clusters aren't box-shaped.
+
+Holding **Ctrl or Shift** while selecting *adds* to the current selection rather than
+replacing it, so you can gather several separate pockets of the map into one set.
+
+Hovering a dot identifies it immediately. **Clicking** one goes further and reads the
+file itself, filling in real artist / title / album / genre / year and its embedded
+cover art — hover stays deliberately cheap (no disk access) because it fires
+constantly, while a click is a considered act and can afford one read.
+
+The **legend** doubles as controls: each row shows a cluster's colour and track
+count, its checkbox hides or shows that cluster on the plot, and clicking the row
+selects every track in it. Unclustered "noise" tracks are listed last and drawn in
+grey, so they read as leftovers rather than as another cluster.
+
+Once you have a selection, you can **send it straight to the Player** as a queue, or
+export it as a **CSV** or an **`.m3u` playlist** — the point of the whole exercise:
+see a region of your library that sounds alike, and turn it into something you can
+listen to.
+
+> **If PyQtGraph isn't installed**, the plot area explains that and tells you how to
+> install it, and the 3-D browser view keeps working regardless.
 
 The "Open Visual Graph" button in the clustering workspace's Results tab does now
 take you straight to the Music Graph room (it used to just show a message box asking
@@ -276,14 +290,16 @@ In the spirit of an honest, up-to-date resource:
 tag-filling (see the caveat above on what "normalization" means here); clustering by
 timbre and tempo with both K-Means and HDBSCAN; the five-step configuration wizard;
 the quality scores and the report dialog that displays them; automatic playlist
-creation from clusters; and the 3-D browser visualization.
+creation from clusters; the 3-D browser visualization; and the in-app 2-D map with
+pan/rectangle/lasso selection, hover and click inspection, legend-driven cluster
+visibility, and selection → Player / CSV / `.m3u`.
 
-**Still ahead (see ROADMAP.md):** wiring an in-app 2-D interactive graph into the
-Music Graph workspace (the single biggest gap between vision and reality in this
-feature area); bringing the additional sound features (harmonic content, brightness,
-percussive density) into the actual clustering rather than just the checkboxes; live
-re-tuning of a clustering without recomputing everything from scratch; and a
-one-click way to export the quality report.
+**Still ahead (see ROADMAP.md):** bringing the additional sound features (harmonic
+content, brightness, percussive density) into the actual clustering rather than just
+the checkboxes; live re-tuning of a clustering without recomputing everything from
+scratch; in-map cluster *editing* (merging clusters, moving a track between them);
+selecting by distance from a point and filtering the map by metadata; a suggestion
+engine for weak groupings; and a one-click way to export the quality report.
 
 ---
 

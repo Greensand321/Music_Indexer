@@ -299,12 +299,17 @@ section kept separate from planned-but-unbuilt features. Summary:
 - **Clustering features:** the engine currently clusters on timbre (MFCC) + tempo;
   the wizard's chroma/spectral/onset checkboxes are UI scaffolding not yet wired into
   feature extraction.
-- **The in-app 2-D interactive graph is fully built but entirely unwired.** Four
-  real widgets (`InteractiveScatterPlot`, `Interactive3DScatterPlot`,
-  `ClusterLegendWidget`, `TrackDetailsPanel`) exist under `gui/widgets/` but are
-  never imported by the Music Graph workspace, which today only launches a
-  browser-based 3-D view. This is now the single biggest "backend/widget ready,
-  not connected" item in the project — see `docs/ROADMAP.md`.
+- **The in-app 2-D interactive graph is built and wired.** `gui/workspaces/graph.py`
+  embeds `InteractiveScatterPlot` + `ClusterLegendWidget` + `TrackDetailsPanel`;
+  data loading/validation/export lives in the Qt-free `cluster_graph_data.py` (tested
+  in `tests/test_cluster_graph_data.py`). `Interactive3DScatterPlot` remains unused —
+  the 3-D view users reach is the browser page from `cluster_graph_3d.py`.
+- **Cluster payload arrays are index-aligned, and must stay that way.**
+  `X_2d`/`X_3d`/`labels`/`tracks` in `Docs/cluster_info.json` are consumed
+  positionally. `clustered_playlists` previously subset the coordinates when
+  downsampling (>5,000 tracks) without subsetting labels/tracks, which broke the 3-D
+  generator outright and would have mislabelled points. If you touch that block,
+  keep every array subset together.
 - **Several UI controls across the app are decorative** (built, but not read by
   the code they appear to control) — the Duplicates workspace's per-group
   disposition combo, the Genre Normalizer's Overwrite/Source controls, the

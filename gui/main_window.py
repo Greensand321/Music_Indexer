@@ -133,6 +133,7 @@ class AlphaDEXWindow(QtWidgets.QMainWindow):
             ws.log_message.connect(self._on_log_message)
             ws.status_changed.connect(self._on_status_changed)
             ws.navigate_requested.connect(self._on_nav_changed)
+            ws.play_tracks_requested.connect(self.play_tracks)
             self._stack.addWidget(ws)
             self._workspaces[key] = ws
 
@@ -332,6 +333,20 @@ class AlphaDEXWindow(QtWidgets.QMainWindow):
         player_ws = self._workspaces.get("player")
         if isinstance(player_ws, PlayerWorkspace):
             player_ws.load_directory_and_play(dirpath)
+
+    @Slot(list, str)
+    def play_tracks(self, paths: list, label: str = "") -> None:
+        """Switch to the Player workspace and queue *paths*.
+
+        Lets a workspace hand a set of tracks to the player — the Music Graph
+        uses it to send a lasso'd selection straight to playback.
+        """
+        if not paths:
+            return
+        self._on_nav_changed("player")
+        player_ws = self._workspaces.get("player")
+        if isinstance(player_ws, PlayerWorkspace):
+            player_ws.load_tracks_and_play(list(paths), label)
 
     @Slot(int)
     def _on_bar_seek(self, ms: int) -> None:
