@@ -20,7 +20,7 @@ import traceback
 from typing import Callable, Dict, List, TypeVar
 from typing_extensions import ParamSpec
 
-import crash_watcher
+from . import crash_watcher
 
 try:
     import tkinter as tk

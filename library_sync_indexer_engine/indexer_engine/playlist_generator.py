@@ -7,8 +7,8 @@ playlists. Existing playlists are overwritten by default; pass
 
 import os, hashlib, difflib, re
 from collections import defaultdict
-from crash_watcher import record_event
-from crash_logger import watcher
+from .crash_watcher import record_event
+from .crash_logger import watcher
 
 # Default extensions for playlist generation
 DEFAULT_EXTS = {".mp3", ".flac", ".wav", ".aac", ".m4a", ".opus"}

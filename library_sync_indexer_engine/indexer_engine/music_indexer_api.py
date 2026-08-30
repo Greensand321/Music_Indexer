@@ -7,8 +7,8 @@ import hashlib
 import unicodedata
 from collections import defaultdict
 from typing import Dict, List
-from dry_run_coordinator import DryRunCoordinator
-from config import load_config
+from .dry_run_coordinator import DryRunCoordinator
+from .config import load_config
 
 def _verify_dependencies() -> None:
     """Raise RuntimeError if the real mutagen library is missing."""
@@ -31,7 +31,7 @@ except Exception:  # pragma: no cover - optional dependency
         """Fallback error when Mutagen is unavailable."""
         pass
 from utils.audio_metadata_reader import read_tags
-from indexer_control import check_cancelled, cancel_event
+from .indexer_control import check_cancelled, cancel_event
 
 # ─── CONFIGURATION ─────────────────────────────────────────────────────
 COMMON_ARTIST_THRESHOLD = 10
@@ -1200,7 +1200,7 @@ def apply_indexer_moves(
 
     if moves:
         try:
-            from playlist_generator import update_playlists
+            from .playlist_generator import update_playlists
             log_callback("   • Updating existing playlists for renamed tracks…")
             update_playlists(moves)
         except ImportError:
@@ -1282,7 +1282,7 @@ def apply_indexer_moves(
     if create_playlists:
         # ─── Phase 7: Generate Playlists with edge-case handling ────────────
         try:
-            from playlist_generator import generate_playlists
+            from .playlist_generator import generate_playlists
             log_callback("7/7: Generating safe playlists…")
 
             def plog(msg):
