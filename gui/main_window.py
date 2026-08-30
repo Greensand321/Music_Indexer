@@ -63,8 +63,10 @@ class AlphaDEXWindow(QtWidgets.QMainWindow):
         get_manager().load_persisted()
         get_manager().theme_changed.connect(self._on_theme_changed)
 
+        self._keyboard_mode_active = False
         self._build_ui()
         self._setup_shortcuts()
+        self._install_global_event_filter()
         self._load_persisted_library()
 
     # ── UI construction ───────────────────────────────────────────────────
@@ -147,11 +149,68 @@ class AlphaDEXWindow(QtWidgets.QMainWindow):
             npb.prev_requested.connect(player_ws.play_prev)
             npb.seek_requested.connect(self._on_bar_seek)
             npb.volume_changed.connect(self._on_bar_volume)
+            npb.keyboard_mode_toggled.connect(self.set_keyboard_mode_global)
             # Keep bar volume knob in sync with the workspace slider
             player_ws._vol_slider.sliderMoved.connect(npb.set_volume)
             player_ws._vol_slider.sliderReleased.connect(
                 lambda: npb.set_volume(player_ws._vol_slider.value())
             )
+
+    # ── Global event filter for keyboard mode ─────────────────────────────
+
+    def _install_global_event_filter(self) -> None:
+        """Install an application-level event filter to intercept arrow keys
+        when keyboard mode is active, overriding default widget behavior."""
+        app = QtWidgets.QApplication.instance()
+        if app:
+            app.installEventFilter(self)
+
+    def eventFilter(self, obj, event):  # noqa: N802
+        """Intercept arrow keys globally when keyboard mode is active.
+
+        Dispatches to library navigation or queue navigation based on which
+        panel the user last clicked (tracked by PlayerWorkspace._kb_target).
+        """
+        if self._keyboard_mode_active and event.type() == QtCore.QEvent.Type.KeyPress:
+            key = event.key()
+            player_ws = self._workspaces.get("player")
+            if isinstance(player_ws, PlayerWorkspace):
+                target = player_ws.kb_target()
+                if target == "library":
+                    if key == QtCore.Qt.Key.Key_Down:
+                        player_ws.kb_lib_down()
+                        return True
+                    elif key == QtCore.Qt.Key.Key_Right:
+                        player_ws.kb_lib_right()
+                        return True
+                    elif key == QtCore.Qt.Key.Key_Left:
+                        player_ws.kb_lib_left()
+                        return True
+                    elif key == QtCore.Qt.Key.Key_Up:
+                        player_ws.kb_lib_up()
+                        return True
+                else:  # queue
+                    if key == QtCore.Qt.Key.Key_Down:
+                        player_ws._preview_next()
+                        return True
+                    elif key == QtCore.Qt.Key.Key_Right:
+                        player_ws.play_next()
+                        return True
+                    elif key == QtCore.Qt.Key.Key_Left:
+                        player_ws.play_prev()
+                        return True
+                    elif key == QtCore.Qt.Key.Key_Up:
+                        player_ws._restart_current()
+                        return True
+        return super().eventFilter(obj, event)
+
+    def set_keyboard_mode_global(self, active: bool) -> None:
+        """Toggle keyboard mode at the main-window level so arrow keys are
+        intercepted globally regardless of which widget has focus."""
+        self._keyboard_mode_active = active
+        player_ws = self._workspaces.get("player")
+        if isinstance(player_ws, PlayerWorkspace):
+            player_ws.set_keyboard_mode(active)
 
     # ── Shortcuts ─────────────────────────────────────────────────────────
 
