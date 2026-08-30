@@ -1,0 +1,391 @@
+name: Sync Branches with Main
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch_filter:
+        description: 'Comma-separated branches to sync (leave blank for all non-main branches). Overrides max_branches when set.'
+        required: false
+        default: ''
+      max_branches:
+        description: 'Only sync the N most recently active branches (blank = no limit). Ignored when branch_filter is set.'
+        required: false
+        default: ''
+      merge_branches_into_main:
+        description: 'Also merge each branch INTO main first (direct push, no PR/review) before catching branches up from main. Only for a disposable integration/test main, not a protected release branch.'
+        type: boolean
+        default: false
+      dry_run:
+        description: 'Dry run (report only, no pushes)'
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-branches-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  discover-branches:
+    runs-on: ubuntu-latest
+    outputs:
+      branches: ${{ steps.discover.outputs.branches }}
+      excluded: ${{ steps.discover.outputs.excluded }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Discover branches to sync
+        id: discover
+        run: |
+          set -euo pipefail
+          git fetch origin --prune
+
+          # refs/remotes/origin/HEAD (the remote's default-branch pointer) has
+          # a quirk: %(refname:short) prints it as the bare word "origin", not
+          # "origin/HEAD" — so the sed strip below leaves it untouched and it
+          # slipped past the main/HEAD filter as a fake branch named "origin".
+          # Excluded explicitly here rather than relying on the strip to catch it.
+          #
+          # Sorted most-recently-committed first, so "top N" (max_branches)
+          # means "top N most recently active", not an arbitrary ordering.
+          ALL_BRANCHES=$(git for-each-ref --sort=-committerdate --format='%(refname:short)' refs/remotes/origin \
+            | sed 's|^origin/||' \
+            | grep -vE '^(main|HEAD|origin)$')
+
+          FILTER="${{ github.event.inputs.branch_filter }}"
+          MAX_BRANCHES="${{ github.event.inputs.max_branches }}"
+          EXCLUDED_JSON='[]'
+
+          if [ -n "$FILTER" ]; then
+            # An explicit list is the user naming exactly what they want —
+            # that always wins over max_branches, and nothing counts as
+            # "excluded" here since none of this was auto-selected.
+            IFS=',' read -ra WANTED <<< "$FILTER"
+            SELECTED=()
+            for b in "${WANTED[@]}"; do
+              trimmed=$(echo "$b" | xargs)
+              [ -n "$trimmed" ] && SELECTED+=("$trimmed")
+            done
+            BRANCHES_JSON=$(printf '%s\n' "${SELECTED[@]}" | jq -R . | jq -s -c .)
+
+          elif [ -n "$MAX_BRANCHES" ] && [ "$MAX_BRANCHES" -gt 0 ] 2>/dev/null; then
+            BRANCHES_JSON=$(printf '%s\n' "$ALL_BRANCHES" | head -n "$MAX_BRANCHES" | jq -R . | jq -s -c .)
+            STALE=$(printf '%s\n' "$ALL_BRANCHES" | tail -n "+$((MAX_BRANCHES + 1))")
+            # tail on "nothing left" still emits one blank line through printf,
+            # which jq would otherwise turn into [""] instead of the empty [].
+            # That happens on every run where max_branches >= the branch count
+            # — not a rare edge case, since setting a generous N is the normal
+            # way to use this input — so it has to be handled explicitly.
+            if [ -z "$STALE" ]; then
+              EXCLUDED_JSON='[]'
+            else
+              EXCLUDED_JSON=$(printf '%s\n' "$STALE" | jq -R . | jq -s -c .)
+            fi
+
+          else
+            BRANCHES_JSON=$(printf '%s\n' "$ALL_BRANCHES" | jq -R . | jq -s -c .)
+          fi
+
+          echo "Branches selected: $BRANCHES_JSON"
+          echo "Branches excluded as stale: $EXCLUDED_JSON"
+          echo "branches=$BRANCHES_JSON" >> "$GITHUB_OUTPUT"
+          echo "excluded=$EXCLUDED_JSON" >> "$GITHUB_OUTPUT"
+
+  # Reverse direction: each branch's OWN commits get merged INTO main, one
+  # branch at a time, BEFORE the normal main-into-branch catch-up runs below.
+  #
+  # This is a direct push to main with no PR and no review — the opposite of
+  # how this repo normally treats main. It only runs when the
+  # merge_branches_into_main checkbox is explicitly checked, and it exists for
+  # one specific situation: main being used as a disposable integration/test
+  # branch that gets reverted freely, with real releases shipped through a
+  # separate pipeline outside GitHub entirely. Do not enable this checkbox on
+  # a repo where main is the protected release branch.
+  #
+  # Sequential by design, not a matrix: pushing to main from parallel jobs
+  # would race. Each branch is merged and (if not a dry run) pushed before the
+  # next branch is attempted, so branch 2 merges against whatever branch 1
+  # just contributed — the same incremental integration you'd get resolving
+  # these by hand, one at a time.
+  #
+  # Every branch pays for two checks up front (is main already ahead? is a
+  # clean fast-forward possible?) specifically to avoid the failure mode this
+  # replaced: --no-ff run unconditionally manufactures a merge commit even
+  # when there is nothing to merge, so running this repeatedly turned into
+  # unbounded, mostly-empty commit growth. A skip or a fast-forward adds zero
+  # commits; only genuine divergence gets a real merge commit.
+  merge-into-main:
+    needs: discover-branches
+    if: github.event.inputs.merge_branches_into_main == 'true' && needs.discover-branches.outputs.branches != '[]'
+    runs-on: ubuntu-latest
+    outputs:
+      results: ${{ steps.merge.outputs.results }}
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Merge each branch into main, one at a time
+        id: merge
+        run: |
+          set -euo pipefail
+          BRANCHES='${{ needs.discover-branches.outputs.branches }}'
+          RESULTS='[]'
+
+          record() {
+            RESULTS=$(echo "$RESULTS" | jq --arg b "$1" --arg s "$2" '. + [{"branch":$b,"status":$s}]')
+          }
+
+          # Pushes the just-merged main and reports what happened. Diagnostic
+          # output is routed to stderr deliberately — this function's stdout
+          # IS its return value ("success" / "push_failed"), captured via
+          # command substitution at the call site, so anything else printed
+          # to stdout would corrupt that value.
+          push_main_or_report() {
+            local branch="$1"
+            if [ "${{ github.event.inputs.dry_run }}" != "false" ]; then
+              echo "success"
+              return
+            fi
+            if git push origin HEAD:main >&2 2>&1; then
+              echo "success"
+            else
+              {
+                echo "::error title=Push to main failed::Branch '$branch' merged cleanly but the push to main was rejected (branch protection, or a race) - reverting local main so the next branch merges against what is actually on origin"
+                git fetch origin main
+                git reset --hard origin/main
+              } >&2
+              echo "push_failed"
+            fi
+          }
+
+          for branch in $(echo "$BRANCHES" | jq -r '.[]'); do
+            echo "::group::Merging $branch into main"
+            git fetch origin "$branch"
+
+            if git merge-base --is-ancestor "origin/$branch" HEAD; then
+              # main already contains everything this branch has.
+              echo "Branch '$branch' has nothing new for main — skipped"
+              record "$branch" "up_to_date"
+
+            elif git merge-base --is-ancestor HEAD "origin/$branch"; then
+              # No divergent history to reconcile — advance the pointer
+              # instead of manufacturing a merge commit.
+              git merge --ff-only "origin/$branch"
+              STATUS=$(push_main_or_report "$branch")
+              record "$branch" "$STATUS"
+
+            else
+              if git merge --no-ff --no-edit "origin/$branch"; then
+                STATUS=$(push_main_or_report "$branch")
+                record "$branch" "$STATUS"
+              else
+                git merge --abort || true
+                echo "::error title=Merge conflict::Branch '$branch' conflicts with main - skipped, needs manual resolution"
+                record "$branch" "conflict"
+              fi
+            fi
+
+            echo "::endgroup::"
+          done
+
+          echo "results=$(echo "$RESULTS" | jq -c .)" >> "$GITHUB_OUTPUT"
+
+  sync-branch:
+    needs: [discover-branches, merge-into-main]
+    # merge-into-main is conditional, so its result is checked explicitly
+    # rather than relying on the default (which would skip this job too
+    # whenever merge-into-main is skipped, not just when it fails). success OR
+    # skipped both mean "safe to proceed" — only an actual failure there
+    # should stop this from running.
+    if: >-
+      always() &&
+      needs.discover-branches.result == 'success' &&
+      needs.discover-branches.outputs.branches != '[]' &&
+      (needs.merge-into-main.result == 'success' || needs.merge-into-main.result == 'skipped')
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        branch: ${{ fromJson(needs.discover-branches.outputs.branches) }}
+    steps:
+      - name: Checkout branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ matrix.branch }}
+          fetch-depth: 0
+
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Attempt merge from main
+        id: merge
+        run: |
+          set -euo pipefail
+          git fetch origin main
+
+          if git merge-base --is-ancestor origin/main HEAD; then
+            # This branch already has everything main has.
+            echo "status=up_to_date" >> "$GITHUB_OUTPUT"
+            echo "Branch '${{ matrix.branch }}' already has everything from main — skipped"
+
+          elif git merge-base --is-ancestor HEAD origin/main; then
+            # No divergent history to reconcile — advance the pointer
+            # instead of manufacturing a merge commit.
+            git merge --ff-only origin/main
+            echo "status=success" >> "$GITHUB_OUTPUT"
+            echo "Branch '${{ matrix.branch }}' fast-forwarded to main"
+
+          else
+            if git merge --no-ff --no-edit origin/main; then
+              echo "status=success" >> "$GITHUB_OUTPUT"
+              echo "Branch '${{ matrix.branch }}' merged cleanly with main"
+            else
+              git merge --abort || true
+              echo "status=conflict" >> "$GITHUB_OUTPUT"
+              echo "::error title=Merge conflict::Branch '${{ matrix.branch }}' conflicts with main - skipped, needs manual resolution"
+            fi
+          fi
+
+      - name: Push updated branch
+        if: steps.merge.outputs.status == 'success' && github.event.inputs.dry_run == 'false'
+        run: git push origin HEAD:${{ matrix.branch }}
+
+      - name: Record result
+        if: always()
+        run: |
+          mkdir -p /tmp/status
+          # Named per matrix job, not `result.json`. The summarize job pulls
+          # every one of these artifacts with `merge-multiple: true`, which
+          # flattens them into a single directory — so a shared filename meant
+          # N parallel downloads racing to write one path. That silently kept
+          # only the last row (every report was missing every other branch),
+          # and when two payloads differed in length the loser's tail survived
+          # the winner's write: a stray `}` on line 2, jq parse error, the
+          # whole job dead with exit 5 while the sync itself had worked fine.
+          cat > "/tmp/status/result-${{ strategy.job-index }}.json" <<EOF
+          {"branch": "${{ matrix.branch }}", "status": "${{ steps.merge.outputs.status }}", "pushed": "${{ steps.merge.outputs.status == 'success' && github.event.inputs.dry_run == 'false' }}"}
+          EOF
+
+      - name: Upload result artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sync-status-${{ strategy.job-index }}
+          path: /tmp/status/result-${{ strategy.job-index }}.json
+          retention-days: 1
+
+  summarize:
+    needs: [discover-branches, merge-into-main, sync-branch]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all status artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: sync-status-*
+          path: /tmp/all-status
+          merge-multiple: true
+        continue-on-error: true
+
+      - name: Build summary report
+        env:
+          MERGE_RAN: ${{ needs.merge-into-main.result }}
+          MERGE_RESULTS: ${{ needs.merge-into-main.outputs.results }}
+          EXCLUDED: ${{ needs.discover-branches.outputs.excluded }}
+        run: |
+          set -euo pipefail
+
+          if [ -n "$EXCLUDED" ] && [ "$EXCLUDED" != "[]" ]; then
+            {
+              echo "## 💤 Stale branches skipped (outside the top N most active)"
+              echo ""
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "$EXCLUDED" | jq -r '.[]' | while read -r b; do
+              echo "- \`$b\`" >> "$GITHUB_STEP_SUMMARY"
+            done
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          # `type == "array"` as well as non-empty: a report must never be the
+          # thing that fails the run, so anything unexpected here is skipped
+          # rather than fed to jq to die on.
+          if [ "$MERGE_RAN" == "success" ] && [ -n "$MERGE_RESULTS" ] \
+             && jq -e 'type == "array"' >/dev/null 2>&1 <<< "$MERGE_RESULTS"; then
+            {
+              echo "## ⬆️ Branches merged into main first"
+              echo ""
+              echo "Dry run: **${{ github.event.inputs.dry_run }}**"
+              echo ""
+              echo "| Branch | Result |"
+              echo "|---|---|"
+            } >> "$GITHUB_STEP_SUMMARY"
+
+            echo "$MERGE_RESULTS" | jq -c '.[]' | while read -r row; do
+              BRANCH=$(echo "$row" | jq -r .branch)
+              STATUS=$(echo "$row" | jq -r .status)
+              ICON="✅"
+              case "$STATUS" in
+                conflict)     ICON="⚠️" ;;
+                push_failed)  ICON="🛑" ;;
+                up_to_date)   ICON="⏭️" ;;
+              esac
+              echo "| $BRANCH | $ICON $STATUS |" >> "$GITHUB_STEP_SUMMARY"
+            done
+
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          {
+            echo "## 🔄 Branch Sync Report (main → branches)"
+            echo ""
+            echo "Dry run: **${{ github.event.inputs.dry_run }}**"
+            echo ""
+            echo "| Branch | Result | Pushed |"
+            echo "|---|---|---|"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          CONFLICTS=""
+
+          if [ -d /tmp/all-status ]; then
+            for f in /tmp/all-status/*.json; do
+              [ -e "$f" ] || continue
+              # One jq per file instead of three, and a readable row instead of
+              # a dead job when a file is unparseable: the sync has already
+              # happened by the time this runs, so losing the report is a far
+              # better outcome than losing the run.
+              if ! ROW=$(jq -r '[.branch // "?", .status // "?", .pushed // "?"] | @tsv' "$f" 2>/dev/null); then
+                echo "| \`$(basename "$f")\` | ❓ unreadable status file | — |" >> "$GITHUB_STEP_SUMMARY"
+                continue
+              fi
+              IFS=$'\t' read -r BRANCH STATUS PUSHED <<< "$ROW"
+              ICON="✅"
+              case "$STATUS" in
+                conflict)   ICON="⚠️"; CONFLICTS="${CONFLICTS} \`${BRANCH}\`" ;;
+                up_to_date) ICON="⏭️" ;;
+              esac
+              echo "| $BRANCH | $ICON $STATUS | $PUSHED |" >> "$GITHUB_STEP_SUMMARY"
+            done
+          fi
+
+          if [ -n "$CONFLICTS" ]; then
+            {
+              echo ""
+              echo "### ⚠️ Needs manual attention"
+              echo "These branches conflict with main and were skipped:$CONFLICTS"
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
