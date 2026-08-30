@@ -17,6 +17,7 @@ class NowPlayingBar(QtWidgets.QWidget):
         next_requested
         prev_requested
         seek_requested(int)   — target position in ms
+        keyboard_mode_toggled(bool)  — arrow-key navigation mode
     """
 
     play_pause_requested = Signal()
@@ -24,6 +25,7 @@ class NowPlayingBar(QtWidgets.QWidget):
     prev_requested       = Signal()
     seek_requested       = Signal(int)   # ms
     volume_changed       = Signal(int)   # 0-100
+    keyboard_mode_toggled = Signal(bool)
 
     _ART_SIZE = 44   # px, small square thumbnail
 
@@ -135,6 +137,74 @@ class NowPlayingBar(QtWidgets.QWidget):
         )
         root.addWidget(vol_lbl)
         root.addWidget(self._vol_slider)
+
+        root.addSpacing(8)
+
+        # ── Keyboard mode toggle (pill button) ────────────────────────────
+        self._kb_btn = QtWidgets.QPushButton("⌨")
+        self._kb_btn.setCheckable(True)
+        self._kb_btn.setFlat(True)
+        self._kb_btn.setFixedSize(36, 28)
+        self._kb_btn.setToolTip(
+            "Keyboard Mode: ↓ preview next  → next  ← prev  ↑ restart"
+        )
+        self._kb_btn.setObjectName("kbModeBtn")
+        self._apply_kb_style(False)
+        self._kb_btn.toggled.connect(self._on_kb_toggled)
+        root.addWidget(self._kb_btn)
+
+    # ── Keyboard mode styling ─────────────────────────────────────────────
+
+    def _apply_kb_style(self, active: bool) -> None:
+        if active:
+            self._kb_btn.setStyleSheet("""
+                #kbModeBtn {
+                    background: #6366f1;
+                    color: #ffffff;
+                    border: 2px solid #818cf8;
+                    border-radius: 12px;
+                    font-size: 14px;
+                    font-weight: bold;
+                }
+                #kbModeBtn:hover {
+                    background: #818cf8;
+                }
+            """)
+        else:
+            self._kb_btn.setStyleSheet("""
+                #kbModeBtn {
+                    background: transparent;
+                    color: #64748b;
+                    border: 1px solid #30363d;
+                    border-radius: 12px;
+                    font-size: 14px;
+                }
+                #kbModeBtn:hover {
+                    background: rgba(99,102,241,40);
+                    color: #818cf8;
+                    border-color: #818cf8;
+                }
+            """)
+
+    def _on_kb_toggled(self, checked: bool) -> None:
+        self._apply_kb_style(checked)
+        self._animate_kb_press(checked)
+        self.keyboard_mode_toggled.emit(checked)
+
+    def _animate_kb_press(self, active: bool) -> None:
+        """Scale-pulse animation when toggling keyboard mode."""
+        anim = QtCore.QPropertyAnimation(self._kb_btn, b"geometry")
+        geo = self._kb_btn.geometry()
+        small = QtCore.QRect(geo.x() + 3, geo.y() + 2, geo.width() - 6, geo.height() - 4)
+        anim.setDuration(120)
+        anim.setKeyValueAt(0.0, geo)
+        anim.setKeyValueAt(0.5, small)
+        anim.setKeyValueAt(1.0, geo)
+        anim.setEasingCurve(QtCore.QEasingCurve.Type.OutCubic)
+        # Self-cleanup
+        anim.finished.connect(anim.deleteLater)
+        anim.start()
+        self._kb_anim = anim  # prevent GC during animation
 
     # ── Painting ──────────────────────────────────────────────────────────
 
