@@ -176,16 +176,18 @@ trimmed edit of a track — a radio edit built by speeding up the original, for
 instance — may not reliably match its full-length counterpart as a near-duplicate.
 This is a known, named gap rather than an unnoticed bug; see **ROADMAP.md**.
 
-### A tool that's currently broken: the Duplicate Pair Report
+### The Duplicate Pair Report
 
-Worth flagging plainly rather than leaving you to discover it the hard way: the
-"inspect this specific pair" diagnostic tool (reachable from the legacy app's
-Duplicate Finder pair-review flow) currently **crashes every time it's used** — it
-raises an unhandled error internally before it can produce a report, due to a type
-mismatch in how it looks up which metadata bucket each track belongs to. This does
-not affect the main scan-group-execute workflow described above, only the standalone
-per-pair inspection report. It's tracked as a bug fix in **ROADMAP.md**, not
-something you should expect to work today.
+Alongside the main scan, there's a focused diagnostic that inspects **one specific
+pair** of files and shows you, step by step, exactly why they were or weren't
+matched: which metadata bucket each landed in, whether they shared any coarse
+fingerprint keys, the raw distance between them, and which threshold applied. It's
+the tool to reach for when the finder's verdict on a particular pair surprises you.
+
+*(Historical note: this tool used to crash on every invocation — it looked up each
+track's metadata bucket using a dictionary operation against what is actually a
+list, so it raised an error before producing anything. That's fixed; both the
+on-screen report and its HTML export work now.)*
 
 ## Why the second scan is so much faster: the cache
 

@@ -13,6 +13,7 @@ class WorkspaceBase(QtWidgets.QWidget):
     Provides:
       - log_message(str, level)  signal routed to the LogDrawer
       - status_changed(str)      signal for the status chip
+      - navigate_requested(key)  signal asking the main window to switch workspace
       - A scroll-area wrapper so content can grow freely
       - Helper: _make_card() — returns a styled QFrame card
       - Helper: _make_card_title(text) — bold card section heading
@@ -22,6 +23,10 @@ class WorkspaceBase(QtWidgets.QWidget):
 
     log_message = Signal(str, str)   # (message, level)
     status_changed = Signal(str, str)  # (text, colour)
+    # Emitted with a _WORKSPACE_MAP key when a workspace wants the main window
+    # to navigate elsewhere (e.g. "open this result in the Music Graph").
+    # Workspaces never switch themselves; the main window owns navigation.
+    navigate_requested = Signal(str)
 
     def __init__(self, library_path: str = "", parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(parent)

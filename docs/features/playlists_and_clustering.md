@@ -231,11 +231,11 @@ today, even though every individual piece needed to build it already does. Wirin
 these widgets into the Music Graph workspace is one of the highest-value, lowest-risk
 items on **ROADMAP.md**, since none of the hard work remains — only the connection.
 
-A second, smaller navigation gap sits right next to this one: the "Open Visual
-Graph" button inside the clustering workspace doesn't currently navigate anywhere —
-it shows a message box telling you to click the sidebar entry yourself. The code
-comment marking this is direct about its own incompleteness: a `TODO` left in place
-of the intended cross-workspace signal.
+The "Open Visual Graph" button in the clustering workspace's Results tab does now
+take you straight to the Music Graph room (it used to just show a message box asking
+you to click the sidebar yourself). Workspaces don't switch themselves — the button
+raises a `navigate_requested` signal and the main window performs the move, keeping
+navigation in one place.
 
 ## Two workspaces exist; only one is live
 
@@ -247,17 +247,10 @@ is wired to it, and the older workspace is unreferenced dead code left in the
 repository. If you're reading the source to understand this feature, ignore
 `clustered.py`; it doesn't run.
 
-## A bug worth knowing about: the quality report can crash
-
-The **Cluster Quality Report** dialog — the one meant to show your Silhouette /
-Davies-Bouldin / Calinski-Harabasz scores plus a per-cluster breakdown — currently
-has a broken internal reference: the section that builds the per-cluster breakdown
-calls a method that doesn't exist under that name. In practice, this means the
-dialog will raise an error and fail to fully render whenever it's opened against a
-real (non-empty) clustering result — which is to say, in the normal case where you
-actually have clusters to look at. This is tracked as a bug fix in **ROADMAP.md**,
-not a feature gap; the scoring math itself is fine, only the dialog that displays the
-per-cluster detail is affected.
+*(Historical note on the quality report: the dialog that displays your Silhouette /
+Davies-Bouldin / Calinski-Harabasz scores used to fail to render its per-cluster
+breakdown against any real result — it called an internal method that didn't exist
+under that name. That's fixed; the scoring math was never affected.)*
 
 ## What's real today, and what's still ahead
 
@@ -266,16 +259,15 @@ In the spirit of an honest, up-to-date resource:
 **Working today:** rule-based playlists and Auto-DJ; MusicBrainz-based genre
 tag-filling (see the caveat above on what "normalization" means here); clustering by
 timbre and tempo with both K-Means and HDBSCAN; the five-step configuration wizard;
-the quality *scoring math* (the summary dialog that displays it has the bug noted
-above); automatic playlist creation from clusters; and the 3-D browser visualization.
+the quality scores and the report dialog that displays them; automatic playlist
+creation from clusters; and the 3-D browser visualization.
 
-**Still ahead (see ROADMAP.md):** wiring the already-built in-app 2-D interactive
-graph widgets into the Music Graph workspace (the single biggest gap between vision
-and reality in this feature area); fixing the Cluster Quality Report crash; fixing
-the "Open Visual Graph" button's navigation; bringing the additional sound features
-(harmonic content, brightness, percussive density) into the actual clustering rather
-than just the checkboxes; live re-tuning of a clustering without recomputing
-everything from scratch; and a one-click way to export the quality report.
+**Still ahead (see ROADMAP.md):** wiring an in-app 2-D interactive graph into the
+Music Graph workspace (the single biggest gap between vision and reality in this
+feature area); bringing the additional sound features (harmonic content, brightness,
+percussive density) into the actual clustering rather than just the checkboxes; live
+re-tuning of a clustering without recomputing everything from scratch; and a
+one-click way to export the quality report.
 
 ---
 

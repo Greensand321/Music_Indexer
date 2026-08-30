@@ -552,8 +552,4 @@ class EnhancedClusteredWorkspace(WorkspaceBase):
     def _open_graph(self) -> None:
         """Open Visual Music Graph workspace."""
         self._log("Opening Visual Music Graph...", "info")
-        # TODO: Signal to switch workspace
-        QtWidgets.QMessageBox.information(
-            self, "Open Graph",
-            "Switch to the Visual Music Graph workspace in the sidebar."
-        )
+        self.navigate_requested.emit("graph")

@@ -268,6 +268,9 @@ features:
 - Wrapped in a `QScrollArea` so tall content is always reachable.
 - `log_message(str, level)` signal routed to the log drawer.
 - `status_changed(str, colour)` signal updates the log drawer handle and status bar.
+- `navigate_requested(key)` signal asking the main window to switch to another
+  workspace. Workspaces never change the active workspace themselves — they raise
+  this and the main window performs the move, so navigation stays in one place.
 - `_make_card()` returns a `QFrame` with rounded corners and a drop-shadow effect
   (shadow colour updates on theme change via `refresh_shadows()`).
 - The scroll area's inner content widget is specifically a `GradientWidget`
@@ -436,13 +439,14 @@ The feature checkboxes exposed via the wizard are `tempo`, `mfcc`, `chroma`,
 `spectral`, `energy`, `onset_rate` — see **features/playlists_and_clustering.md**
 for which of these the clustering engine actually computes today.
 
-Two things worth knowing about this workspace's buttons: **"Open Visual
-Graph"** doesn't currently navigate anywhere — it pops an informational
-message box telling you to use the sidebar instead, with a `TODO` comment in
-the code marking the intended (but unbuilt) cross-workspace signal. And "View
-Playlists" opens the generated-playlists folder via a Linux-specific
-`xdg-open` call with no Windows or macOS fallback — it will not work as
-described on those platforms.
+**"Open Visual Graph"** navigates to the Music Graph workspace by emitting the
+shared `WorkspaceBase.navigate_requested(key)` signal, which the main window
+connects for every workspace — workspaces never switch themselves. (It used
+to pop a message box telling you to click the sidebar yourself.)
+
+Still worth knowing: **"View Playlists"** opens the generated-playlists folder
+via a Linux-specific `xdg-open` call with no Windows or macOS fallback — it
+will not work as described on those platforms.
 
 ### 6.9 Music Graph (`graph.py`)
 
@@ -585,10 +589,9 @@ uncheck every feature.
 
 Shows Silhouette Score / Davies-Bouldin Index / Calinski-Harabasz Score with
 color-coded verdicts, plus a per-cluster breakdown and heuristic
-improvement suggestions. **Currently has a bug**: the method that assembles
-the per-cluster breakdown calls a helper method under the wrong name, so
-opening this dialog against a real (non-empty) clustering result raises an
-error rather than fully rendering. See **ROADMAP.md**.
+improvement suggestions. (This dialog previously failed to render its
+per-cluster section against any real result — it called a helper method
+under the wrong name. Fixed.)
 
 ### 7.4 ThemePickerDialog
 
@@ -660,6 +663,9 @@ Sidebar.exit_requested ──► AlphaDEXWindow.close()
 
 WorkspaceBase.log_message ──► LogDrawer.append()
 WorkspaceBase.status_changed ─► LogDrawer.set_status() + QStatusBar
+WorkspaceBase.navigate_requested ─► AlphaDEXWindow._on_nav_changed
+                              └─► activates sidebar item + switches workspace
+                                   (e.g. Clustered "Open Visual Graph" → graph)
 
 PlayerWorkspace ⇄ NowPlayingBar   (two-way: now-playing/position/state one way,
                                     play-pause/next/prev/seek/volume the other;

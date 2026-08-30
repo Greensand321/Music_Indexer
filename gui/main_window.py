@@ -130,6 +130,7 @@ class AlphaDEXWindow(QtWidgets.QMainWindow):
             ws = cls(library_path=self._library_path)
             ws.log_message.connect(self._on_log_message)
             ws.status_changed.connect(self._on_status_changed)
+            ws.navigate_requested.connect(self._on_nav_changed)
             self._stack.addWidget(ws)
             self._workspaces[key] = ws
 

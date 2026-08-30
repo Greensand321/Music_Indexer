@@ -22,60 +22,55 @@ grouped by area and, within each area, roughly ordered from "smallest / most rea
 
 ## Recently completed
 
-Two items that used to appear on this list are done and have been removed from the
-body below:
+These items used to appear on this list and are done, so they've been removed from
+the body below:
 
 - **Library Sync's Export Report button** is wired — a real "📤 Export Report" button
   in the Library Sync workspace saves HTML, JSON, or CSV reports.
 - **Metadata settings honesty** — the Settings dialog now shows Spotify and Gracenote
   visibly but disabled, with a tooltip explaining they aren't implemented, instead of
   silently omitting them or listing them as if they worked.
+- **The Duplicate Pair Report crash is fixed.** `build_duplicate_pair_report()` was
+  calling `.items()` on the list returned by `_build_metadata_buckets()`, so it
+  raised `AttributeError` on every single invocation. It now looks each track's
+  bucket up by path and reads the bucket's metadata key, matching the
+  `tuple[str, str] | None` type `DuplicatePairReport` already declared. The HTML
+  pair report, which was unreachable as a result, now renders too.
+- **The Cluster Quality Report crash is fixed.** The dialog called
+  `_create_cluster_card()`; the real method is `_build_cluster_card()`. The
+  per-cluster breakdown now renders against real results.
+- **`plugins/` and `controllers/` no longer import Tkinter.** The legacy
+  `MetadataServiceConfigFrame` moved out of `plugins/acoustid_plugin.py` into
+  `metadata_config_frame.py` at the repo root (alongside `library_sync_review.py`,
+  the project's other legacy Tkinter panel), and
+  `controllers/library_index_controller.generate_index()` no longer pops its own
+  `messagebox` — it returns the output path and the legacy GUI reports it. Both
+  modules now import headlessly, which un-breaks
+  `tests/test_musicbrainz_service.py` on machines without a system Tkinter.
+- **The "Open Visual Graph" button navigates.** `WorkspaceBase` gained a
+  `navigate_requested(key)` signal that the main window connects for every
+  workspace; the Clustered workspace emits it instead of showing a message box
+  telling you to click the sidebar yourself.
 
 ---
 
-## Known bugs (fix before building anything new here)
+## Settled decisions (recorded so they don't get re-raised)
 
-- **The Duplicate Pair Report tool crashes every time it's used** *(Bug).* The
-  function that inspects a specific pair of duplicate files
-  (`build_duplicate_pair_report` in `duplicate_consolidation.py`) raises an
-  unhandled `AttributeError` internally — it calls `.items()` on a list, expecting a
-  dict, when looking up which metadata bucket each track belongs to. This doesn't
-  affect the main scan → group → execute duplicate-finding workflow, only the
-  standalone "inspect this pair" diagnostic reachable from the legacy app.
-
-- **The Cluster Quality Report dialog crashes on real data** *(Bug).* The dialog
-  meant to show Silhouette / Davies-Bouldin / Calinski-Harabasz scores plus a
-  per-cluster breakdown (`ClusterQualityReportDialog` in
-  `gui/dialogs/cluster_quality_report_dialog.py`) calls a method,
-  `_create_cluster_card`, that doesn't exist — the real method is named
-  `_build_cluster_card`. The dialog will fail to render its per-cluster section any
-  time it's opened against an actual (non-empty) clustering result, which is the
-  normal case. The scoring math itself is unaffected; only this display is broken.
-
-- **`plugins/acoustid_plugin.py` imports `tkinter` directly**, and so does
-  `controllers/library_index_controller.py` *(Bug / architecture-rule violation).*
-  Both are backend/plugin modules that this project's own conventions say should be
-  importable without a GUI toolkit attached — `plugins/` in particular is meant to
-  be pure lookup logic. In practice this means importing `plugins.acoustid_plugin`
-  fails outright in any environment without Tkinter installed (this is not
-  theoretical — it currently breaks `tests/test_musicbrainz_service.py` on any
-  machine without a system Tkinter), and it silently ties a "backend" module to a
-  GUI toolkit that the modern Qt app doesn't otherwise use at all.
+- **The two indexer engines stay as they are.** Library Sync runs a vendored copy of
+  the scanning/fingerprinting engine (`library_sync_indexer_engine/`) rather than the
+  root-level modules the Indexer and Duplicate Finder use. This is a leftover from
+  the project's two-generation history — an earlier program built around the legacy
+  Tkinter interface, and the current iteration that became the modern Qt app — not a
+  deliberate design decision. **The root-level engine is canonical for all new work;
+  the vendored copy is left alone unless we're specifically making changes to it.**
+  Unifying them is explicitly *not* planned; the only thing to remember is that a fix
+  to a root module doesn't reach Library Sync automatically, so port it across
+  deliberately if Library Sync specifically needs it. See **architecture.md** for the
+  full picture.
 
 ---
 
 ## Library Sync
-
-- **Reconcile the vendored indexer engine** *(Housekeeping / architecture debt).*
-  Library Sync runs its own separately-maintained copy of the
-  scanning/fingerprinting engine (`library_sync_indexer_engine/`) rather than the
-  same modules the Indexer and Duplicate Finder use. The two copies have already
-  drifted — most notably, the vendored fingerprint cache has none of the background
-  writer thread, WAL mode, or extended metadata columns the main cache has grown.
-  No comment or commit anywhere explains why the split exists. At minimum, this
-  should be documented as a load-bearing decision (if it's meant to stay that way)
-  or unified into one engine (if it isn't). See **architecture.md** for the full
-  detail.
 
 - **Wire or remove the "Replace All" / "Replace with Better" report actions**
   *(Backend ready, not connected — but only half-built).* The exported HTML review
@@ -126,11 +121,6 @@ widgets are built but entirely unreachable.
   browser-based 3-D view. Connecting these widgets to the workspace requires no new
   feature work, only wiring.
 
-- **Fix the "Open Visual Graph" button's navigation** *(Bug-adjacent housekeeping).*
-  The button inside the Clustered workspace's Results tab doesn't navigate to the
-  Music Graph workspace — it shows a message box asking you to click the sidebar
-  yourself, with a `TODO` marking the unbuilt cross-workspace signal.
-
 - **Retire the dead `clustered.py` workspace** *(Housekeeping).* An older, simpler
   clustering workspace still exists in the repository but is unreachable — the
   sidebar wires to `clustered_enhanced.py` instead. Leaving the old file in place
@@ -166,9 +156,8 @@ widgets are built but entirely unreachable.
   them."
 
 - **One-click quality-report export** *(Designed, not started).* Saving the clustering
-  quality report as a shareable document (web page or PDF) — worth sequencing after
-  the Cluster Quality Report bug fix above, since there's little point exporting a
-  report that currently fails to render.
+  quality report as a shareable document (web page or PDF). Now unblocked — the
+  dialog it would export renders correctly again.
 
 - **A genuine chronological/"year-gap" playlist tool doesn't exist** *(Designed, not
   started).* Earlier documentation described a "year-gap assistant" that helps build
@@ -263,16 +252,18 @@ widgets are built but entirely unreachable.
 
 If you've been away and want the shortest path back to momentum:
 
-1. **Fix the two known bugs first** (Duplicate Pair Report, Cluster Quality Report) —
-   both are small, isolated, and currently mean a tool silently fails the moment you
-   try to use it.
-2. **Wire the in-app 2-D interactive graph.** It's now the single largest "everything
-   is already built, it just isn't connected" item in the project, having taken over
-   that role from the (now-finished) Export Report button.
-3. **Treat the rest of the Visual Music Graph's deeper interactivity — live tuning,
+1. **Wire the in-app 2-D interactive graph.** It's the single largest "everything is
+   already built, it just isn't connected" item in the project. (Note: a
+   further-along version of this graph exists outside the repo and is slated to be
+   brought in — check before rebuilding any of it from the orphaned widgets.)
+2. **Treat the rest of the Visual Music Graph's deeper interactivity — live tuning,
    advanced selection, cluster editing — as the big, deliberate project it always
    was.** It's still the area with the most outstanding work and the most upside; it
    deserves to be scheduled as real feature work rather than squeezed in.
-4. **Everything under "Other / housekeeping" is safe to ignore indefinitely** — none
+3. **Everything under "Other / housekeeping" is safe to ignore indefinitely** — none
    of it blocks normal use of the app. Pick it up only when you're already touching
    the relevant file for another reason.
+
+The bugs that used to head this list (Duplicate Pair Report, Cluster Quality Report,
+the Tkinter imports in `plugins/` and `controllers/`) are fixed — see "Recently
+completed" above.
