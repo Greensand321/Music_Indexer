@@ -70,6 +70,9 @@ including lower-priority housekeeping items.
 
 - **[ROADMAP.md](ROADMAP.md)** — What's planned but not yet built, with an honest
   status for each item.
+- **[reorganization_spec.md](reorganization_spec.md)** — A deferred plan to clean up
+  and reorganize the ~60 loose files sitting in the repo root. Not scheduled; do not
+  execute until explicitly asked.
 
 ## Reference (kept from before)
 

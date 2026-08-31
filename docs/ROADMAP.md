@@ -218,6 +218,19 @@ widgets are built but entirely unreachable.
 
 ## Other / housekeeping
 
+- **Root directory reorganization** *(Spec written, deliberately deferred).* ~60
+  files sit loose in the repo root — crash logs, old diff dumps, one-off scripts,
+  and ~35 real backend modules with no grouping. A two-phase plan (junk removal,
+  then a domain-grouped `alphadex/` package mirroring this roadmap's own
+  Indexer/Duplicate Finder/Library Sync/Tag Fixer/Playlists split) is written up
+  in **[reorganization_spec.md](reorganization_spec.md)**, including which files
+  are safe to delete, which are misfiled rather than junk, and two undocumented
+  `tkinter`-in-backend-module violations found while auditing it
+  (`cluster_graph_panel.py`, `update_genres.py` — on top of the two already
+  listed above under Known bugs). Deliberately not started: other agents are
+  active in this codebase, and a repo-wide import rewrite would conflict with
+  nearly anything else in flight. Do not execute without being explicitly asked.
+
 - **Fix known docstring/behavior mismatches** *(Housekeeping, low priority, low
   risk).* A handful of functions' docstrings no longer match what the code actually
   does — most notably `config.load_config()`, whose docstring claims it "returns an
