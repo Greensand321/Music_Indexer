@@ -99,23 +99,34 @@ for each before deleting/moving it.
 
 ### Architecture finding from this audit (not yet in `CLAUDE.md`)
 
-`CLAUDE.md` already documents two known violations of "no tkinter in backend
-modules": `plugins/acoustid_plugin.py` and
-`controllers/library_index_controller.py`. This audit found **two more**,
-undocumented until now:
+`CLAUDE.md` documented two known violations of "no tkinter in backend
+modules" — `plugins/acoustid_plugin.py` and
+`controllers/library_index_controller.py` — and concurrent work already
+landed on this branch (merged in while this spec was being written, see
+[Update log](#update-log) below) fixed both: the Tkinter config panel moved
+out into a new root-level `metadata_config_frame.py`, and
+`library_index_controller.generate_index()` no longer pops its own
+`messagebox`. Good news for Phase 2: two fewer files to sort out.
+
+This audit found **one more, still open, undocumented until now**:
 
 - `cluster_graph_panel.py` imports `tkinter` directly.
-- `update_genres.py` imports `tkinter` directly.
 
-Neither can go into a tkinter-free backend package as-is. Options at
-execution time: split UI code out of them first (matches the spirit of the
-architecture rule), or accept the violation and place them under a
+(An earlier version of this document also flagged `update_genres.py` —
+already fixed by the same concurrent work mentioned above, re-verified clean
+as of this update.)
+
+`cluster_graph_panel.py` can't go into a tkinter-free backend package as-is.
+Options at execution time: split UI code out of it first (matches the spirit
+of the architecture rule), or accept the violation and place it under a
 `legacy_gui/` grouping instead of `alphadex/`. Recommend flagging this to
 whoever executes Phase 2 rather than silently choosing one.
 
 Also confirmed importing `tkinter` directly (expected, not new): `main_gui.py`,
 `library_sync_review.py` (already documented in `CLAUDE.md` as "Library Sync
-review-first UI panel"), `unsorted_popup.py`.
+review-first UI panel"), `unsorted_popup.py`, and now `metadata_config_frame.py`
+(new file, the legacy Tkinter panel split out of `acoustid_plugin.py` — belongs
+with the same `legacy_gui/` grouping as `unsorted_popup.py`, not `alphadex/`).
 
 ### Proposed structure
 
@@ -149,7 +160,7 @@ alphadex/
 ├── tagging/
 │   ├── tag_fixer.py
 │   ├── metadata_service.py
-│   └── update_genres.py                # tkinter-coupled — see architecture note above
+│   └── update_genres.py                # re-verified tkinter-free as of this update
 ├── playlists/
 │   ├── playlist_engine.py
 │   ├── playlist_generator.py
@@ -163,8 +174,15 @@ alphadex/
 
 `legacy_gui/` (or leave at root next to `main_gui.py` — pick one at execution
 time) for the confirmed tkinter-only files that don't belong in a backend
-package: `unsorted_popup.py`, and whatever comes out of the
-`cluster_graph_panel.py` / `update_genres.py` split decision above.
+package: `unsorted_popup.py`, `metadata_config_frame.py`, and whatever comes
+out of the `cluster_graph_panel.py` split decision above.
+
+Not yet placed anywhere in this spec — `cluster_graph_data.py`, a new file
+that landed via the same concurrent merge mentioned in the Update log below.
+Re-run the confidence check in
+[Before you start](#before-you-start-re-verify-this-audit) to place it (name
+suggests `playlists/`, alongside `cluster_graph_3d.py`, but that's a guess,
+not a confirmed-importer placement like the rest of this tree).
 
 ### Confidence levels — be honest about what's verified vs. guessed
 
@@ -241,3 +259,17 @@ done
 # sanity check nothing else is mid-edit on files this touches
 git log --all --since="1 week ago" --name-only -- <file>
 ```
+
+## Update log
+
+- **2026-08-31, same day, before merge:** while committing this document, a
+  concurrent merge landed on this branch from other active sessions (see the
+  merge commit combining `origin/claude/branch-cleanup-sxt25y` with
+  `claude/cluster-graph-workflow-*`, `claude/python-app-packaging-*`, and
+  `claude/check-status-*`). That work fixed both tkinter violations
+  `CLAUDE.md` already documented, and also incidentally fixed the
+  `update_genres.py` violation this document originally flagged as new. Both
+  the "Architecture finding" section and the `tagging/`/`legacy_gui/` entries
+  above were corrected in place rather than left wrong. This is exactly the
+  kind of drift the "Before you start" section warns about — it happened
+  within the same session that wrote this spec, not months later.
