@@ -1651,9 +1651,19 @@ def build_duplicate_pair_report(
 
     metadata_key_a = _metadata_bucket_key(normalized_a)
     metadata_key_b = _metadata_bucket_key(normalized_b)
+    # ``_build_metadata_buckets`` returns a list of buckets, each carrying the
+    # metadata key(s) its tracks were grouped under. Map path -> bucket key so a
+    # track can be looked up without relying on DuplicateTrack equality.
     buckets = _build_metadata_buckets([normalized_a, normalized_b])
-    bucket_key_a = next((key for key, items in buckets.items() if normalized_a in items), None)
-    bucket_key_b = next((key for key, items in buckets.items() if normalized_b in items), None)
+    bucket_keys_by_path: Dict[str, tuple[str, str]] = {}
+    for bucket in buckets:
+        if not bucket.metadata_keys:
+            continue
+        bucket_key = min(bucket.metadata_keys)
+        for bucket_track in bucket.tracks:
+            bucket_keys_by_path[bucket_track.path] = bucket_key
+    bucket_key_a = bucket_keys_by_path.get(normalized_a.path)
+    bucket_key_b = bucket_keys_by_path.get(normalized_b.path)
     metadata_bucket_match = bucket_key_a is not None and bucket_key_a == bucket_key_b
 
     coarse_keys_a = _coarse_fingerprint_keys(normalized_a.fingerprint)

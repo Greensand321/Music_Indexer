@@ -4,7 +4,6 @@ import argparse
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Iterable, Callable, List, Optional
-import pkgutil
 import importlib
 from mutagen import File as MutagenFile
 from utils.audio_metadata_reader import read_tags
@@ -56,8 +55,13 @@ ACOUSTID_APP_VERSION   = "1.0.0"
 SUPPORTED_EXTS         = {".mp3", ".flac", ".m4a", ".aac", ".ogg", ".wav", ".opus"}
 
 # ─── Plugin Discovery ─────────────────────────────────────────────────────
+# Explicit module list rather than pkgutil.iter_modules(['plugins']): a
+# filesystem scan relative to the working directory can't find the plugins
+# package once it's bundled into a frozen executable.
+_PLUGIN_MODULE_NAMES = ["acoustid_plugin", "api_service", "lastfm", "test_plugin"]
+
 PLUGINS: List[MetadataPlugin] = []
-for finder, name, _ in pkgutil.iter_modules(['plugins']):
+for name in _PLUGIN_MODULE_NAMES:
     try:
         module = importlib.import_module(f'plugins.{name}')
     except Exception:

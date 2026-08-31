@@ -8134,7 +8134,7 @@ class SoundVaultImporterApp(tk.Tk):
         tools_menu.add_command(label="Fix Tags via AcoustID", command=self.fix_tags_gui)
         tools_menu.add_command(
             label="Generate Library Index…",
-            command=lambda: generate_index(self.require_library()),
+            command=self._on_generate_library_index,
         )
         tools_menu.add_command(
             label="Export Artist/Title List…",
@@ -8829,6 +8829,26 @@ class SoundVaultImporterApp(tk.Tk):
             return cleaned or None
         except Exception:
             return None
+
+    def _on_generate_library_index(self) -> None:
+        """Build Docs/library_index.html and report where it was written.
+
+        ``generate_index`` returns the path and shows nothing itself, so the
+        confirmation dialog lives here in the UI layer rather than in the
+        controller.
+        """
+        library = self.require_library()
+        if not library:
+            return
+        try:
+            out_path = generate_index(library)
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showerror("Library Index", f"Could not generate index:\n{exc}")
+            return
+        messagebox.showinfo(
+            "Library Index Generated",
+            f"Your library index has been saved to:\n{out_path}",
+        )
 
     def _export_artist_title_list(self) -> None:
         library = self.require_library()
@@ -11536,7 +11556,7 @@ class SoundVaultImporterApp(tk.Tk):
             return
         win = tk.Toplevel(self)
         win.title("Metadata Services")
-        from plugins.acoustid_plugin import MetadataServiceConfigFrame
+        from metadata_config_frame import MetadataServiceConfigFrame
 
         frame = MetadataServiceConfigFrame(win)
         frame.pack(fill="both", expand=True, padx=10, pady=10)

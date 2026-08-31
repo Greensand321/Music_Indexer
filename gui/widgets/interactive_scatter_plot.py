@@ -1,324 +1,406 @@
-"""Interactive scatter plot visualization using PyQtGraph."""
+"""Interactive 2-D cluster scatter plot built on PyQtGraph.
+
+Display-only: it renders points it is handed and reports what the user did with
+them. Loading, validating and exporting cluster data lives in
+``cluster_graph_data``.
+
+Point counts are bounded by ``clustered_playlists.MAX_VISUALIZATION_POINTS``
+(5,000), so the geometry here works in plain Python lists rather than numpy —
+one less import to keep working, and well within budget at that size.
+"""
 from __future__ import annotations
 
-import numpy as np
-from typing import Callable, Optional, List, Tuple
+from typing import Dict, List, Sequence, Tuple
 
 from gui.compat import QtCore, QtGui, QtWidgets
 
 try:
     import pyqtgraph as pg
-except ImportError:
+except ImportError:  # pragma: no cover - exercised only on installs without it
     pg = None
+
+#: Cluster id HDBSCAN assigns to points that belong to no cluster.
+NOISE_LABEL = -1
+
+#: Selection interaction modes.
+MODE_PAN = "pan"
+MODE_RECT = "rect"
+MODE_LASSO = "lasso"
+
+
+def _cluster_colour(index: int, total: int) -> QtGui.QColor:
+    """Return a distinct, readable colour for the *index*-th cluster."""
+    hue = int(360 * index / max(total, 1))
+    return QtGui.QColor.fromHsv(hue, 190, 235)
+
+
+#: Noise points are deliberately desaturated so they read as "leftovers"
+#: rather than as just another cluster competing for attention.
+NOISE_COLOUR = QtGui.QColor(140, 140, 150)
+
+
+if pg is not None:
+
+    class _SelectionViewBox(pg.ViewBox):
+        """ViewBox that reports drags instead of panning when selecting.
+
+        Subclassing is the supported way to intercept drags in PyQtGraph; the
+        scene-level mouse signals do not distinguish a drag from a pan.
+        """
+
+        drag_started = QtCore.Signal(object)   # QPointF in view coords
+        drag_moved = QtCore.Signal(object)     # QPointF in view coords
+        drag_finished = QtCore.Signal(object)  # QPointF in view coords
+
+        def __init__(self, *args, **kwargs) -> None:
+            super().__init__(*args, **kwargs)
+            self.selection_mode = MODE_PAN
+
+        def mouseDragEvent(self, ev, axis=None):  # noqa: N802 - PyQtGraph API
+            if self.selection_mode == MODE_PAN:
+                super().mouseDragEvent(ev, axis)
+                return
+
+            ev.accept()
+            point = self.mapToView(ev.pos())
+            if ev.isStart():
+                self.drag_started.emit(point)
+            elif ev.isFinish():
+                self.drag_finished.emit(point)
+            else:
+                self.drag_moved.emit(point)
+
+else:  # pragma: no cover - placeholder so the module imports without PyQtGraph
+    _SelectionViewBox = None  # type: ignore[assignment]
 
 
 class InteractiveScatterPlot(QtWidgets.QWidget):
-    """High-performance scatter plot with interactive features.
+    """Scatter plot of a clustered library with hover, click and drag selection.
 
-    Features:
-    - Smooth panning and zooming
-    - Point selection via lasso or rectangle
-    - Hover tooltips with track metadata
-    - Cluster highlighting
-    - Color and size customization
+    Selection modes
+    ---------------
+    ``MODE_PAN``    drag pans the view (default)
+    ``MODE_RECT``   drag sweeps a rectangle and selects the points inside it
+    ``MODE_LASSO``  drag draws a freehand loop and selects the points inside it
+
+    Holding Ctrl or Shift while selecting adds to the current selection instead
+    of replacing it.
     """
 
-    point_clicked = QtCore.Signal(int)  # index
-    points_selected = QtCore.Signal(list)  # list of indices
-    hover_changed = QtCore.Signal(int)  # index or -1
+    point_clicked = QtCore.Signal(int)      # index, -1 when cleared
+    points_selected = QtCore.Signal(list)   # list[int]
+    hover_changed = QtCore.Signal(int)      # index, -1 when nothing hovered
 
     def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(parent)
 
-        # Store pg status for later checks
-        self._pg_available = pg is not None
-
-        if self._pg_available:
-            self._setup_ui()
-            self._setup_interactions()
-        else:
-            # Create a stub UI when PyQtGraph is not available
-            layout = QtWidgets.QVBoxLayout(self)
-            label = QtWidgets.QLabel(
-                "PyQtGraph is not installed.\n\n"
-                "To enable interactive scatter plot visualization, install it with:\n"
-                "pip install pyqtgraph\n\n"
-                "The graph workspace will be disabled without this library."
-            )
-            label.setWordWrap(True)
-            layout.addWidget(label)
-
-        # Data storage
-        self._X: np.ndarray | None = None  # (n_samples, 2) array
-        self._clusters: np.ndarray | None = None  # (n_samples,) cluster IDs
-        self._labels: List[str] | None = None  # (n_samples,) track names/paths
-        self._metadata: List[dict] | None = None  # (n_samples,) metadata dicts
-        self._colors: np.ndarray | None = None  # (n_samples, 3) RGB colors
-        self._sizes: np.ndarray | None = None  # (n_samples,) point sizes
+        # Data — populated by set_data(). Initialised before any widget is
+        # built so a mouse event arriving mid-construction cannot find a
+        # half-built object.
+        self._xy: List[Tuple[float, float]] = []
+        self._clusters: List[int] = []
+        self._labels: List[str] = []
+        self._metadata: List[dict] = []
+        self._colours: List[QtGui.QColor] = []
 
         # State
-        self._selected_indices: set[int] = set()
-        self._hovered_index: int = -1
-        self._cluster_visibility: dict[int, bool] = {}
+        self._selected: set[int] = set()
+        self._hovered: int = -1
+        self._visibility: Dict[int, bool] = {}
+        self._mode: str = MODE_PAN
+        self._drag_points: List[QtCore.QPointF] = []
+        self._additive = False
 
-    def _setup_ui(self) -> None:
-        """Create the PyQtGraph plot widget."""
+        self._available = pg is not None
+        if self._available:
+            self._build_plot()
+        else:
+            self._build_unavailable_notice()
+
+    # ── Construction ──────────────────────────────────────────────────────
+
+    def _build_unavailable_notice(self) -> None:
+        layout = QtWidgets.QVBoxLayout(self)
+        label = QtWidgets.QLabel(
+            "PyQtGraph is not installed, so the interactive graph cannot be "
+            "drawn.\n\nInstall it with:    pip install pyqtgraph\n\n"
+            "The 3D browser view is unaffected and still works."
+        )
+        label.setWordWrap(True)
+        label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(label)
+
+    def _build_plot(self) -> None:
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
 
-        # Create plot widget
-        self.plot_widget = pg.PlotWidget()
-        self.plot_widget.setLabel("bottom", "X")
-        self.plot_widget.setLabel("left", "Y")
-        self.plot_widget.setTitle("Cluster Visualization")
-        self.plot_widget.setBackground("w")
-        self.plot_widget.setMouseEnabled(x=True, y=True)
-        self.plot_widget.enableAutoRange()
-
+        self._view_box = _SelectionViewBox()
+        self.plot_widget = pg.PlotWidget(viewBox=self._view_box)
+        self.plot_widget.setMenuEnabled(False)
+        self.plot_widget.hideAxis("bottom")
+        self.plot_widget.hideAxis("left")
+        # The embedding axes carry no interpretable units — only relative
+        # position means anything — so the axes are hidden rather than
+        # labelled with numbers that invite over-reading.
+        self.plot_widget.setBackground(self.palette().base().color())
         layout.addWidget(self.plot_widget)
 
-        # Scatter plot item
-        self.scatter = pg.ScatterPlotItem()
-        self.scatter.sigClicked.connect(self._on_scatter_clicked)
+        self.scatter = pg.ScatterPlotItem(pxMode=True, hoverable=False)
+        self.scatter.sigClicked.connect(self._on_points_clicked)
         self.plot_widget.addItem(self.scatter)
 
-        # Hover tracking via ViewBox
-        self.view_box = self.plot_widget.getViewBox()
+        # Overlay used to draw the in-progress rectangle or lasso.
+        self._marquee = QtWidgets.QGraphicsPathItem()
+        self._marquee.setPen(pg.mkPen(QtGui.QColor(80, 160, 255), width=1.5))
+        self._marquee.setBrush(pg.mkBrush(QtGui.QColor(80, 160, 255, 40)))
+        self._marquee.setZValue(50)
+        self._marquee.hide()
+        self._view_box.addItem(self._marquee, ignoreBounds=True)
 
-        self.setLayout(layout)
+        self._view_box.drag_started.connect(self._on_drag_started)
+        self._view_box.drag_moved.connect(self._on_drag_moved)
+        self._view_box.drag_finished.connect(self._on_drag_finished)
+        self.plot_widget.scene().sigMouseMoved.connect(self._on_mouse_moved)
 
-    def _setup_interactions(self) -> None:
-        """Setup mouse event handling."""
-        self.view_box.scene().sigMouseMoved.connect(self._on_mouse_moved)
+    # ── Data ──────────────────────────────────────────────────────────────
 
     def set_data(
         self,
-        X: np.ndarray,
-        clusters: np.ndarray,
-        labels: List[str] | None = None,
-        metadata: List[dict] | None = None,
+        xy: Sequence[Tuple[float, float]],
+        clusters: Sequence[int],
+        labels: Sequence[str] | None = None,
+        metadata: Sequence[dict] | None = None,
     ) -> None:
-        """Set scatter plot data.
+        """Replace the plotted data.
 
-        Parameters
-        ----------
-        X : np.ndarray
-            Shape (n_samples, 2) - 2D coordinates
-        clusters : np.ndarray
-            Shape (n_samples,) - cluster ID for each point
-        labels : List[str], optional
-            Shape (n_samples,) - track names/paths
-        metadata : List[dict], optional
-            Shape (n_samples,) - metadata for each track
+        All four sequences are consumed positionally, so they must be the same
+        length; mismatches raise rather than silently mapping a dot onto the
+        wrong track.
         """
-        # If PyQtGraph is not available, skip rendering
-        if not self._pg_available:
-            return
+        xy = [(float(x), float(y)) for x, y in xy]
+        clusters = [int(c) for c in clusters]
+        labels = list(labels) if labels is not None else [f"Point {i}" for i in range(len(xy))]
+        metadata = list(metadata) if metadata is not None else [{} for _ in xy]
 
-        self._X = np.asarray(X, dtype=np.float32)
-        self._clusters = np.asarray(clusters, dtype=np.int32)
-        self._labels = labels or [f"Track {i}" for i in range(len(X))]
-        self._metadata = metadata or [{} for _ in range(len(X))]
+        if not (len(xy) == len(clusters) == len(labels) == len(metadata)):
+            raise ValueError(
+                "xy, clusters, labels and metadata must be the same length "
+                f"(got {len(xy)}, {len(clusters)}, {len(labels)}, {len(metadata)})"
+            )
 
-        # Validate data shapes and dimensions
-        if len(self._X) == 0:
-            raise ValueError("Data is empty (0 samples)")
+        self._xy = xy
+        self._clusters = clusters
+        self._labels = labels
+        self._metadata = metadata
+        self._selected.clear()
+        self._hovered = -1
 
-        if self._X.ndim != 2 or self._X.shape[1] != 2:
-            raise ValueError(f"X must have shape (n_samples, 2), got {self._X.shape}")
-
-        if len(self._X) != len(self._clusters):
-            raise ValueError("X and clusters must have same length")
-        if len(self._X) != len(self._labels):
-            raise ValueError("X and labels must have same length")
-        if len(self._X) != len(self._metadata):
-            raise ValueError("X and metadata must have same length")
-
-        # Default colors by cluster
-        self._update_colors_by_cluster()
-        self._update_sizes_default()
-
-        # Initialize cluster visibility
-        self._cluster_visibility = {int(c): True for c in np.unique(self._clusters)}
+        ordered = self.cluster_ids()
+        real = [c for c in ordered if c != NOISE_LABEL]
+        palette = {c: _cluster_colour(i, len(real)) for i, c in enumerate(real)}
+        palette[NOISE_LABEL] = NOISE_COLOUR
+        self._colours = [palette[c] for c in clusters]
+        self._visibility = {c: self._visibility.get(c, True) for c in ordered}
 
         self._render()
+        if self._available:
+            self.plot_widget.autoRange()
 
-    def _update_colors_by_cluster(self) -> None:
-        """Generate colors based on clusters."""
-        unique_clusters = np.unique(self._clusters)
-        n_clusters = len(unique_clusters)
+    def cluster_ids(self) -> List[int]:
+        """Return cluster ids in display order — real clusters first, noise last."""
+        unique = set(self._clusters)
+        real = sorted(c for c in unique if c != NOISE_LABEL)
+        return real + ([NOISE_LABEL] if NOISE_LABEL in unique else [])
 
-        # Generate distinct colors using HSV space
-        colors = []
-        for i in range(n_clusters):
-            hue = i / max(n_clusters, 1)
-            color = pg.mkColor(QtGui.QColor.fromHsv(int(hue * 360), 200, 220))
-            colors.append(color)
+    def cluster_colour(self, cluster_id: int) -> QtGui.QColor:
+        """Return the colour used for *cluster_id* (for a matching legend)."""
+        for cid, colour in zip(self._clusters, self._colours):
+            if cid == cluster_id:
+                return colour
+        return NOISE_COLOUR
 
-        cluster_to_color = {c: colors[i] for i, c in enumerate(unique_clusters)}
-        self._colors = np.array([cluster_to_color[c] for c in self._clusters])
-
-    def _update_sizes_default(self) -> None:
-        """Set default point sizes."""
-        self._sizes = np.ones(len(self._X), dtype=np.float32) * 10
+    # ── Rendering ─────────────────────────────────────────────────────────
 
     def _render(self) -> None:
-        """Render scatter plot."""
-        # Skip rendering if PyQtGraph is not available
-        if not self._pg_available or self._X is None or len(self._X) == 0:
+        if not self._available or not self._xy:
+            if self._available:
+                self.scatter.setData(spots=[])
             return
 
-        # Create spots for visible points
+        highlight = pg.mkPen(QtGui.QColor(255, 255, 255), width=2)
         spots = []
-        for i, (x, y) in enumerate(self._X):
-            cluster_id = self._clusters[i]
-
-            # Skip hidden clusters
-            if not self._cluster_visibility.get(cluster_id, True):
+        for i, (x, y) in enumerate(self._xy):
+            if not self._visibility.get(self._clusters[i], True):
                 continue
-
-            color = self._colors[i] if self._colors is not None else "blue"
-            size = self._sizes[i] if self._sizes is not None else 10
-
-            # Highlight selected points
-            pen = None
-            if i in self._selected_indices:
-                pen = pg.mkPen("red", width=2)
-
-            spot = {
+            colour = self._colours[i]
+            selected = i in self._selected
+            spots.append({
                 "pos": (x, y),
-                "size": size,
-                "brush": pg.mkBrush(color),
-                "pen": pen or pg.mkPen(color, width=0.5),
-                "data": i,  # Store index
-            }
-            spots.append(spot)
-
+                "size": 13 if selected else 9,
+                "brush": pg.mkBrush(colour),
+                "pen": highlight if selected else pg.mkPen(colour.darker(140), width=0.5),
+                "data": i,
+            })
         self.scatter.setData(spots=spots)
-        self.plot_widget.enableAutoRange()
 
-    def _on_scatter_clicked(self, plot, points) -> None:
-        """Handle point clicks."""
-        if len(points) > 0:
-            index = points[0].data()
-            self.point_clicked.emit(index)
-            self.set_selection([index])
+    # ── Selection ─────────────────────────────────────────────────────────
 
-    def _on_mouse_moved(self, pos: QtCore.QPointF) -> None:
-        """Handle mouse hover for tooltips."""
-        if self._X is None or len(self._X) == 0:
-            return
+    def set_mode(self, mode: str) -> None:
+        """Switch between panning, rectangle selection and lasso selection."""
+        if mode not in (MODE_PAN, MODE_RECT, MODE_LASSO):
+            raise ValueError(f"unknown selection mode: {mode!r}")
+        self._mode = mode
+        if self._available:
+            self._view_box.selection_mode = mode
+            self._view_box.setMouseEnabled(x=mode == MODE_PAN, y=mode == MODE_PAN)
+            self.plot_widget.setCursor(
+                QtCore.Qt.CursorShape.ArrowCursor if mode == MODE_PAN
+                else QtCore.Qt.CursorShape.CrossCursor
+            )
 
-        # Validate array shape
-        if self._X.ndim != 2 or self._X.shape[1] != 2:
-            return
+    def mode(self) -> str:
+        return self._mode
 
-        # Get view coordinates
-        view_coords = self.view_box.mapSceneToView(pos)
-        x, y = view_coords.x(), view_coords.y()
-
-        # Find nearest point
-        try:
-            distances = np.sqrt((self._X[:, 0] - x) ** 2 + (self._X[:, 1] - y) ** 2)
-            nearest_idx = np.argmin(distances)
-        except (ValueError, IndexError):
-            # Handle empty or invalid array
-            return
-
-        # Only update if close enough
-        hover_dist = distances[nearest_idx]
-
-        # Calculate proximity threshold safely
-        try:
-            x_range = self._X[:, 0].max() - self._X[:, 0].min()
-            y_range = self._X[:, 1].max() - self._X[:, 1].min()
-            data_range = max(x_range, y_range, 0.001)  # Avoid division by zero
-            proximity_threshold = 0.1 * data_range
-        except (ValueError, IndexError):
-            # If we can't compute range, use a default threshold
-            proximity_threshold = 0.1
-
-        if hover_dist < proximity_threshold:
-            if self._hovered_index != nearest_idx:
-                self._hovered_index = nearest_idx
-                self.hover_changed.emit(nearest_idx)
-
-                # Show tooltip
-                self._show_tooltip(nearest_idx)
-        else:
-            if self._hovered_index != -1:
-                self._hovered_index = -1
-                self.hover_changed.emit(-1)
-
-    def _show_tooltip(self, index: int) -> None:
-        """Show tooltip for a point."""
-        if index < 0 or index >= len(self._labels):
-            return
-
-        label = self._labels[index]
-        metadata = self._metadata[index] if self._metadata else {}
-
-        # Format tooltip
-        tooltip_lines = [label]
-        for key, value in list(metadata.items())[:5]:  # Show first 5 fields
-            tooltip_lines.append(f"{key}: {value}")
-
-        tooltip_text = "\n".join(tooltip_lines)
-        self.scatter.setToolTip(tooltip_text)
-
-    def set_selection(self, indices: List[int] | None = None) -> None:
-        """Set selected points.
-
-        Parameters
-        ----------
-        indices : List[int], optional
-            List of indices to select. If None, clears selection.
-        """
-        self._selected_indices = set(indices or [])
-        self.points_selected.emit(list(self._selected_indices))
+    def set_selection(self, indices: Sequence[int] | None) -> None:
+        """Replace the selection and notify listeners."""
+        self._selected = {int(i) for i in (indices or []) if 0 <= int(i) < len(self._xy)}
         self._render()
+        self.points_selected.emit(self.get_selection())
 
     def get_selection(self) -> List[int]:
-        """Get currently selected point indices."""
-        return list(self._selected_indices)
+        """Return selected indices in ascending order (stable for export)."""
+        return sorted(self._selected)
 
-    def toggle_cluster_visibility(self, cluster_id: int) -> None:
-        """Show or hide a cluster."""
-        if cluster_id in self._cluster_visibility:
-            self._cluster_visibility[cluster_id] = not self._cluster_visibility[cluster_id]
-            self._render()
+    def clear_selection(self) -> None:
+        self.set_selection([])
+
+    def select_cluster(self, cluster_id: int, additive: bool = False) -> None:
+        """Select every point belonging to *cluster_id*."""
+        indices = [i for i, c in enumerate(self._clusters) if c == cluster_id]
+        if additive:
+            indices = sorted(self._selected.union(indices))
+        self.set_selection(indices)
+
+    def _apply_selection(self, indices: Sequence[int]) -> None:
+        if self._additive:
+            self.set_selection(sorted(self._selected.union(indices)))
+        else:
+            self.set_selection(indices)
+
+    # ── Mouse handling ────────────────────────────────────────────────────
+
+    @staticmethod
+    def _additive_modifier() -> bool:
+        mods = QtWidgets.QApplication.keyboardModifiers()
+        return bool(
+            mods & (QtCore.Qt.KeyboardModifier.ControlModifier
+                    | QtCore.Qt.KeyboardModifier.ShiftModifier)
+        )
+
+    def _on_points_clicked(self, _scatter, points) -> None:
+        if not len(points):
+            return
+        index = int(points[0].data())
+        self._additive = self._additive_modifier()
+        if self._additive:
+            self._apply_selection([index])
+        else:
+            self.set_selection([index])
+        self.point_clicked.emit(index)
+
+    def _on_drag_started(self, point: QtCore.QPointF) -> None:
+        self._additive = self._additive_modifier()
+        self._drag_points = [point]
+        self._marquee.show()
+
+    def _on_drag_moved(self, point: QtCore.QPointF) -> None:
+        if not self._drag_points:
+            return
+        if self._mode == MODE_LASSO:
+            self._drag_points.append(point)
+        else:
+            self._drag_points = [self._drag_points[0], point]
+        self._marquee.setPath(self._current_path())
+
+    def _on_drag_finished(self, point: QtCore.QPointF) -> None:
+        if not self._drag_points:
+            return
+        self._on_drag_moved(point)
+        path = self._current_path()
+        self._marquee.hide()
+        self._drag_points = []
+
+        hits = [
+            i for i, (x, y) in enumerate(self._xy)
+            if self._visibility.get(self._clusters[i], True)
+            and path.contains(QtCore.QPointF(x, y))
+        ]
+        # A click-sized drag in selection mode reads as "clear", which is the
+        # least surprising way to deselect without leaving the mode.
+        self._apply_selection(hits)
+
+    def _current_path(self) -> QtGui.QPainterPath:
+        path = QtGui.QPainterPath()
+        if len(self._drag_points) < 2:
+            return path
+        if self._mode == MODE_LASSO:
+            path.moveTo(self._drag_points[0])
+            for pt in self._drag_points[1:]:
+                path.lineTo(pt)
+            path.closeSubpath()
+        else:
+            start, end = self._drag_points[0], self._drag_points[-1]
+            path.addRect(QtCore.QRectF(start, end).normalized())
+        return path
+
+    def _on_mouse_moved(self, scene_pos) -> None:
+        if not self._available or not self._xy:
+            return
+        # Hit-testing is delegated to PyQtGraph, which tests against the drawn
+        # point radii in screen space. The previous implementation compared
+        # data-space distances against a threshold derived from the data range,
+        # which mis-picked whenever the axes had different scales and cost a
+        # full pass over every point on every mouse move.
+        if not self.plot_widget.sceneBoundingRect().contains(scene_pos):
+            return
+        view_pos = self._view_box.mapSceneToView(scene_pos)
+        hits = self.scatter.pointsAt(view_pos)
+        index = int(hits[0].data()) if len(hits) else -1
+        if index != self._hovered:
+            self._hovered = index
+            self.scatter.setToolTip(self._tooltip_for(index) if index >= 0 else "")
+            self.hover_changed.emit(index)
+
+    def _tooltip_for(self, index: int) -> str:
+        if not (0 <= index < len(self._labels)):
+            return ""
+        lines = [self._labels[index]]
+        cluster = self._clusters[index]
+        lines.append("Unclustered" if cluster == NOISE_LABEL else f"Cluster {cluster}")
+        for key, value in list((self._metadata[index] or {}).items())[:4]:
+            lines.append(f"{key}: {value}")
+        return "\n".join(lines)
+
+    # ── Cluster visibility ────────────────────────────────────────────────
 
     def set_cluster_visible(self, cluster_id: int, visible: bool) -> None:
-        """Set cluster visibility."""
-        if cluster_id in self._cluster_visibility:
-            self._cluster_visibility[cluster_id] = visible
+        if self._visibility.get(cluster_id) != visible:
+            self._visibility[cluster_id] = visible
             self._render()
 
-    def highlight_cluster(self, cluster_id: int | None) -> None:
-        """Highlight all points in a cluster."""
-        if cluster_id is None:
-            self.set_selection([])
-        else:
-            indices = np.where(self._clusters == cluster_id)[0]
-            self.set_selection(indices.tolist())
+    def toggle_cluster_visibility(self, cluster_id: int) -> None:
+        self.set_cluster_visible(cluster_id, not self._visibility.get(cluster_id, True))
+
+    def visible_clusters(self) -> List[int]:
+        return [c for c, vis in self._visibility.items() if vis]
+
+    # ── View ──────────────────────────────────────────────────────────────
 
     def fit_view(self) -> None:
-        """Fit all visible data in view."""
-        if self._pg_available and hasattr(self, 'plot_widget'):
-            self.plot_widget.enableAutoRange()
+        """Zoom to fit all points."""
+        if self._available and self._xy:
+            self.plot_widget.autoRange()
 
-    def export_selection_paths(self) -> List[str]:
-        """Get file paths of selected tracks."""
-        paths = []
-        for idx in self._selected_indices:
-            if idx < len(self._labels):
-                paths.append(self._labels[idx])
-        return paths
-
-    def export_selection_metadata(self) -> List[dict]:
-        """Get metadata of selected tracks."""
-        metadata = []
-        for idx in self._selected_indices:
-            if idx < len(self._metadata):
-                metadata.append(self._metadata[idx])
-        return metadata
+    def selected_labels(self) -> List[str]:
+        """Return the labels (track paths) of the selected points, in order."""
+        return [self._labels[i] for i in self.get_selection() if i < len(self._labels)]

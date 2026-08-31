@@ -51,8 +51,8 @@ LOSSLESS_EXTS = {".flac", ".wav", ".alac", ".ape", ".aiff", ".aif"}
 def set_debug(enabled: bool, log_root: str | None = None) -> None:
     """Enable or disable verbose debug logging.
 
-    If ``log_root`` is ``None`` the log will be written to the ``docs``
-    directory next to this module. Existing logs are overwritten on each run.
+    If ``log_root`` is ``None`` the log is written to ``~/.soundvault_logs``.
+    Existing logs are overwritten on each run.
     """
     global debug, _file_handler
     debug = enabled
@@ -65,7 +65,7 @@ def set_debug(enabled: bool, log_root: str | None = None) -> None:
 
     _logger.setLevel(logging.DEBUG)
     if log_root is None:
-        log_root = os.path.join(os.path.dirname(__file__), "docs")
+        log_root = os.path.join(os.path.expanduser("~"), ".soundvault_logs")
     os.makedirs(log_root, exist_ok=True)
     log_path = os.path.join(log_root, "library_sync_debug.log")
     if _file_handler:

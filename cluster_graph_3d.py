@@ -153,13 +153,29 @@ def _validate_cluster_data(data: dict) -> None:
         )
 
 
+#: The template carries ``const INJECTED = /*__CLUSTER_DATA__*/null;`` so the
+#: page still runs standalone (the comment collapses and the value is ``null``,
+#: which makes it fall through to its sample data). Substitution must therefore
+#: consume the ``null`` as well — replacing only the comment used to leave
+#: ``= {...}null;`` behind, which is a JavaScript syntax error that stopped the
+#: whole page from running.
+_DATA_PLACEHOLDER = "/*__CLUSTER_DATA__*/null"
+
+
 def _render_html(cluster_data: dict) -> str:
     """Return a complete HTML page string embedding *cluster_data* as JSON."""
+
+    if _DATA_PLACEHOLDER not in _HTML_TEMPLATE:
+        raise RuntimeError(
+            "HTML template is missing the cluster-data placeholder "
+            f"{_DATA_PLACEHOLDER!r}; the generated page would silently show "
+            "sample data instead of the user's library."
+        )
 
     # Inline the cluster data so the HTML is truly self-contained.
     data_json = json.dumps(cluster_data, separators=(",", ":"))
 
-    return _HTML_TEMPLATE.replace("/*__CLUSTER_DATA__*/", data_json)
+    return _HTML_TEMPLATE.replace(_DATA_PLACEHOLDER, data_json)
 
 
 # ---------------------------------------------------------------------------
@@ -174,614 +190,875 @@ _HTML_TEMPLATE = r"""<!DOCTYPE html>
 <title>AlphaDEX — 3D Cluster Graph</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
-html,body{width:100%;height:100%;overflow:hidden;background:#0a0a0f;color:#e2e8f0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
-#scene-container{position:absolute;top:0;left:0;width:100%;height:100%}
-
-/* HUD overlay */
-#hud{position:absolute;top:12px;left:12px;pointer-events:none;z-index:10}
-#hud h1{font-size:16px;font-weight:600;color:#94a3b8;margin-bottom:4px}
-#hud .stats{font-size:12px;color:#64748b}
-
-/* Tooltip */
-#tooltip{position:absolute;display:none;padding:8px 12px;background:rgba(15,23,42,.92);border:1px solid #334155;border-radius:6px;font-size:12px;pointer-events:none;z-index:20;max-width:280px;backdrop-filter:blur(4px)}
-#tooltip .tt-title{font-weight:600;color:#f1f5f9;margin-bottom:2px}
-#tooltip .tt-artist{color:#94a3b8}
-#tooltip .tt-cluster{color:#64748b;font-size:11px;margin-top:2px}
-
-/* Legend */
-#legend{position:absolute;top:12px;right:12px;background:rgba(15,23,42,.85);border:1px solid #1e293b;border-radius:8px;padding:10px 14px;z-index:10;max-height:60vh;overflow-y:auto;min-width:140px;backdrop-filter:blur(4px)}
-#legend h2{font-size:12px;color:#94a3b8;margin-bottom:6px;font-weight:500}
-.legend-item{display:flex;align-items:center;gap:6px;padding:2px 0;cursor:pointer;font-size:12px;user-select:none}
-.legend-item:hover{color:#f8fafc}
-.legend-swatch{width:10px;height:10px;border-radius:50%;flex-shrink:0}
-.legend-item.hidden{opacity:.35}
-
-/* Bottom bar */
-#bottom-bar{position:absolute;bottom:0;left:0;right:0;display:flex;align-items:center;justify-content:space-between;padding:8px 16px;background:rgba(15,23,42,.8);border-top:1px solid #1e293b;z-index:10;backdrop-filter:blur(4px)}
-#bottom-bar .controls{display:flex;gap:8px}
-#bottom-bar button{background:#1e293b;color:#cbd5e1;border:1px solid #334155;border-radius:4px;padding:4px 10px;font-size:11px;cursor:pointer;transition:background .15s}
-#bottom-bar button:hover{background:#334155}
-#bottom-bar button.active{background:#2563eb;border-color:#3b82f6;color:#fff}
-#bottom-bar .help{font-size:11px;color:#475569}
-
-/* Selection info */
-#selection-bar{position:absolute;bottom:44px;left:50%;transform:translateX(-50%);display:none;background:rgba(30,41,59,.95);border:1px solid #334155;border-radius:8px;padding:8px 16px;z-index:15;backdrop-filter:blur(4px);text-align:center}
-#selection-bar .sel-count{font-size:13px;font-weight:500}
-#selection-bar .sel-actions{display:flex;gap:6px;margin-top:6px}
-#selection-bar button{background:#1e293b;color:#cbd5e1;border:1px solid #334155;border-radius:4px;padding:4px 10px;font-size:11px;cursor:pointer}
-#selection-bar button:hover{background:#334155}
-#selection-bar button.primary{background:#2563eb;border-color:#3b82f6;color:#fff}
-
-/* No data message */
-#no-data{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);text-align:center;z-index:30}
-#no-data h2{font-size:20px;margin-bottom:8px;color:#f1f5f9}
-#no-data p{color:#64748b;font-size:14px}
+html,body{width:100%;height:100%;overflow:hidden;background:#0a0000;color:#e2e8f0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+#scene-container{position:absolute;inset:0}
+#vignette{position:absolute;inset:0;pointer-events:none;z-index:1;background:radial-gradient(ellipse at 50% 50%,transparent 30%,rgba(0,0,0,.65) 100%)}
+#hud{position:absolute;top:16px;left:16px;pointer-events:none;z-index:10}
+#hud h1{font-size:14px;font-weight:700;letter-spacing:.15em;text-transform:uppercase;color:#ff6a00;text-shadow:0 0 8px #ff6a00,0 0 20px #ff4400,0 0 40px #ff220088;margin-bottom:4px}
+#hud .stats{font-size:11px;color:#7a3020;letter-spacing:.06em}
+#tooltip{position:absolute;display:none;padding:10px 14px;background:rgba(10,2,2,.92);border:1px solid rgba(255,100,0,.3);border-radius:6px;font-size:12px;pointer-events:none;z-index:20;max-width:260px;backdrop-filter:blur(8px);box-shadow:0 0 20px rgba(255,80,0,.15)}
+#tooltip .tt-title{font-weight:600;color:#fff0e0;margin-bottom:3px;font-size:13px}
+#tooltip .tt-artist{color:#ff8040;font-size:12px}
+#tooltip .tt-cluster{color:#7a3020;font-size:11px;margin-top:4px;display:flex;align-items:center;gap:5px}
+#tt-dot{width:7px;height:7px;border-radius:50%;display:inline-block;flex-shrink:0}
+#legend{position:absolute;top:16px;right:16px;background:rgba(10,2,2,.85);border:1px solid rgba(255,100,0,.15);border-radius:8px;padding:12px 16px;z-index:10;max-height:60vh;overflow-y:auto;min-width:155px;backdrop-filter:blur(8px)}
+#legend h2{font-size:10px;color:#7a3020;margin-bottom:8px;font-weight:600;letter-spacing:.12em;text-transform:uppercase}
+.legend-item{display:flex;align-items:center;gap:8px;padding:3px 0;cursor:pointer;font-size:12px;user-select:none;transition:color .15s;color:#c0896a}
+.legend-item:hover{color:#fff0e0}
+.legend-swatch{width:9px;height:9px;border-radius:50%;flex-shrink:0}
+.legend-item.hidden{opacity:.25}
+#bottom-bar{position:absolute;bottom:0;left:0;right:0;display:flex;align-items:center;justify-content:space-between;padding:8px 16px;background:rgba(10,2,2,.8);border-top:1px solid rgba(255,100,0,.12);z-index:10;backdrop-filter:blur(8px)}
+#bottom-bar .controls{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
+.btn{background:rgba(20,5,0,.8);color:#b05030;border:1px solid rgba(255,100,0,.2);border-radius:4px;padding:5px 11px;font-size:11px;cursor:pointer;transition:all .15s;letter-spacing:.04em;text-transform:uppercase;font-weight:600}
+.btn:hover{background:rgba(255,80,0,.15);color:#ffa070;border-color:rgba(255,120,0,.5);box-shadow:0 0 10px rgba(255,80,0,.2)}
+.btn.active{background:rgba(255,80,0,.2);border-color:#ff6020;color:#ffb080;box-shadow:0 0 12px rgba(255,80,0,.3)}
+#bottom-bar .help{font-size:10px;color:#4a1a0a;letter-spacing:.04em;white-space:nowrap}
+#spread-wrap{display:flex;align-items:center;gap:7px;margin-left:10px}
+#spread-wrap label{font-size:10px;color:#7a3020;letter-spacing:.06em;text-transform:uppercase;font-weight:600;white-space:nowrap}
+#slider-spread{width:110px;accent-color:#ff6020;cursor:pointer}
+#spread-val{font-size:10px;color:#b05030;min-width:28px}
+#selection-bar{position:absolute;bottom:48px;left:50%;transform:translateX(-50%);display:none;background:rgba(10,2,2,.95);border:1px solid rgba(255,100,0,.25);border-radius:8px;padding:10px 18px;z-index:15;backdrop-filter:blur(8px);text-align:center}
+#selection-bar .sel-count{font-size:13px;font-weight:600;color:#ff8040;letter-spacing:.06em}
+#selection-bar .sel-actions{display:flex;gap:6px;margin-top:8px;justify-content:center}
+::-webkit-scrollbar{width:4px}
+::-webkit-scrollbar-thumb{background:#3a1008;border-radius:2px}
 </style>
 </head>
 <body>
-
 <div id="scene-container"></div>
-
+<div id="vignette"></div>
 <div id="hud">
-  <h1>AlphaDEX — 3D Cluster Graph</h1>
-  <div class="stats" id="stats-text">Loading…</div>
+  <h1>AlphaDEX · Cluster Graph</h1>
+  <div class="stats" id="stats-text">Initializing…</div>
 </div>
-
 <div id="tooltip">
   <div class="tt-title" id="tt-title"></div>
   <div class="tt-artist" id="tt-artist"></div>
-  <div class="tt-cluster" id="tt-cluster"></div>
+  <div class="tt-cluster"><span id="tt-dot"></span><span id="tt-cluster-label"></span></div>
 </div>
-
 <div id="legend"><h2>Clusters</h2></div>
-
 <div id="bottom-bar">
   <div class="controls">
-    <button id="btn-reset" title="Reset camera">Reset View</button>
-    <button id="btn-top" title="Top-down (XY)">XY</button>
-    <button id="btn-front" title="Front (XZ)">XZ</button>
-    <button id="btn-side" title="Side (YZ)">YZ</button>
-    <button id="btn-select" title="Toggle selection mode">Select</button>
-    <button id="btn-export-csv" title="Export selected tracks as CSV">Export CSV</button>
-    <button id="btn-export-m3u" title="Export selected tracks as M3U playlist">Export M3U</button>
+    <button class="btn" id="btn-reset">⟳ Reset</button>
+    <button class="btn" id="btn-import-json">Import JSON</button>
+    <button class="btn" id="btn-top">XY</button>
+    <button class="btn" id="btn-front">XZ</button>
+    <button class="btn" id="btn-side">YZ</button>
+    <button class="btn active" id="btn-axes">Axes</button>
+    <button class="btn active" id="btn-grid">Grid</button>
+    <button class="btn active" id="btn-rings">Rings</button>
+    <button class="btn" id="btn-select">Select</button>
+    <button class="btn" id="btn-export-csv">CSV</button>
+    <button class="btn" id="btn-export-m3u">M3U</button>
+    <div id="spread-wrap">
+      <label for="slider-spread">Spread</label>
+      <input type="range" id="slider-spread" min="0.1" max="3.0" step="0.01" value="3.0"/>
+      <span id="spread-val">1.0×</span>
+      <button class="btn active" id="mul-1" data-mul="1">1×</button>
+      <button class="btn" id="mul-10" data-mul="10">10×</button>
+      <button class="btn" id="mul-30" data-mul="30">30×</button>
+      <button class="btn" id="mul-50" data-mul="50">50×</button>
+      <button class="btn" id="mul-100" data-mul="100">100×</button>
+    </div>
   </div>
-  <div class="help">Drag to orbit · Scroll to zoom · Right-drag to pan · Click point to select</div>
+  <div class="help">Drag · Scroll · Right-drag pan · Click to select</div>
 </div>
-
 <div id="selection-bar">
   <div class="sel-count" id="sel-count">0 tracks selected</div>
   <div class="sel-actions">
-    <button onclick="clearSelection()">Clear</button>
-    <button class="primary" onclick="exportSelectedCSV()">Export CSV</button>
-    <button class="primary" onclick="exportSelectedM3U()">Export M3U</button>
+    <button class="btn" onclick="clearSelection()">Clear</button>
+    <button class="btn active" onclick="exportSelectedCSV()">Export CSV</button>
+    <button class="btn active" onclick="exportSelectedM3U()">Export M3U</button>
   </div>
 </div>
 
-<div id="no-data" style="display:none">
-  <h2>No cluster data found</h2>
-  <p>Run <strong>Clustered Playlists</strong> first to generate cluster data.</p>
-</div>
+<input type="file" id="json-importer" accept="application/json" style="display: none;" />
 
-<!-- Three.js from CDN -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
-
 <script>
-// ═══════════════════════════════════════════════════════════════════════════
-// DATA
-// ═══════════════════════════════════════════════════════════════════════════
-const CLUSTER_DATA = /*__CLUSTER_DATA__*/null;
-
-if (!CLUSTER_DATA || !CLUSTER_DATA.X_3d || CLUSTER_DATA.X_3d.length === 0) {
-  document.getElementById("no-data").style.display = "block";
-  document.getElementById("hud").style.display = "none";
-  document.getElementById("legend").style.display = "none";
-  document.getElementById("bottom-bar").style.display = "none";
-  throw new Error("No cluster data");
-}
-
-const positions = CLUSTER_DATA.X_3d;
-const labels    = CLUSTER_DATA.labels;
-const tracks    = CLUSTER_DATA.tracks;
-const metadata  = CLUSTER_DATA.metadata || [];
-const clusterInfo = CLUSTER_DATA.cluster_info || {};
-
-const N = positions.length;
-
-// ═══════════════════════════════════════════════════════════════════════════
-// COLOUR PALETTE
-// ═══════════════════════════════════════════════════════════════════════════
-function hslToRgb(h, s, l) {
-  let r, g, b;
-  if (s === 0) { r = g = b = l; }
-  else {
-    const hue2rgb = (p, q, t) => {
-      if (t < 0) t += 1; if (t > 1) t -= 1;
-      if (t < 1/6) return p + (q - p) * 6 * t;
-      if (t < 1/2) return q;
-      if (t < 2/3) return p + (q - p) * (2/3 - t) * 6;
-      return p;
-    };
-    const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
-    const p = 2 * l - q;
-    r = hue2rgb(p, q, h + 1/3);
-    g = hue2rgb(p, q, h);
-    b = hue2rgb(p, q, h - 1/3);
+// ── SAMPLE DATA ─────────────────────────────────────────────────────────
+(function(){
+  // Data injected by cluster_graph_3d.py at generation time. When this file is
+  // opened standalone (no generator), the placeholder stays null and we fall
+  // through to the sessionStorage import, then to the built-in sample data.
+  const INJECTED = /*__CLUSTER_DATA__*/null;
+  if (INJECTED && INJECTED.X_3d && INJECTED.X_3d.length) {
+    INJECTED.metadata = INJECTED.metadata || [];
+    INJECTED.tracks   = INJECTED.tracks   || [];
+    window.CLUSTER_DATA = INJECTED;
+    return;
   }
-  return [r, g, b];
-}
 
-const uniqueLabels = [...new Set(labels)].sort((a, b) => a - b);
-const clusterColors = {};
-const noiseColor = [0.4, 0.4, 0.4];
+  const storedData = sessionStorage.getItem('importedClusterData');
+  if (storedData) {
+    try {
+      sessionStorage.removeItem('importedClusterData'); // Clean up after reading
+      const data = JSON.parse(storedData);
 
-uniqueLabels.forEach((lbl, i) => {
-  if (lbl < 0) { clusterColors[lbl] = noiseColor; return; }
-  const hue = i / Math.max(uniqueLabels.filter(l => l >= 0).length, 1);
-  clusterColors[lbl] = hslToRgb(hue, 0.85, 0.6);
-});
+      // The user's JSON has high-dimensional data. We will take the first 3 values for our 3D plot.
+      if (data.X && data.X[0] && data.X[0].length > 3) {
+        console.log("Imported data has >3 dimensions per point. Truncating to 3D for visualization.");
+        data.X_3d = data.X.map(p => [p[0], p[1], p[2]]);
+      } else {
+        data.X_3d = data.X; // Assume it's already 3D or less
+      }
+      
+      // Ensure metadata and tracks are arrays even if missing from imported file
+      data.metadata = data.metadata || [];
+      data.tracks = data.tracks || [];
 
-// ═══════════════════════════════════════════════════════════════════════════
-// SCENE SETUP
-// ═══════════════════════════════════════════════════════════════════════════
-const container = document.getElementById("scene-container");
-
-const scene    = new THREE.Scene();
-scene.background = new THREE.Color(0x0a0a0f);
-scene.fog = new THREE.FogExp2(0x0a0a0f, 0.003);
-
-const camera   = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 5000);
-const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
-renderer.setSize(window.innerWidth, window.innerHeight);
-renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-container.appendChild(renderer.domElement);
-
-// Ambient light for gentle fill
-scene.add(new THREE.AmbientLight(0x404060, 0.5));
-
-// ═══════════════════════════════════════════════════════════════════════════
-// COMPUTE BOUNDS & NORMALISE
-// ═══════════════════════════════════════════════════════════════════════════
-let minX = Infinity, minY = Infinity, minZ = Infinity;
-let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
-
-for (let i = 0; i < N; i++) {
-  const [x, y, z] = positions[i];
-  if (x < minX) minX = x; if (x > maxX) maxX = x;
-  if (y < minY) minY = y; if (y > maxY) maxY = y;
-  if (z < minZ) minZ = z; if (z > maxZ) maxZ = z;
-}
-
-const rangeX = maxX - minX || 1;
-const rangeY = maxY - minY || 1;
-const rangeZ = maxZ - minZ || 1;
-const maxRange = Math.max(rangeX, rangeY, rangeZ);
-const SCALE = 100;  // Map to [-50, 50] cube
-
-function normalise(x, y, z) {
-  return [
-    ((x - minX) / maxRange - 0.5 * rangeX / maxRange) * SCALE,
-    ((y - minY) / maxRange - 0.5 * rangeY / maxRange) * SCALE,
-    ((z - minZ) / maxRange - 0.5 * rangeZ / maxRange) * SCALE,
-  ];
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-// POINTS GEOMETRY
-// ═══════════════════════════════════════════════════════════════════════════
-const clusterVisibility = {};
-uniqueLabels.forEach(l => { clusterVisibility[l] = true; });
-
-const geometry = new THREE.BufferGeometry();
-const posArr   = new Float32Array(N * 3);
-const colArr   = new Float32Array(N * 3);
-const sizeArr  = new Float32Array(N);
-
-const BASE_SIZE = Math.max(1.5, Math.min(8, 400 / Math.sqrt(N)));
-
-for (let i = 0; i < N; i++) {
-  const [nx, ny, nz] = normalise(...positions[i]);
-  posArr[i * 3]     = nx;
-  posArr[i * 3 + 1] = ny;
-  posArr[i * 3 + 2] = nz;
-
-  const c = clusterColors[labels[i]] || noiseColor;
-  colArr[i * 3]     = c[0];
-  colArr[i * 3 + 1] = c[1];
-  colArr[i * 3 + 2] = c[2];
-
-  sizeArr[i] = BASE_SIZE;
-}
-
-geometry.setAttribute("position", new THREE.BufferAttribute(posArr, 3));
-geometry.setAttribute("color",    new THREE.BufferAttribute(colArr, 3));
-geometry.setAttribute("size",     new THREE.BufferAttribute(sizeArr, 1));
-
-// Custom shader for round, glowing points
-const pointsMaterial = new THREE.ShaderMaterial({
-  vertexShader: `
-    attribute float size;
-    varying vec3 vColor;
-    void main() {
-      vColor = color;
-      vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
-      gl_PointSize = size * (200.0 / -mvPosition.z);
-      gl_Position = projectionMatrix * mvPosition;
+      window.CLUSTER_DATA = data;
+      // Add a flag for the HUD message
+      window.isImported = true;
+      return; // Exit to prevent generating sample data
+    } catch(e) {
+      alert("Could not parse the imported data. Falling back to the default sample data. Error: " + e.message);
+      // If parsing fails, do nothing and let the default data load below
     }
-  `,
-  fragmentShader: `
-    varying vec3 vColor;
-    void main() {
-      float d = length(gl_PointCoord - vec2(0.5));
-      if (d > 0.5) discard;
-      float glow = 1.0 - smoothstep(0.0, 0.5, d);
-      float alpha = glow * 0.9;
-      vec3 col = vColor + vec3(0.15) * (1.0 - d * 2.0);
-      gl_FragColor = vec4(col, alpha);
-    }
-  `,
-  vertexColors: true,
-  transparent: true,
-  depthWrite: false,
-  blending: THREE.AdditiveBlending,
-});
+  }
 
-const points = new THREE.Points(geometry, pointsMaterial);
-scene.add(points);
-
-// ═══════════════════════════════════════════════════════════════════════════
-// SUBTLE GRID HELPER
-// ═══════════════════════════════════════════════════════════════════════════
-const gridHelper = new THREE.GridHelper(SCALE * 1.2, 20, 0x1a1a2e, 0x12121f);
-gridHelper.position.y = -SCALE * 0.5;
-scene.add(gridHelper);
-
-// ═══════════════════════════════════════════════════════════════════════════
-// CAMERA POSITION
-// ═══════════════════════════════════════════════════════════════════════════
-camera.position.set(SCALE * 0.8, SCALE * 0.6, SCALE * 0.8);
-camera.lookAt(0, 0, 0);
-
-// ═══════════════════════════════════════════════════════════════════════════
-// ORBIT CONTROLS (inline — no import needed)
-// ═══════════════════════════════════════════════════════════════════════════
-const orbitState = {
-  target: new THREE.Vector3(0, 0, 0),
-  spherical: new THREE.Spherical(),
-  sphericalDelta: new THREE.Spherical(),
-  panOffset: new THREE.Vector3(),
-  rotateStart: new THREE.Vector2(),
-  panStart: new THREE.Vector2(),
-  isDragging: false,
-  button: -1,
-  damping: 0.12,
-};
-
-(function initOrbit() {
-  const offset = new THREE.Vector3();
-  offset.copy(camera.position).sub(orbitState.target);
-  orbitState.spherical.setFromVector3(offset);
+  // --- Default sample data generation if nothing was imported ---
+  const rng=(s=>()=>{s=(s*16807)%2147483647;return(s-1)/2147483646;})(42);
+  const N=300,X_3d=[],labels=[],tracks=[],metadata=[];
+  const centers=[[2,1,0],[-2,1,0],[0,-2,1],[1,-1,-2],[-1,2,-1]];
+  const genres=["Electronic","Rock","Jazz","Classical","Hip-Hop"];
+  const artists=[["Daft Punk","Aphex Twin","Burial","Four Tet"],["Radiohead","Nirvana","The Cure","Joy Division"],["Miles Davis","Coltrane","Bill Evans","Monk"],["Bach","Beethoven","Chopin","Debussy"],["Kendrick","J Dilla","MF DOOM","Flying Lotus"]];
+  for(let i=0;i<N;i++){
+    let lbl,cx,cy,cz;
+    if(rng()<0.04){lbl=-1;cx=(rng()-.5)*8;cy=(rng()-.5)*8;cz=(rng()-.5)*8;}
+    else{lbl=Math.floor(rng()*centers.length);[cx,cy,cz]=centers[lbl];}
+    const sp=0.55;
+    X_3d.push([cx+(rng()-.5)*sp*2,cy+(rng()-.5)*sp*2,cz+(rng()-.5)*sp*2]);
+    labels.push(lbl);
+    const g=lbl>=0?lbl:Math.floor(rng()*5);
+    const art=artists[g][Math.floor(rng()*artists[g].length)];
+    const ttl=`Track ${String(i+1).padStart(3,"0")}`;
+    tracks.push(`/music/${genres[g]}/${art}/${ttl}.flac`);
+    metadata.push({title:ttl,artist:art});
+  }
+  window.CLUSTER_DATA={X_3d,labels,tracks,metadata};
 })();
 
-container.addEventListener("mousedown", e => {
-  orbitState.isDragging = true;
-  orbitState.button = e.button;
-  orbitState.rotateStart.set(e.clientX, e.clientY);
-  orbitState.panStart.set(e.clientX, e.clientY);
-});
+function cleanupScene() {
+    // Dispose of all disposable objects
+    scene.traverse(object => {
+        if (!object.isMesh && !object.isLine) return;
+        if (object.geometry) {
+            object.geometry.dispose();
+        }
+        if (object.material) {
+            if (Array.isArray(object.material)) {
+                object.material.forEach(material => material.dispose());
+            } else {
+                object.material.dispose();
+            }
+        }
+    });
 
-container.addEventListener("mousemove", e => {
-  if (!orbitState.isDragging) return;
+    // Remove all children from the scene
+    while(scene.children.length > 0) { 
+        scene.remove(scene.children[0]); 
+    }
 
-  if (orbitState.button === 0) {
-    // Left button — orbit
-    const dx = (e.clientX - orbitState.rotateStart.x) * 0.005;
-    const dy = (e.clientY - orbitState.rotateStart.y) * 0.005;
-    orbitState.spherical.theta -= dx;
-    orbitState.spherical.phi   -= dy;
-    orbitState.spherical.phi = Math.max(0.05, Math.min(Math.PI - 0.05, orbitState.spherical.phi));
-    orbitState.rotateStart.set(e.clientX, e.clientY);
-  } else if (orbitState.button === 2) {
-    // Right button — pan
-    const dx = (e.clientX - orbitState.panStart.x) * 0.05;
-    const dy = (e.clientY - orbitState.panStart.y) * 0.05;
+    // Clear the legend UI
+    const leg = document.getElementById("legend");
+    while (leg.children.length > 1) { // Keep the H2 title
+        leg.removeChild(leg.lastChild);
+    }
+}
 
-    const panLeft = new THREE.Vector3();
-    panLeft.setFromMatrixColumn(camera.matrix, 0);
-    panLeft.multiplyScalar(-dx);
+const CD=CLUSTER_DATA,positions=CD.X_3d,labels=CD.labels,tracks=CD.tracks,metadata=CD.metadata||[];
+const clusterInfo=CD.cluster_info||{};
 
-    const panUp = new THREE.Vector3();
-    panUp.setFromMatrixColumn(camera.matrix, 1);
-    panUp.multiplyScalar(dy);
+// Point indices bucketed by cluster label, built in a single pass. The legend
+// and the cluster-centroid pass below both need "which points belong to this
+// cluster"; scanning the full label array once per cluster made those steps
+// O(clusters x points), which is the dominant cost on a large library.
+const idxByLabel=(()=>{const m=new Map();for(let i=0;i<labels.length;i++){const l=labels[i];let a=m.get(l);if(!a){a=[];m.set(l,a);}a.push(i);}return m;})();
+const idxsFor=l=>idxByLabel.get(l)||[];
+const N=positions.length;
 
-    orbitState.panOffset.add(panLeft).add(panUp);
-    orbitState.panStart.set(e.clientX, e.clientY);
+// ── PALETTE ──────────────────────────────────────────────────────────────
+const NEON_HUES=[[1.0,0.25,0.0],[1.0,0.05,0.05],[1.0,0.55,0.0],[1.0,0.15,0.35],[0.9,0.0,0.2],[1.0,0.7,0.0],[1.0,0.35,0.15],[0.8,0.1,0.0]];
+const noiseColor=[0.7,0.7,0.75];
+const uniqueLabels=[...new Set(labels)].sort((a,b)=>a-b);
+const posLabels=uniqueLabels.filter(l=>l>=0);
+const clusterColors={};
+uniqueLabels.forEach(lbl=>{clusterColors[lbl]=lbl<0?noiseColor:NEON_HUES[posLabels.indexOf(lbl)%NEON_HUES.length];});
+function rgbHex(c){return"#"+c.map(v=>Math.round(Math.min(1,v)*255).toString(16).padStart(2,"0")).join("");}
+function toThreeColor(c){return new THREE.Color(c[0],c[1],c[2]);}
+
+// ── RENDERER ─────────────────────────────────────────────────────────────
+const container=document.getElementById("scene-container");
+const renderer=new THREE.WebGLRenderer({antialias:true,powerPreference:"high-performance"});
+renderer.setSize(innerWidth,innerHeight);
+renderer.setPixelRatio(Math.min(devicePixelRatio,2));
+renderer.shadowMap.enabled=true;
+renderer.shadowMap.type=THREE.PCFSoftShadowMap;
+renderer.toneMapping=THREE.ReinhardToneMapping;
+renderer.toneMappingExposure=1.2;
+container.appendChild(renderer.domElement);
+
+// ── SCENE & FOG ──────────────────────────────────────────────────────────
+const scene=new THREE.Scene();
+scene.background=new THREE.Color(0x060000);
+scene.fog=new THREE.FogExp2(0x0a0000,0.0004);
+
+const camera=new THREE.PerspectiveCamera(60,innerWidth/innerHeight,0.1,5000);
+
+// ── NORMALISE ────────────────────────────────────────────────────────────
+let mnX=Infinity,mnY=Infinity,mnZ=Infinity,mxX=-Infinity,mxY=-Infinity,mxZ=-Infinity;
+for(const[x,y,z]of positions){if(x<mnX)mnX=x;if(x>mxX)mxX=x;if(y<mnY)mnY=y;if(y>mxY)mxY=y;if(z<mnZ)mnZ=z;if(z>mxZ)mxZ=z;}
+const rX=mxX-mnX||1,rY=mxY-mnY||1,rZ=mxZ-mnZ||1,mR=Math.max(rX,rY,rZ),S=100;
+function norm(x,y,z){return[((x-mnX)/mR-0.5*rX/mR)*S,((y-mnY)/mR-0.5*rY/mR)*S,((z-mnZ)/mR-0.5*rZ/mR)*S];}
+
+const ZOOM_MIN=10;
+const ZOOM_MAX=(S*0.5+10)*35;
+const FLOOR_Y=-S*0.75;
+
+// ── STATE ────────────────────────────────────────────────────────────────
+const clusterVis={};uniqueLabels.forEach(l=>{clusterVis[l]=true;});
+const selected=new Set();
+let selectMode=false,spreadScale=0.0,spreadMul=1;
+// ── INTRO ANIMATION STATE ─────────────────────────────────────────────────
+const INTRO_DURATION=1600;
+const SPREAD_TARGET=3.0;
+let introPlaying=false;
+let introStart=null;
+let autoRotate=true;
+let autoRotateSpeed=0.0028;
+let autoRotateFading=false;
+let autoRotateFadeStart=0;
+function triggerIntro(){
+  // Reset camera to default home position
+  orbitState.target.set(0,0,0);
+  orbitState.panOffset.set(0,0,0);
+  orbitState.spherical.set(S*3.0,Math.PI/4,Math.PI/4);
+  updateOrbit(); // Apply camera changes immediately
+
+  // Reset and start spread animation state
+  introPlaying=true;
+  introStart=null; // Will be set on the next animation frame to ensure clean timing
+  spreadScale=0;
+  spreadMul=1;
+  [1,10,30,50,100].forEach(m=>document.getElementById(`mul-${m}`).classList.toggle("active",m===1));
+  document.getElementById("slider-spread").value=0;
+  document.getElementById("spread-val").textContent="0.0×";
+  
+  // Reset and start camera auto-rotation state
+  autoRotate=true;
+  autoRotateFading=false;
+  
+  applySpread();
+  
+  // Defer introStart assignment to the next frame
+  requestAnimationFrame(()=>{ introStart=performance.now(); });
+}
+
+// ── NORMALISED BASE POSITIONS ─────────────────────────────────────────────
+const normPos=[];
+for(let i=0;i<N;i++){const[nx,ny,nz]=norm(...positions[i]);normPos.push(new THREE.Vector3(nx,ny,nz));}
+const scaledPos=normPos.map(p=>p.clone());
+
+// ── LIGHTING ─────────────────────────────────────────────────────────────
+const ambientLight=new THREE.AmbientLight(0x1a0500,2.0);
+scene.add(ambientLight);
+
+// Two orbiting coloured point lights
+const light1=new THREE.PointLight(0xff4400,6,S*2.5);
+light1.castShadow=false;
+scene.add(light1);
+const light2=new THREE.PointLight(0xff0055,4,S*2.0);
+light2.castShadow=false;
+scene.add(light2);
+// Subtle fill from below
+const light3=new THREE.PointLight(0xff2200,2,S*3);
+light3.position.set(0,FLOOR_Y+10,0);
+scene.add(light3);
+
+// ── INLINE REFLECTOR ─────────────────────────────────────────────────────
+// Minimal Reflector adapted from Three.js examples (no external import needed)
+function createReflector(width,height){
+  const geo=new THREE.PlaneGeometry(width,height);
+  const reflectorPlane=new THREE.Plane();
+  const normal=new THREE.Vector3();
+  const reflectorWorldPosition=new THREE.Vector3();
+  const cameraWorldPosition=new THREE.Vector3();
+  const rotationMatrix=new THREE.Matrix4();
+  const lookAtPosition=new THREE.Vector3(0,0,-1);
+  const clipPlane=new THREE.Vector4();
+  const view=new THREE.Vector3();
+  const target=new THREE.Vector3();
+  const q=new THREE.Vector4();
+  const textureMatrix=new THREE.Matrix4();
+  const virtualCamera=new THREE.PerspectiveCamera();
+
+  const parameters={minFilter:THREE.LinearFilter,magFilter:THREE.LinearFilter,format:THREE.RGBFormat,stencilBuffer:false};
+  const renderTarget=new THREE.WebGLRenderTarget(innerWidth*0.6,innerHeight*0.6,parameters);
+
+  const mat=new THREE.ShaderMaterial({
+    uniforms:{
+      color:{value:new THREE.Color(0x110000)},
+      tDiffuse:{value:renderTarget.texture},
+      textureMatrix:{value:textureMatrix},
+      opacity:{value:0.35}
+    },
+    vertexShader:`
+      uniform mat4 textureMatrix;
+      varying vec4 vUv;
+      void main(){
+        vUv=textureMatrix*vec4(position,1.0);
+        gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0);
+      }`,
+    fragmentShader:`
+      uniform vec3 color;
+      uniform sampler2D tDiffuse;
+      uniform float opacity;
+      varying vec4 vUv;
+      float blendOverlay(float base,float blend){return base<0.5?(2.0*base*blend):(1.0-2.0*(1.0-base)*(1.0-blend));}
+      vec3 blendOverlay(vec3 base,vec3 blend){return vec3(blendOverlay(base.r,blend.r),blendOverlay(base.g,blend.g),blendOverlay(base.b,blend.b));}
+      void main(){
+        vec4 base=texture2DProj(tDiffuse,vUv);
+        gl_FragColor=vec4(blendOverlay(base.rgb,color),opacity);
+      }`,
+    transparent:true,depthWrite:false
+  });
+
+  const mesh=new THREE.Mesh(geo,mat);
+  mesh.onBeforeRender=function(renderer,scene,camera){
+    reflectorWorldPosition.setFromMatrixPosition(mesh.matrixWorld);
+    cameraWorldPosition.setFromMatrixPosition(camera.matrixWorld);
+    rotationMatrix.extractRotation(mesh.matrixWorld);
+    normal.set(0,0,1).applyMatrix4(rotationMatrix);
+    view.subVectors(reflectorWorldPosition,cameraWorldPosition);
+    if(view.dot(normal)>0)return;
+    view.reflect(normal).negate();
+    view.add(reflectorWorldPosition);
+    rotationMatrix.extractRotation(mesh.matrixWorld);
+    lookAtPosition.set(0,0,-1).applyMatrix4(rotationMatrix).add(reflectorWorldPosition);
+    target.subVectors(reflectorWorldPosition,lookAtPosition);
+    target.reflect(normal).negate().add(reflectorWorldPosition);
+    virtualCamera.position.copy(view);
+    virtualCamera.up.set(0,1,0).applyMatrix4(rotationMatrix).reflect(normal);
+    virtualCamera.lookAt(target);
+    virtualCamera.far=camera.far;
+    virtualCamera.updateMatrixWorld();
+    virtualCamera.projectionMatrix.copy(camera.projectionMatrix);
+    textureMatrix.set(0.5,0,0,0.5,0,0.5,0,0.5,0,0,0.5,0.5,0,0,0,1);
+    textureMatrix.multiply(virtualCamera.projectionMatrix);
+    textureMatrix.multiply(virtualCamera.matrixWorldInverse);
+    textureMatrix.multiply(mesh.matrixWorld);
+    reflectorPlane.setFromNormalAndCoplanarPoint(normal,reflectorWorldPosition);
+    reflectorPlane.applyMatrix4(virtualCamera.matrixWorldInverse);
+    clipPlane.set(reflectorPlane.normal.x,reflectorPlane.normal.y,reflectorPlane.normal.z,reflectorPlane.constant);
+    const projMat=virtualCamera.projectionMatrix;
+    q.x=(Math.sign(clipPlane.x)+projMat.elements[8])/projMat.elements[0];
+    q.y=(Math.sign(clipPlane.y)+projMat.elements[9])/projMat.elements[5];
+    q.z=-1;q.w=(1+projMat.elements[10])/projMat.elements[14];
+    clipPlane.multiplyScalar(2/clipPlane.dot(q));
+    projMat.elements[2]=clipPlane.x;projMat.elements[6]=clipPlane.y;
+    projMat.elements[10]=clipPlane.z+1;projMat.elements[14]=clipPlane.w;
+    const currentRenderTarget=renderer.getRenderTarget();
+    const currentXrEnabled=renderer.xr.enabled;
+    const currentShadowAutoUpdate=renderer.shadowMap.autoUpdate;
+    renderer.xr.enabled=false;
+    renderer.shadowMap.autoUpdate=false;
+    renderer.setRenderTarget(renderTarget);
+    renderer.state.buffers.color.setMask(true);
+    if(!renderer.autoClear)renderer.clear();
+    renderer.render(scene,virtualCamera);
+    renderer.xr.enabled=currentXrEnabled;
+    renderer.shadowMap.autoUpdate=currentShadowAutoUpdate;
+    renderer.setRenderTarget(currentRenderTarget);
+  };
+  return mesh;
+}
+
+// ── FLOOR REFLECTOR ───────────────────────────────────────────────────────
+const GRID_HALF=(S*0.5+20)*3;
+const reflector=createReflector(GRID_HALF*2,GRID_HALF*2);
+reflector.rotation.x=-Math.PI/2;
+reflector.position.y=FLOOR_Y-0.2;
+scene.add(reflector);
+
+// ── INSTANCED POINTS (MeshStandardMaterial) ──────────────────────────────
+const BSIZE=1.4;
+const dummy=new THREE.Object3D();
+
+function makeInstanced(geo,roughness,metalness,emissiveIntensity,opacity,colorArr){
+  const mat=new THREE.MeshStandardMaterial({
+    roughness,metalness,
+    transparent:opacity<1,opacity,
+    depthWrite:opacity===1,
+    emissive:new THREE.Color(1,1,1),
+    emissiveIntensity
+  });
+  const iGeo=geo.clone();
+  const colorAttr=new THREE.InstancedBufferAttribute(new Float32Array(colorArr),3);
+  iGeo.setAttribute("instanceColor",colorAttr);
+  // Patch shader to use per-instance color for both diffuse and emissive
+  mat.onBeforeCompile=sh=>{
+    sh.vertexShader="attribute vec3 instanceColor;\nvarying vec3 vIC;\n"+
+      sh.vertexShader.replace("#include <color_vertex>","#include <color_vertex>\nvIC=instanceColor;");
+    sh.fragmentShader="varying vec3 vIC;\n"+
+      sh.fragmentShader
+        .replace("vec4 diffuseColor = vec4( diffuse, opacity );","vec4 diffuseColor = vec4( vIC, opacity );")
+        .replace("vec3 totalEmissiveRadiance = emissive;","vec3 totalEmissiveRadiance = vIC;");
+  };
+  const mesh=new THREE.InstancedMesh(iGeo,mat,N);
+  mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+  mesh.castShadow=true;
+  for(let i=0;i<N;i++){
+    dummy.position.copy(normPos[i]);dummy.scale.setScalar(1);dummy.updateMatrix();
+    mesh.setMatrixAt(i,dummy.matrix);
   }
+  mesh.instanceMatrix.needsUpdate=true;
+  return{mesh,attr:colorAttr};
+}
+
+const initColors=new Float32Array(N*3);
+for(let i=0;i<N;i++){
+  const c=clusterColors[labels[i]]||noiseColor;
+  const v=clusterVis[labels[i]]?1:0;
+  initColors[i*3]=c[0]*v;initColors[i*3+1]=c[1]*v;initColors[i*3+2]=c[2]*v;
+}
+
+const coreGeo =new THREE.SphereGeometry(BSIZE,10,10);
+const halo1Geo=new THREE.SphereGeometry(BSIZE*2.2,8,8);
+const halo2Geo=new THREE.SphereGeometry(BSIZE*4.0,6,6);
+
+const{mesh:coreMesh, attr:coreAttr} =makeInstanced(coreGeo, 0.15,0.6,1.2,1.0,  initColors);
+const{mesh:halo1Mesh,attr:halo1Attr}=makeInstanced(halo1Geo,0.8, 0.0,0.8,0.25, initColors);
+const{mesh:halo2Mesh,attr:halo2Attr}=makeInstanced(halo2Geo,1.0, 0.0,0.4,0.07, initColors);
+
+halo1Mesh.material.blending=THREE.AdditiveBlending;halo1Mesh.material.depthWrite=false;
+halo2Mesh.material.blending=THREE.AdditiveBlending;halo2Mesh.material.depthWrite=false;
+
+scene.add(halo2Mesh);scene.add(halo1Mesh);scene.add(coreMesh);
+
+// ── SPREAD ───────────────────────────────────────────────────────────────
+function applySpread(){
+  for(let i=0;i<N;i++){
+    scaledPos[i].set(normPos[i].x*spreadScale,normPos[i].y*spreadScale,normPos[i].z*spreadScale);
+    dummy.position.copy(scaledPos[i]);
+    dummy.scale.setScalar(selected.has(i)&&clusterVis[labels[i]]?1.9:1.0);
+    dummy.updateMatrix();
+    coreMesh.setMatrixAt(i,dummy.matrix);
+    halo1Mesh.setMatrixAt(i,dummy.matrix);
+    halo2Mesh.setMatrixAt(i,dummy.matrix);
+  }
+  coreMesh.instanceMatrix.needsUpdate=true;
+  halo1Mesh.instanceMatrix.needsUpdate=true;
+  halo2Mesh.instanceMatrix.needsUpdate=true;
+  // Scale ring positions with spread
+  ringsGroup.children.forEach((torus,i)=>{
+    const ci=Math.floor(i/3);
+    const{cx,cy,cz}=ringCenters[ci];
+    torus.position.set(cx*spreadScale,cy*spreadScale,cz*spreadScale);
+    torus.scale.setScalar(spreadScale);
+  });
+}
+
+function updatePointAppearance(){
+  for(let i=0;i<N;i++){
+    const vis=clusterVis[labels[i]];
+    let c;
+    if(!vis) c=[0,0,0];
+    else if(selected.has(i)){const b=clusterColors[labels[i]]||noiseColor;c=[Math.min(1,b[0]+0.45),Math.min(1,b[1]+0.35),Math.min(1,b[2]+0.25)];}
+    else c=clusterColors[labels[i]]||noiseColor;
+    coreAttr.setXYZ(i,c[0],c[1],c[2]);
+    halo1Attr.setXYZ(i,c[0],c[1],c[2]);
+    halo2Attr.setXYZ(i,c[0],c[1],c[2]);
+  }
+  coreAttr.needsUpdate=true;halo1Attr.needsUpdate=true;halo2Attr.needsUpdate=true;
+  applySpread();
+}
+
+// ── RAYCASTER ────────────────────────────────────────────────────────────
+const RC_RADIUS=BSIZE*3;
+const rc=new THREE.Raycaster();
+const mouse=new THREE.Vector2();
+function intersectPoints(){
+  let best=-1,bestD=Infinity;const ray=rc.ray;
+  for(let i=0;i<N;i++){
+    if(!clusterVis[labels[i]])continue;
+    const d=ray.distanceSqToPoint(scaledPos[i]);
+    if(d<RC_RADIUS*RC_RADIUS&&d<bestD){bestD=d;best=i;}
+  }
+  return best;
+}
+
+// ── TRON GRID ────────────────────────────────────────────────────────────
+const gridGroup=new THREE.Group();
+scene.add(gridGroup);
+const GRID_STEPS=24;
+const GRID_COLOR=0xff4400;
+
+function makeNeonLine(p1,p2,color,opacity){
+  const grp=new THREE.Group();
+  grp.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints([p1,p2]),new THREE.LineBasicMaterial({color,transparent:true,opacity})));
+  [[0.3,0,0],[-0.3,0,0],[0,0.3,0],[0,-0.3,0]].forEach(([ox,oy,oz])=>{
+    grp.add(new THREE.Line(
+      new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(p1.x+ox,p1.y+oy,p1.z+oz),new THREE.Vector3(p2.x+ox,p2.y+oy,p2.z+oz)]),
+      new THREE.LineBasicMaterial({color,transparent:true,opacity:opacity*0.55})
+    ));
+  });
+  return grp;
+}
+
+for(let i=0;i<=GRID_STEPS;i++){
+  const t=i/GRID_STEPS,x=-GRID_HALF+t*GRID_HALF*2;
+  gridGroup.add(makeNeonLine(new THREE.Vector3(x,FLOOR_Y,-GRID_HALF),new THREE.Vector3(x,FLOOR_Y,GRID_HALF),GRID_COLOR,0.55));
+  gridGroup.add(makeNeonLine(new THREE.Vector3(-GRID_HALF,FLOOR_Y,x),new THREE.Vector3(GRID_HALF,FLOOR_Y,x),GRID_COLOR,0.55));
+}
+gridGroup.add(new THREE.Line(
+  new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(-GRID_HALF,FLOOR_Y,-GRID_HALF),new THREE.Vector3(GRID_HALF,FLOOR_Y,-GRID_HALF)]),
+  new THREE.LineBasicMaterial({color:0xff6600,transparent:true,opacity:0.9})
+));
+
+// ── AXES ─────────────────────────────────────────────────────────────────
+const axesGroup=new THREE.Group();scene.add(axesGroup);
+function makeGlowAxis(dir,hexColor,labelTxt){
+  const len=S*0.9,col=new THREE.Color(hexColor),nd=dir.clone().normalize();
+  const quat=new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0,1,0),nd);
+  const ctr=nd.clone().multiplyScalar(len*0.5);
+  const cm=new THREE.Mesh(new THREE.CylinderGeometry(0.3,0.3,len,12,1),new THREE.MeshStandardMaterial({color:col,emissive:col,emissiveIntensity:1.5,roughness:0.2,metalness:0.8}));
+  cm.quaternion.copy(quat);cm.position.copy(ctr);axesGroup.add(cm);
+  [[0.7,0.35],[1.5,0.10],[3.0,0.04]].forEach(([r,op])=>{
+    const m=new THREE.Mesh(new THREE.CylinderGeometry(r,r,len,12,1),new THREE.MeshBasicMaterial({color:col,transparent:true,opacity:op,depthWrite:false,side:THREE.BackSide,blending:THREE.AdditiveBlending}));
+    m.quaternion.copy(quat);m.position.copy(ctr);axesGroup.add(m);
+  });
+  const cone=new THREE.Mesh(new THREE.ConeGeometry(1.2,5,10),new THREE.MeshStandardMaterial({color:col,emissive:col,emissiveIntensity:1.5,roughness:0.2,metalness:0.8}));
+  cone.position.copy(nd.clone().multiplyScalar(len+2.5));cone.quaternion.copy(quat);axesGroup.add(cone);
+  const cv=document.createElement("canvas");cv.width=64;cv.height=64;
+  const cx2=cv.getContext("2d");cx2.shadowColor=hexColor;cx2.shadowBlur=14;
+  cx2.font="bold 44px Arial";cx2.fillStyle=hexColor;cx2.textAlign="center";cx2.textBaseline="middle";cx2.fillText(labelTxt,32,32);
+  const sp=new THREE.Sprite(new THREE.SpriteMaterial({map:new THREE.CanvasTexture(cv),transparent:true,depthWrite:false}));
+  sp.scale.set(8,8,1);sp.position.copy(nd.clone().multiplyScalar(len+10));axesGroup.add(sp);
+}
+makeGlowAxis(new THREE.Vector3(1,0,0),"#ff4422","X");
+makeGlowAxis(new THREE.Vector3(0,1,0),"#ff7700","Y");
+makeGlowAxis(new THREE.Vector3(0,0,1),"#ff2255","Z");
+
+// ── CLUSTER RINGS ────────────────────────────────────────────────────────
+const ringsGroup=new THREE.Group();scene.add(ringsGroup);
+// Store ring center positions so we can scale them with spread
+const ringCenters=[];
+posLabels.forEach(lbl=>{
+  const idxs=idxsFor(lbl);
+  let cx=0,cy=0,cz=0;
+  idxs.forEach(i=>{const[x,y,z]=norm(...positions[i]);cx+=x;cy+=y;cz+=z;});
+  cx/=idxs.length;cy/=idxs.length;cz/=idxs.length;
+  let r=0;idxs.forEach(i=>{const[x,y,z]=norm(...positions[i]);r+=Math.sqrt((x-cx)**2+(y-cy)**2+(z-cz)**2);});
+  r=(r/idxs.length)*1.55;
+  ringCenters.push({cx,cy,cz,r});
+  const col=toThreeColor(clusterColors[lbl]);
+  [0,Math.PI/3,Math.PI*2/3].forEach((ang,ri)=>{
+    const torus=new THREE.Mesh(new THREE.TorusGeometry(r,0.18,8,72),
+      new THREE.MeshStandardMaterial({color:col,emissive:col,emissiveIntensity:2.5,transparent:true,opacity:0.45+ri*0.15,depthWrite:false,blending:THREE.AdditiveBlending}));
+    torus.position.set(cx,cy,cz);torus.rotation.x=Math.PI/2+ang;torus.rotation.z=ang*0.6;
+    ringsGroup.add(torus);
+  });
 });
 
-container.addEventListener("mouseup",   () => { orbitState.isDragging = false; });
-container.addEventListener("mouseleave", () => { orbitState.isDragging = false; });
-container.addEventListener("contextmenu", e => e.preventDefault());
+// ── INLINE BLOOM (luminosity threshold pass) ──────────────────────────────
+// Lightweight single-pass bloom via ping-pong render targets + custom shader
+const bloomRT1=new THREE.WebGLRenderTarget(innerWidth/2,innerHeight/2,{minFilter:THREE.LinearFilter,magFilter:THREE.LinearFilter,format:THREE.RGBFormat});
+const bloomRT2=new THREE.WebGLRenderTarget(innerWidth/2,innerHeight/2,{minFilter:THREE.LinearFilter,magFilter:THREE.LinearFilter,format:THREE.RGBFormat});
+const mainRT=new THREE.WebGLRenderTarget(innerWidth,innerHeight,{minFilter:THREE.LinearFilter,magFilter:THREE.LinearFilter,format:THREE.RGBFormat});
 
-container.addEventListener("wheel", e => {
+const bloomScene=new THREE.Scene();
+const bloomCam=new THREE.OrthographicCamera(-1,1,1,-1,0,1);
+
+const extractMat=new THREE.ShaderMaterial({
+  uniforms:{tDiffuse:{value:mainRT.texture},threshold:{value:0.25}},
+  vertexShader:`varying vec2 vUv;void main(){vUv=uv;gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0);}`,
+  fragmentShader:`uniform sampler2D tDiffuse;uniform float threshold;varying vec2 vUv;
+    void main(){vec4 c=texture2D(tDiffuse,vUv);float br=dot(c.rgb,vec3(0.299,0.587,0.114));gl_FragColor=br>threshold?c:vec4(0.0,0.0,0.0,1.0);}`
+});
+
+const blurHMat=new THREE.ShaderMaterial({
+  uniforms:{tDiffuse:{value:bloomRT1.texture},resolution:{value:new THREE.Vector2(innerWidth/2,innerHeight/2)}},
+  vertexShader:`varying vec2 vUv;void main(){vUv=uv;gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0);}`,
+  fragmentShader:`uniform sampler2D tDiffuse;uniform vec2 resolution;varying vec2 vUv;
+    void main(){float px=1.0/resolution.x;vec4 c=vec4(0.0);
+    float w[9];w[0]=0.0625;w[1]=0.125;w[2]=0.0625;w[3]=0.125;w[4]=0.25;w[5]=0.125;w[6]=0.0625;w[7]=0.125;w[8]=0.0625;
+    for(int i=-1;i<=1;i++)for(int j=-1;j<=1;j++)c+=texture2D(tDiffuse,vUv+vec2(float(i)*px*2.0,float(j)/resolution.y*2.0))*w[(i+1)*3+(j+1)];
+    gl_FragColor=c;}`
+});
+
+const compositeMat=new THREE.ShaderMaterial({
+  uniforms:{tScene:{value:mainRT.texture},tBloom:{value:bloomRT2.texture},bloomStrength:{value:1.6}},
+  vertexShader:`varying vec2 vUv;void main(){vUv=uv;gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0);}`,
+  fragmentShader:`uniform sampler2D tScene;uniform sampler2D tBloom;uniform float bloomStrength;varying vec2 vUv;
+    void main(){vec4 scene=texture2D(tScene,vUv);vec4 bloom=texture2D(tBloom,vUv);gl_FragColor=scene+bloom*bloomStrength;}`
+});
+
+const quad=new THREE.Mesh(new THREE.PlaneGeometry(2,2),extractMat);
+bloomScene.add(quad);
+
+function renderBloom(){
+  // 1. Render scene to main RT
+  renderer.setRenderTarget(mainRT);
+  renderer.render(scene,camera);
+  // 2. Extract bright areas → bloomRT1
+  quad.material=extractMat;extractMat.uniforms.tDiffuse.value=mainRT.texture;
+  renderer.setRenderTarget(bloomRT1);
+  renderer.render(bloomScene,bloomCam);
+  // 3. Blur → bloomRT2
+  quad.material=blurHMat;blurHMat.uniforms.tDiffuse.value=bloomRT1.texture;
+  renderer.setRenderTarget(bloomRT2);
+  renderer.render(bloomScene,bloomCam);
+  // 4. Blur again for wider glow
+  blurHMat.uniforms.tDiffuse.value=bloomRT2.texture;
+  renderer.setRenderTarget(bloomRT1);
+  renderer.render(bloomScene,bloomCam);
+  // 5. Composite to screen
+  quad.material=compositeMat;
+  compositeMat.uniforms.tScene.value=mainRT.texture;
+  compositeMat.uniforms.tBloom.value=bloomRT1.texture;
+  renderer.setRenderTarget(null);
+  renderer.render(bloomScene,bloomCam);
+}
+
+// ── CAMERA & ORBIT ───────────────────────────────────────────────────────
+camera.position.set(S*0.9,S*0.55,S*0.9);camera.lookAt(0,0,0);
+const orbitState={target:new THREE.Vector3(),spherical:new THREE.Spherical(),panOffset:new THREE.Vector3(),rStart:new THREE.Vector2(),pStart:new THREE.Vector2(),drag:false,btn:-1};
+orbitState.spherical.setFromVector3(new THREE.Vector3().copy(camera.position).sub(orbitState.target));
+
+const el=container;
+el.addEventListener("mousedown",e=>{orbitState.drag=true;orbitState.btn=e.button;orbitState.rStart.set(e.clientX,e.clientY);orbitState.pStart.set(e.clientX,e.clientY);});
+el.addEventListener("mousemove",e=>{
+  if(orbitState.drag){
+    if(orbitState.btn===0){
+      orbitState.spherical.theta-=(e.clientX-orbitState.rStart.x)*0.005;
+      orbitState.spherical.phi  -=(e.clientY-orbitState.rStart.y)*0.005;
+      orbitState.spherical.phi=Math.max(0.05,Math.min(Math.PI-0.05,orbitState.spherical.phi));
+      orbitState.rStart.set(e.clientX,e.clientY);
+    }else if(orbitState.btn===2){
+      const dx=(e.clientX-orbitState.pStart.x)*0.05,dy=(e.clientY-orbitState.pStart.y)*0.05;
+      orbitState.panOffset.add(new THREE.Vector3().setFromMatrixColumn(camera.matrix,0).multiplyScalar(-dx));
+      orbitState.panOffset.add(new THREE.Vector3().setFromMatrixColumn(camera.matrix,1).multiplyScalar(dy));
+      orbitState.pStart.set(e.clientX,e.clientY);
+    }
+  }
+  mouse.x=(e.clientX/innerWidth)*2-1;mouse.y=-(e.clientY/innerHeight)*2+1;
+  rc.setFromCamera(mouse,camera);
+  const idx=intersectPoints();
+  if(idx>=0){
+    const hex=rgbHex(clusterColors[labels[idx]]||noiseColor);
+    document.getElementById("tt-title").textContent=metadata[idx]?.title||(tracks[idx]||"").split(/[/\\]/).pop()||`Track ${idx}`;
+    document.getElementById("tt-artist").textContent=metadata[idx]?.artist||"";
+    document.getElementById("tt-cluster-label").textContent=labels[idx]<0?"Noise":`Cluster ${labels[idx]}`;
+    document.getElementById("tt-dot").style.cssText=`background:${hex};box-shadow:0 0 8px ${hex}`;
+    document.getElementById("tooltip").style.cssText=`display:block;left:${e.clientX+14}px;top:${e.clientY+14}px`;
+    document.body.style.cursor="crosshair";
+  }else{document.getElementById("tooltip").style.display="none";document.body.style.cursor="default";}
+});
+el.addEventListener("mouseup",()=>orbitState.drag=false);
+el.addEventListener("mouseleave",()=>orbitState.drag=false);
+el.addEventListener("contextmenu",e=>e.preventDefault());
+el.addEventListener("wheel",e=>{
   e.preventDefault();
-  const factor = e.deltaY > 0 ? 1.1 : 0.9;
-  orbitState.spherical.radius *= factor;
-  orbitState.spherical.radius = Math.max(5, Math.min(SCALE * 5, orbitState.spherical.radius));
-}, { passive: false });
-
-function updateOrbit() {
-  orbitState.target.add(orbitState.panOffset);
-  orbitState.panOffset.multiplyScalar(0);
-
-  const offset = new THREE.Vector3();
-  offset.setFromSpherical(orbitState.spherical);
-  camera.position.copy(orbitState.target).add(offset);
+  orbitState.spherical.radius*=e.deltaY>0?1.1:0.9;
+  orbitState.spherical.radius=Math.max(ZOOM_MIN,Math.min(ZOOM_MAX,orbitState.spherical.radius));
+},{passive:false});
+function updateOrbit(){
+  orbitState.target.add(orbitState.panOffset);orbitState.panOffset.set(0,0,0);
+  camera.position.copy(orbitState.target).add(new THREE.Vector3().setFromSpherical(orbitState.spherical));
   camera.lookAt(orbitState.target);
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-// RAYCASTER — hover & click
-// ═══════════════════════════════════════════════════════════════════════════
-const raycaster = new THREE.Raycaster();
-raycaster.params.Points.threshold = BASE_SIZE * 0.6;
-const mouse = new THREE.Vector2();
-let hoveredIndex = -1;
-
-const tooltip   = document.getElementById("tooltip");
-const ttTitle   = document.getElementById("tt-title");
-const ttArtist  = document.getElementById("tt-artist");
-const ttCluster = document.getElementById("tt-cluster");
-
-function getTrackName(i) {
-  if (metadata[i] && metadata[i].title) return metadata[i].title;
-  const p = tracks[i] || "";
-  return p.split(/[/\\]/).pop() || `Track ${i}`;
-}
-
-function getArtistName(i) {
-  if (metadata[i] && metadata[i].artist) return metadata[i].artist;
-  return "";
-}
-
-container.addEventListener("mousemove", e => {
-  mouse.x =  (e.clientX / window.innerWidth)  * 2 - 1;
-  mouse.y = -(e.clientY / window.innerHeight) * 2 + 1;
-
-  raycaster.setFromCamera(mouse, camera);
-  const intersects = raycaster.intersectObject(points);
-
-  if (intersects.length > 0) {
-    const idx = intersects[0].index;
-    if (!clusterVisibility[labels[idx]]) { hideTooltip(); return; }
-    hoveredIndex = idx;
-    const name   = getTrackName(idx);
-    const artist = getArtistName(idx);
-    ttTitle.textContent   = name;
-    ttArtist.textContent  = artist;
-    ttCluster.textContent = `Cluster ${labels[idx]}`;
-    tooltip.style.display = "block";
-    tooltip.style.left    = (e.clientX + 14) + "px";
-    tooltip.style.top     = (e.clientY + 14) + "px";
-    document.body.style.cursor = "pointer";
-  } else {
-    hideTooltip();
-  }
-});
-
-function hideTooltip() {
-  hoveredIndex = -1;
-  tooltip.style.display = "none";
-  document.body.style.cursor = "default";
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-// SELECTION
-// ═══════════════════════════════════════════════════════════════════════════
-const selected = new Set();
-let selectMode = false;
-
-const selBar   = document.getElementById("selection-bar");
-const selCount = document.getElementById("sel-count");
-
-function updateSelectionUI() {
-  if (selected.size > 0) {
-    selBar.style.display = "block";
-    selCount.textContent = `${selected.size} track${selected.size !== 1 ? "s" : ""} selected`;
-  } else {
-    selBar.style.display = "none";
-  }
+// ── SELECTION ────────────────────────────────────────────────────────────
+function updateSelectionUI(){
+  document.getElementById("selection-bar").style.display=selected.size>0?"block":"none";
+  document.getElementById("sel-count").textContent=`${selected.size} track${selected.size!==1?"s":""} selected`;
   updatePointAppearance();
 }
-
-function updatePointAppearance() {
-  const col = geometry.attributes.color.array;
-  const sz  = geometry.attributes.size.array;
-
-  for (let i = 0; i < N; i++) {
-    if (!clusterVisibility[labels[i]]) {
-      col[i*3] = col[i*3+1] = col[i*3+2] = 0;
-      sz[i] = 0;
-      continue;
-    }
-
-    const c = clusterColors[labels[i]] || noiseColor;
-
-    if (selected.has(i)) {
-      // Selected: bright white-ish glow
-      col[i*3]     = Math.min(1, c[0] + 0.4);
-      col[i*3 + 1] = Math.min(1, c[1] + 0.4);
-      col[i*3 + 2] = Math.min(1, c[2] + 0.4);
-      sz[i] = BASE_SIZE * 2;
-    } else {
-      col[i*3]     = c[0];
-      col[i*3 + 1] = c[1];
-      col[i*3 + 2] = c[2];
-      sz[i] = BASE_SIZE;
-    }
+el.addEventListener("click",e=>{
+  if(autoRotate && !autoRotateFading){
+    autoRotateFading=true;
+    autoRotateFadeStart=performance.now();
   }
-
-  geometry.attributes.color.needsUpdate = true;
-  geometry.attributes.size.needsUpdate  = true;
-}
-
-container.addEventListener("click", e => {
-  if (orbitState.isDragging) return;
-
-  raycaster.setFromCamera(mouse, camera);
-  const intersects = raycaster.intersectObject(points);
-
-  if (intersects.length > 0) {
-    const idx = intersects[0].index;
-    if (!clusterVisibility[labels[idx]]) return;
-
-    if (e.shiftKey || e.ctrlKey || e.metaKey || selectMode) {
-      if (selected.has(idx)) selected.delete(idx);
-      else selected.add(idx);
-    } else {
-      selected.clear();
-      selected.add(idx);
-    }
+  if(orbitState.drag)return;
+  const idx=intersectPoints();
+  if(idx>=0){
+    if(!clusterVis[labels[idx]])return;
+    if(e.shiftKey||e.ctrlKey||e.metaKey||selectMode)selected.has(idx)?selected.delete(idx):selected.add(idx);
+    else{selected.clear();selected.add(idx);}
     updateSelectionUI();
-  } else if (!e.shiftKey && !e.ctrlKey && !e.metaKey) {
-    clearSelection();
-  }
+  }else if(!e.shiftKey&&!e.ctrlKey)clearSelection();
 });
+function clearSelection(){selected.clear();updateSelectionUI();}
 
-function clearSelection() {
-  selected.clear();
-  updateSelectionUI();
-}
+// ── EXPORT ───────────────────────────────────────────────────────────────
+function getSelected(){return[...selected].sort((a,b)=>a-b).map(i=>tracks[i]);}
+function exportSelectedCSV(){const s=getSelected();if(!s.length)return alert("No tracks selected");dl('track_path\n'+s.map(t=>'"'+t.replace(/"/g,'""')+'"').join('\n'),"selection.csv","text/csv");}
+function exportSelectedM3U(){const s=getSelected();if(!s.length)return alert("No tracks selected");dl("#EXTM3U\n"+s.join("\n"),"selection.m3u","audio/x-mpegurl");}
+function dl(text,name,mime){const a=Object.assign(document.createElement("a"),{href:URL.createObjectURL(new Blob([text],{type:mime})),download:name});document.body.appendChild(a);a.click();document.body.removeChild(a);}
 
-// ═══════════════════════════════════════════════════════════════════════════
-// EXPORT
-// ═══════════════════════════════════════════════════════════════════════════
-function getSelectedTracks() {
-  return [...selected].sort((a, b) => a - b).map(i => tracks[i]);
-}
-
-function exportSelectedCSV() {
-  const sel = getSelectedTracks();
-  if (sel.length === 0) { alert("No tracks selected"); return; }
-
-  let csv = "track_path\n";
-  sel.forEach(t => { csv += '"' + t.replace(/"/g, '""') + '"\n'; });
-
-  downloadText(csv, "cluster_selection.csv", "text/csv");
-}
-
-function exportSelectedM3U() {
-  const sel = getSelectedTracks();
-  if (sel.length === 0) { alert("No tracks selected"); return; }
-
-  let m3u = "#EXTM3U\n";
-  sel.forEach(t => { m3u += t + "\n"; });
-
-  downloadText(m3u, "cluster_selection.m3u", "audio/x-mpegurl");
-}
-
-function downloadText(text, filename, mime) {
-  const blob = new Blob([text], { type: mime });
-  const url  = URL.createObjectURL(blob);
-  const a    = document.createElement("a");
-  a.href = url;
-  a.download = filename;
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  URL.revokeObjectURL(url);
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-// LEGEND
-// ═══════════════════════════════════════════════════════════════════════════
-(function buildLegend() {
-  const legend = document.getElementById("legend");
-  const validClusters = uniqueLabels.filter(l => l >= 0);
-
-  validClusters.forEach(lbl => {
-    const count = labels.filter(l => l === lbl).length;
-    const c = clusterColors[lbl];
-    const hex = "#" + [c[0], c[1], c[2]].map(v => {
-      const h = Math.round(v * 255).toString(16);
-      return h.length === 1 ? "0" + h : h;
-    }).join("");
-
-    const item = document.createElement("div");
-    item.className = "legend-item";
-    item.innerHTML = `<span class="legend-swatch" style="background:${hex}"></span>
-      <span>Cluster ${lbl} (${count})</span>`;
-    item.addEventListener("click", () => {
-      clusterVisibility[lbl] = !clusterVisibility[lbl];
-      item.classList.toggle("hidden", !clusterVisibility[lbl]);
-      updatePointAppearance();
-    });
-    legend.appendChild(item);
+// ── LEGEND ───────────────────────────────────────────────────────────────
+(()=>{
+  const leg=document.getElementById("legend");
+  posLabels.forEach(lbl=>{
+    const cnt=idxsFor(lbl).length,hex=rgbHex(clusterColors[lbl]);
+    const div=document.createElement("div");div.className="legend-item";
+    div.innerHTML=`<span class="legend-swatch" style="background:${hex};box-shadow:0 0 7px ${hex}99"></span><span>Cluster ${lbl} <span style="color:#4a1a0a">(${cnt})</span></span>`;
+    div.addEventListener("click",()=>{clusterVis[lbl]=!clusterVis[lbl];div.classList.toggle("hidden",!clusterVis[lbl]);updatePointAppearance();});
+    leg.appendChild(div);
   });
-
-  const noiseCount = labels.filter(l => l < 0).length;
-  if (noiseCount > 0) {
-    const item = document.createElement("div");
-    item.className = "legend-item";
-    item.innerHTML = `<span class="legend-swatch" style="background:#666"></span>
-      <span>Noise (${noiseCount})</span>`;
-    item.addEventListener("click", () => {
-      clusterVisibility[-1] = !clusterVisibility[-1];
-      item.classList.toggle("hidden", !clusterVisibility[-1]);
-      updatePointAppearance();
-    });
-    legend.appendChild(item);
+  const nc=[...idxByLabel.keys()].filter(l=>l<0).reduce((s,l)=>s+idxsFor(l).length,0);
+  if(nc>0){
+    const div=document.createElement("div");div.className="legend-item";
+    div.innerHTML=`<span class="legend-swatch" style="background:#663322"></span><span>Noise <span style="color:#4a1a0a">(${nc})</span></span>`;
+    div.addEventListener("click",()=>{clusterVis[-1]=!clusterVis[-1];div.classList.toggle("hidden",!clusterVis[-1]);updatePointAppearance();});
+    leg.appendChild(div);
   }
 })();
 
-// ═══════════════════════════════════════════════════════════════════════════
-// BUTTONS
-// ═══════════════════════════════════════════════════════════════════════════
-function setCameraView(theta, phi) {
-  orbitState.spherical.theta = theta;
-  orbitState.spherical.phi = phi;
+// ── BUTTONS ──────────────────────────────────────────────────────────────
+let axesOn=true,gridOn=true,ringsOn=true;
+document.getElementById("btn-reset").addEventListener("click", triggerIntro);
+document.getElementById("btn-top").addEventListener("click",  ()=>{orbitState.spherical.theta=0;orbitState.spherical.phi=0.01;});
+document.getElementById("btn-front").addEventListener("click",()=>{orbitState.spherical.theta=0;orbitState.spherical.phi=Math.PI/2;});
+document.getElementById("btn-side").addEventListener("click", ()=>{orbitState.spherical.theta=Math.PI/2;orbitState.spherical.phi=Math.PI/2;});
+document.getElementById("btn-axes").addEventListener("click",function(){axesOn=!axesOn;axesGroup.visible=axesOn;this.classList.toggle("active",axesOn);});
+document.getElementById("btn-grid").addEventListener("click",function(){gridOn=!gridOn;gridGroup.visible=gridOn;this.classList.toggle("active",gridOn);});
+document.getElementById("btn-rings").addEventListener("click",function(){ringsOn=!ringsOn;ringsGroup.visible=ringsOn;this.classList.toggle("active",ringsOn);});
+document.getElementById("btn-select").addEventListener("click",function(){selectMode=!selectMode;this.classList.toggle("active",selectMode);this.textContent=selectMode?"Select ✓":"Select";});
+document.getElementById("btn-export-csv").addEventListener("click",exportSelectedCSV);
+document.getElementById("btn-export-m3u").addEventListener("click",exportSelectedM3U);
+document.getElementById("slider-spread").addEventListener("input",function(){
+  spreadScale=parseFloat(this.value)*spreadMul;
+  document.getElementById("spread-val").textContent=spreadScale.toFixed(spreadScale<10?1:0)+"×";
+  applySpread();
+});
+[1,10,30,50,100].forEach(mul=>{
+  document.getElementById(`mul-${mul}`).addEventListener("click",function(){
+    spreadMul=mul;
+    const raw=parseFloat(document.getElementById("slider-spread").value);
+    spreadScale=raw*spreadMul;
+    document.getElementById("spread-val").textContent=spreadScale.toFixed(spreadScale<10?1:0)+"×";
+    [1,10,30,50,100].forEach(m=>document.getElementById(`mul-${m}`).classList.toggle("active",m===mul));
+    applySpread();
+  });
+});
+
+// ── HUD ──────────────────────────────────────────────────────────────────
+document.getElementById("stats-text").textContent=`${N.toLocaleString()} tracks · ${posLabels.length} clusters · ${window.isImported ? 'imported data' : 'sample data'}`;
+
+function initScene(clusterData) {
+    // This will be populated with scene generation logic.
 }
 
-document.getElementById("btn-reset").addEventListener("click", () => {
-  orbitState.target.set(0, 0, 0);
-  orbitState.spherical.set(SCALE * 1.2, Math.PI / 4, Math.PI / 4);
+// ── DATA IMPORT ────────────────────────────────────────────────────────
+document.getElementById("btn-import-json").addEventListener("click", () => {
+    document.getElementById("json-importer").click();
 });
 
-document.getElementById("btn-top").addEventListener("click",   () => setCameraView(0, 0.01));
-document.getElementById("btn-front").addEventListener("click", () => setCameraView(0, Math.PI / 2));
-document.getElementById("btn-side").addEventListener("click",  () => setCameraView(Math.PI / 2, Math.PI / 2));
+document.getElementById("json-importer").addEventListener("change", e => {
+    const file = e.target.files[0];
+    if (!file) return;
 
-document.getElementById("btn-select").addEventListener("click", function() {
-  selectMode = !selectMode;
-  this.classList.toggle("active", selectMode);
-  this.textContent = selectMode ? "Select (ON)" : "Select";
+    const reader = new FileReader();
+    reader.onload = function(event) {
+        try {
+            // Validate the file is parseable as JSON before reloading
+            JSON.parse(event.target.result);
+            sessionStorage.setItem('importedClusterData', event.target.result);
+            window.location.reload();
+        } catch (err) {
+            alert(`Could not parse file. Please ensure it is a valid JSON file.\n\nError: ${err.message}`);
+        }
+        // Clear value to allow re-importing the same file
+        e.target.value = '';
+    };
+    reader.onerror = () => {
+        alert("Error reading file.");
+    };
+    reader.readAsText(file);
 });
 
-document.getElementById("btn-export-csv").addEventListener("click", exportSelectedCSV);
-document.getElementById("btn-export-m3u").addEventListener("click", exportSelectedM3U);
+triggerIntro();
 
-// ═══════════════════════════════════════════════════════════════════════════
-// HUD STATS
-// ═══════════════════════════════════════════════════════════════════════════
-const nClusters = uniqueLabels.filter(l => l >= 0).length;
-document.getElementById("stats-text").textContent =
-  `${N.toLocaleString()} tracks · ${nClusters} cluster${nClusters !== 1 ? "s" : ""}` +
-  (CLUSTER_DATA.X_downsampled ? ` (downsampled from ${CLUSTER_DATA.X_total_points.toLocaleString()})` : "");
-
-// ═══════════════════════════════════════════════════════════════════════════
-// RENDER LOOP
-// ═══════════════════════════════════════════════════════════════════════════
-function animate() {
+// ── RENDER LOOP ──────────────────────────────────────────────────────────
+let t=0;
+(function animate(){
   requestAnimationFrame(animate);
-  updateOrbit();
-  renderer.render(scene, camera);
-}
-animate();
 
-// Handle window resize
-window.addEventListener("resize", () => {
-  camera.aspect = window.innerWidth / window.innerHeight;
-  camera.updateProjectionMatrix();
-  renderer.setSize(window.innerWidth, window.innerHeight);
+  // ── INTRO/RESET ANIMATIONS ─────────────────────────────────────────────
+  if (introPlaying && introStart) {
+    const elapsedSinceTrigger = performance.now() - introStart;
+
+    // Wait 1 second before starting the spread animation
+    if (elapsedSinceTrigger >= 1000) {
+        const animationTime = elapsedSinceTrigger - 1000;
+        const progress = Math.min(animationTime / INTRO_DURATION, 1);
+
+        // Ease-out cubic for spread
+        const easedProgress = 1 - Math.pow(1 - progress, 3);
+        let currentSpread = easedProgress * SPREAD_TARGET;
+        
+        // Safeguard: Ensure multiplier is 1x during animation.
+        if (spreadMul !== 1) {
+            [1,10,30,50,100].forEach(m=>document.getElementById(`mul-${m}`).classList.toggle("active",m===1));
+            spreadMul = 1;
+        }
+
+        spreadScale = currentSpread;
+        
+        // Update UI elements in real-time
+        document.getElementById("slider-spread").value = currentSpread;
+        document.getElementById("spread-val").textContent = currentSpread.toFixed(1) + "×";
+        
+        applySpread();
+        
+        if (progress === 1) {
+          introPlaying = false;
+          // Ensure final state is perfectly aligned
+          spreadScale = SPREAD_TARGET;
+          document.getElementById("slider-spread").value = SPREAD_TARGET;
+          document.getElementById("spread-val").textContent = SPREAD_TARGET.toFixed(1) + "×";
+          applySpread();
+        }
+    }
+  }
+
+  if (autoRotate) {
+    if (autoRotateFading) {
+      const fadeElapsed = performance.now() - autoRotateFadeStart;
+      const fadeProgress = Math.min(fadeElapsed / 500, 1); // 500ms fade
+      // Ease-out quad for fade
+      const currentSpeed = autoRotateSpeed * (1 - fadeProgress * fadeProgress); 
+      orbitState.spherical.theta += currentSpeed;
+      if (fadeProgress === 1) {
+        autoRotate = false;
+        autoRotateFading = false;
+      }
+    } else {
+      orbitState.spherical.theta += autoRotateSpeed;
+    }
+  }
+  // ── END ANIMATIONS ─────────────────────────────────────────────────────
+
+  t+=0.007;
+  // Orbit the two point lights around the cluster cloud
+  light1.position.set(Math.cos(t*0.4)*S*0.8, S*0.3+Math.sin(t*0.3)*S*0.2, Math.sin(t*0.4)*S*0.8);
+  light2.position.set(Math.cos(t*0.4+Math.PI)*S*0.7, -S*0.1+Math.cos(t*0.5)*S*0.2, Math.sin(t*0.4+Math.PI)*S*0.7);
+  // Scale fog density inversely with spread so distant points stay visible
+  scene.fog.density = 0.0004 / Math.max(1, spreadScale * 0.5);
+  ringsGroup.children.forEach((r,i)=>{r.rotation.y=t*0.1*(i%2===0?1:-1);});
+  updateOrbit();
+  renderBloom();
+})();
+
+window.addEventListener("resize",()=>{
+  camera.aspect=innerWidth/innerHeight;camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth,innerHeight);
+  mainRT.setSize(innerWidth,innerHeight);
+  bloomRT1.setSize(innerWidth/2,innerHeight/2);
+  bloomRT2.setSize(innerWidth/2,innerHeight/2);
+  blurHMat.uniforms.resolution.value.set(innerWidth/2,innerHeight/2);
 });
 </script>
 </body>
