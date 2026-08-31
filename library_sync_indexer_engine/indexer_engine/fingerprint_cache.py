@@ -3,7 +3,7 @@ import sqlite3
 import time
 from typing import Callable, Optional
 from functools import lru_cache
-from utils.path_helpers import ensure_long_path
+from .utils.path_helpers import ensure_long_path
 
 verbose: bool = True
 

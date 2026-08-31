@@ -31,9 +31,6 @@ if sys.platform == "win32":
         except Exception:
             pass
 
-import tkinter as tk
-from tkinter import filedialog
-
 import musicbrainzngs
 from utils.audio_metadata_reader import read_tags
 try:
@@ -202,6 +199,9 @@ def process_file(filepath, logfile):
 
 
 def main():
+    import tkinter as tk
+    from tkinter import filedialog
+
     root = tk.Tk()
     try:
         root.tk.call('tk', 'scaling', 1.5)

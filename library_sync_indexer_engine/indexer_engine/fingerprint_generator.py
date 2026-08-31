@@ -16,7 +16,7 @@ def _with_thresh(func, *args, silence_threshold_db: float = SILENCE_THRESH, **kw
         return func(*args, silence_thresh=silence_threshold_db, **kwargs)
 from concurrent.futures import ProcessPoolExecutor
 import acoustid
-from utils.path_helpers import ensure_long_path
+from .utils.path_helpers import ensure_long_path
 import audio_norm
 
 SUPPORTED_EXTS = {".flac", ".m4a", ".aac", ".mp3", ".wav", ".ogg"}
