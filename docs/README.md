@@ -10,20 +10,6 @@ A quick-reference list of what's broken or not yet built, ordered by how urgent 
 close-to-done each item is. See **[ROADMAP.md](ROADMAP.md)** for the full list,
 including lower-priority housekeeping items.
 
-- **Two confirmed crash bugs** *(Bug — fix these first).* The Duplicate Pair Report
-  tool and the Cluster Quality Report dialog both raise an unhandled error and fail
-  every time they're opened against real data, due to small internal mistakes (a
-  list treated as a dict; a call to a method that doesn't exist under that name).
-  Neither affects the main duplicate-scan or clustering workflows — only these two
-  specific report/inspection views.
-
-- **Visual Music Graph — the in-app 2-D interactive map is built but entirely
-  unreachable** *(Backend ready, not connected — now the single biggest "almost
-  done" item in the project).* Four real widgets exist — an interactive scatter
-  plot with lasso/rectangle selection, a 3-D OpenGL scatter, a cluster legend, and a
-  track-details panel — and none of them are wired into the Music Graph workspace.
-  Today, that workspace only opens a separate browser-based 3-D view.
-
 - **Clustering — extra sound features** *(Partially built).* The wizard shows
   checkboxes for harmonic content, brightness, and percussive density, but the engine
   currently clusters on **timbre (MFCC) and tempo only**. Those checkboxes are UI

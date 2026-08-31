@@ -265,16 +265,6 @@ second pass found and corrected substantial drift, especially in
 See `docs/ROADMAP.md` for the full, maintained list, including a "Known bugs"
 section kept separate from planned-but-unbuilt features. Summary:
 
-- **Two confirmed crash bugs:** `duplicate_consolidation.build_duplicate_pair_report()`
-  always raises `AttributeError` (calls `.items()` on a list). The Cluster Quality
-  Report dialog (`gui/dialogs/cluster_quality_report_dialog.py`) calls a
-  nonexistent method (`_create_cluster_card` instead of the real
-  `_build_cluster_card`) and fails to render its per-cluster section on any
-  real result. Fix these before adding new features in either area.
-- **`plugins/acoustid_plugin.py` and `controllers/library_index_controller.py`
-  import `tkinter` directly** — a violation of the "no Tkinter in backend
-  modules" rule above, and the reason `tests/test_musicbrainz_service.py`
-  fails on systems without a Tkinter install.
 - **Metadata provider breadth:** Only AcoustID, MusicBrainz, and Last.fm are fully
   wired end-to-end. Spotify and Gracenote are listed in `config.SUPPORTED_SERVICES`
   and have stub functions in `metadata_service.py` that return `{}` (placeholders,
@@ -291,12 +281,17 @@ section kept separate from planned-but-unbuilt features. Summary:
   plan building. Remaining limitation: one-at-a-time flagging; no bulk flag yet.
 - **Library Sync Export Report:** ✅ IMPLEMENTED. A real "Export Report" button in
   the Qt workspace writes HTML, JSON, or CSV via `library_sync_review_report.py`.
-- **Library Sync has two separately-maintained engine copies:** `library_sync.py`
-  imports its scanning/fingerprinting logic from a vendored copy under
-  `library_sync_indexer_engine/`, not from the root-level `music_indexer_api.py` /
-  `fingerprint_cache.py`. The two have already drifted (see repo layout above and
-  `docs/architecture.md`). A fix to the root modules does not automatically apply
-  to Library Sync.
+- **Library Sync has two separately-maintained engine copies** — and this is
+  *settled, not debt to pay down.* `library_sync.py` imports its
+  scanning/fingerprinting logic from a vendored copy under
+  `library_sync_indexer_engine/`, a leftover from the project's earlier
+  (Tkinter-era) generation; the root-level `music_indexer_api.py` /
+  `fingerprint_cache.py` are the ones that kept evolving. **The root-level engine
+  is canonical for new work; leave the vendored copy alone unless you are
+  specifically changing it.** Unifying them is explicitly not planned. The one
+  consequence to remember: a fix to a root module does not reach Library Sync
+  automatically — port it across deliberately if Library Sync needs it. See
+  `docs/architecture.md`.
 - **Genre canonicalization only exists in the legacy Tkinter app.** The Qt
   "Genre Normalizer" workspace is a much simpler MusicBrainz top-3-tags fetcher
   with no mapping step; two of its controls (Overwrite, Source selector) have no
@@ -304,12 +299,17 @@ section kept separate from planned-but-unbuilt features. Summary:
 - **Clustering features:** the engine currently clusters on timbre (MFCC) + tempo;
   the wizard's chroma/spectral/onset checkboxes are UI scaffolding not yet wired into
   feature extraction.
-- **The in-app 2-D interactive graph is fully built but entirely unwired.** Four
-  real widgets (`InteractiveScatterPlot`, `Interactive3DScatterPlot`,
-  `ClusterLegendWidget`, `TrackDetailsPanel`) exist under `gui/widgets/` but are
-  never imported by the Music Graph workspace, which today only launches a
-  browser-based 3-D view. This is now the single biggest "backend/widget ready,
-  not connected" item in the project — see `docs/ROADMAP.md`.
+- **The in-app 2-D interactive graph is built and wired.** `gui/workspaces/graph.py`
+  embeds `InteractiveScatterPlot` + `ClusterLegendWidget` + `TrackDetailsPanel`;
+  data loading/validation/export lives in the Qt-free `cluster_graph_data.py` (tested
+  in `tests/test_cluster_graph_data.py`). `Interactive3DScatterPlot` remains unused —
+  the 3-D view users reach is the browser page from `cluster_graph_3d.py`.
+- **Cluster payload arrays are index-aligned, and must stay that way.**
+  `X_2d`/`X_3d`/`labels`/`tracks` in `Docs/cluster_info.json` are consumed
+  positionally. `clustered_playlists` previously subset the coordinates when
+  downsampling (>5,000 tracks) without subsetting labels/tracks, which broke the 3-D
+  generator outright and would have mislabelled points. If you touch that block,
+  keep every array subset together.
 - **Several UI controls across the app are decorative** (built, but not read by
   the code they appear to control) — the Duplicates workspace's per-group
   disposition combo, the Genre Normalizer's Overwrite/Source controls, the

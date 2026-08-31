@@ -92,6 +92,41 @@ def test_render_html_embeds_data(cluster_data):
     assert '"tracks"' in html
 
 
+def test_render_html_data_substitution_is_syntactically_clean(cluster_data):
+    """The injected assignment must be valid JS, not ``= {...}null;``.
+
+    Regression test: the placeholder used to be substituted by replacing only
+    the ``/*__CLUSTER_DATA__*/`` comment, which left the trailing ``null``
+    behind and produced ``const INJECTED = {...}null;`` — a syntax error that
+    stopped the entire page from running. Every other assertion in this module
+    is a substring check, so none of them noticed.
+    """
+    html = _render_html(cluster_data)
+
+    # No placeholder residue of any kind.
+    assert "__CLUSTER_DATA__" not in html
+
+    # Find the injected assignment and check it terminates cleanly.
+    line = next(
+        (ln for ln in html.splitlines() if "const INJECTED" in ln), None
+    )
+    assert line is not None, "injected data assignment not found"
+    stripped = line.strip()
+    assert stripped.endswith("};"), f"malformed assignment: ...{stripped[-40:]!r}"
+    assert "null" not in stripped.split("=", 1)[1][:20], (
+        "leftover 'null' immediately after the substituted JSON"
+    )
+
+
+def test_render_html_raises_if_placeholder_missing(monkeypatch, cluster_data):
+    """A template without the placeholder must fail loudly, not ship sample data."""
+    import cluster_graph_3d as mod
+
+    monkeypatch.setattr(mod, "_HTML_TEMPLATE", "<html>no placeholder here</html>")
+    with pytest.raises(RuntimeError, match="placeholder"):
+        mod._render_html(cluster_data)
+
+
 def test_render_html_has_controls(cluster_data):
     html = _render_html(cluster_data)
     assert "btn-reset" in html

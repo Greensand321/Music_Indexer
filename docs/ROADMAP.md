@@ -22,60 +22,85 @@ grouped by area and, within each area, roughly ordered from "smallest / most rea
 
 ## Recently completed
 
-Two items that used to appear on this list are done and have been removed from the
-body below:
+These items used to appear on this list and are done, so they've been removed from
+the body below:
 
 - **Library Sync's Export Report button** is wired — a real "📤 Export Report" button
   in the Library Sync workspace saves HTML, JSON, or CSV reports.
 - **Metadata settings honesty** — the Settings dialog now shows Spotify and Gracenote
   visibly but disabled, with a tooltip explaining they aren't implemented, instead of
   silently omitting them or listing them as if they worked.
+- **The Duplicate Pair Report crash is fixed.** `build_duplicate_pair_report()` was
+  calling `.items()` on the list returned by `_build_metadata_buckets()`, so it
+  raised `AttributeError` on every single invocation. It now looks each track's
+  bucket up by path and reads the bucket's metadata key, matching the
+  `tuple[str, str] | None` type `DuplicatePairReport` already declared. The HTML
+  pair report, which was unreachable as a result, now renders too.
+- **The Cluster Quality Report crash is fixed.** The dialog called
+  `_create_cluster_card()`; the real method is `_build_cluster_card()`. The
+  per-cluster breakdown now renders against real results.
+- **`plugins/` and `controllers/` no longer import Tkinter.** The legacy
+  `MetadataServiceConfigFrame` moved out of `plugins/acoustid_plugin.py` into
+  `metadata_config_frame.py` at the repo root (alongside `library_sync_review.py`,
+  the project's other legacy Tkinter panel), and
+  `controllers/library_index_controller.generate_index()` no longer pops its own
+  `messagebox` — it returns the output path and the legacy GUI reports it. Both
+  modules now import headlessly, which un-breaks
+  `tests/test_musicbrainz_service.py` on machines without a system Tkinter.
+- **The "Open Visual Graph" button navigates.** `WorkspaceBase` gained a
+  `navigate_requested(key)` signal that the main window connects for every
+  workspace; the Clustered workspace emits it instead of showing a message box
+  telling you to click the sidebar yourself.
+- **The 3-D browser graph was generating invalid JavaScript, and is fixed.**
+  `_render_html()` substituted only the `/*__CLUSTER_DATA__*/` comment, leaving
+  the template's trailing `null` in place and emitting
+  `const CLUSTER_DATA = {...}null;` — a syntax error that stopped the whole page
+  running. Substitution now consumes the `null`, `_render_html()` raises if the
+  placeholder is missing rather than silently shipping sample data, and there are
+  two new tests: one asserting the injected assignment is syntactically clean and
+  one asserting the loud failure. (Every other test in that module is a substring
+  check, which is exactly why this shipped unnoticed.)
+- **The in-app 2-D interactive map is built and reachable.** The Music Graph
+  workspace now embeds a live scatter plot alongside the cluster legend and a track
+  details panel, instead of only launching a browser page. Pan / rectangle / lasso
+  selection (Ctrl or Shift to add), hover to identify, click for full tags and cover
+  art, click a legend row to select a whole cluster, and send a selection straight to
+  the Player or export it as CSV or `.m3u`. The four widgets that had been sitting
+  unused were substantially reworked rather than merely connected — see the report
+  in the commit for what was wrong with each.
+- **Cluster data is no longer misaligned when downsampled.** For libraries above
+  5,000 tracks, `clustered_playlists` wrote subsetted `X_2d`/`X_3d` alongside
+  *full-length* `labels` and `tracks`. That made `cluster_info.json` internally
+  inconsistent: the 3-D generator rejected it outright ("Length mismatch"), so the
+  browser graph simply never worked on a large library, and any index-based lookup
+  would have mapped a point to the wrong song. Labels and tracks are now subset with
+  the coordinates, and the original positions are recorded in `X_indices`.
+- **The 3-D graph template was upgraded to the `alphadex3` design.** Adds spread
+  control (slider + 1×/10×/30×/50×/100× presets), axes / grid / orbit-ring
+  toggles, a richer tooltip, a vignette, and JSON import, on top of the existing
+  orbit / hover / select / CSV+M3U export. Cluster membership is now bucketed in a
+  single pass instead of rescanning the full label array once per cluster, which
+  had made legend and centroid construction O(clusters x points).
 
 ---
 
-## Known bugs (fix before building anything new here)
+## Settled decisions (recorded so they don't get re-raised)
 
-- **The Duplicate Pair Report tool crashes every time it's used** *(Bug).* The
-  function that inspects a specific pair of duplicate files
-  (`build_duplicate_pair_report` in `duplicate_consolidation.py`) raises an
-  unhandled `AttributeError` internally — it calls `.items()` on a list, expecting a
-  dict, when looking up which metadata bucket each track belongs to. This doesn't
-  affect the main scan → group → execute duplicate-finding workflow, only the
-  standalone "inspect this pair" diagnostic reachable from the legacy app.
-
-- **The Cluster Quality Report dialog crashes on real data** *(Bug).* The dialog
-  meant to show Silhouette / Davies-Bouldin / Calinski-Harabasz scores plus a
-  per-cluster breakdown (`ClusterQualityReportDialog` in
-  `gui/dialogs/cluster_quality_report_dialog.py`) calls a method,
-  `_create_cluster_card`, that doesn't exist — the real method is named
-  `_build_cluster_card`. The dialog will fail to render its per-cluster section any
-  time it's opened against an actual (non-empty) clustering result, which is the
-  normal case. The scoring math itself is unaffected; only this display is broken.
-
-- **`plugins/acoustid_plugin.py` imports `tkinter` directly**, and so does
-  `controllers/library_index_controller.py` *(Bug / architecture-rule violation).*
-  Both are backend/plugin modules that this project's own conventions say should be
-  importable without a GUI toolkit attached — `plugins/` in particular is meant to
-  be pure lookup logic. In practice this means importing `plugins.acoustid_plugin`
-  fails outright in any environment without Tkinter installed (this is not
-  theoretical — it currently breaks `tests/test_musicbrainz_service.py` on any
-  machine without a system Tkinter), and it silently ties a "backend" module to a
-  GUI toolkit that the modern Qt app doesn't otherwise use at all.
+- **The two indexer engines stay as they are.** Library Sync runs a vendored copy of
+  the scanning/fingerprinting engine (`library_sync_indexer_engine/`) rather than the
+  root-level modules the Indexer and Duplicate Finder use. This is a leftover from
+  the project's two-generation history — an earlier program built around the legacy
+  Tkinter interface, and the current iteration that became the modern Qt app — not a
+  deliberate design decision. **The root-level engine is canonical for all new work;
+  the vendored copy is left alone unless we're specifically making changes to it.**
+  Unifying them is explicitly *not* planned; the only thing to remember is that a fix
+  to a root module doesn't reach Library Sync automatically, so port it across
+  deliberately if Library Sync specifically needs it. See **architecture.md** for the
+  full picture.
 
 ---
 
 ## Library Sync
-
-- **Reconcile the vendored indexer engine** *(Housekeeping / architecture debt).*
-  Library Sync runs its own separately-maintained copy of the
-  scanning/fingerprinting engine (`library_sync_indexer_engine/`) rather than the
-  same modules the Indexer and Duplicate Finder use. The two copies have already
-  drifted — most notably, the vendored fingerprint cache has none of the background
-  writer thread, WAL mode, or extended metadata columns the main cache has grown.
-  No comment or commit anywhere explains why the split exists. At minimum, this
-  should be documented as a load-bearing decision (if it's meant to stay that way)
-  or unified into one engine (if it isn't). See **architecture.md** for the full
-  detail.
 
 - **Wire or remove the "Replace All" / "Replace with Better" report actions**
   *(Backend ready, not connected — but only half-built).* The exported HTML review
@@ -112,24 +137,8 @@ body below:
 
 ## Playlists, Clustering & the Visual Music Graph
 
-This is the area with the largest gap between vision and current reality — larger
-than previously documented, now that a full re-verification found the in-app graph
-widgets are built but entirely unreachable.
-
-- **Wire the built-but-orphaned in-app 2-D interactive graph** *(Backend ready, not
-  connected — the single biggest "almost done" item in the whole project now that
-  Export Report is finished).* Four real, working widgets exist —
-  `InteractiveScatterPlot` (lasso/rectangle selection, hover tooltips),
-  `Interactive3DScatterPlot`, `ClusterLegendWidget` (per-cluster show/hide), and
-  `TrackDetailsPanel` — and none of them are imported by the Music Graph workspace or
-  anything else you can reach from the sidebar. Today, "Music Graph" only opens a
-  browser-based 3-D view. Connecting these widgets to the workspace requires no new
-  feature work, only wiring.
-
-- **Fix the "Open Visual Graph" button's navigation** *(Bug-adjacent housekeeping).*
-  The button inside the Clustered workspace's Results tab doesn't navigate to the
-  Music Graph workspace — it shows a message box asking you to click the sidebar
-  yourself, with a `TODO` marking the unbuilt cross-workspace signal.
+The foundation and the in-app map are now built; the remaining work is the richer
+editing and tuning layer on top of them.
 
 - **Retire the dead `clustered.py` workspace** *(Housekeeping).* An older, simpler
   clustering workspace still exists in the repository but is unreachable — the
@@ -151,11 +160,9 @@ widgets are built but entirely unreachable.
   say, "make eight groups instead of six" — and watch the map re-form in near real time,
   without recomputing every track's sound profile from scratch.
 
-- **Advanced selection tools** *(Designed, not started).* Richer ways to pick tracks off
-  the visual map: free-form lasso, rectangle, distance-from-a-point, and filtering by
-  metadata (artist, genre). (Note: the lasso/rectangle selection logic already exists
-  inside the orphaned `InteractiveScatterPlot` widget above — wiring that widget in is
-  a prerequisite for this item, not a separate build.)
+- **Advanced selection tools** *(Partially built).* Lasso and rectangle selection
+  now work in the in-app map, with Ctrl/Shift to add to a selection. Still to come:
+  select-by-distance-from-a-point and filtering the map by metadata (artist, genre).
 
 - **In-map cluster editing** *(Designed, not started).* Hands-on refinement of the
   groups after the fact: merging two clusters, moving a track from one cluster to
@@ -166,9 +173,8 @@ widgets are built but entirely unreachable.
   them."
 
 - **One-click quality-report export** *(Designed, not started).* Saving the clustering
-  quality report as a shareable document (web page or PDF) — worth sequencing after
-  the Cluster Quality Report bug fix above, since there's little point exporting a
-  report that currently fails to render.
+  quality report as a shareable document (web page or PDF). Now unblocked — the
+  dialog it would export renders correctly again.
 
 - **A genuine chronological/"year-gap" playlist tool doesn't exist** *(Designed, not
   started).* Earlier documentation described a "year-gap assistant" that helps build
@@ -263,16 +269,19 @@ widgets are built but entirely unreachable.
 
 If you've been away and want the shortest path back to momentum:
 
-1. **Fix the two known bugs first** (Duplicate Pair Report, Cluster Quality Report) —
-   both are small, isolated, and currently mean a tool silently fails the moment you
-   try to use it.
-2. **Wire the in-app 2-D interactive graph.** It's now the single largest "everything
-   is already built, it just isn't connected" item in the project, having taken over
-   that role from the (now-finished) Export Report button.
-3. **Treat the rest of the Visual Music Graph's deeper interactivity — live tuning,
-   advanced selection, cluster editing — as the big, deliberate project it always
-   was.** It's still the area with the most outstanding work and the most upside; it
-   deserves to be scheduled as real feature work rather than squeezed in.
-4. **Everything under "Other / housekeeping" is safe to ignore indefinitely** — none
+1. **Wire the clustering wizard's remaining sound features into extraction.** The
+   checkboxes are already there and the clustering pipeline already accepts a
+   feature selection — this is the most visible remaining gap between what the UI
+   offers and what the engine does.
+2. **Treat the Visual Music Graph's deeper interactivity — live re-tuning, in-map
+   cluster editing, the suggestion engine — as the big, deliberate project it always
+   was.** The map itself now exists to build on, which makes these additions rather
+   than foundations.
+3. **Everything under "Other / housekeeping" is safe to ignore indefinitely** — none
    of it blocks normal use of the app. Pick it up only when you're already touching
    the relevant file for another reason.
+
+The bugs and gaps that used to head this list (Duplicate Pair Report, Cluster
+Quality Report, the Tkinter imports in `plugins/` and `controllers/`, the broken 3-D
+graph data injection, and the unreachable in-app map) are all fixed — see "Recently
+completed" above.

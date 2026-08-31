@@ -1,5 +1,4 @@
 import os
-from tkinter import messagebox
 from utils.audio_metadata_reader import read_tags
 
 SUPPORTED_EXTS = {".mp3", ".flac", ".m4a", ".aac", ".wav", ".ogg", ".opus"}
@@ -51,7 +50,12 @@ def extract_tags(path: str) -> dict:
 
 
 def generate_index(folder_path: str) -> str:
-    """Generate library_index.html for ``folder_path`` and return its path."""
+    """Generate library_index.html for ``folder_path`` and return its path.
+
+    Returns the output path so the caller can surface it however it likes. This
+    module deliberately shows no dialog of its own — reporting the result is the
+    UI layer's job (see the "GUI <-> backend separation" rule in CLAUDE.md).
+    """
     docs_dir = os.path.join(folder_path, "Docs")
     os.makedirs(docs_dir, exist_ok=True)
     entries = []
@@ -98,8 +102,4 @@ def generate_index(folder_path: str) -> str:
     out_path = os.path.join(docs_dir, "library_index.html")
     with open(out_path, "w", encoding="utf-8") as f:
         f.write("\n".join(html_lines))
-    messagebox.showinfo(
-        "Library Index Generated",
-        f"Your library index has been saved to:\n{out_path}"
-    )
     return out_path

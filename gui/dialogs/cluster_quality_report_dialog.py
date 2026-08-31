@@ -125,7 +125,7 @@ class ClusterQualityReportDialog(QtWidgets.QDialog):
         scroll_layout.setSpacing(6)
 
         for cluster_id, info in sorted(self._cluster_info.items()):
-            cluster_card = self._create_cluster_card(cluster_id, info)
+            cluster_card = self._build_cluster_card(cluster_id, info)
             scroll_layout.addWidget(cluster_card)
 
         scroll_layout.addStretch()

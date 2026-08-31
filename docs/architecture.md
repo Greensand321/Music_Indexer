@@ -73,14 +73,17 @@ and it exists for two concrete reasons:
 When you read the rule "business logic lives in the backend; the interface is
 display-only," this three-floor picture is what it is protecting.
 
-**One confirmed crack in the wall, worth knowing about:** `controllers/library_index_controller.py`
-is a backend/controller module that directly imports and calls `tkinter.messagebox`
-to show a result popup. It is the one place in the codebase that breaks the "no
-Tkinter in backend modules" rule stated later in this document. It is a small,
-self-contained violation (one tool, "Generate Library Index"), not a sign the rule
-has broken down elsewhere — but a future contributor extending that file should
-route the message back through a `log_callback` instead of adding more direct UI
-calls.
+**This rule is currently held everywhere**, but it has been broken before and the
+two repairs are worth knowing as precedent. `controllers/library_index_controller.py`
+used to import `tkinter.messagebox` and pop its own "here's where I saved it"
+dialog; it now simply returns the output path and lets the calling UI report it.
+`plugins/acoustid_plugin.py` used to carry a Tkinter configuration `Frame`
+alongside its lookup services, which made the whole plugin module unimportable on
+any machine without Tkinter — that widget now lives in `metadata_config_frame.py`
+at the repository root, next to `library_sync_review.py`, the project's other
+legacy Tkinter panel. Both fixes followed the same shape: **the backend computes
+and returns; the UI layer decides how to show it.** Reach for that shape rather
+than adding a dialog call to a backend module.
 
 ## Why long jobs run "in the background"
 
@@ -260,21 +263,35 @@ metadata columns (bitrate, codec, embedded tags, artwork) that the root
 vendored `music_indexer_api.py` is missing a few refinements (like richer
 collision-decision logging) that the root copy has picked up since.
 
-No comment anywhere in the codebase explains *why* this split exists — it isn't a
-documented design decision, and searching the project's git history turns up no
-earlier commit that explains it either. The one piece of evidence that someone
-noticed and cared about the drift is a single test
-(`tests/test_sanitize.py::test_engine_sanitize_matches_api_sanitize`) that loads both
-copies of `sanitize()` and asserts they still agree — a guard against exactly one
-function drifting, while the surrounding modules around it have already drifted
-regardless.
+**Why this exists:** the split is a leftover from the project's two-generation
+history, not a design decision made on purpose. AlphaDEX was effectively built
+twice — an earlier program (built around the now-legacy Tkinter interface, among
+other dated choices) and the current iteration that grew into the modern Qt app.
+The vendored `library_sync_indexer_engine/` copy is a snapshot carried over from
+that first generation; the root-level modules are the ones that kept evolving.
+Nothing in the code says this, which is why it reads as mysterious when you first
+trip over it — hence this note.
 
-**What this means in practice:** if you fix a bug or add a feature to the root
-`fingerprint_cache.py` or `near_duplicate_detector.py`, **Library Sync will not see
-it** unless you also apply the change to the vendored copy under
-`library_sync_indexer_engine/indexer_engine/`. This is the single most important
-"gotcha" for anyone extending the fingerprinting/caching layer, and it is tracked as
-an open item in **ROADMAP.md**.
+**The working rule that follows from that history:**
+
+- **The root-level engine is the canonical one.** New work, fixes, and features
+  belong in `music_indexer_api.py`, `fingerprint_cache.py`, and
+  `near_duplicate_detector.py`.
+- **Leave the vendored copy alone** unless you are deliberately making a change to
+  it. It is not a target for opportunistic refactoring, and there is no active plan
+  to unify the two — treating it as "debt to pay down" would be churn for its own
+  sake.
+- **Know the one real consequence:** a fix to a root-level module does **not**
+  reach Library Sync automatically. If you fix something in the root engine and you
+  specifically need Library Sync to get that fix too, you have to port it across
+  deliberately. That's the whole gotcha; it doesn't require any larger cleanup.
+
+One small piece of evidence that someone previously noticed the drift: a single
+test (`tests/test_sanitize.py::test_engine_sanitize_matches_api_sanitize`) loads
+both copies of `sanitize()` and asserts they still agree — a guard on exactly one
+function, while the modules around it have drifted freely. Keep that test passing
+if you touch `sanitize()`; don't read it as an aspiration to keep everything else
+in lockstep.
 
 A smaller, related gotcha: Tag Fixer and the Library Sync review panel both store
 their state in the same file, `Docs/.soundvault.db`, inside the library root. The

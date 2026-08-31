@@ -1,148 +1,195 @@
-"""Track details panel showing metadata for hovered/selected tracks."""
+"""Details panel for the track under the cursor or currently selected."""
 from __future__ import annotations
 
-from typing import Optional, Dict, List
+import os
+from typing import Dict, List, Optional
 
 from gui.compat import QtCore, QtGui, QtWidgets
 
+_ART_SIZE = 132
+
+#: Fields shown, in order, mapped to the labels used in the panel.
+_FIELDS = (
+    ("artist", "Artist"),
+    ("title", "Title"),
+    ("album", "Album"),
+    ("genre", "Genre"),
+    ("year", "Year"),
+    ("cluster", "Cluster"),
+)
+
 
 class TrackDetailsPanel(QtWidgets.QWidget):
-    """Shows track metadata when point is hovered or selected.
+    """Shows one track's artwork and tags.
 
-    Displays:
-    - Album art (if available)
-    - Artist, title, album
-    - Genre, BPM, duration
-    - Cluster assignment
+    Artwork is only read from disk when :meth:`set_track` is called with
+    ``load_art=True``. Hovering a scatter plot fires continuously, and decoding
+    an embedded cover on every hover would stutter the UI, so the graph hovers
+    with art off and turns it on when a point is actually selected.
     """
+
+    play_requested = QtCore.Signal(str)     # track path
+    reveal_requested = QtCore.Signal(str)   # track path
 
     def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(parent)
-
-        self._current_metadata: Dict | None = None
-
+        self._path: Optional[str] = None
+        self._metadata: Dict[str, object] = {}
         self._build_ui()
+        self.clear()
 
     def _build_ui(self) -> None:
-        """Build the UI."""
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
 
-        # Title
         title = QtWidgets.QLabel("Track Details")
-        title.setStyleSheet("font-weight: bold; font-size: 12px;")
+        title.setStyleSheet("font-weight:600;")
         layout.addWidget(title)
 
-        # Scroll area for details
-        scroll = QtWidgets.QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setStyleSheet("QScrollArea { border: 1px solid #ddd; }")
+        self._art = QtWidgets.QLabel()
+        self._art.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        self._art.setFixedHeight(_ART_SIZE)
+        self._art.setFrameShape(QtWidgets.QFrame.Shape.StyledPanel)
+        layout.addWidget(self._art)
 
-        # Content widget
-        content = QtWidgets.QWidget()
-        content_layout = QtWidgets.QVBoxLayout(content)
-        content_layout.setContentsMargins(8, 8, 8, 8)
-        content_layout.setSpacing(8)
+        form = QtWidgets.QFormLayout()
+        form.setContentsMargins(0, 0, 0, 0)
+        form.setSpacing(4)
+        form.setLabelAlignment(QtCore.Qt.AlignmentFlag.AlignRight)
+        self._values: Dict[str, QtWidgets.QLabel] = {}
+        for key, caption in _FIELDS:
+            value = QtWidgets.QLabel("—")
+            value.setWordWrap(True)
+            form.addRow(f"{caption}:", value)
+            self._values[key] = value
+        layout.addLayout(form)
 
-        # Album art placeholder
-        self._album_art = QtWidgets.QLabel()
-        self._album_art.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-        self._album_art.setStyleSheet("background-color: #eee; border: 1px solid #ddd;")
-        self._album_art.setMinimumHeight(120)
-        self._album_art.setMaximumHeight(120)
-        content_layout.addWidget(self._album_art)
+        self._path_label = QtWidgets.QLabel("")
+        self._path_label.setObjectName("statusHint")
+        self._path_label.setWordWrap(True)
+        layout.addWidget(self._path_label)
 
-        # Metadata fields
-        self._fields = {}
-        field_names = [
-            "artist",
-            "title",
-            "album",
-            "genres",
-            "bpm",
-            "duration",
-            "bitrate",
-            "cluster",
-        ]
+        buttons = QtWidgets.QHBoxLayout()
+        self.play_btn = QtWidgets.QPushButton("▶  Play")
+        self.play_btn.setToolTip("Play this track in the Player workspace")
+        self.play_btn.clicked.connect(self._emit_play)
+        self.reveal_btn = QtWidgets.QPushButton("Open folder")
+        self.reveal_btn.setToolTip("Open the folder containing this track")
+        self.reveal_btn.clicked.connect(self._emit_reveal)
+        buttons.addWidget(self.play_btn)
+        buttons.addWidget(self.reveal_btn)
+        layout.addLayout(buttons)
 
-        for field_name in field_names:
-            field_layout = QtWidgets.QHBoxLayout()
-            field_layout.setSpacing(8)
+        layout.addStretch(1)
 
-            label = QtWidgets.QLabel(f"{field_name.title()}:")
-            label.setStyleSheet("font-weight: bold; width: 80px; font-size: 11px;")
-            label.setMinimumWidth(80)
-            field_layout.addWidget(label, 0)
+    # ── Population ────────────────────────────────────────────────────────
 
-            value_label = QtWidgets.QLabel("")
-            value_label.setStyleSheet("font-size: 11px; color: #333;")
-            value_label.setWordWrap(True)
-            field_layout.addWidget(value_label, 1)
-
-            content_layout.addLayout(field_layout)
-            self._fields[field_name] = value_label
-
-        content_layout.addStretch()
-        scroll.setWidget(content)
-        layout.addWidget(scroll, 1)
-
-        # Action buttons
-        button_layout = QtWidgets.QHBoxLayout()
-        button_layout.setSpacing(4)
-
-        self.play_btn = QtWidgets.QPushButton("▶ Play")
-        self.play_btn.setToolTip("Play this track")
-        button_layout.addWidget(self.play_btn)
-
-        self.details_btn = QtWidgets.QPushButton("ℹ Details")
-        self.details_btn.setToolTip("Open full track details")
-        button_layout.addWidget(self.details_btn)
-
-        layout.addLayout(button_layout)
-
-        self.setLayout(layout)
-        self._clear_display()
-
-    def set_track(self, metadata: Dict | None) -> None:
-        """Set displayed track metadata.
-
-        Parameters
-        ----------
-        metadata : dict or None
-            Track metadata dict with keys: artist, title, album, genres, bpm, etc.
-        """
-        self._current_metadata = metadata
-
-        if metadata is None:
-            self._clear_display()
+    def set_track(
+        self,
+        path: str | None,
+        metadata: Dict[str, object] | None = None,
+        cluster: int | None = None,
+        *,
+        load_art: bool = False,
+    ) -> None:
+        """Display *path*, optionally decoding its embedded cover art."""
+        if not path:
+            self.clear()
             return
 
-        # Populate fields
-        for field_name, value_label in self._fields.items():
-            value = metadata.get(field_name, "—")
+        self._path = path
+        self._metadata = dict(metadata or {})
 
-            # Format special fields
-            if field_name == "genres" and isinstance(value, list):
-                value = ", ".join(value)
-            elif field_name == "duration" and isinstance(value, (int, float)):
-                minutes = int(value // 60)
-                seconds = int(value % 60)
-                value = f"{minutes}:{seconds:02d}"
-            elif field_name == "bpm" and isinstance(value, (int, float)):
-                value = f"{value:.0f} BPM"
+        if load_art:
+            # One read serves both the artwork and the tag fields — the reader
+            # returns them together, so pulling tags here costs nothing extra
+            # and means a selected track shows real artist/album/year rather
+            # than just its file name.
+            tags, covers = self._read_from_file(path)
+            for key, value in tags.items():
+                if value not in (None, "", []):
+                    self._metadata.setdefault(key, value)
+            self._apply_art(covers)
+        else:
+            self._set_art_placeholder("Select a point to load artwork")
 
-            value_label.setText(str(value) if value else "—")
+        if cluster is not None:
+            self._metadata["cluster"] = (
+                "Unclustered" if cluster < 0 else str(cluster)
+            )
 
-    def _clear_display(self) -> None:
-        """Clear all displayed information."""
-        self._album_art.setPixmap(QtGui.QPixmap())
-        self._album_art.setText("No track selected")
-        self._album_art.setStyleSheet("background-color: #eee; color: #999; border: 1px solid #ddd;")
+        for key, _caption in _FIELDS:
+            self._values[key].setText(self._display_value(key))
 
-        for label in self._fields.values():
-            label.setText("—")
+        self._path_label.setText(path)
+        self.play_btn.setEnabled(True)
+        self.reveal_btn.setEnabled(True)
 
-    def get_current_metadata(self) -> Dict | None:
-        """Get currently displayed metadata."""
-        return self._current_metadata
+    def _display_value(self, key: str) -> str:
+        value = self._metadata.get(key)
+        if value in (None, "", []):
+            return "—"
+        if isinstance(value, (list, tuple)):
+            return ", ".join(str(v) for v in value if v) or "—"
+        return str(value)
+
+    @staticmethod
+    def _read_from_file(path: str) -> tuple[Dict[str, object], List[bytes]]:
+        """Return ``(tags, cover_payloads)``, degrading quietly on any failure."""
+        try:
+            from utils.audio_metadata_reader import read_metadata
+
+            tags, covers, _error, _hint = read_metadata(path, include_cover=True)
+            return dict(tags or {}), list(covers or [])
+        except Exception:  # noqa: BLE001 - detail is nice-to-have, never fatal
+            return {}, []
+
+    def _apply_art(self, covers: List[bytes]) -> None:
+        """Show the first decodable cover payload, or a placeholder."""
+        pixmap = QtGui.QPixmap()
+        for payload in covers or []:
+            if payload and pixmap.loadFromData(payload):
+                break
+
+        if pixmap.isNull():
+            self._set_art_placeholder("No artwork")
+            return
+
+        self._art.setText("")
+        self._art.setPixmap(
+            pixmap.scaled(
+                _ART_SIZE,
+                _ART_SIZE,
+                QtCore.Qt.AspectRatioMode.KeepAspectRatio,
+                QtCore.Qt.TransformationMode.SmoothTransformation,
+            )
+        )
+
+    def _set_art_placeholder(self, message: str) -> None:
+        self._art.setPixmap(QtGui.QPixmap())
+        self._art.setText(message)
+
+    def clear(self) -> None:
+        """Reset the panel to its empty state."""
+        self._path = None
+        self._metadata = {}
+        for value in self._values.values():
+            value.setText("—")
+        self._path_label.setText("")
+        self._set_art_placeholder("No track selected")
+        self.play_btn.setEnabled(False)
+        self.reveal_btn.setEnabled(False)
+
+    # ── Actions ───────────────────────────────────────────────────────────
+
+    def _emit_play(self) -> None:
+        if self._path:
+            self.play_requested.emit(self._path)
+
+    def _emit_reveal(self) -> None:
+        if self._path:
+            self.reveal_requested.emit(self._path)
+
+    def current_path(self) -> Optional[str]:
+        return self._path
