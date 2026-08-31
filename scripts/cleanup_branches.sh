@@ -1,11 +1,9 @@
 #!/usr/bin/env bash
-# Delete stale remote branches on Greensand321/Music_Indexer, keeping:
-#   - the default branch (main)
-#   - your current checked-out branch
-#   - any branch listed as head or base of an OPEN pull request
-#   - anything you list in KEEP_EXTRA below
+# Delete stale remote branches on Greensand321/Music_Indexer.
+# git-only - no gh CLI or extra auth needed, just your existing git credentials.
 #
-# Requires: git, GitHub CLI (`gh`) authenticated with delete permission on the repo.
+# Keeps: main, whatever branch you have checked out, and any branch starting
+# with "claude/". Deletes everything else, regardless of open PR status.
 #
 # Usage:
 #   ./scripts/cleanup_branches.sh            # dry run - just prints what WOULD be deleted
@@ -13,19 +11,14 @@
 
 set -euo pipefail
 
-REPO="Greensand321/Music_Indexer"
 BATCH_SIZE=30
-
-# Add any extra branch names here that should never be deleted, one per line.
-KEEP_EXTRA=(
-)
 
 EXECUTE=false
 if [[ "${1:-}" == "--execute" ]]; then
   EXECUTE=true
 fi
 
-echo "Fetching branches and PR state for $REPO ..."
+echo "Fetching branches ..."
 git fetch origin --prune --quiet
 
 DEFAULT_BRANCH=$(git remote show origin | awk '/HEAD branch/ {print $NF}')
@@ -42,20 +35,11 @@ git for-each-ref --format='%(refname:short)' refs/remotes/origin \
   | grep -v '^HEAD$' \
   | sort -u > "$TMPDIR/all_branches.txt"
 
-{
-  echo "$DEFAULT_BRANCH"
-  [[ -n "$CURRENT_BRANCH" ]] && echo "$CURRENT_BRANCH"
-  gh pr list --repo "$REPO" --state open --limit 1000 \
-    --json headRefName,baseRefName \
-    --jq '.[] | (.headRefName, .baseRefName)'
-  printf '%s\n' "${KEEP_EXTRA[@]}"
-} | sort -u > "$TMPDIR/keep.txt"
-
-comm -23 "$TMPDIR/all_branches.txt" "$TMPDIR/keep.txt" > "$TMPDIR/to_delete.txt"
+grep -vE "^(${DEFAULT_BRANCH}|${CURRENT_BRANCH})\$|^claude/" "$TMPDIR/all_branches.txt" > "$TMPDIR/to_delete.txt" || true
 
 TOTAL=$(wc -l < "$TMPDIR/all_branches.txt")
-KEEP=$(wc -l < "$TMPDIR/keep.txt")
 DELETE=$(wc -l < "$TMPDIR/to_delete.txt")
+KEEP=$((TOTAL - DELETE))
 
 echo ""
 echo "Total branches:  $TOTAL"
@@ -70,7 +54,7 @@ fi
 
 echo "Branches slated for deletion (first 30 shown):"
 head -30 "$TMPDIR/to_delete.txt"
-[[ "$DELETE" -gt 30 ]] && echo "... and $((DELETE - 30)) more (full list: $TMPDIR/to_delete.txt)"
+[[ "$DELETE" -gt 30 ]] && echo "... and $((DELETE - 30)) more"
 echo ""
 
 if [[ "$EXECUTE" != true ]]; then
