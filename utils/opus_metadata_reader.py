@@ -12,13 +12,21 @@ from utils.year_normalizer import normalize_year
 
 logger = logging.getLogger(__name__)
 
-_MUTAGEN_AVAILABLE = importlib.util.find_spec("mutagen") is not None
-if _MUTAGEN_AVAILABLE:
+# Probe by importing what we actually need rather than via
+# importlib.util.find_spec("mutagen"). find_spec *raises* ValueError when a
+# module is already in sys.modules with __spec__ = None — which is exactly what
+# the test suite's inline mutagen stubs (bare types.ModuleType) look like — so
+# the old probe crashed at import time depending on which test file had run
+# first. Attempting the real imports answers the only question that matters
+# and degrades to "Opus support unavailable" under any stub, real or absent.
+try:
     from mutagen.flac import Picture  # type: ignore
     from mutagen.oggopus import OggOpus  # type: ignore
-else:  # pragma: no cover - optional dependency
+    _MUTAGEN_AVAILABLE = True
+except Exception:  # noqa: BLE001 - ImportError, or ValueError from a spec-less stub
     Picture = None  # type: ignore
     OggOpus = None  # type: ignore
+    _MUTAGEN_AVAILABLE = False
 
 
 TAG_KEYS = (

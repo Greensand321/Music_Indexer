@@ -6,6 +6,17 @@ import types
 
 import pytest
 
+# library_sync loads the vendored engine as a package, so its
+# fingerprint_generator must be stubbed under the dotted name *before*
+# library_sync is imported; otherwise the real vendored module loads and
+# imports ``acoustid`` at module level. Registering it here (rather than in a
+# fixture) is what makes the import on the next line succeed.
+_FP_VENDORED = "library_sync_indexer_engine.indexer_engine.fingerprint_generator"
+if _FP_VENDORED not in sys.modules:
+    sys.modules[_FP_VENDORED] = types.ModuleType("fingerprint_generator")
+if "fingerprint_generator" not in sys.modules:
+    sys.modules["fingerprint_generator"] = sys.modules[_FP_VENDORED]
+
 import library_sync
 from fingerprint_cache import flush_cache
 from library_sync import PerformanceProfile
@@ -16,9 +27,9 @@ import music_indexer_api
 
 
 def _ensure_fp_module() -> types.ModuleType:
-    if "fingerprint_generator" not in sys.modules:
-        sys.modules["fingerprint_generator"] = types.ModuleType("fingerprint_generator")
-    return sys.modules["fingerprint_generator"]
+    # Patch the object library_sync actually bound, so this stays correct
+    # regardless of which engine copy (root or vendored) it resolved to.
+    return library_sync.idx_fingerprint_generator
 
 
 def _setup_media_stubs(monkeypatch, fp_map, corrupt=None, missing=None, cancel_after=None):
@@ -44,6 +55,9 @@ def _setup_media_stubs(monkeypatch, fp_map, corrupt=None, missing=None, cancel_a
         return {"artist": "Artist", "title": name, "album": "Album", "year": None, "track": None, "genre": None}
 
     monkeypatch.setattr(music_indexer_api, "get_tags", fake_get_tags)
+    # library_sync reads tags through the vendored engine (``idx.get_tags``),
+    # not the root module patched above, so patch that binding as well.
+    monkeypatch.setattr(library_sync.idx, "get_tags", fake_get_tags)
 
     class DummyInfo:
         def __init__(self):

@@ -13,13 +13,19 @@ from utils.opus_metadata_reader import read_opus_metadata
 
 logger = logging.getLogger(__name__)
 
-_MUTAGEN_AVAILABLE = importlib.util.find_spec("mutagen") is not None
-if _MUTAGEN_AVAILABLE:
+# Probe by importing what we need, not via importlib.util.find_spec("mutagen"):
+# find_spec raises ValueError for a module already in sys.modules with
+# __spec__ = None, which is what the test suite's inline mutagen stubs look
+# like. duplicate_consolidation, its executor and playlist_engine already guard
+# against exactly this; the readers under utils/ were the ones still exposed.
+try:
     from mutagen import File as MutagenFile  # type: ignore
     from mutagen.mp4 import MP4  # type: ignore
-else:  # pragma: no cover - optional dependency
+    _MUTAGEN_AVAILABLE = True
+except Exception:  # noqa: BLE001 - ImportError, or ValueError from a spec-less stub
     MutagenFile = None  # type: ignore
     MP4 = None  # type: ignore
+    _MUTAGEN_AVAILABLE = False
 
 TAG_KEYS = (
     "artist",

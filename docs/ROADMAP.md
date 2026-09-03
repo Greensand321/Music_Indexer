@@ -252,6 +252,20 @@ editing and tuning layer on top of them.
   None of this blocks development, but a "the tests are green" claim currently
   depends on which files ran first.
 
+  *Two concrete instances of this are now fixed:* the `utils/` metadata readers
+  probed for mutagen with `importlib.util.find_spec("mutagen")`, which CPython
+  *raises* on (rather than returns `None` for) a module already in `sys.modules`
+  with `__spec__ = None` — exactly what the inline stubs are — so whether
+  `test_library_sync*` even collected depended on which file imported the readers
+  first. They now probe by attempting the real imports, matching the guard
+  `duplicate_consolidation` and `playlist_engine` already had. Separately, the
+  packaging work made the vendored engine a real package (relative imports, needed
+  for PyInstaller), which stopped the Library Sync tests' bare-name
+  `fingerprint_generator` stub from shadowing the vendored module; those tests now
+  register the stub under the dotted vendored name too and patch the engine object
+  `library_sync` actually binds. What remains is the general pattern — per-file
+  `mutagen` stubs and the cache race.
+
 - **Tidal-dl sync** *(Designed, not started).* An old idea to pull music from the Tidal
   service was referenced in early notes, but no interface or workflow for it exists.
   Consider this dormant unless revived.

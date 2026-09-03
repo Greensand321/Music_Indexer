@@ -14,11 +14,14 @@ from typing import Callable, Iterable, Mapping
 
 from utils.path_helpers import ensure_long_path, strip_ext_prefix
 
-_MUTAGEN_AVAILABLE = importlib.util.find_spec("mutagen") is not None
-if _MUTAGEN_AVAILABLE:
+# See utils/audio_metadata_reader.py for why this probes by importing rather
+# than via importlib.util.find_spec (which raises on a spec-less stub module).
+try:
     from mutagen.flac import FLAC, Picture  # type: ignore
     from mutagen.oggopus import OggOpus  # type: ignore
-else:  # pragma: no cover - optional dependency
+    _MUTAGEN_AVAILABLE = True
+except Exception:  # noqa: BLE001 - ImportError, or ValueError from a spec-less stub
+    _MUTAGEN_AVAILABLE = False
     FLAC = None  # type: ignore
     Picture = None  # type: ignore
     OggOpus = None  # type: ignore

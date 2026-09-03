@@ -34,6 +34,12 @@ def fake_compute(paths, db_path, log_callback=None, progress_callback=None, canc
 
 fingerprint_stub.compute_fingerprints_parallel = fake_compute
 sys.modules['fingerprint_generator'] = fingerprint_stub
+# library_sync imports the vendored engine as a package
+# (``from .indexer_engine import fingerprint_generator``), so the stub must
+# also sit under that dotted name or the real vendored module is loaded — and
+# it imports ``acoustid`` at module level, which test environments may lack.
+# The bare-name entry above still covers the root engine.
+sys.modules['library_sync_indexer_engine.indexer_engine.fingerprint_generator'] = fingerprint_stub
 
 import importlib
 import music_indexer_api
