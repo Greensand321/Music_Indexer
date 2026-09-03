@@ -259,7 +259,8 @@ gui/workspaces/           - One QWidget per workflow (loaded into QStackedWidget
   library_sync.py         - Library Sync: scan, plan, copy/move execution
   similarity.py           - Similarity Inspector: two-file threshold breakdown
   tag_fixer.py            - Tag Fixer: proposals table with checkboxes
-  genres.py               - Genre Normalizer: MusicBrainz/Last.fm batch update
+  genres.py               - Genre Normalizer: MusicBrainz gap-fill tab + canonical
+                             mapping tab (scan → LLM mapping → preview → apply)
   playlists.py            - Playlist Generator: Folder / Tempo+Energy / Auto-DJ / Repair
   clustered_enhanced.py   - Clustered Playlists: K-Means + HDBSCAN wizard + results
                              (an older clustered.py also exists but is dead code —

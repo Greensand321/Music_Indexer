@@ -68,16 +68,12 @@ more than a listener's ear might expect.
 
 ### A smaller helper: genre normalization
 
-**Genre normalization** tidies the messy, inconsistent genre labels in your files by
-looking each track up in an online music encyclopedia and writing back a small set of
-tags — so your library moves toward fewer stray spellings of "Hip-Hop." Worth being
-precise about what this does today, though: the Playlist Creator side of the app
-performs a straightforward "ask MusicBrainz, take its three most popular tags, write
-them if the file doesn't already have at least two genres" pass — it does not map
-messy variants to one clean, chosen vocabulary. A genuinely canonical genre-mapping
-system does exist in the codebase, but only in the legacy Tkinter app; see
-**features/tag_fixer.md** for the full explanation of why "genre normalizer" means
-two different things depending on which app you're in.
+**Genre normalization** tidies the messy, inconsistent genre labels in your files so
+your library moves toward fewer stray spellings of "Hip-Hop" — which matters here
+because genre is one of the rule-based playlist dimensions. The Genre Normalizer
+workspace offers two tools: filling *missing* genres from MusicBrainz, and collapsing
+whatever vocabulary your library has accumulated into a canonical one via a mapping
+you build once, preview, and apply. See **features/tag_fixer.md** for both.
 
 *(An earlier version of this document also described a "year-gap assistant" that
 built playlists telling a chronological story across your collection. That feature

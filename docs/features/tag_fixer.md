@@ -140,32 +140,42 @@ ever see a suspiciously perfect, suspiciously generic match.
 
 ## A related, differently-named feature: the Genre Normalizer
 
-The sidebar has a workspace called **Genre Normalizer**, and it's important to
-understand that **this label means two different things depending on which app
-you're in** — worth being very clear about, since the same words describe two
-unrelated pieces of code.
+The sidebar has a workspace called **Genre Normalizer**. It holds two genuinely
+different tools, and they are two tabs because they answer two different questions:
 
-- **In the modern (Qt) app**, "Genre Normalizer" is a thin wrapper around a batch
-  MusicBrainz genre updater: for each file with fewer than two existing genre tags,
-  it looks up the recording on MusicBrainz, takes the three most popular community
-  tags, and writes them in. There is no canonical mapping step — "normalize" here
-  just means "pick MusicBrainz's most popular raw tags," not "map messy variants to a
-  clean, consistent vocabulary." Its "Overwrite existing genre tags" checkbox and its
-  MusicBrainz/Last.fm/Both source selector are both currently decorative — neither
-  has any effect on what the tool actually does (it always uses MusicBrainz, and it
-  always skips files that already have 2+ genres, regardless of the checkbox).
-- **In the legacy (Tkinter) app only**, "Genre Normalizer" is a genuinely different,
-  more ambitious feature: it scans your library's raw genre tags, hands you a
-  ready-to-paste prompt for an external LLM (ChatGPT, Claude, or similar) asking it to
-  group your messy raw genres into a small set of canonical categories, and lets you
-  paste the LLM's JSON answer back in to build a genre-mapping table that then gets
-  applied library-wide. This is the actual canonical-genre-mapping system the name
-  implies — but it does not exist in the modern app at all.
+- **Fill from MusicBrainz** — *"some of my tracks have no genre at all."* For each
+  file with fewer than two existing genre tags, it looks the recording up on
+  MusicBrainz, takes the three most popular community tags, and writes them in.
+  Files that already carry two or more genres are left alone, so this fills gaps
+  rather than second-guessing choices you've already made. It has one control, a
+  dry-run checkbox. (An earlier version showed a source selector and an "overwrite"
+  checkbox that did nothing; both are gone.)
 
-If your goal is genuinely consolidating "Hip Hop," "hip-hop," and "Rap" into one
-clean label, that capability currently only exists in the legacy Tkinter app.
-Bringing the canonical-mapping workflow into the modern app is a real, trackable gap
-— see **ROADMAP.md**.
+- **Normalize with a mapping** — *"my genres are a mess of spellings."* This is the
+  canonical-mapping workflow: collapse "Hip Hop," "hip-hop," "hiphoprap," and "Rap"
+  into whatever clean vocabulary *you* choose. It runs in four numbered steps on the
+  screen, and the shape is deliberately preview-first:
+
+  1. **Scan** your library to collect every distinct raw genre string (combined
+     entries like "Hip-Hop/Rap" are split, so the mapping sees each part).
+  2. **Build the mapping.** Copy the provided prompt, paste it and the raw list into
+     an LLM of your choice, and paste back the JSON it returns — keys are raw genres,
+     values are the canonical name(s). A value of `["invalid"]` or `null` means "this
+     isn't a genre; drop it." Unmapped genres pass through unchanged, so a partial
+     mapping never makes things worse. Mappings can be saved to and reloaded from
+     `Docs/.genre_mapping.json`, so you build it once and reuse it.
+  3. **Preview.** The app reads every file's tags and shows a table of exactly which
+     files would change and how (current genres → new genres), plus how many were
+     already canonical and how many had no genre to normalize. Nothing is written.
+  4. **Apply.** After a confirmation, it writes *exactly* what the preview showed —
+     the plan, not a fresh decision. Editing the mapping after previewing disables
+     Apply until you preview again, the same rule Library Sync applies to its plan.
+
+  This workflow previously existed only in the legacy Tkinter app, where "Apply"
+  read, decided and wrote in a single pass with no preview, and where the `["invalid"]`
+  marker the prompt asks for was written into files as a literal genre named
+  "invalid." The port fixed both: it's preview-first now, and `["invalid"]` drops the
+  entry as the prompt promises.
 
 *(The same legacy app also has a "Year Assistant" that fills in missing `year` tags
 via the same copy-paste-to-an-LLM pattern, with a genuinely honored dry-run mode and

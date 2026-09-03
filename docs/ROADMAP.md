@@ -85,6 +85,17 @@ the body below:
   moment a checkbox changed, and silently mixed librosa and Essentia values before
   that. The legacy MFCC+tempo/librosa combination keeps the original filename so
   existing caches still load.
+- **Canonical genre mapping is in the modern app.** The Genre Normalizer workspace
+  is now two tabs: the existing MusicBrainz gap-filler (with its two non-functional
+  controls removed) and a new "Normalize with a mapping" tab — scan raw genres, build
+  a raw → canonical mapping with an LLM's help, save/reload it, **preview** every file
+  that would change, then apply exactly that plan. The backend
+  (`controllers/normalize_controller.py`) gained `plan_genre_normalization` /
+  `apply_genre_changes` with injectable discovery, reader and writer, so it is
+  Qt-free and tested without mutagen or musicbrainzngs (17 tests). Two legacy
+  behaviours were corrected in the port: the old "Apply" wrote with no preview, and
+  it wrote the prompt's `["invalid"]` marker into files as a literal genre; both
+  `null` and `["invalid"]` now mean "drop." The legacy Tkinter panel is untouched.
 - **The 3-D graph template was upgraded to the `alphadex3` design.** Adds spread
   control (slider + 1×/10×/30×/50×/100× presets), axes / grid / orbit-ring
   toggles, a richer tooltip, a vignette, and JSON import, on top of the existing
@@ -199,16 +210,6 @@ editing and tuning layer on top of them.
   plugin would let the Tag Fixer fall back to MusicBrainz when AcoustID doesn't
   recognize a file.
 
-- **Bring canonical genre-mapping into the modern app** *(Designed, not started, but
-  a working reference implementation already exists in the legacy app).* The
-  legacy Tkinter app has a real "map messy raw genres to a clean, chosen vocabulary"
-  workflow (paste your raw genres into an LLM prompt, paste back a JSON mapping,
-  apply it library-wide). The modern app's "Genre Normalizer" workspace does
-  something much simpler — pick MusicBrainz's top 3 popular tags — and doesn't do
-  any canonicalization at all. Porting the legacy mapping system forward (or
-  designing a modern-app equivalent) is a real, user-visible gap; see
-  **features/tag_fixer.md** for the full explanation of the naming collision.
-
 - **Spotify integration** *(Designed, not started).* Spotify appears as an option in
   the settings (now honestly marked unavailable — see "Recently completed" above),
   and the supporting library is already installed, but the connection is an empty
@@ -288,9 +289,9 @@ editing and tuning layer on top of them.
 
 If you've been away and want the shortest path back to momentum:
 
-1. **Bring canonical genre mapping into the modern app.** It's the last piece of
-   real functionality that exists only in the legacy Tkinter app, and a working
-   reference implementation is already there to port from.
+1. **Library Sync bulk flagging and persistent sessions.** The review-first sync is
+   the app's strongest workflow and one-at-a-time flagging is its main friction;
+   persistence needs the stale-flag care already noted under Library Sync.
 2. **Treat the Visual Music Graph's deeper interactivity — live re-tuning, in-map
    cluster editing, the suggestion engine — as the big, deliberate project it always
    was.** The map itself now exists to build on, which makes these additions rather

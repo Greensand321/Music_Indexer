@@ -391,18 +391,32 @@ services elsewhere in the app.
 
 ### 6.6 Genre Normalizer (`genres.py`)
 
-Batch genre-tag update — see **features/tag_fixer.md** for the important
-caveat that this label describes something different from the legacy app's
-"Genre Normalizer."
+Two tabs. See **features/tag_fixer.md** for the reasoning behind each.
+
+**Tab — Fill from MusicBrainz**
 
 | Element | Type | Purpose |
 |---|---|---|
-| Service selector | ComboBox | MusicBrainz / Last.fm / Both — **currently decorative; the backend only ever queries MusicBrainz regardless of this selection** |
-| Dry Run | Checkbox | When checked, files are logged as "would process" without ever being looked up — the dry-run preview does not show what genres would actually be proposed |
-| Overwrite Existing | Checkbox | **Currently decorative; has no effect.** The real (fixed) rule is: skip any file that already has two or more genre tags |
-| Run Genre Update | Button (primary) | Launches `GenreWorker` |
-| Progress bar | Progress bar | File processing progress |
-| Results card | Card | Count summary: updated / skipped / errors |
+| Dry Run | Checkbox | When checked, files are logged as "would process" without being looked up |
+| Run Genre Update / Cancel | Buttons | Launches `GenreWorker`; fixed rule: MusicBrainz top-3 tags, skipping files that already have 2+ genres |
+| Progress bar + status | | File processing progress |
+| Log | `QPlainTextEdit` | Per-file output |
+
+(The former "Source" selector and "Overwrite existing" checkbox, which had no
+effect, were removed.)
+
+**Tab — Normalize with a mapping** (backed by `controllers/normalize_controller.py`)
+
+| Element | Type | Purpose |
+|---|---|---|
+| 1 · Scan library / Copy list | Buttons + list | `_ScanWorker` → `scan_raw_genres`; every distinct raw genre string, split on `; , /` |
+| 2 · Copy prompt | Button | Copies `PROMPT_TEMPLATE` for an external LLM |
+| Load saved / Save mapping | Buttons | `Docs/.genre_mapping.json` |
+| Mapping editor | `QPlainTextEdit` | Paste the JSON mapping; validated live (entry count, drop count, or the JSON error) |
+| 3 · Preview changes | Button (primary) | `_PlanWorker` → `plan_genre_normalization`; table of File / Current genres / After, plus counts |
+| 4 · Apply N changes / Cancel | Button (danger) | Enabled only for a preview computed from the *current* mapping text; confirmation dialog; `_ApplyWorker` → `apply_genre_changes` writes exactly the previewed plan; saves the mapping; then invalidates the preview |
+
+Editing the mapping after a preview disables Apply until you preview again.
 
 ### 6.7 Playlists (`playlists.py`)
 

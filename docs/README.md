@@ -10,12 +10,6 @@ A quick-reference list of what's broken or not yet built, ordered by how urgent 
 close-to-done each item is. See **[ROADMAP.md](ROADMAP.md)** for the full list,
 including lower-priority housekeeping items.
 
-- **Genre canonicalization only exists in the legacy app** *(Designed, not started
-  in the modern app).* The Qt "Genre Normalizer" workspace just picks MusicBrainz's
-  top 3 popular tags per track — it doesn't map messy genre variants to a clean,
-  chosen vocabulary. That real mapping workflow only exists in the legacy Tkinter
-  app today.
-
 - **Library Sync — bulk flagging & session persistence** *(Designed, not started).*
   Tracks can only be flagged one at a time; there is no multi-select batch flag. Review
   flags also live in memory only and are cleared when you re-scan or restart.

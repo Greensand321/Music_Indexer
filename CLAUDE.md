@@ -292,10 +292,11 @@ section kept separate from planned-but-unbuilt features. Summary:
   consequence to remember: a fix to a root module does not reach Library Sync
   automatically — port it across deliberately if Library Sync needs it. See
   `docs/architecture.md`.
-- **Genre canonicalization only exists in the legacy Tkinter app.** The Qt
-  "Genre Normalizer" workspace is a much simpler MusicBrainz top-3-tags fetcher
-  with no mapping step; two of its controls (Overwrite, Source selector) have no
-  effect. See `docs/features/tag_fixer.md`.
+- **Canonical genre mapping is in the Qt app** (`gui/workspaces/genres.py`,
+  "Normalize with a mapping" tab), backed by `controllers/normalize_controller.py`
+  — `plan_genre_normalization` (dry run) then `apply_genre_changes` (writes only
+  the plan). Discovery/reader/writer are injectable; keep it that way so it stays
+  Qt-free and testable. `["invalid"]` and `null` mapping values mean "drop."
 - **Clustering features are selectable and all wired.** `clustered_playlists.FEATURE_ORDER`
   defines six blocks (mfcc 26, tempo 1, chroma 12, spectral 2, energy 2, onset_rate 1);
   `generate_clustered_playlists(features=..., normalization=...)` computes only the
@@ -316,8 +317,8 @@ section kept separate from planned-but-unbuilt features. Summary:
   keep every array subset together.
 - **Several UI controls across the app are decorative** (built, but not read by
   the code they appear to control) — the Duplicates workspace's per-group
-  disposition combo, the Genre Normalizer's Overwrite/Source controls, the
-  Playlist Generator's tempo/energy range fields and "Prefer Opus" checkbox, and
+  disposition combo, the Playlist Generator's tempo/energy range fields and
+  "Prefer Opus" checkbox, and
   most of the Fuzzy Duplicate Finder dialog's search/filter fields. Don't assume a
   visible checkbox has an effect without checking its handler — see
   `docs/gui_inventory.md` for the full list.
