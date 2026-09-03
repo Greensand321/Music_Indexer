@@ -62,7 +62,7 @@ added, then moves on from there. It has no lookahead and doesn't try to avoid
 "painting itself into a corner" late in a long playlist — it's a nearest-neighbor
 tour, not an optimized route. One detail worth knowing if a queued set feels uneven:
 this distance calculation does not currently apply the same feature-scaling step the
-clustering wizard uses (see the "honest note on features" below), so a feature with
+clustering wizard uses, so a feature with
 naturally larger numbers can end up dominating the "how similar is this" judgment
 more than a listener's ear might expect.
 
@@ -100,20 +100,40 @@ to make, cutting across genre labels based on the actual texture and feel of the
 
 It can't hear the way you do, so it measures. For each track, AlphaDEX extracts a set
 of **audio features** — numeric descriptions of measurable qualities of the sound — and
-treats them as the track's coordinates. The most important feature in use today is
-**timbre**: the "tone color" of a track, the quality that makes a saxophone and a
-guitar playing the same note sound different. Timbre is captured as a cluster of
-related numbers describing the shape of the sound. Alongside timbre, the app uses
-**tempo** (speed). Together these give each track a position in a multi-dimensional
+treats them as the track's coordinates. Six qualities are available, and the wizard
+lets you choose which ones to listen to:
+
+- **Timbre** — the "tone color" of a track, the quality that makes a saxophone and a
+  guitar playing the same note sound different. Captured as a cluster of related
+  numbers describing the shape of the sound (26 of them). This is the workhorse.
+- **Tempo** — speed, in beats per minute.
+- **Harmonic content** — how much energy sits in each of the twelve pitch classes,
+  which is a fingerprint of key and tonality (12 numbers).
+- **Brightness** — where the sound's energy sits in the frequency range, and how much
+  that moves around; bright, airy tracks versus dark, muffled ones.
+- **Energy** — overall loudness and how much it varies.
+- **Percussive density** — how many note onsets happen per second; busy, rhythmic
+  material versus sparse, sustained material. (This one is the slowest to compute,
+  which is why it's off by default.)
+
+Only the qualities you tick are actually computed, so leaving an expensive one
+unticked genuinely saves the work. Together the chosen qualities give each track a
+position in a multi-dimensional
 "space of sound," where tracks that sound alike sit near each other and tracks that
 sound different sit far apart.
 
-> **An honest note on features.** The interface offers checkboxes for additional
-> qualities — harmonic content, brightness, percussive density — and these are part of
-> the design's vision. Today, however, the clustering actually computes **timbre and
-> tempo**; the other checkboxes are scaffolding for features not yet wired into the
-> engine. **ROADMAP.md** tracks the work to bring the rest online. We mention this so
-> the documentation matches reality rather than the aspiration.
+> **A note on caching.** Computing these qualities is the slow part of clustering,
+> so the results are remembered per track between runs. Each *combination* of ticked
+> qualities (and each extraction engine) keeps its own remembered set, because a
+> vector built from timbre-and-tempo means something different from one built from
+> timbre-and-harmony, even when they happen to be the same width. The practical
+> upshot: the first run with a new combination re-analyzes your library once; every
+> run after that with the same combination is fast, and switching back to an earlier
+> combination is fast too.
+>
+> *(Historical note: for a long stretch only timbre and tempo were actually computed,
+> and the other four checkboxes were scaffolding that the engine ignored. That's no
+> longer the case — every checkbox now does what it says.)*
 
 ### Two ways to form the groups
 
@@ -294,12 +314,11 @@ creation from clusters; the 3-D browser visualization; and the in-app 2-D map wi
 pan/rectangle/lasso selection, hover and click inspection, legend-driven cluster
 visibility, and selection → Player / CSV / `.m3u`.
 
-**Still ahead (see ROADMAP.md):** bringing the additional sound features (harmonic
-content, brightness, percussive density) into the actual clustering rather than just
-the checkboxes; live re-tuning of a clustering without recomputing everything from
-scratch; in-map cluster *editing* (merging clusters, moving a track between them);
-selecting by distance from a point and filtering the map by metadata; a suggestion
-engine for weak groupings; and a one-click way to export the quality report.
+**Still ahead (see ROADMAP.md):** live re-tuning of a clustering without recomputing
+everything from scratch; choosing the map-flattening method from the interface; in-map
+cluster *editing* (merging clusters, moving a track between them); selecting by
+distance from a point and filtering the map by metadata; a suggestion engine for weak
+groupings; and a one-click way to export the quality report.
 
 ---
 

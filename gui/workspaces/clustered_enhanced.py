@@ -111,13 +111,16 @@ class ClusterWorker(QtCore.QThread):
                     "min_samples": self.config.get("min_samples", 5),
                 }
 
-            features = [k for k, v in self.config.get("features", {}).items() if v]
-            if not features:
-                # Use all features if none specified
-                features = ["tempo", "mfcc", "chroma", "spectral", "energy"]
+            selected = self.config.get("features") or {}
+            if not any(selected.values()):
+                # Nothing ticked: fall back to the balanced default rather than
+                # failing, matching what the wizard offers as its middle preset.
+                selected = {"tempo": True, "mfcc": True, "energy": True}
+            normalization = self.config.get("normalization", "standard")
 
             _log(f"Using algorithm: {algorithm.upper()}")
-            _log(f"Using features: {', '.join(features)}")
+            _log(f"Using features: {', '.join(k for k, v in selected.items() if v)}")
+            _log(f"Normalization: {normalization}")
 
             # Run clustering (with parallel processing enabled for speed)
             self.progress.emit(10, "Extracting audio features (parallel processing)...")
@@ -129,6 +132,8 @@ class ClusterWorker(QtCore.QThread):
                 log_callback=_log,
                 engine="parallel",  # Enable fast parallel audio feature extraction
                 use_max_workers=True,  # Use all available CPU cores
+                features=selected,
+                normalization=normalization,
             )
 
             if self._cancelled:

@@ -14,7 +14,7 @@ from typing import Literal
 logger = logging.getLogger(__name__)
 
 from sklearn.cluster import KMeans
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import MinMaxScaler, RobustScaler, StandardScaler
 import hdbscan
 
 from utils.path_helpers import ensure_long_path
@@ -57,7 +57,86 @@ AudioFeatureEngine = Literal["librosa", "essentia"]
 
 # Magic number constants for clarity
 DEFAULT_MFCC_COEFS = 13
-FEATURE_VECTOR_LENGTH = 27  # Mean MFCC (13) + Std MFCC (13) + Tempo (1)
+FEATURE_VECTOR_LENGTH = 27  # Legacy default: mean MFCC (13) + std MFCC (13) + tempo (1)
+
+# ── Selectable audio features ────────────────────────────────────────────────
+# The clustering wizard lets the user pick which qualities of the sound to group
+# on. Blocks are always assembled in this order so a vector's meaning is fixed by
+# the selection alone, never by dict iteration order.
+FEATURE_ORDER = ("mfcc", "tempo", "chroma", "spectral", "energy", "onset_rate")
+
+#: How many numbers each block contributes to the feature vector.
+FEATURE_DIMENSIONS = {
+    "mfcc": 2 * DEFAULT_MFCC_COEFS,  # mean + standard deviation per coefficient
+    "tempo": 1,                      # beats per minute
+    "chroma": 12,                    # mean energy per pitch class (harmonic content)
+    "spectral": 2,                   # spectral centroid mean + std (brightness)
+    "energy": 2,                     # RMS loudness mean + std
+    "onset_rate": 1,                 # note onsets per second (percussive density)
+}
+
+#: Feature scalers the clustering wizard can choose between. Robust scaling uses
+#: the median and interquartile range, so a handful of outlier tracks pull the
+#: rest of the library around far less than with standard scaling.
+SCALERS = {
+    "standard": StandardScaler,
+    "minmax": MinMaxScaler,
+    "robust": RobustScaler,
+}
+
+#: What callers get when they do not ask for anything specific. Matches the
+#: historical 27-dimension vector so existing caches and callers (Auto-DJ, the
+#: older clustering entry points) keep working unchanged.
+DEFAULT_FEATURES = {name: name in ("mfcc", "tempo") for name in FEATURE_ORDER}
+
+
+def normalize_feature_selection(features: dict | None = None) -> dict:
+    """Return a complete, validated ``{feature: bool}`` selection.
+
+    ``None`` yields the legacy MFCC+tempo set. Unknown keys are ignored rather
+    than raising, so a wizard that grows a checkbox before the engine supports
+    it degrades to "not selected" instead of crashing a clustering run.
+    """
+    if features is None:
+        return dict(DEFAULT_FEATURES)
+    selection = {name: bool(features.get(name, False)) for name in FEATURE_ORDER}
+    if not any(selection.values()):
+        raise ValueError(
+            "at least one audio feature must be selected for clustering"
+        )
+    return selection
+
+
+def feature_vector_length(features: dict | None = None) -> int:
+    """Return the length of the vector produced by *features*."""
+    selection = normalize_feature_selection(features)
+    return sum(FEATURE_DIMENSIONS[name] for name in FEATURE_ORDER if selection[name])
+
+
+def feature_selection_key(features: dict | None = None) -> str:
+    """Return a short, stable identifier for a feature selection."""
+    selection = normalize_feature_selection(features)
+    return "-".join(name for name in FEATURE_ORDER if selection[name])
+
+
+def feature_cache_name(
+    features: dict | None = None, feature_engine: str = "librosa"
+) -> str:
+    """Return the cache filename for a given selection and extraction engine.
+
+    Cached vectors are only interchangeable with vectors built from the *same*
+    features by the *same* engine — mixing them would stack arrays of different
+    widths (or, worse, the same width with different meanings). Keying the file
+    name on both means switching selections re-extracts once and then reuses
+    each set thereafter, instead of invalidating everything on every toggle.
+
+    The legacy MFCC+tempo/librosa combination keeps the original
+    ``features.npy`` name so existing caches are still picked up.
+    """
+    key = feature_selection_key(features)
+    if key == feature_selection_key(None) and feature_engine == "librosa":
+        return "features.npy"
+    return f"features_{feature_engine}_{key}.npy"
 MAX_VISUALIZATION_POINTS = 5000  # Downsample large datasets for viz performance
 MIN_VISUALIZATION_POINTS = 100  # Ensure minimum visualization quality
 DEFAULT_CLUSTER_COUNT = 8  # Default K for K-Means
@@ -77,9 +156,18 @@ def _ensure_1d(a):
 
 
 def extract_audio_features(
-    file_path: str, log_callback=None, engine: AudioFeatureEngine = "librosa"
+    file_path: str,
+    log_callback=None,
+    engine: AudioFeatureEngine = "librosa",
+    features: dict | None = None,
 ) -> "np.ndarray":
-    """Return a simple feature vector for ``file_path`` using the requested engine."""
+    """Return the feature vector for ``file_path`` using the requested engine.
+
+    ``features`` selects which blocks to compute (see :data:`FEATURE_ORDER`);
+    omitting it keeps the historical MFCC+tempo vector. Only the selected
+    blocks are computed, so unticking an expensive one \u2014 onset detection in
+    particular \u2014 genuinely saves the work rather than just hiding the result.
+    """
 
     if log_callback is None:
         log_callback = lambda msg: None
@@ -87,14 +175,18 @@ def extract_audio_features(
     if np is None:
         raise RuntimeError("numpy required for audio feature extraction")
 
+    selection = normalize_feature_selection(features)
+
     if engine == "librosa":
-        return _extract_audio_features_librosa(file_path, log_callback)
+        return _extract_audio_features_librosa(file_path, log_callback, selection)
     if engine == "essentia":
-        return _extract_audio_features_essentia(file_path, log_callback)
+        return _extract_audio_features_essentia(file_path, log_callback, selection)
     raise ValueError(f"Unknown feature extraction engine: {engine}")
 
 
-def _extract_audio_features_librosa(file_path: str, log_callback) -> "np.ndarray":
+def _extract_audio_features_librosa(
+    file_path: str, log_callback, selection: dict
+) -> "np.ndarray":
     if librosa is None:
         raise RuntimeError("librosa required for feature extraction (engine='librosa')")
 
@@ -108,20 +200,78 @@ def _extract_audio_features_librosa(file_path: str, log_callback) -> "np.ndarray
         )
         with _decode_opus_as_wav(file_path, log_callback) as audio_path:
             y, sr = librosa.load(audio_path, sr=None, mono=True)
-    mfcc = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=DEFAULT_MFCC_COEFS)
-    log_callback(
-        f"   \u00b7 MFCC shape for {os.path.basename(file_path)}: {mfcc.shape}"
-    )
-    tempo, _ = librosa.beat.beat_track(y=y, sr=sr)
 
-    mean_mfcc = _ensure_1d(np.mean(mfcc, axis=1))
-    std_mfcc = _ensure_1d(np.std(mfcc, axis=1))
-    tempo_arr = _ensure_1d(np.array([tempo], dtype=np.float32))
+    blocks: dict[str, "np.ndarray"] = {}
 
-    return _assemble_feature_vector(mean_mfcc, std_mfcc, tempo_arr)
+    if selection["mfcc"]:
+        mfcc = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=DEFAULT_MFCC_COEFS)
+        log_callback(
+            f"   \u00b7 MFCC shape for {os.path.basename(file_path)}: {mfcc.shape}"
+        )
+        blocks["mfcc"] = np.hstack(
+            [_ensure_1d(np.mean(mfcc, axis=1)), _ensure_1d(np.std(mfcc, axis=1))]
+        )
+
+    if selection["tempo"]:
+        tempo, _ = librosa.beat.beat_track(y=y, sr=sr)
+        blocks["tempo"] = _ensure_1d(np.array([tempo], dtype=np.float32))
+
+    if selection["chroma"]:
+        # chroma_stft rather than chroma_cqt: both describe pitch-class energy,
+        # but the STFT variant is markedly faster and does not fail on very
+        # short or unusual inputs, which matters when sweeping a whole library.
+        chroma = librosa.feature.chroma_stft(y=y, sr=sr)
+        blocks["chroma"] = _ensure_1d(np.mean(chroma, axis=1))
+
+    if selection["spectral"]:
+        centroid = librosa.feature.spectral_centroid(y=y, sr=sr)
+        blocks["spectral"] = np.array(
+            [float(np.mean(centroid)), float(np.std(centroid))], dtype=np.float32
+        )
+
+    if selection["energy"]:
+        rms = librosa.feature.rms(y=y)
+        blocks["energy"] = np.array(
+            [float(np.mean(rms)), float(np.std(rms))], dtype=np.float32
+        )
+
+    if selection["onset_rate"]:
+        onset_env = librosa.onset.onset_strength(y=y, sr=sr)
+        onsets = librosa.onset.onset_detect(onset_envelope=onset_env, sr=sr)
+        duration = len(y) / float(sr) if sr else 0.0
+        rate = (len(onsets) / duration) if duration > 0 else 0.0
+        blocks["onset_rate"] = np.array([rate], dtype=np.float32)
+
+    return _assemble_feature_vector(blocks, selection)
 
 
-def _extract_audio_features_essentia(file_path: str, log_callback) -> "np.ndarray":
+def _essentia_descriptor(features, key: str, size: int) -> "np.ndarray":
+    """Pull *key* from an Essentia result, failing loudly if it is absent.
+
+    Descriptor names drift between Essentia versions. Zero-filling a missing one
+    would quietly cluster on a constant \u2014 worse than stopping \u2014 so this reports
+    exactly which descriptor is missing and points at the engine that does have
+    it.
+    """
+    try:
+        value = features[key]
+    except Exception as exc:  # noqa: BLE001 - Essentia raises its own key errors
+        raise RuntimeError(
+            f"Essentia did not provide '{key}'. This build may not expose that "
+            "descriptor; switch the feature engine to librosa, or deselect the "
+            "feature that needs it."
+        ) from exc
+    arr = _ensure_1d(np.asarray(value, dtype=np.float32))
+    if arr.shape[0] != size:
+        raise RuntimeError(
+            f"Essentia descriptor '{key}' has length {arr.shape[0]}, expected {size}"
+        )
+    return arr
+
+
+def _extract_audio_features_essentia(
+    file_path: str, log_callback, selection: dict
+) -> "np.ndarray":
     if (
         essentia is None
         or MonoLoader is None
@@ -132,6 +282,7 @@ def _extract_audio_features_essentia(file_path: str, log_callback) -> "np.ndarra
     extractor = MusicExtractor(
         lowlevelStats=["mean", "stdev"],
         rhythmStats=["mean"],
+        tonalStats=["mean"],
         numberMfccCoefficients=DEFAULT_MFCC_COEFS,
     )
     try:
@@ -145,23 +296,52 @@ def _extract_audio_features_essentia(file_path: str, log_callback) -> "np.ndarra
         with _decode_opus_as_wav(file_path, log_callback) as audio_path:
             features = extractor(audio_path)
 
-    mfcc_mean = _ensure_1d(np.asarray(features["lowlevel.mfcc.mean"], dtype=np.float32))
-    mfcc_std = _ensure_1d(np.asarray(features["lowlevel.mfcc.stdev"], dtype=np.float32))
-    tempo_arr = _ensure_1d(np.array([features["rhythm.bpm"]], dtype=np.float32))
+    blocks: dict[str, "np.ndarray"] = {}
 
-    log_callback(
-        f"   \u00b7 Essentia MFCC lengths for {os.path.basename(file_path)}: {mfcc_mean.shape}"
-    )
+    if selection["mfcc"]:
+        mfcc_mean = _essentia_descriptor(features, "lowlevel.mfcc.mean", DEFAULT_MFCC_COEFS)
+        mfcc_std = _essentia_descriptor(features, "lowlevel.mfcc.stdev", DEFAULT_MFCC_COEFS)
+        log_callback(
+            f"   \u00b7 Essentia MFCC lengths for {os.path.basename(file_path)}: {mfcc_mean.shape}"
+        )
+        blocks["mfcc"] = np.hstack([mfcc_mean, mfcc_std])
 
-    return _assemble_feature_vector(mfcc_mean, mfcc_std, tempo_arr)
+    if selection["tempo"]:
+        blocks["tempo"] = _essentia_descriptor(features, "rhythm.bpm", 1)
+
+    if selection["chroma"]:
+        # HPCP is Essentia's pitch-class profile \u2014 the counterpart to librosa's
+        # chroma.
+        blocks["chroma"] = _essentia_descriptor(features, "tonal.hpcp.mean", 12)
+
+    if selection["spectral"]:
+        blocks["spectral"] = np.hstack([
+            _essentia_descriptor(features, "lowlevel.spectral_centroid.mean", 1),
+            _essentia_descriptor(features, "lowlevel.spectral_centroid.stdev", 1),
+        ])
+
+    if selection["energy"]:
+        blocks["energy"] = np.hstack([
+            _essentia_descriptor(features, "lowlevel.spectral_energy.mean", 1),
+            _essentia_descriptor(features, "lowlevel.spectral_energy.stdev", 1),
+        ])
+
+    if selection["onset_rate"]:
+        blocks["onset_rate"] = _essentia_descriptor(features, "rhythm.onset_rate", 1)
+
+    return _assemble_feature_vector(blocks, selection)
 
 
-def _assemble_feature_vector(mean_mfcc, std_mfcc, tempo_arr) -> "np.ndarray":
-    vec = np.hstack([mean_mfcc, std_mfcc, tempo_arr]).astype(np.float32)
+def _assemble_feature_vector(blocks: dict, selection: dict) -> "np.ndarray":
+    """Stack the computed blocks in :data:`FEATURE_ORDER` and check the width."""
+    parts = [blocks[name] for name in FEATURE_ORDER if selection.get(name)]
+    vec = np.hstack(parts).astype(np.float32)
 
-    if vec.shape[0] != FEATURE_VECTOR_LENGTH:
+    expected = feature_vector_length(selection)
+    if vec.shape[0] != expected:
         raise RuntimeError(
-            f"Feature vector has wrong length {vec.shape[0]}, expected {FEATURE_VECTOR_LENGTH}"
+            f"Feature vector has wrong length {vec.shape[0]}, expected {expected} "
+            f"for features [{feature_selection_key(selection)}]"
         )
     return vec
 
@@ -201,13 +381,19 @@ def _decode_opus_as_wav(file_path: str, log_callback):
             pass
 
 
-def _extract_worker(path: str, engine: AudioFeatureEngine) -> tuple[str, "np.ndarray", str | None]:
+def _extract_worker(
+    path: str, engine: AudioFeatureEngine, features: dict | None = None
+) -> tuple[str, "np.ndarray", str | None]:
     """Process-pool friendly wrapper around :func:`extract_audio_features`."""
 
     try:
-        return path, extract_audio_features(path, engine=engine), None
+        return path, extract_audio_features(path, engine=engine, features=features), None
     except Exception as exc:  # pragma: no cover - defensive logging path
-        zeros = np.zeros(27, dtype=np.float32) if np is not None else None
+        zeros = (
+            np.zeros(feature_vector_length(features), dtype=np.float32)
+            if np is not None
+            else None
+        )
         return path, zeros, str(exc)
 
 
@@ -217,6 +403,7 @@ def _extract_features_parallel(
     log_callback,
     engine: AudioFeatureEngine,
     use_max_workers: bool = False,
+    features: dict | None = None,
 ):
     """Fill ``cache`` for ``tracks`` using a bounded process pool."""
 
@@ -233,7 +420,8 @@ def _extract_features_parallel(
         )
         with ProcessPoolExecutor(max_workers=workers) as ex:
             future_map = {
-                ex.submit(_extract_worker, path, engine): path for path in missing
+                ex.submit(_extract_worker, path, engine, features): path
+                for path in missing
             }
             for done, fut in enumerate(as_completed(future_map), 1):
                 path, vec, err = fut.result()
@@ -256,7 +444,13 @@ def _extract_features_parallel(
     return feats, bool(missing)
 
 
-def _extract_features_serial(tracks, cache, log_callback, engine: AudioFeatureEngine):
+def _extract_features_serial(
+    tracks,
+    cache,
+    log_callback,
+    engine: AudioFeatureEngine,
+    features: dict | None = None,
+):
     """Sequential feature extraction (original behavior)."""
 
     feats: list["np.ndarray"] = []
@@ -267,10 +461,14 @@ def _extract_features_serial(tracks, cache, log_callback, engine: AudioFeatureEn
         else:
             log_callback(f"• Extracting features {idx}/{len(tracks)}")
             try:
-                cache[path] = extract_audio_features(path, log_callback, engine=engine)
+                cache[path] = extract_audio_features(
+                    path, log_callback, engine=engine, features=features
+                )
             except Exception as e:  # pragma: no cover - defensive path
                 log_callback(f"! Failed features for {path}: {e}")
-                cache[path] = np.zeros(27, dtype=np.float32)
+                cache[path] = np.zeros(
+                    feature_vector_length(features), dtype=np.float32
+                )
             updated = True
         feats.append(cache[path])
 
@@ -526,8 +724,16 @@ def generate_clustered_playlists(
     engine: str = "parallel",  # DEFAULT: Use parallel processing for speed!
     feature_engine: AudioFeatureEngine = "librosa",
     use_max_workers: bool = False,
+    features: dict | None = None,
+    normalization: str = "standard",
 ) -> None:
-    """Create clustered data for the given tracks without writing playlists."""
+    """Create clustered data for the given tracks without writing playlists.
+
+    ``features`` picks which audio qualities to cluster on (see
+    :data:`FEATURE_ORDER`); ``None`` keeps the legacy MFCC+tempo behaviour.
+    ``normalization`` selects the scaler applied before clustering — see
+    :data:`SCALERS`.
+    """
     if log_callback is None:
         log_callback = lambda msg: None
 
@@ -556,7 +762,11 @@ def generate_clustered_playlists(
         log_callback(f"! Warning: Cannot create Docs folder: {e}")
         docs = root_path  # Fall back to root
 
-    cache_file = os.path.join(docs, "features.npy")
+    selection = normalize_feature_selection(features)
+    # Vectors are only interchangeable within one (selection, engine) pair, so
+    # each pair gets its own cache file rather than one file that would have to
+    # be thrown away whenever the user changed a checkbox.
+    cache_file = os.path.join(docs, feature_cache_name(selection, feature_engine))
 
     # Load cache with validation for stale entries
     cache = _load_cache_with_validation(cache_file, tracks, log_callback)
@@ -570,14 +780,23 @@ def generate_clustered_playlists(
     log_callback(
         f"⚙ Extracting audio features with {engine_mode} engine ({feature_engine}) …"
     )
+    log_callback(
+        f"→ Features: {feature_selection_key(selection).replace('-', ', ')} "
+        f"({feature_vector_length(selection)} dimensions)"
+    )
 
     if engine_mode == "parallel":
         feats, updated = _extract_features_parallel(
-            tracks, cache, log_callback, feature_engine, use_max_workers=use_max_workers
+            tracks,
+            cache,
+            log_callback,
+            feature_engine,
+            use_max_workers=use_max_workers,
+            features=selection,
         )
     else:
         feats, updated = _extract_features_serial(
-            tracks, cache, log_callback, feature_engine
+            tracks, cache, log_callback, feature_engine, features=selection
         )
 
     if updated:
@@ -589,7 +808,17 @@ def generate_clustered_playlists(
             logger.warning(f"Failed to save feature cache: {e}")
 
     X = np.vstack(feats)
-    X = StandardScaler().fit_transform(X)
+    scaler_cls = SCALERS.get(normalization)
+    if scaler_cls is None:
+        log_callback(
+            f"! Unknown normalization {normalization!r}; falling back to 'standard'"
+        )
+        scaler_cls = SCALERS["standard"]
+    # Scaling matters more now that features are selectable: tempo is in the
+    # hundreds while chroma sits in [0, 1], so without it whichever block has
+    # the largest raw numbers would dominate the distances.
+    log_callback(f"→ Normalizing features ({normalization})")
+    X = scaler_cls().fit_transform(X)
 
     labels = cluster_tracks(
         X, method, log_callback=log_callback, engine=engine_mode, **params

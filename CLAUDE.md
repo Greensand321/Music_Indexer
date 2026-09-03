@@ -296,9 +296,13 @@ section kept separate from planned-but-unbuilt features. Summary:
   "Genre Normalizer" workspace is a much simpler MusicBrainz top-3-tags fetcher
   with no mapping step; two of its controls (Overwrite, Source selector) have no
   effect. See `docs/features/tag_fixer.md`.
-- **Clustering features:** the engine currently clusters on timbre (MFCC) + tempo;
-  the wizard's chroma/spectral/onset checkboxes are UI scaffolding not yet wired into
-  feature extraction.
+- **Clustering features are selectable and all wired.** `clustered_playlists.FEATURE_ORDER`
+  defines six blocks (mfcc 26, tempo 1, chroma 12, spectral 2, energy 2, onset_rate 1);
+  `generate_clustered_playlists(features=..., normalization=...)` computes only the
+  selected ones. The feature cache filename is keyed by selection and engine
+  (`feature_cache_name`) — do not reintroduce a single shared `features.npy` for all
+  selections. `features=None` keeps the legacy 27-dim MFCC+tempo vector that Auto-DJ
+  (`playlist_engine`) still relies on.
 - **The in-app 2-D interactive graph is built and wired.** `gui/workspaces/graph.py`
   embeds `InteractiveScatterPlot` + `ClusterLegendWidget` + `TrackDetailsPanel`;
   data loading/validation/export lives in the Qt-free `cluster_graph_data.py` (tested

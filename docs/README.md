@@ -10,11 +10,6 @@ A quick-reference list of what's broken or not yet built, ordered by how urgent 
 close-to-done each item is. See **[ROADMAP.md](ROADMAP.md)** for the full list,
 including lower-priority housekeeping items.
 
-- **Clustering — extra sound features** *(Partially built).* The wizard shows
-  checkboxes for harmonic content, brightness, and percussive density, but the engine
-  currently clusters on **timbre (MFCC) and tempo only**. Those checkboxes are UI
-  scaffolding not yet wired into feature extraction.
-
 - **Genre canonicalization only exists in the legacy app** *(Designed, not started
   in the modern app).* The Qt "Genre Normalizer" workspace just picks MusicBrainz's
   top 3 popular tags per track — it doesn't map messy genre variants to a clean,

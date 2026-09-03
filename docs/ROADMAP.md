@@ -7,7 +7,7 @@ language so anyone can understand the state of the project at a glance. Items ar
 grouped by area and, within each area, roughly ordered from "smallest / most ready" to
 "largest / most speculative."*
 
-*Last reviewed: 2026-07-22.*
+*Last reviewed: 2026-09-03.*
 
 ---
 
@@ -75,6 +75,16 @@ the body below:
   browser graph simply never worked on a large library, and any index-based lookup
   would have mapped a point to the wrong song. Labels and tracks are now subset with
   the coordinates, and the original positions are recorded in `X_indices`.
+- **The clustering wizard's feature checkboxes all work.** Harmonic content (chroma),
+  brightness (spectral centroid), energy (RMS) and percussive density (onset rate)
+  are now computed alongside timbre and tempo, on both the librosa and Essentia
+  engines, and only the ticked ones are computed. The wizard's normalization choice
+  (standard / min-max / robust) is honoured too instead of always using standard
+  scaling. The feature cache is keyed by selection *and* engine — previously one
+  `features.npy` served every run, which would have stacked mismatched vectors the
+  moment a checkbox changed, and silently mixed librosa and Essentia values before
+  that. The legacy MFCC+tempo/librosa combination keeps the original filename so
+  existing caches still load.
 - **The 3-D graph template was upgraded to the `alphadex3` design.** Adds spread
   control (slider + 1×/10×/30×/50×/100× presets), axes / grid / orbit-ring
   toggles, a richer tooltip, a vignette, and JSON import, on top of the existing
@@ -144,11 +154,6 @@ editing and tuning layer on top of them.
   clustering workspace still exists in the repository but is unreachable — the
   sidebar wires to `clustered_enhanced.py` instead. Leaving the old file in place
   risks a future contributor editing it and wondering why nothing changes.
-
-- **More sound features in clustering** *(Partially built).* The clustering wizard
-  shows checkboxes for harmonic content, brightness, and percussive density, but the
-  engine currently groups tracks using **timbre and tempo** only. Wiring the remaining
-  features into the actual grouping would make the clusters richer and more musical.
 
 - **A choice of "map flattening" methods in the interface** *(Partially built).* The
   app already flattens many-dimensional sound data into a 2-D or 3-D picture using
@@ -269,10 +274,9 @@ editing and tuning layer on top of them.
 
 If you've been away and want the shortest path back to momentum:
 
-1. **Wire the clustering wizard's remaining sound features into extraction.** The
-   checkboxes are already there and the clustering pipeline already accepts a
-   feature selection — this is the most visible remaining gap between what the UI
-   offers and what the engine does.
+1. **Bring canonical genre mapping into the modern app.** It's the last piece of
+   real functionality that exists only in the legacy Tkinter app, and a working
+   reference implementation is already there to port from.
 2. **Treat the Visual Music Graph's deeper interactivity — live re-tuning, in-map
    cluster editing, the suggestion engine — as the big, deliberate project it always
    was.** The map itself now exists to build on, which makes these additions rather
