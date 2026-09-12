@@ -37,6 +37,19 @@ Open `index.html` in a browser and press `1`–`6` (`1` is Hybrid v2).
 - **Compare became a real pane** — a ladder readout showing how many rows each rung resolved, so
   the result is inspectable instead of a black box.
 
+### Revision 2.1 — the second pass, and saved sources
+
+- **A seventh step: Verify.** The pipeline now spans **two passes** — find and sort, then check
+  what actually downloaded. Downloaders often fetch the wrong recording (you asked for the remix
+  and got the original), which leaves a duplicate *and* the wanted track still missing, while the
+  ledger marks the row done. The Verify pane checks source ID first, fingerprints the rest, and
+  splits the folder into five outcomes; only the *wrong version* group needs a decision, and its
+  fix writes the correction back into the ledger. The tile strip shows the
+  `you download` break between the two passes.
+- **Saved sources.** Setup now leads with a list of saved sources — name, source, URL, row count,
+  *new since last run*, and a ▶ button per row — plus **Run all**, which builds one combined list
+  with each track only once. The routine monthly use is one press.
+
 ## Editing
 
 `build_mockups.py` is the **source of truth** — it emits all six HTML files, so the

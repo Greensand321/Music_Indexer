@@ -17,7 +17,7 @@ import os
 OUT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 MOCKUPS = [
-    ("06-hybrid-v2",    "mk6", "Hybrid v2",       "Tiles and tabs at once: the tile strip is the live overview and the navigation, and each step gets the whole pane below it. Triage and the summary board are where the depth went."),
+    ("06-hybrid-v2",    "mk6", "Hybrid v2",       "Tiles and tabs at once: the tile strip is the live overview and the navigation, and each step gets the whole pane below it. Seven steps across two passes — find and sort, then verify what actually downloaded."),
     ("01-flow-tiles",   "mk1", "Flow Tiles",      "Every step is a tile on one board, wired in order. You always see the whole pipeline and where you stopped."),
     ("02-tabbed-steps", "mk2", "Tabbed Steps",    "One step at a time behind a tab bar that tracks completion. Closest to the workspaces the app already has."),
     ("03-workbench",    "mk3", "Workbench",       "No steps. Setup rail, a three-column bucket board you drag between, evidence docked on the right."),
@@ -816,7 +816,7 @@ MK6_CSS = """
   }
   #mk6 .tl{
     background:var(--card-bg); border:1px solid var(--card-border); border-radius:6px;
-    padding:8px 11px 9px; min-width:152px; flex:1 1 0; cursor:pointer; text-align:left;
+    padding:8px 9px 9px; min-width:104px; flex:1 1 0; cursor:pointer; text-align:left;
     font-family:var(--ui); color:var(--text); display:flex; flex-direction:column; gap:3px;
   }
   #mk6 .tl:hover{border-color:var(--accent)}
@@ -826,19 +826,29 @@ MK6_CSS = """
     border-radius:50%; display:grid; place-items:center; flex:none;
     background:#21262d; color:var(--text-3);
   }
-  #mk6 .tl .nm{font-size:11.5px; font-weight:700; letter-spacing:-.005em; white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
+  #mk6 .tl .nm{font-size:11px; font-weight:700; letter-spacing:-.005em; white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
   #mk6 .tl .st{margin-left:auto; flex:none}
-  #mk6 .tl .m{font-size:10.5px; color:var(--text-2); line-height:1.4; white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
+  #mk6 .tl .m{font-size:10px; color:var(--text-2); line-height:1.4; white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
   #mk6 .tl .m b{color:var(--text); font-weight:600; font-variant-numeric:tabular-nums}
   #mk6 .tl.done{border-color:#1d4a30} #mk6 .tl.done .n{background:var(--ok); color:var(--text-inv)}
   #mk6 .tl.alert{border-color:#5c4410} #mk6 .tl.alert .n{background:var(--warn); color:var(--text-inv)}
+  #mk6 .tl.warnb{border-color:#5e2320}
+  #mk6 .tl.warnb .n{background:var(--bad); color:var(--text-inv)}
+  #mk6 .pass{
+    display:flex; justify-content:center; align-items:center; flex:none;
+    padding:0 3px; border-left:1px dashed var(--text-3); margin:0 5px;
+  }
+  #mk6 .pass span{
+    writing-mode:vertical-rl; font-family:var(--mono); font-size:8px; font-weight:700;
+    letter-spacing:.14em; text-transform:uppercase; color:var(--text-2); white-space:nowrap;
+  }
   #mk6 .tl[aria-selected="true"]{
-    border-color:var(--accent); border-width:2px; padding:7px 10px 8px;
+    border-color:var(--accent); border-width:2px; padding:7px 9px 8px;
     box-shadow:0 0 0 1px var(--accent-pressed), 0 6px 18px -12px #000;
   }
   #mk6 .tl[aria-selected="true"] .n{background:var(--accent); color:var(--text-inv)}
   #mk6 .tl:focus-visible{outline:2px solid var(--accent); outline-offset:2px}
-  #mk6 .chev{display:grid; place-items:center; color:var(--text-3); font-size:12px; padding:0 5px; flex:none}
+  #mk6 .chev{display:grid; place-items:center; color:var(--text-3); font-size:11px; padding:0 3px; flex:none}
   #mk6 .chev.lit{color:var(--accent)}
 
   #mk6 .pane{padding:15px 18px; overflow:auto; flex:1; min-height:0}
@@ -869,6 +879,25 @@ MK6_CSS = """
   #mk6 .chk.off i{background:var(--input-bg)}
   #mk6 .chk .note{margin-left:auto; color:var(--text-3); font-size:10px}
   #mk6 .two{display:grid; grid-template-columns:1fr 1fr; gap:12px; align-items:start}
+  /* saved sources */
+  #mk6 .tmpl{
+    display:grid; grid-template-columns:30px 1.1fr 1.6fr auto; gap:11px; align-items:center;
+    padding:8px 4px; border-bottom:1px solid #23282f;
+  }
+  #mk6 .tmpl:hover{background:var(--sidebar-hover)}
+  #mk6 .tmpl.on{background:var(--accent-bg); border-radius:4px; box-shadow:inset 3px 0 0 var(--accent)}
+  #mk6 .tmpl .run{
+    width:26px; height:26px; border-radius:50%; border:1px solid var(--accent-pressed);
+    background:var(--accent); color:var(--text-inv); font-size:10px; cursor:pointer;
+    display:grid; place-items:center; padding:0; font-family:var(--ui);
+  }
+  #mk6 .tmpl .run:hover{background:var(--accent-hover)}
+  #mk6 .tmpl .run:focus-visible{outline:2px solid var(--accent); outline-offset:2px}
+  #mk6 .tmpl .tn{font-size:12px; font-weight:600; display:flex; gap:6px; align-items:center; flex-wrap:wrap}
+  #mk6 .tmpl .tm{font-size:10.5px; color:var(--text-2); overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+  #mk6 .tmpl .tr{font-size:10.5px; color:var(--text-2); text-align:right; line-height:1.5; white-space:nowrap}
+  #mk6 .tmpl .tr b{color:var(--text); font-weight:600; font-variant-numeric:tabular-nums}
+  @media (max-width:820px){#mk6 .tmpl{grid-template-columns:30px 1fr; } #mk6 .tmpl .tr{text-align:left}}
   #mk6 .g13{display:grid; grid-template-columns:1.4fr 1fr; gap:12px; align-items:start}
   #mk6 table{width:100%; border-collapse:collapse; font-size:11px}
   #mk6 th{text-align:left; padding:5px 7px; color:var(--text-3); font-size:9px; letter-spacing:.11em; text-transform:uppercase; border-bottom:1px solid var(--card-border)}
@@ -994,7 +1023,8 @@ MK6_CSS = """
   #mk6 .bt .bl b{color:var(--text); font-weight:600; font-variant-numeric:tabular-nums}
   #mk6 .bt .ba{display:flex; gap:5px; flex-wrap:wrap}
   #mk6 .bt.wide{grid-column:1/-1}
-  #mk6 .bt.pend{border-color:var(--accent-pressed)}
+  #mk6 .bt.pend{border-color:var(--bad); border-width:2px}
+  #mk6 .bt.pend .bh .n{background:var(--bad)}
   #mk6 .trio{display:grid; grid-template-columns:repeat(3,1fr); gap:7px}
   #mk6 .trio .c{border:1px solid var(--card-border); border-radius:5px; padding:7px 9px; background:var(--input-bg)}
   #mk6 .trio .c .v{font-size:17px; font-weight:700; letter-spacing:-.02em; font-variant-numeric:tabular-nums}
@@ -1002,6 +1032,58 @@ MK6_CSS = """
   #mk6 .trio .c.a{border-color:#5c4410} #mk6 .trio .c.a .v{color:var(--warn)}
   #mk6 .trio .c.r{border-color:#5e2320} #mk6 .trio .c.r .v{color:var(--bad)}
 
+
+  /* second pass / verify */
+  #mk6 .vhead{
+    border:1px solid #5e2320; background:var(--bad-bg); border-radius:6px; padding:11px 14px;
+    margin-bottom:12px; display:flex; gap:12px; align-items:center; flex-wrap:wrap;
+  }
+  #mk6 .vhead .big{font-size:24px; font-weight:700; letter-spacing:-.03em; color:var(--bad); font-variant-numeric:tabular-nums}
+  #mk6 .vhead .txt{font-size:11.5px; line-height:1.5}
+  #mk6 .vhead .txt b{font-variant-numeric:tabular-nums}
+  #mk6 .vhead .sp{margin-left:auto; display:flex; gap:6px}
+  #mk6 .oc{display:grid; grid-template-columns:repeat(5,1fr); gap:7px; margin-bottom:12px}
+  #mk6 .oc button{
+    border:1px solid var(--card-border); border-radius:5px; padding:8px 10px; background:var(--card-bg);
+    text-align:left; cursor:pointer; font-family:var(--ui); color:var(--text);
+    display:flex; flex-direction:column; gap:1px;
+  }
+  #mk6 .oc button:hover{border-color:var(--accent)}
+  #mk6 .oc .v{font-size:18px; font-weight:700; letter-spacing:-.02em; font-variant-numeric:tabular-nums}
+  #mk6 .oc .k2{font-size:9.5px; font-weight:600; letter-spacing:.05em; text-transform:uppercase; color:var(--text-2); white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
+  #mk6 .oc button.g{border-color:#1d4a30} #mk6 .oc button.g .v{color:var(--ok)}
+  #mk6 .oc button.r{border-color:var(--bad); border-width:2px; background:var(--bad-bg)} #mk6 .oc button.r .v{color:var(--bad)}
+  #mk6 .oc button.a{border-color:#5c4410} #mk6 .oc button.a .v{color:var(--warn)}
+  #mk6 .wrongc{border:1px solid var(--bad); border-radius:6px; overflow:hidden; margin-bottom:12px}
+  #mk6 .wrongc > .wh{padding:9px 13px; background:var(--bad-bg); border-bottom:1px solid #5e2320; font-size:11.5px}
+  #mk6 .wrongc > .wh b{color:var(--bad)}
+  #mk6 .wrow{padding:12px 13px; border-bottom:1px solid #23282f; background:var(--card-bg)}
+  #mk6 .wrow:last-child{border-bottom:none}
+  #mk6 .wgrid{display:grid; grid-template-columns:1fr 22px 1fr; gap:10px; align-items:center; margin-bottom:9px}
+  #mk6 .wgrid .cell{border:1px solid var(--card-border); border-radius:5px; padding:8px 10px; background:var(--input-bg)}
+  #mk6 .wgrid .cell .lb{font-size:8.5px; font-weight:700; letter-spacing:.11em; text-transform:uppercase; color:var(--text-3); margin-bottom:3px}
+  #mk6 .wgrid .cell .tx{font-family:var(--mono); font-size:10.5px; line-height:1.4; word-break:break-word}
+  #mk6 .wgrid .cell .mt{font-size:10px; color:var(--text-2); margin-top:3px}
+  #mk6 .wgrid .cell.want{border-color:var(--accent-pressed)}
+  #mk6 .wgrid .cell.got{border-color:var(--bad)}
+  #mk6 .wgrid .ne{display:grid; place-items:center; color:var(--bad); font-size:14px; font-weight:700}
+  #mk6 .wcons{display:flex; gap:8px; flex-wrap:wrap; font-size:10.5px; margin-bottom:9px}
+  #mk6 .wcons span{
+    border:1px solid #5e2320; background:var(--bad-bg); border-radius:4px; padding:4px 8px; color:var(--text);
+  }
+  #mk6 .wacts{display:flex; gap:6px; flex-wrap:wrap; align-items:center}
+  #mk6 .wacts .t3{margin-left:auto; font-size:10px}
+  #mk6 .idbox{
+    border:1px solid var(--card-border); border-radius:6px; padding:10px 13px; background:var(--card-bg);
+    font-size:11px; display:flex; gap:14px; align-items:center; flex-wrap:wrap; margin-bottom:12px;
+  }
+  #mk6 .idbox b{font-variant-numeric:tabular-nums}
+  #mk6 .idbox .sp{margin-left:auto}
+  @media (max-width:900px){
+    #mk6 .oc{grid-template-columns:repeat(2,1fr)}
+    #mk6 .wgrid{grid-template-columns:1fr}
+    #mk6 .wgrid .ne{transform:rotate(90deg)}
+  }
   @media (max-width:1080px){
     #mk6 .tri{grid-template-columns:1fr}
     #mk6 .qr{max-height:220px}
@@ -1015,48 +1097,54 @@ MK6_CSS = """
 MK6 = """
       <div class="titlebar">
         <h2>Playlist Gap</h2>
-        <span class="crumb">Liked videos · YouTube Music · 6 days since last run</span>
+        <span class="crumb">YouTube Music · 6 days since last run</span>
         <div class="right">
-          <button class="btn sm">Saved lists (4)</button>
-          <button class="btn sm">Re-compare</button>
+          <button class="btn sm">▾ Liked videos <span class="t3">· 4 saved</span></button>
+          <button class="btn pri sm">▶ Run</button>
         </div>
       </div>
 
       <div class="strip" role="tablist">
         <button class="tl done" role="tab" data-p="setup" aria-selected="false">
           <div class="r1"><span class="n">✓</span><span class="nm">Setup</span><span class="st pill ok">ok</span></div>
-          <div class="m">YT Music · <b>Liked videos</b></div>
-          <div class="m"><b>1,204</b> rows · <b>14</b> new</div>
+          <div class="m"><b>1,204</b> rows</div>
+          <div class="m"><b>14</b> new</div>
         </button>
         <div class="chev lit">›</div>
         <button class="tl done" role="tab" data-p="read" aria-selected="false">
-          <div class="r1"><span class="n">✓</span><span class="nm">Read &amp; split</span><span class="st pill ok">ok</span></div>
-          <div class="m"><b>1,189</b> clean · <b>15</b> split</div>
-          <div class="m">1 unavailable upstream</div>
+          <div class="r1"><span class="n">✓</span><span class="nm">Read</span><span class="st pill ok">ok</span></div>
+          <div class="m"><b>1,189</b> clean</div>
+          <div class="m"><b>15</b> split</div>
         </button>
         <div class="chev lit">›</div>
         <button class="tl done" role="tab" data-p="compare" aria-selected="false">
-          <div class="r1"><span class="n">✓</span><span class="nm">Compare</span><span class="st pill ok">4.2 s</span></div>
-          <div class="m">rungs <b>0 · 2 · 4 · 5b</b></div>
-          <div class="m">620 settled by video ID</div>
+          <div class="r1"><span class="n">✓</span><span class="nm">Compare</span><span class="st pill ok">ok</span></div>
+          <div class="m"><b>620</b> by ID · 4.2 s</div>
+          <div class="m"><b>4</b> rungs used</div>
         </button>
         <div class="chev lit">›</div>
         <button class="tl alert" role="tab" data-p="triage" aria-selected="true">
-          <div class="r1"><span class="n">4</span><span class="nm">Triage</span><span class="st pill warn">46 left</span></div>
-          <div class="m"><b>1,031</b> owned · <b>68</b> unsure</div>
-          <div class="m"><b>105</b> missing</div>
+          <div class="r1"><span class="n">4</span><span class="nm">Triage</span><span class="st pill warn">46</span></div>
+          <div class="m"><b>1,031</b> owned</div>
+          <div class="m"><b>68</b> unsure</div>
         </button>
         <div class="chev lit">›</div>
         <button class="tl" role="tab" data-p="export" aria-selected="false">
-          <div class="r1"><span class="n">5</span><span class="nm">Download list</span><span class="st pill mute">ready</span></div>
-          <div class="m"><b>105</b> tracks · 38 artists</div>
-          <div class="m">not exported yet</div>
+          <div class="r1"><span class="n">5</span><span class="nm">Export list</span></div>
+          <div class="m"><b>105</b> missing</div>
+          <div class="m">not sent yet</div>
         </button>
-        <div class="chev">›</div>
+        <div class="pass"><span>you download</span></div>
+        <button class="tl warnb" role="tab" data-p="verify" aria-selected="false">
+          <div class="r1"><span class="n">6</span><span class="nm">Verify</span><span class="st pill bad">3</span></div>
+          <div class="m"><b>42</b> arrived</div>
+          <div class="m"><b>3</b> wrong</div>
+        </button>
+        <div class="chev lit">›</div>
         <button class="tl" role="tab" data-p="summary" aria-selected="false">
-          <div class="r1"><span class="n">6</span><span class="nm">Summary</span><span class="st pill mute">—</span></div>
-          <div class="m">run overview &amp; hand-off</div>
-          <div class="m">42 pending from last run</div>
+          <div class="r1"><span class="n">7</span><span class="nm">Summary</span><span class="st pill mute">—</span></div>
+          <div class="m">2 passes</div>
+          <div class="m">ledger</div>
         </button>
       </div>
 
@@ -1064,12 +1152,46 @@ MK6 = """
       <div class="pane" data-pane="setup" hidden>
         <div class="ph">
           <h3>Setup</h3>
-          <span class="hint">Two fields and a library path. Everything else is remembered.</span>
-          <div class="rt"><button class="btn pri">Fetch &amp; scan →</button></div>
+          <span class="hint">Saved sources remember everything — press ▶ and the whole run goes.</span>
+          <div class="rt"><button class="btn sm">▶▶ Run all 4</button><button class="btn pri">▶ Run “Liked videos”</button></div>
+        </div>
+        <div class="card sect" style="margin-bottom:12px">
+          <h4>Saved sources</h4>
+          <p class="sub">Source, URL, folders and thresholds — stored per entry. One press re-runs the lot.</p>
+          <div class="tmpl on">
+            <button class="run" title="Run this source">▶</button>
+            <div class="tn">Liked videos <span class="pill acc">active</span></div>
+            <div class="tm">YT Music · <span class="mono">music.youtube.com/playlist?list=LM</span></div>
+            <div class="tr"><b>1,204</b> rows · <b>14</b> new<br><span class="t3">run 2 min ago</span></div>
+          </div>
+          <div class="tmpl">
+            <button class="run" title="Run this source">▶</button>
+            <div class="tn">Deep house 2026</div>
+            <div class="tm">YT Music · <span class="mono">…list=PLxK9v2mQ</span></div>
+            <div class="tr"><b>318</b> rows · <b>6</b> new<br><span class="t3">run 6 days ago</span></div>
+          </div>
+          <div class="tmpl">
+            <button class="run" title="Run this source">▶</button>
+            <div class="tn">Late night drives</div>
+            <div class="tm">YT Music · <span class="mono">…list=PLq7Rb1nT</span></div>
+            <div class="tr"><b>92</b> rows · <b>0</b> new<br><span class="t3">run 6 days ago</span></div>
+          </div>
+          <div class="tmpl">
+            <button class="run" title="Run this source">▶</button>
+            <div class="tn">Backlog import</div>
+            <div class="tm">CSV file · <span class="mono">tunemymusic_export.csv</span></div>
+            <div class="tr"><b>1,204</b> rows · <span class="t3">—</span><br><span class="t3">run 3 weeks ago</span></div>
+          </div>
+          <div class="navb">
+            <button class="btn sm">+ New saved source</button>
+            <button class="btn sm">Duplicate</button>
+            <button class="btn sm">Delete</button>
+            <span class="t3 sp" style="font-size:10.5px; align-self:center">“Run all” builds one combined list, each track only once.</span>
+          </div>
         </div>
         <div class="two">
           <div class="card sect">
-            <h4>Wanted list</h4>
+            <h4>Editing “Liked videos”</h4>
             <p class="sub">Where the list of songs you want comes from.</p>
             <div class="fr">
               <span class="lbl">Source</span>
@@ -1094,7 +1216,7 @@ MK6 = """
             <div class="kv"><span>New since last run</span><b>14</b></div>
             <div class="navb">
               <button class="btn sm">Re-fetch from YouTube</button>
-              <button class="btn sm">Load a CSV instead…</button>
+              <button class="btn sm">Save changes to source</button>
             </div>
           </div>
           <div class="card sect">
@@ -1341,7 +1463,7 @@ Marsh - Alpine
             <div class="navb">
               <button class="btn">← Back to triage</button>
               <button class="btn sm">Mark all 105 as pending download</button>
-              <button class="btn sm sp">Summary →</button>
+              <button class="btn pri sm sp">Verify a download folder →</button>
             </div>
           </div>
           <div style="display:flex; flex-direction:column; gap:12px">
@@ -1362,6 +1484,148 @@ Marsh - Alpine
         </div>
       </div>
 
+      <!-- ── VERIFY · second pass ────────────────────────────── -->
+      <div class="pane" data-pane="verify" hidden>
+        <div class="ph">
+          <h3>Verify — second pass</h3>
+          <span class="hint">Did you actually get what you asked for?</span>
+          <div class="rt">
+            <input class="inp mono" style="width:250px" value="D:\Downloads\yt-dlp\2026-09-12">
+            <button class="btn sm">Browse…</button>
+            <button class="btn pri">Re-run verify</button>
+          </div>
+        </div>
+
+        <div class="vhead">
+          <span class="big">3</span>
+          <span class="txt"><b>3 downloads are the wrong recording.</b><br>
+          <span class="t2">Each one is a duplicate of something you already own <em>and</em> leaves
+          the track you wanted still missing. Left alone, the ledger would call these done.</span></span>
+          <span class="sp"><button class="btn pri">Fix all 3</button></span>
+        </div>
+
+        <div class="idbox">
+          <span><b>38</b> of 42 settled by source ID — filename kept the <span class="mono">[videoId]</span>, no audio decoded.</span>
+          <span><b>4</b> fingerprinted · 1.8 s</span>
+          <span class="sp t3">Re-runnable — already-judged files are skipped.</span>
+        </div>
+
+        <div class="oc">
+          <button class="g"><span class="v">37</span><span class="k2">✅ Correct</span></button>
+          <button class="r"><span class="v">3</span><span class="k2">⚠ Wrong version</span></button>
+          <button class="a"><span class="v">1</span><span class="k2">⚠ Already owned</span></button>
+          <button><span class="v">2</span><span class="k2">✕ Didn't arrive</span></button>
+          <button><span class="v">1</span><span class="k2">? Unrecognized</span></button>
+        </div>
+
+        <div class="wrongc">
+          <div class="wh"><b>Wrong version — 3 rows.</b> The only group that needs you. Everything else is just counts.</div>
+
+          <div class="wrow">
+            <div class="wgrid">
+              <div class="cell want">
+                <div class="lb">You asked for</div>
+                <div class="tx">FIFTY FIFTY - Cupid (Twin Version)</div>
+                <div class="mt">2:54 · video <span class="mono">Qc7_zRjH808</span></div>
+              </div>
+              <div class="ne">≠</div>
+              <div class="cell got">
+                <div class="lb">What arrived</div>
+                <div class="tx">FIFTY FIFTY - Cupid.opus</div>
+                <div class="mt">3:35 · fingerprint matches a file you own</div>
+              </div>
+            </div>
+            <div class="wcons">
+              <span>→ duplicate of <span class="mono">By Artist/FIFTY FIFTY/Cupid.flac</span></span>
+              <span>→ <b>Twin Version</b> still missing</span>
+            </div>
+            <div class="wacts">
+              <button class="btn pri sm">Quarantine dupe + re-list Twin Version</button>
+              <button class="btn sm">Quarantine only</button>
+              <button class="btn sm">Keep it anyway</button>
+              <button class="btn sm">▶ Play both</button>
+            </div>
+          </div>
+
+          <div class="wrow">
+            <div class="wgrid">
+              <div class="cell want">
+                <div class="lb">You asked for</div>
+                <div class="tx">ODESZA - Bloom (Extended)</div>
+                <div class="mt">7:42 · video <span class="mono">kP3n8vLqW1c</span></div>
+              </div>
+              <div class="ne">≠</div>
+              <div class="cell got">
+                <div class="lb">What arrived</div>
+                <div class="tx">ODESZA - Bloom.m4a</div>
+                <div class="mt">5:31 · radio edit · not in your library</div>
+              </div>
+            </div>
+            <div class="wcons">
+              <span>→ not a duplicate — this one is new</span>
+              <span>→ <b>Extended</b> still missing</span>
+            </div>
+            <div class="wacts">
+              <button class="btn pri sm">Keep + re-list Extended</button>
+              <button class="btn sm">Discard + re-list</button>
+              <button class="btn sm">▶ Play both</button>
+            </div>
+          </div>
+
+          <div class="wrow">
+            <div class="wgrid">
+              <div class="cell want">
+                <div class="lb">You asked for</div>
+                <div class="tx">(Triple Vibe) HOME - Resonance but it's beats 3,3</div>
+                <div class="mt">4:08 · video <span class="mono">mT4xZ0pKr9A</span></div>
+              </div>
+              <div class="ne">≠</div>
+              <div class="cell got">
+                <div class="lb">What arrived</div>
+                <div class="tx">HOME - Resonance.opus</div>
+                <div class="mt">3:32 · fingerprint matches a file you own</div>
+              </div>
+            </div>
+            <div class="wcons">
+              <span>→ duplicate of <span class="mono">By Artist/HOME/Resonance.flac</span></span>
+              <span>→ the fan edit still missing</span>
+            </div>
+            <div class="wacts">
+              <button class="btn pri sm">Quarantine dupe + re-list fan edit</button>
+              <button class="btn sm">Quarantine only</button>
+              <button class="btn sm">Keep it anyway</button>
+              <button class="btn sm">▶ Play both</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="two">
+          <div class="card sect">
+            <h4>Everything else</h4>
+            <div class="kv"><span>✅ Correct — ledger marked satisfied</span><b>37</b></div>
+            <div class="kv"><span>⚠ Already owned — straight duplicate</span><b>1</b></div>
+            <div class="kv"><span>✕ Didn't arrive — stays missing, stays visible</span><b>2</b></div>
+            <div class="kv"><span>? Unrecognized — genuinely new, accept &amp; index</span><b>1</b></div>
+            <div class="navb">
+              <button class="btn sm">Open Duplicates for the 4 dupes →</button>
+              <button class="btn sm">Merge the 37 via Library Sync →</button>
+            </div>
+          </div>
+          <div class="card sect">
+            <h4>After fixing</h4>
+            <p class="sub">What the ledger will say once the 3 are handled.</p>
+            <div class="kv"><span>Rows closed this pass</span><b>37</b></div>
+            <div class="kv"><span>Rows returning to missing</span><b>5</b></div>
+            <div class="kv"><span>Files to quarantine</span><b>4</b></div>
+            <div class="kv"><span>Next download list</span><b>73</b></div>
+            <div class="navb">
+              <button class="btn">← Download list</button>
+              <button class="btn pri sp">Summary →</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
       <!-- ── SUMMARY ─────────────────────────────────────────── -->
       <div class="pane" data-pane="summary" hidden>
         <div class="ph">
@@ -1372,7 +1636,8 @@ Marsh - Alpine
         <div class="sumhead">
           <span class="big">105</span>
           <span class="txt"><b>105</b> tracks to download, out of <b>1,204</b> wanted.<br>
-          <span class="t2">You already had <b>86%</b> of this playlist. <b>46</b> rows still unsure.</span></span>
+          <span class="t2">You already had <b>86%</b> of this playlist. <b>46</b> rows still unsure,
+          and the second pass sent <b>5</b> back to missing.</span></span>
           <span class="sp">
             <button class="btn pri">⧉ Copy the list</button>
             <button class="btn sm">Open Library Sync →</button>
@@ -1410,19 +1675,25 @@ Marsh - Alpine
             <div class="ba"><button class="btn sm">Resume triage</button></div>
           </div>
           <div class="bt pend">
-            <div class="bh"><span class="n">↻</span><h5>Pending from last run</h5><span class="st pill acc">42</span></div>
-            <div class="bl"><b>42</b> tracks exported 6 days ago, not yet seen in the library.<br>Verify with real fingerprints once they land.</div>
+            <div class="bh"><span class="n">!</span><h5>Second pass · verify</h5><span class="st pill bad">3 wrong</span></div>
+            <div class="bl">
+              <b>42</b> downloads checked · <b>38</b> by source ID, <b>4</b> fingerprinted.<br>
+              <b>37</b> correct · <b>3</b> wrong version · <b>1</b> already owned · <b>2</b> never arrived.<br>
+              <span class="t3">The 3 wrong ones are duplicates <em>and</em> leave their track still missing.</span>
+            </div>
             <div class="ba">
-              <button class="btn sm">Open Library Sync →</button>
-              <button class="btn sm">Mark downloaded</button>
+              <button class="btn sm">Fix the 3 →</button>
+              <button class="btn sm">Open Duplicates →</button>
             </div>
           </div>
           <div class="bt wide">
             <div class="bh"><span class="n">✓</span><h5>Remembered for next time</h5><span class="st pill mute">ledger</span></div>
             <div class="bl">
               <b>22</b> confirmations · <b>7</b> never-want rows · <b>3</b> learned split rules ·
-              <b>2</b> modifier rules (“<span class="mono">feat.</span>-only means owned”).
-              Next run on this playlist will only ask about rows it has never seen.
+              <b>2</b> modifier rules (“<span class="mono">feat.</span>-only means owned”) ·
+              <b>37</b> rows closed and <b>5</b> reopened by the second pass.<br>
+              Next run on this playlist only asks about rows it has never seen — and never calls a
+              wrong-version download “done”.
             </div>
             <div class="ba">
               <button class="btn sm">View ledger</button>

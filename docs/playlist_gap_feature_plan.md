@@ -83,6 +83,104 @@ Framed that way, the fuzzy work is a bounded cleanup with an end date, not the f
 steady state. The single highest-leverage thing the spec can do is make sure that from
 day one, anything newly downloaded is never ambiguous again.
 
+### The second pass — verify what actually arrived
+
+*Added after the mockup round. This was missing from the first draft and it is not a nicety;
+it closes the loop that causes the original problem.*
+
+Exporting the missing list is **not** the end. The downloads then have to be checked, because
+**downloaders pick the wrong recording surprisingly often** — and the way that fails is nasty:
+
+> You ask for `FIFTY FIFTY - Cupid (Twin Version)`. The downloader hands you `Cupid` — the plain
+> version, which you already own. Now you have **a duplicate of Cupid**, you **still don't have
+> the Twin Version**, and the ledger has marked the row satisfied so **it will never ask again.**
+
+That is a false MATCHED arriving through the back door, and it is exactly the silent-loss error
+class §3 rules out. Worse, it *corrupts the ledger* — the one mechanism the whole feature relies
+on to make later runs cheap. Without a verification pass, the ledger's accuracy decays every
+month, and the feature slowly becomes the problem it was built to solve.
+
+So the pipeline has a second pass:
+
+```
+  pass 1  →  find & sort  →  the download list  →  [ the user downloads ]
+                                                            ↓
+  pass 2  →  verify what arrived  →  correct the ledger  →  re-list what's still missing
+```
+
+**What it checks.** Point it at the folder the downloads landed in. For each new file, answer one
+question: *is this the recording that was asked for?* Two mechanisms, cheapest first:
+
+1. **Identity check.** If the file kept its source `[videoId]` (filename or a `comment`/`purl`
+   tag), compare it directly to the video ID on the wanted row. Exact, instant, no audio decoded.
+   For anything downloaded with `yt-dlp` this settles most of the folder.
+2. **Fingerprint check.** For the rest, fingerprint the file and compare it against both the
+   wanted row's expectation *and* the existing library. Duration corroborates: the Twin Version
+   is 41 s from the plain version, so the mismatch is unmistakable.
+
+**Five outcomes, each with a different consequence:**
+
+| Outcome | What it means | What the app does |
+|---|---|---|
+| ✅ **Correct** | Fingerprint/ID matches what was asked for | Mark the ledger row **satisfied**. Done. |
+| ⚠️ **Wrong version** | A different recording than requested — often one already owned | **Two actions, and both matter:** quarantine the duplicate, *and* put the wanted row **back on the missing list**. Never mark it satisfied. |
+| ⚠️ **Already owned** | A straight duplicate of an existing file | Hand to the Duplicate Finder; leave the wanted row satisfied only if it was genuinely the right track. |
+| ❌ **Didn't arrive** | Exported, nothing showed up | Row stays **missing** and stays visible; don't let it quietly age out. |
+| ❓ **Unrecognized** | Fingerprint matches nothing known | Almost certainly a genuine new track. Accept and index it. |
+
+**It is mostly composition, not new engine work.** The pieces already exist and are already
+tested:
+
+- `near_duplicate_detector.fingerprint_distance(fp1, fp2)` — a public pairwise fingerprint
+  comparison, which is precisely the primitive this needs.
+- `fingerprint_generator.compute_fingerprint_for_file()` — fingerprints a single file.
+- `fingerprint_cache` — the library side is already fingerprinted and cached, so only the newly
+  downloaded files need work.
+- `duplicate_consolidation` / its executor — for quarantining whatever the pass finds is a
+  duplicate, using the project's existing preview-then-execute contract.
+- Library Sync — for actually merging the verified-correct files into the library.
+
+**This supersedes §14's Option D**, which treated the post-download check as workflow guidance
+("point the user at Library Sync") rather than a step. That was wrong. It is a first-class stage
+with its own screen, because the *wrong-version* outcome needs a decision the user can only make
+here, and because nothing else writes the correction back into the ledger.
+
+Two notes for the spec:
+
+- **Only the wrong-version outcome is interesting.** The other four are counts. Design the screen
+  so the handful of wrong-version rows are unmissable and the rest collapse into a summary.
+- **Verification is re-runnable and incremental.** Downloads trickle in over days; the pass should
+  be safe to run repeatedly against the same folder, skipping files it has already judged.
+
+### Saved sources — templates for one-press re-runs
+
+Also missing from the first draft, and cheap to build.
+
+A **saved source** (template / preset) stores everything a run needs:
+
+- source type and URL (`https://music.youtube.com/playlist?list=…`), plus a friendly name,
+- the library folder and its inclusion flags,
+- the duration tolerances and fuzzy floor in force,
+- a pointer to that source's ledger.
+
+With those saved, the routine monthly use collapses to: open the workspace → the saved sources are
+listed with *last run* and *new since then* → press ▶ on one → read the download list. One press,
+no re-typing a URL, no re-choosing folders, no re-answering settled questions.
+
+Why it matters more than it sounds: the whole value proposition is that **run two is cheaper than
+run one**. The ledger makes the *thinking* cheaper; templates make the *setup* cheaper. Without
+them, every run starts with a URL paste and a folder pick, which is exactly the friction that
+stops a tool from being used monthly.
+
+Worth specifying alongside it:
+
+- **Run all** — compare every saved source in one go, with a combined download list. If four
+  playlists share 30 wanted tracks, you want to download each one once.
+- **Per-source ledgers, one shared library snapshot.** The snapshot is expensive and identical
+  across sources; build it once per session, not once per playlist.
+- Templates are plain config, so they belong in `config.load_config()` / `save_config()` per the
+  project's config rule — not a bespoke file.
+
 ### Stage 2.5 — parse the display string into candidate artist/title splits
 
 A new pipeline stage between "import" and "match", and now the highest-risk component.
@@ -366,6 +464,9 @@ Six stages. Each is a place the user can stop, look, and go back.
   │ list (CSV)  │   │  what I own  │   │ both sides│   │        │   │ review │   │  + LEDGER│
   └─────────────┘   └──────────────┘   └───────────┘   └────────┘   └────────┘   └──────────┘
 ```
+
+*(Revised: there are now **eight** stages — a saved-source step in front of stage 1, and a
+verification pass after stage 6. See the revision note's "second pass" and "saved sources".)*
 
 1. **Import the wanted list.** A CSV from TuneMyMusic (and anything CSV-shaped).
    Because column names vary by source service, the importer shows a **column-mapping
@@ -694,11 +795,12 @@ mainstream-catalogue CONFIRM rows, never as a pipeline stage.
 missing tracks, the files *do* exist — so the existing Duplicate Finder and Library
 Sync can verify the result with real fingerprints, catching anything this feature
 wrongly called MISSING before it pollutes the library.
-**Recommendation: adopt as workflow guidance, not new code.** The output screen should
-end with "downloaded them? → run Library Sync / Duplicate Finder on the download
-folder," with a button that navigates there (the `navigate_requested` signal for this
-already exists). Near-free, and it makes the feature's one recoverable error class
-actually get recovered.
+**Recommendation — SUPERSEDED. This is now a first-class pipeline stage, not guidance.**
+See "The second pass" in the revision note. Pointing the user at Library Sync is not
+enough, because the interesting outcome — *the downloader fetched a different recording
+than you asked for* — needs a decision made here, and needs writing back into the
+ledger. Left as guidance, the ledger silently decays: rows marked satisfied by a
+wrong-version download are never asked about again.
 
 **Option E — Learn from confirmations.** Every Class C adjudication is a labelled
 example. Promoting repeated decisions into lexicon rules ("for this library,
@@ -811,6 +913,16 @@ with per-row evidence and overrides; HTML report.
 **Phase 4 — scale and learning.** Pattern-grouped bulk triage; promoting repeated
 confirmations into lexicon rules; user-editable lexicon UI; grouped-by-album output.
 → *This is where a 68-row CONFIRM bucket becomes four clicks.*
+
+**Phase 2.5 — the second pass.** Verify a download folder: identity check first, fingerprint
+fallback, the five outcomes, and the wrong-version correction written back into the ledger.
+Slots here rather than later because without it the ledger's accuracy decays from the first run
+onward — and it is mostly wiring existing tested modules together.
+→ *This is what stops the feature from recreating the problem it solves.*
+
+**Phase 3.5 — saved sources.** Templates for source + URL + settings, listed with *last run* and
+*new since then*, each with a one-press run. Plus "run all" with a combined, de-duplicated list.
+→ *Turns a five-minute setup into one click, which is what makes it a monthly habit.*
 
 **Phase 5 — optional extensions.** Pluggable Spotify source (Option B); MusicBrainz
 deep-resolve escalation (Option C); post-download verification hand-off (Option D);
