@@ -4,6 +4,14 @@ Five interaction models for the Playlist Gap workspace, built to be compared and
 narrowed down to one. Concept stage — see `docs/playlist_gap_feature_plan.md` for
 the feature itself.
 
+## Current direction
+
+| File | Model | In one line |
+|---|---|---|
+| **`06-hybrid-v2.html`** | **Hybrid v2** ★ | **Tiles and tabs at once. The tile strip is the live overview *and* the navigation; each step gets the whole pane below it. All six panes are filled in — click the tiles to move between them.** |
+
+Round 1, kept for reference only:
+
 | File | Model | In one line |
 |---|---|---|
 | `01-flow-tiles.html` | Flow Tiles | Every step is a tile on one board, wired in order. |
@@ -11,9 +19,23 @@ the feature itself.
 | `03-workbench.html` | Workbench | Setup rail, three-column bucket board, docked evidence panel. |
 | `04-triage-queue.html` | Triage Queue | An inbox — list, reading pane, keyboard-driven. |
 | `05-answer-first.html` | Answer First | Opens on the download list; machinery collapsed behind a summary. |
-| `index.html` | — | All five behind a switcher, for side-by-side comparison. |
+| `index.html` | — | All six behind a switcher, for side-by-side comparison. |
 
-Open `index.html` in a browser and press `1`–`5`.
+Open `index.html` in a browser and press `1`–`6` (`1` is Hybrid v2).
+
+### What v2 changed, and why
+
+- **Tiles moved to where they earn their keep** — a persistent strip that reports live state and
+  doubles as the step navigation, plus a full **Summary** board at the end. They are no longer the
+  main workflow.
+- **Every pane is drawn**, not just one, so the whole shape is visible rather than partial.
+- **Setup is deliberately small** — a source dropdown, a playlist URL, a name, and the library
+  folder inclusion list. Two fields and a scan, as it should be.
+- **Triage got the depth**: a queue on the left, a full evidence comparison in the middle with
+  **cover art on both sides**, and a **ranked list of every possible counterpart** on the right,
+  clickable, plus manual library search and a "none of these" escape. Nothing is accepted blindly.
+- **Compare became a real pane** — a ladder readout showing how many rows each rung resolved, so
+  the result is inspectable instead of a black box.
 
 ## Editing
 

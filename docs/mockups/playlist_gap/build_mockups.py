@@ -17,6 +17,7 @@ import os
 OUT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 MOCKUPS = [
+    ("06-hybrid-v2",    "mk6", "Hybrid v2",       "Tiles and tabs at once: the tile strip is the live overview and the navigation, and each step gets the whole pane below it. Triage and the summary board are where the depth went."),
     ("01-flow-tiles",   "mk1", "Flow Tiles",      "Every step is a tile on one board, wired in order. You always see the whole pipeline and where you stopped."),
     ("02-tabbed-steps", "mk2", "Tabbed Steps",    "One step at a time behind a tab bar that tracks completion. Closest to the workspaces the app already has."),
     ("03-workbench",    "mk3", "Workbench",       "No steps. Setup rail, a three-column bucket board you drag between, evidence docked on the right."),
@@ -804,8 +805,661 @@ Marsh - Alpine
       </div>
 """
 
-FRAGS = {"mk1": MK1, "mk2": MK2, "mk3": MK3, "mk4": MK4, "mk5": MK5}
-CSSES = {"mk1": MK1_CSS, "mk2": MK2_CSS, "mk3": MK3_CSS, "mk4": MK4_CSS, "mk5": MK5_CSS}
+# ── 6 · Hybrid (v2) ─────────────────────────────────────────────────────────
+
+MK6_CSS = """
+  /* tile strip — the overview AND the navigation */
+  #mk6 .strip{
+    display:flex; gap:0; align-items:stretch; padding:11px 16px 12px;
+    border-bottom:1px solid var(--card-border); background:var(--sidebar-bg);
+    overflow-x:auto; flex:none;
+  }
+  #mk6 .tl{
+    background:var(--card-bg); border:1px solid var(--card-border); border-radius:6px;
+    padding:8px 11px 9px; min-width:152px; flex:1 1 0; cursor:pointer; text-align:left;
+    font-family:var(--ui); color:var(--text); display:flex; flex-direction:column; gap:3px;
+  }
+  #mk6 .tl:hover{border-color:var(--accent)}
+  #mk6 .tl .r1{display:flex; align-items:center; gap:6px; min-width:0}
+  #mk6 .tl .n{
+    font-family:var(--mono); font-size:9px; font-weight:700; width:15px; height:15px;
+    border-radius:50%; display:grid; place-items:center; flex:none;
+    background:#21262d; color:var(--text-3);
+  }
+  #mk6 .tl .nm{font-size:11.5px; font-weight:700; letter-spacing:-.005em; white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
+  #mk6 .tl .st{margin-left:auto; flex:none}
+  #mk6 .tl .m{font-size:10.5px; color:var(--text-2); line-height:1.4; white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
+  #mk6 .tl .m b{color:var(--text); font-weight:600; font-variant-numeric:tabular-nums}
+  #mk6 .tl.done{border-color:#1d4a30} #mk6 .tl.done .n{background:var(--ok); color:var(--text-inv)}
+  #mk6 .tl.alert{border-color:#5c4410} #mk6 .tl.alert .n{background:var(--warn); color:var(--text-inv)}
+  #mk6 .tl[aria-selected="true"]{
+    border-color:var(--accent); border-width:2px; padding:7px 10px 8px;
+    box-shadow:0 0 0 1px var(--accent-pressed), 0 6px 18px -12px #000;
+  }
+  #mk6 .tl[aria-selected="true"] .n{background:var(--accent); color:var(--text-inv)}
+  #mk6 .tl:focus-visible{outline:2px solid var(--accent); outline-offset:2px}
+  #mk6 .chev{display:grid; place-items:center; color:var(--text-3); font-size:12px; padding:0 5px; flex:none}
+  #mk6 .chev.lit{color:var(--accent)}
+
+  #mk6 .pane{padding:15px 18px; overflow:auto; flex:1; min-height:0}
+  #mk6 .pane[hidden]{display:none !important}
+  #mk6 .ph{display:flex; align-items:baseline; gap:11px; margin-bottom:13px; flex-wrap:wrap}
+  #mk6 .ph h3{margin:0; font-size:14px; font-weight:700; letter-spacing:-.015em}
+  #mk6 .ph .hint{font-size:11.5px; color:var(--text-2)}
+  #mk6 .ph .rt{margin-left:auto; display:flex; gap:6px; align-items:center}
+  #mk6 .sect{padding:13px 15px}
+  #mk6 .sect h4{margin:0 0 3px; font-size:12px; font-weight:700}
+  #mk6 .sect .sub{margin:0 0 11px; font-size:11px; color:var(--text-2)}
+  #mk6 .fr{display:flex; gap:8px; align-items:center; margin-bottom:9px; flex-wrap:wrap}
+  #mk6 .fr > .lbl{flex:0 0 74px}
+  #mk6 .fr .inp{flex:1; min-width:150px}
+  #mk6 .sel{
+    background:var(--input-bg); border:1px solid var(--input-border); border-radius:5px;
+    padding:6px 9px; color:var(--text); font-size:12px; font-family:var(--ui); flex:1; min-width:150px;
+  }
+  #mk6 .kv{display:flex; justify-content:space-between; gap:10px; font-size:11.5px; padding:4px 0; border-bottom:1px solid #23282f}
+  #mk6 .kv:last-child{border-bottom:none}
+  #mk6 .kv b{font-variant-numeric:tabular-nums}
+  #mk6 .chk{display:flex; align-items:center; gap:7px; font-size:11.5px; padding:3px 0}
+  #mk6 .chk i{
+    width:13px; height:13px; border-radius:3px; border:1px solid var(--card-border);
+    display:grid; place-items:center; font-size:9px; font-style:normal; flex:none;
+  }
+  #mk6 .chk.on i{background:var(--ok); border-color:var(--ok); color:var(--text-inv)}
+  #mk6 .chk.off i{background:var(--input-bg)}
+  #mk6 .chk .note{margin-left:auto; color:var(--text-3); font-size:10px}
+  #mk6 .two{display:grid; grid-template-columns:1fr 1fr; gap:12px; align-items:start}
+  #mk6 .g13{display:grid; grid-template-columns:1.4fr 1fr; gap:12px; align-items:start}
+  #mk6 table{width:100%; border-collapse:collapse; font-size:11px}
+  #mk6 th{text-align:left; padding:5px 7px; color:var(--text-3); font-size:9px; letter-spacing:.11em; text-transform:uppercase; border-bottom:1px solid var(--card-border)}
+  #mk6 td{padding:5px 7px; border-bottom:1px solid #23282f}
+  #mk6 tr:last-child td{border-bottom:none}
+  #mk6 .ok-t{color:var(--ok); font-family:var(--mono)}
+  #mk6 .bad-t{color:var(--bad); font-family:var(--mono)}
+  #mk6 .navb{display:flex; gap:7px; margin-top:12px; padding-top:11px; border-top:1px solid var(--card-border); flex-wrap:wrap}
+  #mk6 .navb .sp{margin-left:auto}
+
+  /* ladder readout */
+  #mk6 .rung{display:grid; grid-template-columns:26px 1fr 54px 46px; gap:9px; align-items:center; font-size:11px; padding:5px 0; border-bottom:1px solid #23282f}
+  #mk6 .rung:last-child{border-bottom:none}
+  #mk6 .rung .rn{font-family:var(--mono); font-weight:700; color:var(--accent)}
+  #mk6 .rung .bar{height:5px; border-radius:3px; background:#21262d; overflow:hidden}
+  #mk6 .rung .bar i{display:block; height:100%; background:var(--accent)}
+  #mk6 .rung .ct{font-family:var(--mono); text-align:right; font-variant-numeric:tabular-nums}
+  #mk6 .rung .pc{color:var(--text-3); font-size:10px; text-align:right; font-variant-numeric:tabular-nums}
+  #mk6 .rung.off{opacity:.42}
+  #mk6 .rung.off .bar i{background:var(--text-3)}
+
+  /* triage — three panes, the deep one */
+  #mk6 .tri{display:grid; grid-template-columns:252px 1fr 216px; gap:12px; align-items:start}
+  #mk6 .qcol{display:flex; flex-direction:column; border:1px solid var(--card-border); border-radius:6px; overflow:hidden; background:var(--input-bg)}
+  #mk6 .qf{display:flex; gap:3px; padding:8px 9px; border-bottom:1px solid var(--card-border); flex-wrap:wrap}
+  #mk6 .qf button{
+    font-family:var(--ui); font-size:10px; font-weight:600; padding:3px 7px; border-radius:10px;
+    cursor:pointer; border:1px solid var(--card-border); background:#21262d; color:var(--text-2);
+  }
+  #mk6 .qf button.on{background:var(--warn-bg); border-color:#5c4410; color:var(--warn)}
+  #mk6 .qr{max-height:392px; overflow:auto}
+  #mk6 .qi{
+    display:grid; grid-template-columns:10px 1fr; gap:7px; padding:7px 10px; cursor:pointer;
+    border-bottom:1px solid #23282f; align-items:start;
+  }
+  #mk6 .qi:hover{background:var(--sidebar-hover)}
+  #mk6 .qi.on{background:var(--sidebar-active); box-shadow:inset 3px 0 0 var(--accent)}
+  #mk6 .qi .d{width:6px; height:6px; border-radius:50%; background:var(--warn); margin-top:4px}
+  #mk6 .qi.seen .d{background:transparent; border:1px solid var(--text-3)}
+  #mk6 .qi .t{font-family:var(--mono); font-size:10px; line-height:1.35; word-break:break-word}
+  #mk6 .qi .w{font-size:9.5px; color:var(--text-2); margin-top:2px}
+  #mk6 .qi.seen .t{color:var(--text-2)}
+
+  #mk6 .ev{border:1px solid var(--card-border); border-radius:6px; background:var(--card-bg); padding:13px 15px}
+  #mk6 .bulkb{
+    border:1px solid var(--accent-pressed); background:var(--accent-bg); border-radius:5px;
+    padding:9px 12px; font-size:11px; display:flex; gap:9px; align-items:center; flex-wrap:wrap; margin-bottom:12px;
+  }
+  #mk6 .bulkb b{font-variant-numeric:tabular-nums}
+  #mk6 .bulkb .sp{margin-left:auto; display:flex; gap:5px}
+  #mk6 .vs{display:grid; grid-template-columns:1fr 1fr; gap:12px}
+  #mk6 .vc{border:1px solid var(--card-border); border-radius:5px; padding:10px; background:var(--input-bg)}
+  #mk6 .vc.cand{border-color:var(--accent-pressed)}
+  #mk6 .vc > .lbl{display:block; margin-bottom:8px}
+  #mk6 .art{
+    width:100%; aspect-ratio:1/1; max-width:112px; border-radius:4px; margin-bottom:9px;
+    display:grid; place-items:center; font-family:var(--mono); font-size:9px; font-weight:700;
+    text-align:center; padding:6px; line-height:1.3; border:1px solid var(--card-border);
+  }
+  #mk6 .art.a1{background:linear-gradient(145deg,#7a2f5e,#2a1636); color:#f3d9ea}
+  #mk6 .art .cap{display:block; font-size:7.5px; font-weight:400; opacity:.72; margin-top:4px; letter-spacing:.05em; text-transform:uppercase}
+  #mk6 .art.a2{background:linear-gradient(145deg,#1f4f6e,#101f2e); color:#cfe6f5}
+  #mk6 .art.none{background:repeating-linear-gradient(45deg,#1c2128,#1c2128 6px,#21262d 6px,#21262d 12px); color:var(--text-3)}
+  #mk6 .fl{padding:4px 0; border-top:1px solid #23282f; font-size:10.5px}
+  #mk6 .fl:first-of-type{border-top:none}
+  #mk6 .fl .k{color:var(--text-3); font-size:8.5px; letter-spacing:.1em; text-transform:uppercase}
+  #mk6 .fl .v{font-family:var(--mono); font-size:10.5px; word-break:break-word}
+  #mk6 .fl.same .v{color:var(--ok)}
+  #mk6 .fl.diff .v{color:var(--bad)}
+  #mk6 .why{border-left:3px solid var(--warn); background:var(--warn-bg); padding:9px 12px; border-radius:0 5px 5px 0; font-size:11px; line-height:1.5; margin:12px 0}
+  #mk6 .why b{font-variant-numeric:tabular-nums}
+  #mk6 .acts{display:flex; gap:6px; flex-wrap:wrap; align-items:center}
+  #mk6 kbd{
+    font-family:var(--mono); font-size:9px; font-weight:700; background:#2b3138;
+    border:1px solid #3a424b; border-bottom-width:2px; border-radius:3px; padding:1px 4px;
+    color:var(--text); margin-left:4px;
+  }
+  #mk6 .cands{border:1px solid var(--card-border); border-radius:6px; background:var(--card-bg); overflow:hidden}
+  #mk6 .cands > .hd{padding:9px 11px; border-bottom:1px solid var(--card-border)}
+  #mk6 .cands > .hd .lbl{display:block}
+  #mk6 .cands > .hd .sub2{font-size:10px; color:var(--text-2); margin-top:2px}
+  #mk6 .cd{padding:8px 11px; border-bottom:1px solid #23282f; cursor:pointer}
+  #mk6 .cd:last-of-type{border-bottom:none}
+  #mk6 .cd:hover{background:var(--sidebar-hover)}
+  #mk6 .cd.pick{background:var(--accent-bg); box-shadow:inset 3px 0 0 var(--accent)}
+  #mk6 .cd .cn{font-family:var(--mono); font-size:10px; line-height:1.35; word-break:break-word}
+  #mk6 .cd .cm{display:flex; gap:7px; align-items:center; margin-top:3px; font-size:9.5px; color:var(--text-2)}
+  #mk6 .cd .sc{font-family:var(--mono); font-weight:700; color:var(--accent)}
+  #mk6 .cands .ft{padding:9px 11px; border-top:1px solid var(--card-border); display:flex; flex-direction:column; gap:6px}
+
+  /* download list */
+  #mk6 .lbx{
+    background:var(--input-bg); border:1px solid var(--card-border); border-radius:6px;
+    font-family:var(--mono); font-size:11px; line-height:1.8; padding:12px 14px;
+    max-height:300px; overflow:auto; white-space:pre;
+  }
+  #mk6 .lbx .g{color:var(--accent); font-weight:600}
+  #mk6 .lbx .dim{color:var(--text-3)}
+  #mk6 .seg{display:flex; border:1px solid var(--card-border); border-radius:5px; overflow:hidden}
+  #mk6 .seg button{
+    font-family:var(--ui); font-size:10.5px; font-weight:600; padding:4px 9px; cursor:pointer;
+    background:#21262d; color:var(--text-2); border:none; border-right:1px solid var(--card-border);
+  }
+  #mk6 .seg button:last-child{border-right:none}
+  #mk6 .seg button.on{background:var(--accent); color:var(--text-inv)}
+
+  /* summary board — the tile approach, where it belongs */
+  #mk6 .sumhead{
+    border:1px solid #1d4a30; background:var(--ok-bg); border-radius:6px; padding:12px 15px;
+    margin-bottom:13px; display:flex; gap:12px; align-items:center; flex-wrap:wrap;
+  }
+  #mk6 .sumhead .big{font-size:26px; font-weight:700; letter-spacing:-.03em; color:var(--ok); font-variant-numeric:tabular-nums}
+  #mk6 .sumhead .txt{font-size:12px}
+  #mk6 .sumhead .txt b{font-variant-numeric:tabular-nums}
+  #mk6 .sumhead .sp{margin-left:auto; display:flex; gap:6px}
+  #mk6 .board{display:grid; grid-template-columns:repeat(3,1fr) ; gap:10px}
+  #mk6 .bt{background:var(--card-bg); border:1px solid var(--card-border); border-radius:6px; padding:12px 14px; display:flex; flex-direction:column; gap:7px}
+  #mk6 .bt .bh{display:flex; align-items:center; gap:7px}
+  #mk6 .bt .bh .n{font-family:var(--mono); font-size:9px; font-weight:700; width:16px; height:16px; border-radius:50%; background:var(--ok); color:var(--text-inv); display:grid; place-items:center}
+  #mk6 .bt .bh h5{margin:0; font-size:12px; font-weight:700}
+  #mk6 .bt .bh .st{margin-left:auto}
+  #mk6 .bt .bl{font-size:11px; color:var(--text-2); line-height:1.55; flex:1}
+  #mk6 .bt .bl b{color:var(--text); font-weight:600; font-variant-numeric:tabular-nums}
+  #mk6 .bt .ba{display:flex; gap:5px; flex-wrap:wrap}
+  #mk6 .bt.wide{grid-column:1/-1}
+  #mk6 .bt.pend{border-color:var(--accent-pressed)}
+  #mk6 .trio{display:grid; grid-template-columns:repeat(3,1fr); gap:7px}
+  #mk6 .trio .c{border:1px solid var(--card-border); border-radius:5px; padding:7px 9px; background:var(--input-bg)}
+  #mk6 .trio .c .v{font-size:17px; font-weight:700; letter-spacing:-.02em; font-variant-numeric:tabular-nums}
+  #mk6 .trio .c.g{border-color:#1d4a30} #mk6 .trio .c.g .v{color:var(--ok)}
+  #mk6 .trio .c.a{border-color:#5c4410} #mk6 .trio .c.a .v{color:var(--warn)}
+  #mk6 .trio .c.r{border-color:#5e2320} #mk6 .trio .c.r .v{color:var(--bad)}
+
+  @media (max-width:1080px){
+    #mk6 .tri{grid-template-columns:1fr}
+    #mk6 .qr{max-height:220px}
+  }
+  @media (max-width:820px){
+    #mk6 .two,#mk6 .g13,#mk6 .vs,#mk6 .board{grid-template-columns:1fr}
+    #mk6 .chev{display:none}
+  }
+"""
+
+MK6 = """
+      <div class="titlebar">
+        <h2>Playlist Gap</h2>
+        <span class="crumb">Liked videos · YouTube Music · 6 days since last run</span>
+        <div class="right">
+          <button class="btn sm">Saved lists (4)</button>
+          <button class="btn sm">Re-compare</button>
+        </div>
+      </div>
+
+      <div class="strip" role="tablist">
+        <button class="tl done" role="tab" data-p="setup" aria-selected="false">
+          <div class="r1"><span class="n">✓</span><span class="nm">Setup</span><span class="st pill ok">ok</span></div>
+          <div class="m">YT Music · <b>Liked videos</b></div>
+          <div class="m"><b>1,204</b> rows · <b>14</b> new</div>
+        </button>
+        <div class="chev lit">›</div>
+        <button class="tl done" role="tab" data-p="read" aria-selected="false">
+          <div class="r1"><span class="n">✓</span><span class="nm">Read &amp; split</span><span class="st pill ok">ok</span></div>
+          <div class="m"><b>1,189</b> clean · <b>15</b> split</div>
+          <div class="m">1 unavailable upstream</div>
+        </button>
+        <div class="chev lit">›</div>
+        <button class="tl done" role="tab" data-p="compare" aria-selected="false">
+          <div class="r1"><span class="n">✓</span><span class="nm">Compare</span><span class="st pill ok">4.2 s</span></div>
+          <div class="m">rungs <b>0 · 2 · 4 · 5b</b></div>
+          <div class="m">620 settled by video ID</div>
+        </button>
+        <div class="chev lit">›</div>
+        <button class="tl alert" role="tab" data-p="triage" aria-selected="true">
+          <div class="r1"><span class="n">4</span><span class="nm">Triage</span><span class="st pill warn">46 left</span></div>
+          <div class="m"><b>1,031</b> owned · <b>68</b> unsure</div>
+          <div class="m"><b>105</b> missing</div>
+        </button>
+        <div class="chev lit">›</div>
+        <button class="tl" role="tab" data-p="export" aria-selected="false">
+          <div class="r1"><span class="n">5</span><span class="nm">Download list</span><span class="st pill mute">ready</span></div>
+          <div class="m"><b>105</b> tracks · 38 artists</div>
+          <div class="m">not exported yet</div>
+        </button>
+        <div class="chev">›</div>
+        <button class="tl" role="tab" data-p="summary" aria-selected="false">
+          <div class="r1"><span class="n">6</span><span class="nm">Summary</span><span class="st pill mute">—</span></div>
+          <div class="m">run overview &amp; hand-off</div>
+          <div class="m">42 pending from last run</div>
+        </button>
+      </div>
+
+      <!-- ── SETUP ───────────────────────────────────────────── -->
+      <div class="pane" data-pane="setup" hidden>
+        <div class="ph">
+          <h3>Setup</h3>
+          <span class="hint">Two fields and a library path. Everything else is remembered.</span>
+          <div class="rt"><button class="btn pri">Fetch &amp; scan →</button></div>
+        </div>
+        <div class="two">
+          <div class="card sect">
+            <h4>Wanted list</h4>
+            <p class="sub">Where the list of songs you want comes from.</p>
+            <div class="fr">
+              <span class="lbl">Source</span>
+              <select class="sel">
+                <option selected>YouTube Music — playlist or Liked</option>
+                <option>YouTube — playlist</option>
+                <option>CSV file (TuneMyMusic, any export)</option>
+                <option disabled>Spotify — not wired yet</option>
+              </select>
+            </div>
+            <div class="fr">
+              <span class="lbl">URL</span>
+              <input class="inp mono" value="https://music.youtube.com/playlist?list=LM">
+            </div>
+            <div class="fr">
+              <span class="lbl">Name</span>
+              <input class="inp" value="Liked videos">
+            </div>
+            <div class="kv"><span>Reads via</span><b>ytmusicapi</b></div>
+            <div class="kv"><span>Fields it gives us</span><b>video ID · artist · album · duration</b></div>
+            <div class="kv"><span>Last fetched</span><b>2 min ago · 1,204 rows</b></div>
+            <div class="kv"><span>New since last run</span><b>14</b></div>
+            <div class="navb">
+              <button class="btn sm">Re-fetch from YouTube</button>
+              <button class="btn sm">Load a CSV instead…</button>
+            </div>
+          </div>
+          <div class="card sect">
+            <h4>Library</h4>
+            <p class="sub">What counts as “I already have this”.</p>
+            <div class="fr">
+              <span class="lbl">Folder</span>
+              <input class="inp mono" value="D:\\Music\\SoundVault">
+            </div>
+            <div class="kv"><span>Snapshot</span><b>8,412 tracks · 4 min ago</b></div>
+            <span class="lbl" style="display:block; margin:11px 0 5px">Counted as owned</span>
+            <div class="chk on"><i>✓</i>By Artist / albums<span class="note">7,902</span></div>
+            <div class="chk on"><i>✓</i>Not Sorted<span class="note">388 · downloaded, unfiled</span></div>
+            <div class="chk on"><i>✓</i>Quarantine<span class="note">98 · dupe losers</span></div>
+            <div class="chk on"><i>✓</i>Manual Review<span class="note">24 · matched by filename</span></div>
+            <div class="chk off"><i></i>Trash<span class="note">excluded</span></div>
+            <div class="navb"><button class="btn sm">Refresh snapshot</button></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── READ & SPLIT ────────────────────────────────────── -->
+      <div class="pane" data-pane="read" hidden>
+        <div class="ph">
+          <h3>Read &amp; split</h3>
+          <span class="hint">Nothing is committed — ambiguous rows carry every candidate split into the compare.</span>
+          <div class="rt"><button class="btn sm">Edit split rules…</button><button class="btn pri">Compare →</button></div>
+        </div>
+        <div class="g13">
+          <div class="card sect">
+            <h4>How each row was read</h4>
+            <p class="sub">1,204 rows from YouTube Music.</p>
+            <div style="overflow-x:auto">
+            <table>
+              <thead><tr><th>Wanted row</th><th>Artist</th><th>Title</th><th>Read as</th></tr></thead>
+              <tbody>
+                <tr><td class="track">Kate Bush - Running Up That Hill (A Deal With God)</td><td class="ok-t">Kate Bush</td><td class="ok-t">Running Up That Hill (A Deal With God)</td><td><span class="pill ok">clean</span></td></tr>
+                <tr><td class="track">Wavebeatmaker - Resonance</td><td class="ok-t">Wavebeatmaker</td><td class="ok-t">Resonance</td><td><span class="pill ok">clean</span></td></tr>
+                <tr><td class="track">The Sways - Someday We Will Dream About Today</td><td class="ok-t">The Sways</td><td class="ok-t">Someday We Will Dream About Today</td><td><span class="pill ok">clean</span></td></tr>
+                <tr><td class="track">FIFTY FIFTY - Cupid (Twin Version)</td><td class="ok-t">FIFTY FIFTY</td><td class="ok-t">Cupid <span class="t3">+ (Twin Version)</span></td><td><span class="pill ok">clean</span></td></tr>
+                <tr><td class="track">French 79 · New Constellations - Colors Collide</td><td class="bad-t">2 candidates</td><td class="bad-t">2 candidates</td><td><span class="pill warn">ambiguous</span></td></tr>
+                <tr><td class="track">(Triple Vibe) HOME - Resonance but it's beats 3,3</td><td class="ok-t">HOME</td><td class="ok-t">Resonance <span class="t3">+ fan edit</span></td><td><span class="pill warn">derivative</span></td></tr>
+                <tr><td class="track">Self Aware x Babydoll</td><td class="bad-t">none found</td><td class="bad-t">none found</td><td><span class="pill bad">mashup</span></td></tr>
+                <tr><td class="track t3">(blank row)</td><td class="bad-t">—</td><td class="bad-t">—</td><td><span class="pill bad">unavailable</span></td></tr>
+              </tbody>
+            </table>
+            </div>
+          </div>
+          <div style="display:flex; flex-direction:column; gap:12px">
+            <div class="card sect">
+              <h4>Tally</h4>
+              <div class="kv"><span>Parsed cleanly</span><b>1,189</b></div>
+              <div class="kv"><span>Ambiguous delimiter</span><b>9</b></div>
+              <div class="kv"><span>Derivative / fan edit</span><b>4</b></div>
+              <div class="kv"><span>No artist found</span><b>1</b></div>
+              <div class="kv"><span>Unavailable upstream</span><b>1</b></div>
+            </div>
+            <div class="card sect">
+              <h4>Candidate splits</h4>
+              <p class="sub" style="margin-bottom:8px">For <span class="mono">French 79 · New Constellations - Colors Collide</span>:</p>
+              <div class="kv"><span class="mono t2">French 79 / New Constellations…</span><b class="pill mute">tried</b></div>
+              <div class="kv"><span class="mono t2">French 79 · New Const… / Colors Collide</span><b class="pill acc">hit</b></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── COMPARE ─────────────────────────────────────────── -->
+      <div class="pane" data-pane="compare" hidden>
+        <div class="ph">
+          <h3>Compare</h3>
+          <span class="hint">Where each of the 1,204 rows was resolved. Cheapest rungs first.</span>
+          <div class="rt"><button class="btn sm">Thresholds…</button><button class="btn pri">Go to triage →</button></div>
+        </div>
+        <div class="g13">
+          <div class="card sect">
+            <h4>Match ladder</h4>
+            <p class="sub">Rungs 1 and 5 sat idle — nothing reached them.</p>
+            <div class="rung"><span class="rn">0</span><span>Video ID identity</span><div class="bar"><i style="width:100%"></i></div><span class="ct">620</span><span class="pc">51%</span></div>
+            <div class="rung"><span class="rn">0b</span><span>Filename / <span class="mono">purl</span> tag identity</span><div class="bar"><i style="width:23%"></i></div><span class="ct">142</span><span class="pc">12%</span></div>
+            <div class="rung off"><span class="rn">1</span><span>Exact artist + title</span><div class="bar"><i style="width:0"></i></div><span class="ct">0</span><span class="pc">—</span></div>
+            <div class="rung"><span class="rn">2</span><span>Core title + primary artist</span><div class="bar"><i style="width:31%"></i></div><span class="ct">193</span><span class="pc">16%</span></div>
+            <div class="rung"><span class="rn">3</span><span>Modifier adjudication</span><div class="bar"><i style="width:13%"></i></div><span class="ct">82</span><span class="pc">7%</span></div>
+            <div class="rung"><span class="rn">4</span><span>Fuzzy title within artist</span><div class="bar"><i style="width:10%"></i></div><span class="ct">62</span><span class="pc">5%</span></div>
+            <div class="rung"><span class="rn">5b</span><span>Fuzzy display string vs filenames</span><div class="bar"><i style="width:7%"></i></div><span class="ct">45</span><span class="pc">4%</span></div>
+            <div class="rung"><span class="rn">6</span><span>Nothing plausible found</span><div class="bar"><i style="width:9%"></i></div><span class="ct">60</span><span class="pc">5%</span></div>
+          </div>
+          <div style="display:flex; flex-direction:column; gap:12px">
+            <div class="card sect">
+              <h4>Thresholds used</h4>
+              <div class="kv"><span>Same recording</span><b>≤ 3 s apart</b></div>
+              <div class="kv"><span>Needs confirmation</span><b>3–15 s</b></div>
+              <div class="kv"><span>Different version</span><b>&gt; 15 s</b></div>
+              <div class="kv"><span>Fuzzy title floor</span><b>0.82</b></div>
+            </div>
+            <div class="card sect">
+              <h4>Outcome</h4>
+              <div class="trio">
+                <div class="c g"><div class="lbl">Owned</div><div class="v">1,031</div></div>
+                <div class="c a"><div class="lbl">Unsure</div><div class="v">68</div></div>
+                <div class="c r"><div class="lbl">Missing</div><div class="v">105</div></div>
+              </div>
+              <p class="sub" style="margin:10px 0 0">Uncertainty resolved toward <b>unsure</b>, never toward owned — a wrong “owned” loses the song silently.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── TRIAGE ──────────────────────────────────────────── -->
+      <div class="pane" data-pane="triage">
+        <div class="ph">
+          <h3>Triage</h3>
+          <span class="hint">22 of 68 cleared · pick a row, compare it against every candidate</span>
+          <div class="rt">
+            <span class="pill ok">1,031 owned</span>
+            <span class="pill bad">105 missing</span>
+            <button class="btn pri sm">Finish &amp; export →</button>
+          </div>
+        </div>
+        <div class="tri">
+          <div class="qcol">
+            <div class="qf">
+              <button class="on">Unsure 46</button>
+              <button>Missing 105</button>
+              <button>Owned 1,031</button>
+              <button>Never 7</button>
+            </div>
+            <div class="qr">
+              <div class="qi on"><span class="d"></span><div><div class="t">FIFTY FIFTY - Cupid (Twin Version)</div><div class="w">version differs · 41 s apart</div></div></div>
+              <div class="qi"><span class="d"></span><div><div class="t">(Triple Vibe) HOME - Resonance but it's beats 3,3</div><div class="w">fan edit of an owned track</div></div></div>
+              <div class="qi"><span class="d"></span><div><div class="t">Self Aware x Babydoll</div><div class="w">mashup · no artist found</div></div></div>
+              <div class="qi"><span class="d"></span><div><div class="t">French 79 · New Constellations - Colors Collide</div><div class="w">2 splits, both plausible</div></div></div>
+              <div class="qi"><span class="d"></span><div><div class="t">ODESZA - Bloom (Extended)</div><div class="w">version differs · 2:11 apart</div></div></div>
+              <div class="qi"><span class="d"></span><div><div class="t">Tinlicker - Because You Move Me (feat. Helsloot)</div><div class="w">feat. credit only</div></div></div>
+              <div class="qi seen"><span class="d"></span><div><div class="t">Lane 8 - Fingerprint</div><div class="w">→ marked owned</div></div></div>
+              <div class="qi seen"><span class="d"></span><div><div class="t">RÜFÜS DU SOL - Innerbloom (Live)</div><div class="w">→ sent to missing</div></div></div>
+              <div class="qi seen"><span class="d"></span><div><div class="t">Bonobo - Kerala</div><div class="w">→ marked owned</div></div></div>
+            </div>
+          </div>
+
+          <div class="ev">
+            <div class="bulkb">
+              <span><b>17 rows</b> here differ only by a version modifier with a runtime gap over 15 s.</span>
+              <span class="sp">
+                <button class="btn pri sm">Send all 17 to missing</button>
+                <button class="btn sm">One by one</button>
+              </span>
+            </div>
+            <div class="vs">
+              <div class="vc">
+                <span class="lbl">Wanted · from YouTube Music</span>
+                <div class="art a1">CUPID<br>TWIN VER.<span class="cap">yt thumbnail</span></div>
+                <div class="fl same"><div class="k">Core title</div><div class="v">Cupid</div></div>
+                <div class="fl same"><div class="k">Artist</div><div class="v">FIFTY FIFTY</div></div>
+                <div class="fl diff"><div class="k">Modifiers</div><div class="v">(Twin Version)</div></div>
+                <div class="fl diff"><div class="k">Duration</div><div class="v">2:54</div></div>
+                <div class="fl"><div class="k">Album</div><div class="v t2">The Beginning: Cupid</div></div>
+                <div class="fl"><div class="k">Video ID</div><div class="v t2">Qc7_zRjH808</div></div>
+              </div>
+              <div class="vc cand">
+                <span class="lbl">Candidate 1 of 3 · in your library</span>
+                <div class="art a2">CUPID<span class="cap">embedded art</span></div>
+                <div class="fl same"><div class="k">Core title</div><div class="v">Cupid</div></div>
+                <div class="fl same"><div class="k">Artist</div><div class="v">FIFTY FIFTY</div></div>
+                <div class="fl diff"><div class="k">Modifiers</div><div class="v">— none —</div></div>
+                <div class="fl diff"><div class="k">Duration</div><div class="v">3:35</div></div>
+                <div class="fl"><div class="k">Album</div><div class="v t2">The Beginning: Cupid</div></div>
+                <div class="fl"><div class="k">File</div><div class="v t2">By Artist/FIFTY FIFTY/Cupid.flac</div></div>
+              </div>
+            </div>
+            <div class="why">
+              Core title, artist and album all agree — but “Twin Version” is a distinct official
+              recording and the runtimes are <b>41 s</b> apart, past the 15 s gate.
+              Owning <span class="mono">Cupid</span> is not owning this one.
+            </div>
+            <div class="acts">
+              <button class="btn pri">Send to missing<kbd>M</kbd></button>
+              <button class="btn">Accept as owned<kbd>A</kbd></button>
+              <button class="btn">Never want<kbd>X</kbd></button>
+              <button class="btn sm">▶ Play both<kbd>Space</kbd></button>
+              <button class="btn sm">Add note…</button>
+              <span class="t3" style="margin-left:auto; font-size:10px">
+                <kbd>J</kbd><kbd>K</kbd> move · <kbd>U</kbd> undo · <kbd>1-3</kbd> pick candidate
+              </span>
+            </div>
+          </div>
+
+          <div class="cands">
+            <div class="hd">
+              <span class="lbl">Possible counterparts</span>
+              <div class="sub2">3 found in your library · click to compare</div>
+            </div>
+            <div class="cd pick">
+              <div class="cn">FIFTY FIFTY — Cupid</div>
+              <div class="cm"><span class="sc">0.97</span><span>flac · 3:35</span><span class="pill warn">+41 s</span></div>
+            </div>
+            <div class="cd">
+              <div class="cn">FIFTY FIFTY — Cupid (Sped Up)</div>
+              <div class="cm"><span class="sc">0.88</span><span>mp3 · 2:51</span><span class="pill acc">−3 s</span></div>
+            </div>
+            <div class="cd">
+              <div class="cn">Not Sorted/fifty fifty cupid twin ver [Qc7_zRjH808].opus</div>
+              <div class="cm"><span class="sc">0.71</span><span>opus · 2:54</span><span class="pill ok">ID match</span></div>
+            </div>
+            <div class="ft">
+              <button class="btn sm">🔍 Search library manually…</button>
+              <button class="btn sm">None of these</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── DOWNLOAD LIST ───────────────────────────────────── -->
+      <div class="pane" data-pane="export" hidden>
+        <div class="ph">
+          <h3>Download list</h3>
+          <span class="hint">105 tracks · 38 artists · 11 albums</span>
+          <div class="rt">
+            <div class="seg"><button class="on">By album</button><button>Flat</button><button>By artist</button></div>
+            <button class="btn pri">⧉ Copy all 105</button>
+            <button class="btn sm">Save .txt / .csv / report</button>
+          </div>
+        </div>
+        <div class="g13">
+          <div>
+            <div class="lbx"><span class="g"># Ben Böhmer — Begin Again  (4 of 12 tracks missing)</span>
+Ben Böhmer - Breathing
+Ben Böhmer - Sailing
+Ben Böhmer - After Earth
+Ben Böhmer - Lost In Thought
+<span class="dim"># → whole album is probably the better grab</span>
+
+<span class="g"># Yotto — Erased Dreams  (2 of 8 missing)</span>
+Yotto - Radiate
+Yotto - Nova
+
+<span class="g"># Singles &amp; one-offs  (99)</span>
+FIFTY FIFTY - Cupid (Twin Version)
+Nora En Pure - Enchantment
+ODESZA - Bloom (Extended)
+Lane 8 - Shatter
+Marsh - Alpine
+<span class="dim">… 94 more</span></div>
+            <div class="navb">
+              <button class="btn">← Back to triage</button>
+              <button class="btn sm">Mark all 105 as pending download</button>
+              <button class="btn sm sp">Summary →</button>
+            </div>
+          </div>
+          <div style="display:flex; flex-direction:column; gap:12px">
+            <div class="card sect">
+              <h4>What's in here</h4>
+              <div class="kv"><span>Nothing plausible found</span><b>60</b></div>
+              <div class="kv"><span>Only a remix / edit owned</span><b>28</b></div>
+              <div class="kv"><span>Sent here from triage</span><b>17</b></div>
+            </div>
+            <div class="card sect">
+              <h4>Not in here</h4>
+              <div class="kv"><span>Never-want list</span><b>7</b></div>
+              <div class="kv"><span>Still unsure</span><b>46</b></div>
+              <div class="kv"><span>Unavailable upstream</span><b>1</b></div>
+              <p class="sub" style="margin:9px 0 0">Clear the 46 and some may land here.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── SUMMARY ─────────────────────────────────────────── -->
+      <div class="pane" data-pane="summary" hidden>
+        <div class="ph">
+          <h3>Run summary</h3>
+          <span class="hint">Liked videos · 12 Sep, 15:58 · 4.2 s</span>
+          <div class="rt"><button class="btn sm">Save report to Docs/</button><button class="btn sm">Run again</button></div>
+        </div>
+        <div class="sumhead">
+          <span class="big">105</span>
+          <span class="txt"><b>105</b> tracks to download, out of <b>1,204</b> wanted.<br>
+          <span class="t2">You already had <b>86%</b> of this playlist. <b>46</b> rows still unsure.</span></span>
+          <span class="sp">
+            <button class="btn pri">⧉ Copy the list</button>
+            <button class="btn sm">Open Library Sync →</button>
+          </span>
+        </div>
+        <div class="board">
+          <div class="bt">
+            <div class="bh"><span class="n">✓</span><h5>Source</h5><span class="st pill ok">ok</span></div>
+            <div class="bl">YouTube Music — <b>Liked videos</b><br><b>1,204</b> rows via ytmusicapi<br><b>14</b> new since 6 Sep · <b>1</b> unavailable</div>
+            <div class="ba"><button class="btn sm">Re-fetch</button></div>
+          </div>
+          <div class="bt">
+            <div class="bh"><span class="n">✓</span><h5>Library</h5><span class="st pill ok">ok</span></div>
+            <div class="bl"><b>8,412</b> tracks counted<br>incl. Not Sorted, Quarantine, Manual Review<br>snapshot read 4 min before the run</div>
+            <div class="ba"><button class="btn sm">Refresh</button></div>
+          </div>
+          <div class="bt">
+            <div class="bh"><span class="n">✓</span><h5>Read &amp; split</h5><span class="st pill ok">ok</span></div>
+            <div class="bl"><b>1,189</b> parsed cleanly<br><b>15</b> needed candidate splits<br><b>4</b> fan edits · <b>1</b> mashup</div>
+            <div class="ba"><button class="btn sm">Inspect</button></div>
+          </div>
+          <div class="bt">
+            <div class="bh"><span class="n">✓</span><h5>Compare</h5><span class="st pill ok">4.2 s</span></div>
+            <div class="bl"><b>762</b> settled by identity alone (rungs 0 / 0b)<br><b>337</b> by title, artist and duration<br><b>105</b> reached rung 6</div>
+            <div class="ba"><button class="btn sm">Ladder breakdown</button></div>
+          </div>
+          <div class="bt">
+            <div class="bh"><span class="n">4</span><h5>Triage</h5><span class="st pill warn">46 left</span></div>
+            <div class="trio">
+              <div class="c g"><div class="lbl">Owned</div><div class="v">1,031</div></div>
+              <div class="c a"><div class="lbl">Unsure</div><div class="v">46</div></div>
+              <div class="c r"><div class="lbl">Missing</div><div class="v">105</div></div>
+            </div>
+            <div class="bl"><b>22</b> decisions made this run, all remembered.</div>
+            <div class="ba"><button class="btn sm">Resume triage</button></div>
+          </div>
+          <div class="bt pend">
+            <div class="bh"><span class="n">↻</span><h5>Pending from last run</h5><span class="st pill acc">42</span></div>
+            <div class="bl"><b>42</b> tracks exported 6 days ago, not yet seen in the library.<br>Verify with real fingerprints once they land.</div>
+            <div class="ba">
+              <button class="btn sm">Open Library Sync →</button>
+              <button class="btn sm">Mark downloaded</button>
+            </div>
+          </div>
+          <div class="bt wide">
+            <div class="bh"><span class="n">✓</span><h5>Remembered for next time</h5><span class="st pill mute">ledger</span></div>
+            <div class="bl">
+              <b>22</b> confirmations · <b>7</b> never-want rows · <b>3</b> learned split rules ·
+              <b>2</b> modifier rules (“<span class="mono">feat.</span>-only means owned”).
+              Next run on this playlist will only ask about rows it has never seen.
+            </div>
+            <div class="ba">
+              <button class="btn sm">View ledger</button>
+              <button class="btn sm">Edit learned rules…</button>
+            </div>
+          </div>
+        </div>
+      </div>
+"""
+
+FRAGS = {"mk6": MK6, "mk1": MK1, "mk2": MK2, "mk3": MK3, "mk4": MK4, "mk5": MK5}
+CSSES = {"mk6": MK6_CSS, "mk1": MK1_CSS, "mk2": MK2_CSS, "mk3": MK3_CSS, "mk4": MK4_CSS, "mk5": MK5_CSS}
+
+PANE_JS = """
+<script>
+  document.querySelectorAll('.app').forEach(app => {
+    const strip = app.querySelector('.strip[role="tablist"]');
+    if (!strip) return;
+    const show = key => {
+      strip.querySelectorAll('.tl').forEach(t => t.setAttribute('aria-selected', String(t.dataset.p === key)));
+      app.querySelectorAll('[data-pane]').forEach(p => { p.hidden = p.dataset.pane !== key; });
+    };
+    strip.addEventListener('click', e => {
+      const t = e.target.closest('.tl[data-p]');
+      if (t) show(t.dataset.p);
+    });
+    strip.addEventListener('keydown', e => {
+      if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft') return;
+      const tiles = [...strip.querySelectorAll('.tl')];
+      const at = tiles.findIndex(t => t.getAttribute('aria-selected') === 'true');
+      const next = tiles[at + (e.key === 'ArrowRight' ? 1 : -1)];
+      if (next) { e.preventDefault(); show(next.dataset.p); next.focus(); }
+    });
+  });
+</script>
+"""
+
 
 FONTS = ('<link rel="stylesheet" href="https://fonts.googleapis.com/css2?'
          'family=Inter:wght@400;600;700&family=JetBrains+Mono:wght@400;600;700&display=swap">')
@@ -830,7 +1484,7 @@ def standalone(name: str, slug: str, title: str, thesis: str) -> str:
     <p class="thesis">{thesis}</p>
   </header>
 {app_block(slug, title, thesis)}</div>
-"""
+{PANE_JS if slug == "mk6" else ""}"""
 
 
 def index() -> str:
@@ -844,6 +1498,9 @@ def index() -> str:
   .picker button:hover{color:var(--text); border-color:var(--accent)}
   .picker button[aria-selected="true"]{background:var(--accent); border-color:var(--accent); color:var(--text-inv)}
   .picker button .k{font-family:var(--mono); font-size:10px; opacity:.75}
+  .picker button:first-child{border-color:var(--accent-pressed)}
+  .picker button:first-child[aria-selected="false"]{color:var(--accent)}
+  .picker .div{width:1px; background:var(--card-border); margin:2px 6px}
   .picker button:focus-visible{outline:2px solid var(--accent); outline-offset:2px}
   .pgtitle{margin:0 0 4px; font-size:22px; font-weight:700; letter-spacing:-.025em}
   .pgsub{margin:0 0 16px; font-size:13px; color:var(--text-2); max-width:80ch}
@@ -854,9 +1511,9 @@ def index() -> str:
 """
     picker = "\n".join(
         f'    <button role="tab" aria-selected="{"true" if i == 0 else "false"}" data-t="{slug}">'
-        f'<span class="k">{name[:2]}</span>{title}</button>'
+        f'<span class="k">{name[:2]}</span>{title}{" ★" if slug == "mk6" else ""}</button>'
         for i, (name, slug, title, _d) in enumerate(MOCKUPS)
-    )
+    ).replace("</button>\n    <button", "</button>\n    <div class=\"div\"></div>\n    <button", 1)
     panels = "\n".join(
         f'  <div class="mkwrap" id="w-{slug}"{"" if i == 0 else " hidden"}>\n'
         f'    <h1><em>Mockup {name[:2]}</em>{title}</h1>\n'
@@ -868,15 +1525,17 @@ def index() -> str:
 {FONTS}
 <style>{css}</style>
 <div class="shell">
-  <h1 class="pgtitle">Playlist Gap — five interfaces</h1>
-  <p class="pgsub">Same feature, same data, five interaction models. Palette and sidebar are the
-  app's real Midnight theme, so these read at roughly the density the Qt build would have.
-  Pick one and we refine it.</p>
+  <h1 class="pgtitle">Playlist Gap — interface directions</h1>
+  <p class="pgsub"><b>06 Hybrid v2 is the current direction</b> — tiles and tabs at once, with every
+  step's pane filled in. Click the tiles inside it to move between steps. <span class="t2">01–05
+  are the first round, kept for reference.</span> Palette and sidebar are the app's real Midnight
+  theme, and the data is your real YouTube Music export.</p>
   <div class="picker" role="tablist">
 {picker}
   </div>
 {panels}
 </div>
+{PANE_JS}
 <script>
   const picker = document.querySelector('.picker');
   picker.addEventListener('click', e => {{
