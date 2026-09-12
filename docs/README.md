@@ -45,6 +45,11 @@ including lower-priority housekeeping items.
 
 - **[ROADMAP.md](ROADMAP.md)** — What's planned but not yet built, with an honest
   status for each item.
+- **[playlist_gap_feature_plan.md](playlist_gap_feature_plan.md)** — Concept plan for
+  the Playlist Gap workspace: import a CSV of songs you want (a TuneMyMusic export,
+  say), compare it against the library on metadata, and get back a short, trustworthy
+  list of what you still need to download. Conceptual only — the technical spec is the
+  next step.
 - **[reorganization_spec.md](reorganization_spec.md)** — A deferred plan to clean up
   and reorganize the ~60 loose files sitting in the repo root. Not scheduled; do not
   execute until explicitly asked.

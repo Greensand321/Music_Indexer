@@ -156,6 +156,34 @@ the body below:
   list (one color for "copy," another for "replace") so the state is visible at a
   glance, beyond the small text badges used now.
 
+## Playlist Gap — "what am I missing?" (acquisition triage)
+
+- **Compare a wanted-song list against the library** *(Concept plan written, not
+  started).* The recurring problem this addresses: a playlist grows by a handful of
+  songs every few months, there's no way to tell which handful is new, so the whole
+  playlist gets re-downloaded and most of it arrives as duplicates. The proposed
+  feature imports a CSV of wanted songs (e.g. a TuneMyMusic export), compares it
+  against the library on *metadata* rather than fingerprints — there is no audio on the
+  incoming side, which is what makes this a different engine from Library Sync — and
+  sorts every row into MATCHED / NEEDS CONFIRMATION / MISSING. The MISSING list is the
+  deliverable; the user downloads it by hand.
+
+  Full concept plan: **`docs/playlist_gap_feature_plan.md`** (problem framing, the
+  match ladder, the remix/`feat.` modifier model, the decision ledger that makes
+  re-runs cheap, alternatives considered, risks, and suggested phasing). A technical
+  spec is the next step; the plan's §17 lists what needs deciding first.
+
+  Two prerequisites the plan calls out, both worth knowing independently of the
+  feature:
+  - The fingerprint cache's `normalized_artist` / `normalized_title` /
+    `normalized_album` columns are only ever populated by the **legacy** Tkinter
+    writer. The Qt Duplicates workspace calls `store_fingerprint()` without them, so
+    in the active app those columns are `NULL`.
+  - The reserved-folder skip list is wrong for this kind of comparison. `Not Sorted/`,
+    `Quarantine/`, and `Manual Review/` hold music the user *already has*, so a gap
+    scan that reuses the indexer's exclusions unmodified would report those tracks as
+    missing and cause exactly the re-download it's meant to prevent.
+
 ## Playlists, Clustering & the Visual Music Graph
 
 The foundation and the in-app map are now built; the remaining work is the richer
