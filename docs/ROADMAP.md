@@ -170,8 +170,12 @@ the body below:
 
   Full concept plan: **`docs/playlist_gap_feature_plan.md`** (problem framing, the
   match ladder, the remix/`feat.` modifier model, the decision ledger that makes
-  re-runs cheap, alternatives considered, risks, and suggested phasing). A technical
-  spec is the next step; the plan's §17 lists what needs deciding first.
+  re-runs cheap, the second verification pass, alternatives considered, risks, and
+  phasing). Technical spec: **`docs/playlist_gap_spec.md`** (module manifest, data
+  model, source protocol, parser, lexicon, ladder, ledger schema, verify pass, Qt
+  workspace, test plan, phased delivery). Interface mockups:
+  **`docs/mockups/playlist_gap/`** — six directions, `06-hybrid-v2.html` is the chosen
+  one. Both prerequisites below are Phase 0 of the spec.
 
   Two prerequisites the plan calls out, both worth knowing independently of the
   feature:

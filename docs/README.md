@@ -50,6 +50,10 @@ including lower-priority housekeeping items.
   say), compare it against the library on metadata, and get back a short, trustworthy
   list of what you still need to download. Conceptual only — the technical spec is the
   next step.
+- **[playlist_gap_spec.md](playlist_gap_spec.md)** — The technical spec for Playlist Gap:
+  module manifest, data model, the source protocol, the parser, the modifier lexicon, the
+  match ladder, the ledger schema, the verification pass, the Qt workspace, the test plan,
+  and phased delivery. Read the plan first for intent; this says what to build.
 - **[reorganization_spec.md](reorganization_spec.md)** — A deferred plan to clean up
   and reorganize the ~60 loose files sitting in the repo root. Not scheduled; do not
   execute until explicitly asked.

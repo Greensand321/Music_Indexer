@@ -1,9 +1,9 @@
 # Feature Plan — Playlist Gap (“What am I missing?”)
 
-*Status: **concept plan**, not a spec. This document exists to agree on the problem,
-the workflow, and the tools before anyone writes a technical breakdown. Nothing here
-is committed implementation detail; the follow-on spec turns the agreed parts of this
-into precise behaviour.*
+*Status: **concept plan**. This document exists to agree on the problem, the workflow, and
+the tools. It argues **why**; the technical breakdown that says **what to build** is
+**[`playlist_gap_spec.md`](playlist_gap_spec.md)**. Where the two disagree, the spec wins on
+mechanics and this document wins on intent.*
 
 *Written: 2026-09-12. Target app: the **Qt** app (`alpha_dex_gui.py`). Not the legacy
 Tkinter app.*
