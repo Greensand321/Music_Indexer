@@ -1,0 +1,278 @@
+<title>Playlist Gap — Answer First</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&family=JetBrains+Mono:wght@400;600;700&display=swap">
+<style>
+  :root{
+    --sidebar-bg:#0d1117; --sidebar-hover:#1c2128; --sidebar-active:#1c2a3a;
+    --sidebar-accent:#58a6ff; --sidebar-text:#c9d1d9; --sidebar-hdr:#484f58;
+    --content-bg:#161b22; --card-bg:#1c2128; --card-border:#30363d;
+    --text:#e6edf3; --text-2:#8b949e; --text-3:#484f58; --text-inv:#0d1117;
+    --accent:#58a6ff; --accent-hover:#79b8ff; --accent-pressed:#388bfd;
+    --ok:#22c55e; --warn:#f59e0b; --bad:#ef4444;
+    --ok-bg:#10251a; --warn-bg:#2a1f0a; --bad-bg:#2a1212; --accent-bg:#10243d;
+    --input-bg:#0d1117; --input-border:#30363d;
+    --ui:"Inter","Segoe UI",system-ui,-apple-system,sans-serif;
+    --mono:"JetBrains Mono",ui-monospace,Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  body{background:#0a0d12; color:var(--text); font-family:var(--ui); font-size:13px; line-height:1.45}
+
+  /* app frame */
+  .app{
+    display:grid; grid-template-columns:186px 1fr;
+    background:var(--content-bg); border:1px solid var(--card-border);
+    border-radius:8px; overflow:hidden; min-height:660px;
+  }
+  .rail{background:var(--sidebar-bg); padding:12px 0; border-right:1px solid var(--card-border)}
+  .rail .brand{
+    font-weight:700; font-size:14px; letter-spacing:-.01em; color:var(--text);
+    padding:4px 16px 14px; display:flex; align-items:center; gap:7px;
+  }
+  .rail .brand span{color:var(--accent)}
+  .rail .hdr{
+    font-size:9.5px; font-weight:700; letter-spacing:.13em; text-transform:uppercase;
+    color:var(--sidebar-hdr); padding:12px 16px 5px;
+  }
+  .rail a{
+    display:flex; align-items:center; gap:9px; padding:6px 16px;
+    color:var(--sidebar-text); text-decoration:none; font-size:12.5px;
+    border-left:3px solid transparent;
+  }
+  .rail a .ic{width:15px; text-align:center; opacity:.75; font-size:12px}
+  .rail a:hover{background:var(--sidebar-hover)}
+  .rail a.on{background:var(--sidebar-active); border-left-color:var(--sidebar-accent); color:#fff; font-weight:600}
+  .rail a.on .ic{opacity:1}
+  .rail a.new::after{
+    content:"NEW"; margin-left:auto; font-family:var(--mono); font-size:8px; font-weight:700;
+    letter-spacing:.08em; color:var(--accent); background:var(--accent-bg);
+    border:1px solid var(--accent-pressed); border-radius:3px; padding:1px 4px;
+  }
+  .main{display:flex; flex-direction:column; min-width:0; overflow:hidden}
+  .titlebar{
+    padding:14px 20px 13px; border-bottom:1px solid var(--card-border);
+    display:flex; align-items:baseline; gap:12px; flex-wrap:wrap; flex:none;
+  }
+  .titlebar h2{margin:0; font-size:16px; font-weight:700; letter-spacing:-.015em}
+  .titlebar .crumb{font-size:11.5px; color:var(--text-2)}
+  .titlebar .right{margin-left:auto; display:flex; gap:7px; align-items:center}
+  .body{padding:18px 20px; overflow:auto; flex:1; min-width:0}
+  .statusbar{
+    flex:none; border-top:1px solid var(--card-border); padding:6px 20px;
+    font-size:11px; color:var(--text-2); display:flex; gap:14px; align-items:center;
+    background:var(--sidebar-bg);
+  }
+  .statusbar .sp{margin-left:auto}
+
+  /* primitives */
+  .card{background:var(--card-bg); border:1px solid var(--card-border); border-radius:6px}
+  .btn{
+    font-family:var(--ui); font-size:12px; font-weight:600; color:var(--text);
+    background:#21262d; border:1px solid var(--card-border); border-radius:5px;
+    padding:6px 12px; cursor:pointer;
+  }
+  .btn:hover{border-color:var(--accent); color:var(--accent-hover)}
+  .btn.pri{background:var(--accent); border-color:var(--accent); color:var(--text-inv)}
+  .btn.pri:hover{background:var(--accent-hover); color:var(--text-inv)}
+  .btn.sm{padding:3px 8px; font-size:11px}
+  .btn:focus-visible{outline:2px solid var(--accent); outline-offset:2px}
+  .btn[disabled]{opacity:.4; cursor:default}
+  .inp{
+    background:var(--input-bg); border:1px solid var(--input-border); border-radius:5px;
+    padding:6px 9px; color:var(--text); font-size:12px; font-family:var(--ui); width:100%;
+  }
+  .inp.mono{font-family:var(--mono); font-size:11.5px}
+  .pill{
+    display:inline-block; font-family:var(--mono); font-size:9px; font-weight:700;
+    letter-spacing:.07em; text-transform:uppercase; padding:2px 6px; border-radius:3px;
+    white-space:nowrap;
+  }
+  .pill.ok{background:var(--ok-bg); color:var(--ok); border:1px solid #1d4a30}
+  .pill.warn{background:var(--warn-bg); color:var(--warn); border:1px solid #5c4410}
+  .pill.bad{background:var(--bad-bg); color:var(--bad); border:1px solid #5e2320}
+  .pill.acc{background:var(--accent-bg); color:var(--accent); border:1px solid var(--accent-pressed)}
+  .pill.mute{background:#21262d; color:var(--text-2); border:1px solid var(--card-border)}
+  .lbl{
+    font-size:9.5px; font-weight:700; letter-spacing:.12em; text-transform:uppercase;
+    color:var(--text-3);
+  }
+  .mono{font-family:var(--mono)}
+  .t2{color:var(--text-2)}
+  .t3{color:var(--text-3)}
+  .num{font-variant-numeric:tabular-nums}
+  .track{font-family:var(--mono); font-size:11.5px; word-break:break-word}
+
+  /* mockup page shell */
+  .shell{max-width:1240px; margin:0 auto; padding:22px 18px 60px}
+  .shell > header{margin-bottom:16px}
+  .shell h1{
+    margin:0 0 5px; font-size:19px; font-weight:700; letter-spacing:-.02em;
+  }
+  .shell h1 em{font-style:normal; font-family:var(--mono); font-size:12px; color:var(--accent); font-weight:600; margin-right:8px}
+  .shell .thesis{margin:0; font-size:13px; color:var(--text-2); max-width:78ch}
+  @media (max-width:820px){
+    .app{grid-template-columns:1fr}
+    .rail{display:none}
+  }
+
+  #mk5 .strip{
+    display:flex; gap:9px; align-items:stretch; padding:13px 20px;
+    border-bottom:1px solid var(--card-border); flex-wrap:wrap; background:var(--sidebar-bg); flex:none;
+  }
+  #mk5 .st{border:1px solid var(--card-border); border-radius:6px; padding:7px 13px; min-width:108px; background:var(--card-bg)}
+  #mk5 .st .lbl{display:block; margin-bottom:1px}
+  #mk5 .st .v{font-size:20px; font-weight:700; letter-spacing:-.025em; font-variant-numeric:tabular-nums}
+  #mk5 .st.g{border-color:#1d4a30} #mk5 .st.g .v{color:var(--ok)}
+  #mk5 .st.a{border-color:#5c4410} #mk5 .st.a .v{color:var(--warn)}
+  #mk5 .st.r{border-color:var(--bad); border-width:2px; background:var(--bad-bg)} #mk5 .st.r .v{color:var(--bad)}
+  #mk5 .st .sub{font-size:10px; color:var(--text-2)}
+  #mk5 .strip .rt{margin-left:auto; display:flex; flex-direction:column; gap:5px; justify-content:center}
+  #mk5 .banner{
+    display:flex; gap:11px; align-items:center; padding:9px 20px; font-size:12px;
+    background:var(--warn-bg); border-bottom:1px solid #5c4410; flex-wrap:wrap; flex:none;
+  }
+  #mk5 .banner b{color:var(--warn)}
+  #mk5 .banner .sp{margin-left:auto}
+  #mk5 .out{padding:18px 20px; overflow:auto; flex:1}
+  #mk5 .outhd{display:flex; align-items:baseline; gap:11px; margin-bottom:11px; flex-wrap:wrap}
+  #mk5 .outhd h3{margin:0; font-size:14.5px; font-weight:700; letter-spacing:-.015em}
+  #mk5 .outhd .tools{margin-left:auto; display:flex; gap:6px; align-items:center}
+  #mk5 .seg{display:flex; border:1px solid var(--card-border); border-radius:5px; overflow:hidden}
+  #mk5 .seg button{
+    font-family:var(--ui); font-size:11px; font-weight:600; padding:4px 10px; cursor:pointer;
+    background:#21262d; color:var(--text-2); border:none; border-right:1px solid var(--card-border);
+  }
+  #mk5 .seg button:last-child{border-right:none}
+  #mk5 .seg button.on{background:var(--accent); color:var(--text-inv)}
+  #mk5 .listbox{
+    background:var(--input-bg); border:1px solid var(--card-border); border-radius:6px;
+    font-family:var(--mono); font-size:11.5px; line-height:1.85; padding:13px 15px;
+    max-height:268px; overflow:auto; white-space:pre; color:var(--text);
+  }
+  #mk5 .listbox .grp{color:var(--accent); font-weight:600}
+  #mk5 .listbox .dim{color:var(--text-3)}
+  #mk5 .exp{margin-top:15px; border-top:1px solid var(--card-border); padding-top:13px}
+  #mk5 .acc{border:1px solid var(--card-border); border-radius:6px; margin-bottom:7px; background:var(--card-bg)}
+  #mk5 .acc > .hd{
+    display:flex; align-items:center; gap:9px; padding:9px 13px; cursor:pointer; font-size:12px;
+  }
+  #mk5 .acc > .hd .ar{color:var(--text-3); font-size:10px}
+  #mk5 .acc > .hd .nm{font-weight:600}
+  #mk5 .acc > .hd .sm2{color:var(--text-2); font-size:11px}
+  #mk5 .acc > .hd .rr{margin-left:auto; display:flex; gap:6px; align-items:center}
+  #mk5 .acc > .bd{padding:0 13px 12px; border-top:1px solid var(--card-border); padding-top:11px}
+  #mk5 .kv2{display:flex; justify-content:space-between; gap:11px; font-size:11.5px; padding:4px 0; border-bottom:1px solid #23282f}
+  #mk5 .kv2:last-child{border-bottom:none}
+  #mk5 .kv2 b{font-variant-numeric:tabular-nums}
+  #mk5 .grpline{
+    display:flex; gap:9px; align-items:center; padding:7px 0; border-bottom:1px solid #23282f;
+    font-size:11.5px; flex-wrap:wrap;
+  }
+  #mk5 .grpline:last-child{border-bottom:none}
+  #mk5 .grpline .cnt{font-family:var(--mono); font-weight:700; color:var(--warn); min-width:26px}
+  #mk5 .grpline .aa{margin-left:auto; display:flex; gap:5px}
+</style>
+<div class="shell">
+  <header>
+    <h1><em>Mockup 05</em>Answer First</h1>
+    <p class="thesis">Opens on the download list. The machinery is collapsed behind a summary strip you expand only if you doubt it.</p>
+  </header>
+    <section class="app" id="mk5">
+      <nav class="rail">
+        <div class="brand">◈ Alpha<span>DEX</span></div>
+        <div class="hdr">Organize</div>
+        <a href="#"><span class="ic">⊞</span>Indexer</a>
+        <a href="#"><span class="ic">⇄</span>Library Sync</a>
+        <a href="#"><span class="ic">⧉</span>Duplicates</a>
+        <a href="#" class="on new"><span class="ic">◎</span>Playlist Gap</a>
+        <div class="hdr">Metadata</div>
+        <a href="#"><span class="ic">✎</span>Tag Fixer</a>
+        <a href="#"><span class="ic">♫</span>Genres</a>
+        <div class="hdr">Discover</div>
+        <a href="#"><span class="ic">≡</span>Playlists</a>
+        <a href="#"><span class="ic">✳</span>Clustered</a>
+        <a href="#"><span class="ic">◌</span>Graph</a>
+        <div class="hdr">Utility</div>
+        <a href="#"><span class="ic">▶</span>Player</a>
+        <a href="#"><span class="ic">⚙</span>Tools</a>
+      </nav>
+      <div class="main">
+      <div class="titlebar">
+        <h2>Playlist Gap</h2>
+        <span class="crumb">Liked videos · compared 2 min ago · 6 days since last run</span>
+        <div class="right"><button class="btn sm">Saved lists (4)</button><button class="btn sm">Re-compare</button></div>
+      </div>
+      <div class="strip">
+        <div class="st"><span class="lbl">Wanted</span><div class="v">1,204</div><div class="sub">14 new since last run</div></div>
+        <div class="st g"><span class="lbl">Already owned</span><div class="v">1,031</div><div class="sub">86% of the list</div></div>
+        <div class="st a"><span class="lbl">Unsure</span><div class="v">68</div><div class="sub">4 patterns</div></div>
+        <div class="st r"><span class="lbl">Go download</span><div class="v">105</div><div class="sub">the answer</div></div>
+        <div class="rt">
+          <button class="btn pri">⧉  Copy all 105</button>
+          <button class="btn sm">Save as .txt / .csv / report</button>
+        </div>
+      </div>
+      <div class="banner">
+        <b>68 rows are unsure.</b>
+        <span class="t2">Clearing them could move some into this list. Four bulk decisions will handle 62 of them.</span>
+        <button class="btn sm sp">Review unsure →</button>
+      </div>
+      <div class="out">
+        <div class="outhd">
+          <h3>Download list</h3>
+          <span class="t2 num">105 tracks · 38 artists · 11 albums</span>
+          <div class="tools">
+            <div class="seg">
+              <button class="on">Group by album</button>
+              <button>Flat list</button>
+              <button>By artist</button>
+            </div>
+            <button class="btn sm">Mark exported</button>
+          </div>
+        </div>
+        <div class="listbox"><span class="grp"># Ben Böhmer — Begin Again  (4 of 12 tracks missing)</span>
+Ben Böhmer - Breathing
+Ben Böhmer - Sailing
+Ben Böhmer - After Earth
+Ben Böhmer - Lost In Thought
+<span class="dim"># → whole album is probably the better grab</span>
+
+<span class="grp"># Yotto — Erased Dreams  (2 of 8 missing)</span>
+Yotto - Radiate
+Yotto - Nova
+
+<span class="grp"># Singles &amp; one-offs  (99)</span>
+Nora En Pure - Enchantment
+ODESZA - Bloom
+Lane 8 - Shatter
+Tinlicker - Because You Move Me
+Marsh - Alpine
+<span class="dim">… 94 more</span></div>
+
+        <div class="exp">
+          <div class="acc">
+            <div class="hd"><span class="ar">▾</span><span class="nm">Unsure</span><span class="sm2">— 4 patterns cover 62 of 68 rows</span><div class="rr"><span class="pill warn">68</span></div></div>
+            <div class="bd">
+              <div class="grpline"><span class="cnt">29</span><span>differ only by a <span class="mono">feat.</span> credit the library file lacks</span><span class="aa"><button class="btn sm">Accept all as owned</button><button class="btn sm">Review</button></span></div>
+              <div class="grpline"><span class="cnt">17</span><span>version modifier with a runtime gap over 15 s</span><span class="aa"><button class="btn sm">Send all to missing</button><button class="btn sm">Review</button></span></div>
+              <div class="grpline"><span class="cnt">11</span><span>fan edits / mashups of tracks already owned</span><span class="aa"><button class="btn sm">Send all to missing</button><button class="btn sm">Review</button></span></div>
+              <div class="grpline"><span class="cnt">5</span><span>ambiguous artist/title split, more than one candidate hit</span><span class="aa"><button class="btn sm">Review</button></span></div>
+              <div class="grpline"><span class="cnt">6</span><span>weak match, no corroborating signal</span><span class="aa"><button class="btn sm">Review individually</button></span></div>
+            </div>
+          </div>
+          <div class="acc">
+            <div class="hd"><span class="ar">▸</span><span class="nm">How this was worked out</span><span class="sm2">— source, snapshot, ladder rungs, thresholds</span><div class="rr"><span class="pill ok">all green</span></div></div>
+          </div>
+          <div class="acc">
+            <div class="hd"><span class="ar">▸</span><span class="nm">Pending downloads</span><span class="sm2">— 42 exported 6 days ago, not yet verified</span><div class="rr"><span class="pill acc">42</span><button class="btn sm">Verify in Library Sync</button></div></div>
+          </div>
+          <div class="acc">
+            <div class="hd"><span class="ar">▸</span><span class="nm">Never want</span><span class="sm2">— 7 rows you excluded permanently</span><div class="rr"><span class="pill mute">7</span></div></div>
+          </div>
+        </div>
+      </div>
+        <div class="statusbar">
+          <span>Library snapshot: <b class="num">8,412</b> tracks · read 4 min ago</span>
+          <span class="sp">Source: YouTube Music · ytmusicapi</span>
+        </div>
+      </div>
+    </section>
+</div>
