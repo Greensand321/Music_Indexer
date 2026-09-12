@@ -534,7 +534,7 @@ class AlphaDEXStyle(QtWidgets.QProxyStyle):
                 painter.setPen(QPen(QC(col)))
                 font = painter.font()
                 if active:
-                    font.setWeight(QtGui.QFont.Weight.SemiBold)
+                    font.setWeight(QtGui.QFont.Weight.DemiBold)
                 painter.setFont(font)
                 painter.drawText(opt.rect,
                                  int(Qt.AlignmentFlag.AlignCenter), opt.text)
@@ -551,7 +551,7 @@ class AlphaDEXStyle(QtWidgets.QProxyStyle):
                 painter.setPen(QPen(QC(col)))
                 font = painter.font()
                 font.setPointSize(max(font.pointSize() - 1, 9))
-                font.setWeight(QtGui.QFont.Weight.SemiBold)
+                font.setWeight(QtGui.QFont.Weight.DemiBold)
                 painter.setFont(font)
                 painter.drawText(option.rect,
                                  int(Qt.AlignmentFlag.AlignLeft |

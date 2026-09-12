@@ -1,0 +1,1306 @@
+<title>AlphaDEX Visual Audit</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap">
+<style>
+/* ── Tokens: AlphaDEX "Pearl" (light) is the base ─────────────────────── */
+:root{
+  --ground:#f8f9fc; --surface:#ffffff; --card:#ffffff; --raise:#f0f2f8;
+  --border:#e5e7eb; --border-strong:#d1d5db;
+  --tx:#111827; --tx2:#4b5563; --tx3:#6b7280; --tx4:#9ca3af;
+  --accent:#4f46e5; --accent-soft:#eef2ff; --accent-line:#6366f1;
+  --ok:#15803d; --ok-bg:#ecfdf3; --warn:#b45309; --warn-bg:#fffbeb;
+  --bad:#b91c1c; --bad-bg:#fef2f2;
+  --shot-ring:rgba(17,24,39,.10); --shadow:0 1px 2px rgba(16,24,40,.05),0 8px 24px -12px rgba(16,24,40,.18);
+  --mono:"JetBrains Mono",ui-monospace,"Cascadia Code",Consolas,Menlo,monospace;
+  --ui:"Inter","Segoe UI Variable","SF Pro Text","Helvetica Neue",Arial,sans-serif;
+  --rail:264px;
+}
+/* System-dark (no stamp) — AlphaDEX "Midnight" */
+@media (prefers-color-scheme:dark){
+  :root:not([data-theme="light"]){
+    --ground:#0d1117; --surface:#161b22; --card:#1c2128; --raise:#21262d;
+    --border:#30363d; --border-strong:#3d444d;
+    --tx:#e6edf3; --tx2:#b7c0ca; --tx3:#8b949e; --tx4:#6b7482;
+    --accent:#58a6ff; --accent-soft:#12243a; --accent-line:#58a6ff;
+    --ok:#4ade80; --ok-bg:#0f2418; --warn:#fbbf24; --warn-bg:#2a1f06;
+    --bad:#f87171; --bad-bg:#2c1214;
+    --shot-ring:rgba(255,255,255,.10); --shadow:0 1px 2px rgba(0,0,0,.4),0 10px 30px -14px rgba(0,0,0,.7);
+  }
+}
+/* Explicit dark stamp */
+:root[data-theme="dark"]{
+  --ground:#0d1117; --surface:#161b22; --card:#1c2128; --raise:#21262d;
+  --border:#30363d; --border-strong:#3d444d;
+  --tx:#e6edf3; --tx2:#b7c0ca; --tx3:#8b949e; --tx4:#6b7482;
+  --accent:#58a6ff; --accent-soft:#12243a; --accent-line:#58a6ff;
+  --ok:#4ade80; --ok-bg:#0f2418; --warn:#fbbf24; --warn-bg:#2a1f06;
+  --bad:#f87171; --bad-bg:#2c1214;
+  --shot-ring:rgba(255,255,255,.10); --shadow:0 1px 2px rgba(0,0,0,.4),0 10px 30px -14px rgba(0,0,0,.7);
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--ground);color:var(--tx);font-family:var(--ui);
+     font-size:15px;line-height:1.6;-webkit-font-smoothing:antialiased}
+h1,h2,h3,h4{text-wrap:balance;margin:0}
+a{color:var(--accent)}
+code,kbd{font-family:var(--mono);font-size:.86em}
+
+/* ── Shell ─────────────────────────────────────────────────────────────── */
+.shell{display:grid;grid-template-columns:var(--rail) minmax(0,1fr);gap:0;
+       max-width:1560px;margin:0 auto}
+.rail{position:sticky;top:0;align-self:start;height:100vh;overflow-y:auto;
+      border-right:1px solid var(--border);background:var(--surface);
+      padding:22px 0 40px}
+.rail-brand{padding:0 20px 18px;border-bottom:1px solid var(--border);margin-bottom:14px}
+.rail-brand b{display:block;font-size:15px;letter-spacing:-.02em}
+.rail-brand span{display:block;font-size:11.5px;color:var(--tx3);margin-top:2px}
+.rail h5{font-size:10.5px;letter-spacing:.1em;text-transform:uppercase;color:var(--tx4);
+         font-weight:600;margin:16px 20px 6px}
+.rail a{display:flex;justify-content:space-between;gap:8px;align-items:baseline;
+        padding:5px 20px;font-size:13.5px;color:var(--tx2);text-decoration:none;
+        border-left:2px solid transparent}
+.rail a:hover{color:var(--tx);background:var(--raise);border-left-color:var(--border-strong)}
+.rail a .g{font-size:10.5px;font-family:var(--mono);color:var(--tx4)}
+.rail a.bad .g{color:var(--bad)} .rail a.warn .g{color:var(--warn)} .rail a.ok .g{color:var(--ok)}
+main{min-width:0;padding:0 clamp(16px,3.4vw,54px) 96px}
+
+/* ── Masthead ──────────────────────────────────────────────────────────── */
+.mast{padding:56px 0 34px;border-bottom:1px solid var(--border)}
+.eyebrow{font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--tx3);
+         font-weight:600;font-family:var(--mono)}
+.mast h1{font-size:clamp(31px,4.4vw,48px);letter-spacing:-.033em;line-height:1.06;margin:12px 0 0;font-weight:700}
+.mast .lede{font-size:17.5px;color:var(--tx2);max-width:64ch;margin:16px 0 0}
+.mast .meta{margin-top:22px;font-size:12px;color:var(--tx4);font-family:var(--mono)}
+
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(132px,1fr));
+       gap:1px;background:var(--border);border:1px solid var(--border);
+       border-radius:12px;overflow:hidden;margin:30px 0 0}
+.stat{background:var(--card);padding:15px 16px}
+.stat b{display:block;font-size:25px;letter-spacing:-.03em;font-variant-numeric:tabular-nums;line-height:1.1}
+.stat span{display:block;font-size:11.5px;color:var(--tx3);margin-top:4px;line-height:1.35}
+.stat.bad b{color:var(--bad)} .stat.warn b{color:var(--warn)} .stat.ok b{color:var(--ok)}
+
+/* ── Sections ──────────────────────────────────────────────────────────── */
+section{padding:52px 0 8px;scroll-margin-top:18px}
+section>h2{font-size:25px;letter-spacing:-.026em;font-weight:700}
+section>.sub{color:var(--tx2);max-width:70ch;margin:9px 0 0}
+.hr{height:1px;background:var(--border);margin:44px 0 0}
+
+/* ── Verdict callout ───────────────────────────────────────────────────── */
+.verdict{margin:26px 0 0;padding:22px 24px;border:1px solid var(--border);
+         border-left:3px solid var(--accent-line);border-radius:10px;background:var(--card)}
+.verdict p{margin:0 0 11px}
+.verdict p:last-child{margin-bottom:0}
+
+/* ── Matrix table ──────────────────────────────────────────────────────── */
+.twrap{overflow-x:auto;margin:24px 0 0;border:1px solid var(--border);border-radius:12px;background:var(--card)}
+table{border-collapse:collapse;width:100%;font-size:13px;min-width:760px}
+th,td{text-align:left;padding:9px 12px;border-bottom:1px solid var(--border);white-space:nowrap}
+thead th{font-size:10.5px;letter-spacing:.07em;text-transform:uppercase;color:var(--tx3);
+         font-weight:600;background:var(--raise);position:sticky;top:0}
+tbody tr:last-child td{border-bottom:none}
+tbody tr:hover td{background:var(--raise)}
+td.name{font-weight:600;white-space:nowrap}
+td.num{font-family:var(--mono);font-variant-numeric:tabular-nums;font-size:12px;color:var(--tx2)}
+.yes{color:var(--ok);font-weight:600} .no{color:var(--bad);font-weight:600} .part{color:var(--warn);font-weight:600}
+.tnote{font-size:12px;color:var(--tx3);margin:10px 2px 0}
+
+/* ── Pills ─────────────────────────────────────────────────────────────── */
+.pill{display:inline-block;padding:1.5px 8px;border-radius:999px;font-size:10.5px;
+      font-weight:600;letter-spacing:.02em;border:1px solid transparent;vertical-align:1px;
+      font-family:var(--ui)}
+.pill.bad{color:var(--bad);background:var(--bad-bg);border-color:color-mix(in srgb,var(--bad) 26%,transparent)}
+.pill.warn{color:var(--warn);background:var(--warn-bg);border-color:color-mix(in srgb,var(--warn) 26%,transparent)}
+.pill.ok{color:var(--ok);background:var(--ok-bg);border-color:color-mix(in srgb,var(--ok) 26%,transparent)}
+.pill.n{color:var(--tx3);background:var(--raise);border-color:var(--border)}
+
+/* ── Defect entries ────────────────────────────────────────────────────── */
+.defects{display:grid;gap:14px;margin:26px 0 0}
+.defect{border:1px solid var(--border);border-radius:11px;background:var(--card);overflow:hidden}
+.defect>summary{cursor:pointer;list-style:none;padding:14px 18px;display:flex;gap:12px;
+                align-items:baseline;flex-wrap:wrap}
+.defect>summary::-webkit-details-marker{display:none}
+.defect>summary:hover{background:var(--raise)}
+.defect .dn{font-family:var(--mono);font-size:11.5px;color:var(--tx4);min-width:26px}
+.defect .dt{font-weight:600;flex:1;min-width:220px}
+.defect .body{padding:2px 18px 18px 56px;border-top:1px solid var(--border);margin-top:2px}
+.defect .body>*:first-child{margin-top:14px}
+.defect p{margin:0 0 10px;color:var(--tx2)}
+.defect .fix{margin:12px 0 0;padding:11px 13px;border-radius:8px;background:var(--ok-bg);
+             border:1px solid color-mix(in srgb,var(--ok) 22%,transparent);font-size:13.5px;color:var(--tx)}
+.defect .fix b{color:var(--ok)}
+pre{margin:12px 0;padding:12px 14px;border-radius:8px;background:var(--raise);
+    border:1px solid var(--border);overflow-x:auto;font-family:var(--mono);
+    font-size:12.2px;line-height:1.55;color:var(--tx2)}
+pre .c{color:var(--tx4)} pre .k{color:var(--accent)} pre .r{color:var(--bad)} pre .g{color:var(--ok)}
+.where{font-family:var(--mono);font-size:11.5px;color:var(--tx3);margin:0 0 8px}
+
+/* ── Page gallery ──────────────────────────────────────────────────────── */
+.page{border:1px solid var(--border);border-radius:13px;background:var(--card);
+      overflow:hidden;margin:20px 0 0;box-shadow:var(--shadow)}
+.page-hd{padding:15px 19px;display:flex;gap:11px;align-items:baseline;flex-wrap:wrap;
+         border-bottom:1px solid var(--border)}
+.page-hd h3{font-size:16.5px;letter-spacing:-.015em;font-weight:650}
+.page-hd .file{font-family:var(--mono);font-size:11.5px;color:var(--tx4);margin-left:auto}
+.page-body{display:grid;grid-template-columns:minmax(0,1.32fr) minmax(0,1fr)}
+@media (max-width:1080px){.page-body{grid-template-columns:1fr}}
+.shot{padding:18px;background:var(--raise);border-right:1px solid var(--border);min-width:0}
+@media (max-width:1080px){.shot{border-right:none;border-bottom:1px solid var(--border)}}
+.shot img{width:100%;height:auto;display:block;border-radius:7px;
+          border:1px solid var(--shot-ring);background:var(--surface)}
+.shot figcaption{font-size:11.5px;color:var(--tx3);margin-top:9px;font-family:var(--mono)}
+.notes{padding:18px 20px;min-width:0}
+.notes h4{font-size:10.5px;letter-spacing:.09em;text-transform:uppercase;color:var(--tx4);
+          font-weight:600;margin:0 0 9px}
+.notes h4+h4{margin-top:18px}
+.notes ul{margin:0;padding-left:17px}
+.notes li{margin:0 0 7px;font-size:13.5px;color:var(--tx2)}
+.notes li b{color:var(--tx);font-weight:600}
+.notes li code{color:var(--tx);background:var(--raise);padding:1px 4px;border-radius:4px;
+               border:1px solid var(--border)}
+.tags{display:flex;gap:6px;flex-wrap:wrap;margin:0 0 13px}
+
+/* pairs (dark/light comparisons) */
+.pair{display:grid;grid-template-columns:1fr 1fr;gap:14px;padding:18px;background:var(--raise)}
+@media (max-width:760px){.pair{grid-template-columns:1fr}}
+.pair figure{margin:0}
+.pair img{width:100%;height:auto;display:block;border-radius:7px;border:1px solid var(--shot-ring)}
+.pair figcaption{font-size:11.5px;color:var(--tx3);margin-top:8px;font-family:var(--mono)}
+
+/* swatch strip */
+.swatches{display:flex;flex-wrap:wrap;gap:8px;margin:18px 0 0}
+.sw{border:1px solid var(--border);border-radius:8px;overflow:hidden;width:112px;background:var(--card)}
+.sw .chip{height:38px}
+.sw .lab{padding:6px 8px;font-family:var(--mono);font-size:10.5px;color:var(--tx2);line-height:1.35}
+.sw .lab b{display:block;color:var(--tx);font-size:10.5px}
+
+/* recommendation */
+.rec{display:grid;gap:14px;margin:24px 0 0}
+.reccard{border:1px solid var(--border);border-radius:11px;background:var(--card);padding:18px 20px}
+.reccard h3{font-size:16px;margin:0 0 8px;letter-spacing:-.012em}
+.reccard p{margin:0 0 10px;color:var(--tx2)}
+.reccard p:last-child{margin-bottom:0}
+.reccard ul{margin:8px 0 0;padding-left:18px}
+.reccard li{margin:0 0 7px;color:var(--tx2);font-size:14px}
+.phase{display:grid;grid-template-columns:auto minmax(0,1fr);gap:0 18px;margin:22px 0 0}
+.phase-n{font-family:var(--mono);font-size:11.5px;color:var(--accent);font-weight:500;
+         padding-top:3px;white-space:nowrap}
+.phase-b{border-left:1px solid var(--border);padding:0 0 24px 18px;margin-left:-9px}
+.phase-b:last-child{padding-bottom:0}
+.phase-b h4{font-size:14.5px;margin:0 0 6px}
+.phase-b p{margin:0;color:var(--tx2);font-size:14px}
+.phase-b ul{margin:8px 0 0;padding-left:17px}
+.phase-b li{font-size:13.5px;color:var(--tx2);margin:0 0 5px}
+
+footer{margin-top:56px;padding-top:22px;border-top:1px solid var(--border);
+       font-size:12px;color:var(--tx4);font-family:var(--mono);line-height:1.7}
+@media (max-width:900px){
+  .shell{grid-template-columns:1fr}
+  .rail{position:static;height:auto;border-right:none;border-bottom:1px solid var(--border);
+        padding-bottom:18px}
+  .rail a{padding:5px 16px}
+}
+</style>
+
+<div class="shell">
+<nav class="rail">
+  <div class="rail-brand"><b>AlphaDEX Visual Audit</b><span>51 captures · 14 workspaces · 11 dialogs</span></div>
+  <h5>Report</h5>
+  <a href="#verdict">The verdict</a>
+  <a href="#matrix">Adoption matrix</a>
+  <a href="#defects" class="bad">Defects <span class="g">8</span></a>
+  <a href="#crosscut" class="warn">Inconsistency catalog <span class="g">6</span></a>
+  <h5>Organize</h5>
+  <a href="#indexer" class="ok">Indexer <span class="g">reference</span></a>
+  <a href="#library_sync" class="warn">Library Sync <span class="g">overflow</span></a>
+  <h5>Clean up</h5>
+  <a href="#duplicates" class="ok">Duplicates <span class="g">conforms</span></a>
+  <a href="#similarity" class="warn">Similarity <span class="g">drift</span></a>
+  <a href="#tag_fixer" class="warn">Tag Fixer <span class="g">drift</span></a>
+  <a href="#genres" class="warn">Genre Normalizer <span class="g">drift</span></a>
+  <h5>Playlists</h5>
+  <a href="#playlists" class="warn">Playlists <span class="g">drift</span></a>
+  <a href="#clustered" class="warn">Clustered <span class="g">drift</span></a>
+  <a href="#graph" class="warn">Music Graph <span class="g">drift</span></a>
+  <h5>Player</h5>
+  <a href="#player" class="bad">Player <span class="g">off-system</span></a>
+  <a href="#compression" class="warn">Compression <span class="g">drift</span></a>
+  <h5>Tools</h5>
+  <a href="#tools" class="warn">Utilities <span class="g">own system</span></a>
+  <a href="#help" class="warn">Help <span class="g">drift</span></a>
+  <h5>Chrome &amp; dialogs</h5>
+  <a href="#chrome">Landing · log · splash</a>
+  <a href="#dialogs" class="bad">11 dialogs</a>
+  <h5>Direction</h5>
+  <a href="#direction">Recommendation</a>
+  <a href="#plan">Migration plan</a>
+</nav>
+
+<main>
+
+<header class="mast">
+  <div class="eyebrow">Design consistency audit · Qt app</div>
+  <h1>AlphaDEX has a design system.<br>Three pages use it.</h1>
+  <p class="lede">Every screen in the PySide6 app was launched, screenshotted in both the default
+  dark (Midnight) and light (Pearl) themes, and read against its source. The finding is not that
+  the app lacks a visual language — it ships a thorough one. It is that the language is optional,
+  and most screens declined it.</p>
+  <p class="meta">Captured 2026-09-12 · PySide6 6.11.2 · 1440×900 · themes: midnight, pearl · entry point <code>alpha_dex_gui.py</code></p>
+
+  <div class="stats">
+    <div class="stat"><b>14</b><span>workspaces audited</span></div>
+    <div class="stat bad"><b>3</b><span>use the full page pattern</span></div>
+    <div class="stat bad"><b>1</b><span>workspace reads theme tokens</span></div>
+    <div class="stat warn"><b>54</b><span>hardcoded colors outside the token file</span></div>
+    <div class="stat warn"><b>68</b><span>hardcoded <code>font-size</code> rules</span></div>
+    <div class="stat warn"><b>10</b><span>distinct font sizes in use</span></div>
+    <div class="stat bad"><b>8</b><span>defects that are bugs, not taste</span></div>
+  </div>
+</header>
+
+<section id="verdict">
+  <h2>The verdict</h2>
+  <p class="sub">Read this part and you can skip the rest.</p>
+
+  <div class="verdict">
+    <p><b>AlphaDEX already has a real design system.</b> <code>gui/themes/</code> defines 14 complete
+    themes as frozen token dataclasses, a 39 KB <code>QProxyStyle</code> that hand-paints every control,
+    a point-based <code>TypeScale</code>, and a QSS layer exposing a 15-name component vocabulary
+    (<code>workspaceCard</code>, <code>headerCard</code>, <code>actionCard</code>,
+    <code>workflowStepper</code>, <code>sectionTitle</code>, <code>cardTitle</code> …). It is genuinely
+    good work. When a page uses it, that page themes correctly across all 14 themes for free.</p>
+
+    <p><b>The system is opt-in, and opting out is easier.</b> <code>WorkspaceBase</code> offers helpers —
+    <code>_make_card()</code>, <code>_make_card_title()</code>, <code>_make_primary_button()</code> — but
+    nothing requires them, and no token object is reachable from a workspace without importing the
+    manager by hand. So the path of least resistance is <code>setStyleSheet("color: #64748b")</code>.
+    Twelve of fourteen workspaces took it.</p>
+
+    <p><b>The result is four visual languages in one binary.</b> A hero-card-and-stepper language
+    (Indexer, Duplicates, Library Sync); a bare-title-and-loose-controls language (most of the rest);
+    a tile-and-status-pill language (Utilities); and a full-bleed application chrome language (Player).
+    Plus <code>gui/qt_launcher.py</code> — 698 lines and the single densest concentration of hardcoded
+    styling in the tree — which the active app never loads at all.</p>
+
+    <p><b>The fix is not a redesign.</b> The target already exists on screen: the Indexer page. The work
+    is closing the escape hatches so the system is the only convenient path, then migrating eleven
+    pages onto it. Sequence in <a href="#plan">the migration plan</a>.</p>
+  </div>
+</section>
+
+<div class="hr"></div>
+
+<section id="matrix">
+  <h2>Adoption matrix</h2>
+  <p class="sub">Counted from source, not from impression. “Header card”, “stepper” and “action card”
+  are the three elements that make the Indexer page look the way it does; “tokens” counts references
+  to the live theme object.</p>
+
+  <div class="twrap">
+  <table>
+    <thead><tr>
+      <th>Workspace</th><th>Lines</th><th>Header&nbsp;card</th><th>Stepper</th><th>Action&nbsp;card</th>
+      <th>Cards</th><th>Card&nbsp;titles</th><th>Tokens</th><th>setStyleSheet</th><th>Hex</th><th>Verdict</th>
+    </tr></thead>
+    <tbody>
+      <tr><td class="name">Indexer</td><td class="num">382</td><td class="yes">✓</td><td class="yes">✓</td><td class="yes">✓</td><td class="num">5</td><td class="num">4</td><td class="num">0</td><td class="num">0</td><td class="num">3</td><td><span class="pill ok">reference</span></td></tr>
+      <tr><td class="name">Duplicates</td><td class="num">658</td><td class="yes">✓</td><td class="yes">✓</td><td class="yes">✓</td><td class="num">6</td><td class="num">3</td><td class="num">0</td><td class="num">2</td><td class="num">6</td><td><span class="pill ok">conforms</span></td></tr>
+      <tr><td class="name">Library Sync</td><td class="num">911</td><td class="yes">✓</td><td class="yes">✓</td><td class="yes">✓</td><td class="num">9</td><td class="num">6</td><td class="num">0</td><td class="num">1</td><td class="num">9</td><td><span class="pill warn">conforms, overflows</span></td></tr>
+      <tr><td class="name">Genre Normalizer</td><td class="num">648</td><td class="no">—</td><td class="no">—</td><td class="no">—</td><td class="num">6</td><td class="num">6</td><td class="num">0</td><td class="num">2</td><td class="num">7</td><td><span class="pill warn">own step idiom</span></td></tr>
+      <tr><td class="name">Compression</td><td class="num">448</td><td class="no">—</td><td class="no">—</td><td class="no">—</td><td class="num">3</td><td class="num">3</td><td class="num">0</td><td class="num">8</td><td class="num">8</td><td><span class="pill warn">drift</span></td></tr>
+      <tr><td class="name">Tag Fixer</td><td class="num">416</td><td class="no">—</td><td class="no">—</td><td class="no">—</td><td class="num">3</td><td class="num">0</td><td class="num">0</td><td class="num">3</td><td class="num">8</td><td><span class="pill warn">drift</span></td></tr>
+      <tr><td class="name">Similarity</td><td class="num">243</td><td class="no">—</td><td class="no">—</td><td class="no">—</td><td class="num">2</td><td class="num">0</td><td class="num">0</td><td class="num">1</td><td class="num">3</td><td><span class="pill warn">drift</span></td></tr>
+      <tr><td class="name">Clustered</td><td class="num">561</td><td class="no">—</td><td class="no">—</td><td class="no">—</td><td class="num">4</td><td class="num">0</td><td class="num">0</td><td class="num">4</td><td class="num">3</td><td><span class="pill warn">drift</span></td></tr>
+      <tr><td class="name">Playlists</td><td class="num">394</td><td class="no">—</td><td class="no">—</td><td class="no">—</td><td class="num">1</td><td class="num">0</td><td class="num">0</td><td class="num">1</td><td class="num">3</td><td><span class="pill warn">drift</span></td></tr>
+      <tr><td class="name">Music Graph</td><td class="num">367</td><td class="no">—</td><td class="no">—</td><td class="no">—</td><td class="num">3</td><td class="num">0</td><td class="num">0</td><td class="num">0</td><td class="num">0</td><td><span class="pill warn">drift, but clean</span></td></tr>
+      <tr><td class="name">Help</td><td class="num">96</td><td class="no">—</td><td class="no">—</td><td class="no">—</td><td class="num">3</td><td class="num">0</td><td class="num">0</td><td class="num">1</td><td class="num">1</td><td><span class="pill warn">drift</span></td></tr>
+      <tr><td class="name">Utilities</td><td class="num">1443</td><td class="no">—</td><td class="no">—</td><td class="no">—</td><td class="num">0</td><td class="num">0</td><td class="part">16</td><td class="num">11</td><td class="num">3</td><td><span class="pill warn">parallel system</span></td></tr>
+      <tr><td class="name">Player</td><td class="num">1980</td><td class="no">—</td><td class="no">—</td><td class="no">—</td><td class="num">0</td><td class="num">0</td><td class="num">0</td><td class="num">16</td><td class="num">16</td><td><span class="pill bad">off-system</span></td></tr>
+      <tr><td class="name">Clustered (legacy)</td><td class="num">263</td><td class="no">—</td><td class="no">—</td><td class="no">—</td><td class="num">3</td><td class="num">0</td><td class="num">0</td><td class="num">2</td><td class="num">4</td><td><span class="pill n">unrouted</span></td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p class="tnote">“Clustered (legacy)” is <code>gui/workspaces/clustered.py</code>; <code>main_window.py</code>
+  imports <code>clustered_enhanced.py</code> under the same key, so the legacy file is built but never shown.
+  <code>gui/qt_launcher.py</code> (698 lines, 47 <code>setStyleSheet</code> calls, 45 hardcoded colors) is excluded —
+  it is reachable only from the legacy Tkinter app via <code>main_gui.py:11102</code>.</p>
+</section>
+
+<div class="hr"></div>
+
+<section id="defects">
+  <h2>Defects, not taste</h2>
+  <p class="sub">Eight of these are wrong by any style guide. They surfaced while capturing the
+  screenshots — three of them prevented capture entirely until fixed. Each is small; each has a
+  named fix and a line number.</p>
+
+  <div class="defects">
+
+  <details class="defect" open>
+    <summary><span class="dn">D1</span><span class="dt">Every tab label and every group-box title fails to paint</span><span class="pill bad">crash</span></summary>
+    <div class="body">
+      <p class="where">gui/themes/style.py:537 · gui/themes/style.py:554</p>
+      <p>The custom style engine asks for a font weight that does not exist in Qt 6. Qt's enum is
+      <code>DemiBold</code>; there is no <code>SemiBold</code> member in PySide6 or PySide2. The
+      <code>AttributeError</code> is raised inside a paint override, so Qt swallows it and abandons
+      that draw call — the label is simply never rendered.</p>
+      <pre><span class="c"># CE_TabBarTabLabel — raises on every selected tab repaint</span>
+if active:
+    font.setWeight(QtGui.QFont.Weight.<span class="r">SemiBold</span>)   <span class="c"># AttributeError: SemiBold</span></pre>
+      <p>This hits the three tabbed workspaces (Genre Normalizer, Playlists, Clustered) and the
+      Settings dialog, plus every <code>QGroupBox</code> title in the app. While capturing, it aborted
+      <code>widget.grab()</code> outright — those three pages could not be screenshotted until it was
+      corrected.</p>
+      <div class="fix"><b>Fix —</b> <code>SemiBold</code> → <code>DemiBold</code> at both sites.
+      Applied in this branch so the remaining pages could be captured.</div>
+    </div>
+  </details>
+
+  <details class="defect">
+    <summary><span class="dn">D2</span><span class="dt">The Pair Review dialog cannot open</span><span class="pill bad">crash</span></summary>
+    <div class="body">
+      <p class="where">gui/dialogs/pair_review_dialog.py:355–358</p>
+      <p>Four shortcut constructions use the Qt 5 namespace. <code>QShortcut</code> moved from
+      <code>QtWidgets</code> to <code>QtGui</code> in Qt 6, so the constructor raises before the dialog
+      finishes building. Every other file in the tree — <code>main_window.py:221</code>,
+      <code>player.py:953</code> — already uses the correct namespace, so this is an isolated miss.</p>
+      <pre><span class="r">QtWidgets</span>.QShortcut(QtGui.QKeySequence(Qt.Key.Key_Return), self, self._handle_yes)
+<span class="c"># AttributeError: module 'PySide6.QtWidgets' has no attribute 'QShortcut'</span></pre>
+      <div class="fix"><b>Fix —</b> <code>QtWidgets.QShortcut</code> → <code>QtGui.QShortcut</code> ×4.
+      Applied in this branch; the dialog then opens and is captured below.</div>
+    </div>
+  </details>
+
+  <details class="defect">
+    <summary><span class="dn">D3</span><span class="dt">The Cluster Quality Report renders white-on-white</span><span class="pill bad">unusable</span></summary>
+    <div class="body">
+      <p class="where">gui/dialogs/cluster_quality_report_dialog.py:171, 192, 208</p>
+      <p>This dialog styles itself for a light theme that the app does not ship as default. It paints
+      card backgrounds <code>#fafafa</code> and body copy <code>#333</code>, while text it does not
+      override inherits the active theme's near-white. On Midnight — the default — the metric values,
+      the per-cluster cards and the suggestions are all invisible.</p>
+      <pre>card.setStyleSheet(<span class="r">"border: 1px solid #ddd; border-radius: 4px; background-color: #fafafa;"</span>)
+suggestion_widget.setStyleSheet(<span class="r">"color: #333; font-size: 11px;"</span>)</pre>
+      <p>There is a compounding Qt subtlety: a <code>border</code> declared on a bare container
+      <code>QWidget</code> cascades to every child widget, which is why the labels inside also pick up
+      boxes they were never meant to have.</p>
+      <div class="fix"><b>Fix —</b> delete all three stylesheets and give the container
+      <code>setObjectName("workspaceCard")</code>. The theme QSS then supplies background, border and
+      radius correctly in all 14 themes.</div>
+    </div>
+  </details>
+
+  <details class="defect">
+    <summary><span class="dn">D4</span><span class="dt">The sidebar wordmark disappears in all six light themes</span><span class="pill bad">contrast</span></summary>
+    <div class="body">
+      <p class="where">gui/widgets/sidebar.py:139–142</p>
+      <p>“AlphaDEX” at the top of the nav rail is pinned to <code>#f8fafc</code> — near-white. Pearl's
+      sidebar is <code>#f0f2f8</code>. The app's own name is the least legible text on the screen in
+      half its themes. Visible in the light captures throughout this report.</p>
+      <pre>logo_lbl.setStyleSheet(
+    <span class="r">"color: #f8fafc;"</span> <span class="c"># ← ignores sidebar_text; invisible on 6 of 14 themes</span>
+    "font-size: 22px; font-weight: 700; padding: 0 8px; letter-spacing: -0.02em;")</pre>
+      <div class="fix"><b>Fix —</b> drive the colour from <code>tokens.sidebar_text</code> and repaint on
+      <code>theme_changed</code>, as <code>Sidebar</code> already does for its nav buttons.</div>
+    </div>
+  </details>
+
+  <details class="defect">
+    <summary><span class="dn">D5</span><span class="dt">Light-theme names are unreadable in the theme picker</span><span class="pill bad">contrast</span></summary>
+    <div class="body">
+      <p class="where">gui/themes/picker.py:115</p>
+      <p>Each swatch previews its own theme, then writes that theme's name using the
+      <em>currently active</em> theme's text colour. Browsing from a dark theme, every light swatch
+      label — Pearl, Blossom, Meadow, Lavender, Sunset — is white on white. You cannot read the name
+      of the theme you are about to pick.</p>
+      <pre>p.setPen(QtGui.QColor(<span class="r">current</span>.text_primary))   <span class="c"># active theme's ink…</span>
+p.drawText(label_rect, Qt.AlignmentFlag.AlignCenter, <span class="k">t</span>.name)  <span class="c"># …on swatch t's ground</span></pre>
+      <div class="fix"><b>Fix —</b> <code>current.text_primary</code> → <code>t.text_primary</code>.
+      One word; the swatch then labels itself in its own palette.</div>
+    </div>
+  </details>
+
+  <details class="defect">
+    <summary><span class="dn">D6</span><span class="dt">The Player keeps a dark slab in light themes</span><span class="pill bad">theming</span></summary>
+    <div class="body">
+      <p class="where">gui/workspaces/player.py — 16 setStyleSheet calls, 16 hardcoded colors, 0 token reads</p>
+      <p>The Player is the largest workspace (1,980 lines) and reads the theme zero times. Its track
+      table, column header, album-art placeholders and separators are fixed to Midnight values
+      (<code>#30363d</code>, <code>#8b949e</code>, <code>#64748b</code>). Switch to Pearl and the page
+      keeps a black rectangle across two-thirds of the window. Side-by-side capture in the
+      <a href="#player">Player section</a>.</p>
+      <div class="fix"><b>Fix —</b> the largest single migration in the app; scheduled as its own phase
+      in <a href="#plan">the plan</a> rather than bundled with the quick wins.</div>
+    </div>
+  </details>
+
+  <details class="defect">
+    <summary><span class="dn">D7</span><span class="dt">Library Sync overflows its viewport horizontally</span><span class="pill warn">layout</span></summary>
+    <div class="body">
+      <p class="where">gui/workspaces/library_sync.py</p>
+      <p>At the app's own default window size (1300×860) and at the 1440×900 used for capture, the
+      Library Sync content is wider than the content area: the “Browse…” buttons on both path rows are
+      clipped to “Bro”, and a horizontal scrollbar appears under the workspace. The path
+      <code>QLineEdit</code>s carry no width constraint, so they win the layout negotiation against the
+      buttons beside them.</p>
+      <div class="fix"><b>Fix —</b> give the path rows a minimum-width budget and let the line edit
+      shrink — the shared <code>_make_browse_row()</code> helper in <code>base.py</code> already fixes
+      the browse button at 80 px for exactly this reason; this page builds its rows by hand instead.</div>
+    </div>
+  </details>
+
+  <details class="defect">
+    <summary><span class="dn">D8</span><span class="dt">The landing wordmark is clipped on both sides</span><span class="pill warn">layout</span></summary>
+    <div class="body">
+      <p class="where">gui/widgets/landing.py</p>
+      <p>The first thing the app shows renders “AlphaDEX” as “lphaDE” — the A and X are cut by the CTA
+      card's fixed width. It is the first frame of the product and it clips the product's name.
+      See <a href="#chrome">Landing</a>.</p>
+      <div class="fix"><b>Fix —</b> size the card to the laid-out text, or reduce the wordmark point
+      size until <code>fontMetrics().horizontalAdvance()</code> fits with padding.</div>
+    </div>
+  </details>
+
+  </div>
+</section>
+
+<div class="hr"></div>
+
+<section id="crosscut">
+  <h2>Inconsistency catalog</h2>
+  <p class="sub">Six axes on which the app disagrees with itself. These are the decisions the
+  standard has to settle.</p>
+
+  <div class="defects">
+
+  <details class="defect" open>
+    <summary><span class="dn">C1</span><span class="dt">Page headers — three patterns</span></summary>
+    <div class="body">
+      <p>How a workspace introduces itself is the most visible inconsistency, because it is the first
+      thing on every screen.</p>
+      <ul>
+        <li><b>Hero card + stepper</b> — title and description inside a <code>headerCard</code> with a
+        3&nbsp;px accent left border, followed by a <code>workflowStepper</code> rail reading
+        <code>1. Preview (dry run) → 2. Review HTML report → 3. Execute changes</code>.
+        Used by <b>Indexer, Duplicates, Library Sync</b>.</li>
+        <li><b>Bare title</b> — a <code>sectionTitle</code> label and a <code>sectionSubtitle</code>
+        sitting directly on the background with no container. Used by <b>Compression, Similarity,
+        Tag Fixer, Genre Normalizer, Playlists, Clustered, Music Graph, Utilities</b> — eight pages.</li>
+        <li><b>Application toolbar</b> — title inline in a control strip with a search field and
+        buttons; no subtitle, no card. Used by <b>Player</b>.</li>
+      </ul>
+      <p>Help is a fourth case: bare title with no subtitle at all.</p>
+    </div>
+  </details>
+
+  <details class="defect">
+    <summary><span class="dn">C2</span><span class="dt">Progress through a workflow — three idioms</span></summary>
+    <div class="body">
+      <p>Three screens teach the user three different ways to read “where am I in this process”.</p>
+      <ul>
+        <li><b>Inline stepper rail</b> — <code>1. Scan &amp; fingerprint → 2. Review groups → 3. Execute plan</code>,
+        active step in accent, rest muted. Indexer, Duplicates, Library Sync.</li>
+        <li><b>Numbered card headings</b> — <code>1 · Collect the raw genres</code>,
+        <code>2 · Build the mapping</code>, <code>3 · Preview what would change</code> as the titles of
+        stacked cards. Genre Normalizer only.</li>
+        <li><b>Wizard counter + progress bar</b> — <code>Step 1: Feature Selection</code> with
+        <code>1 of 5</code> and a green bar. Clustering Wizard dialog only — and the bar is green while
+        the app's accent is blue.</li>
+      </ul>
+      <p>Separately, the Indexer's Progress card uses a fourth vocabulary — <em>Phase A / Phase B /
+      Phase C</em> — for the same underlying run it describes as steps 1–3 in its own stepper.</p>
+    </div>
+  </details>
+
+  <details class="defect">
+    <summary><span class="dn">C3</span><span class="dt">Buttons — a three-name vocabulary, thinly used</span></summary>
+    <div class="body">
+      <p>The style engine recognises exactly three semantic buttons by <code>objectName</code> —
+      <code>primaryBtn</code>, <code>dangerBtn</code>, <code>successBtn</code> — and paints everything
+      else as a neutral card-coloured button. There is no secondary, ghost, or toolbar variant, so any
+      page wanting one invents it.</p>
+      <p>The consequential disagreement is <b>which colour means “commit”</b>:</p>
+      <ul>
+        <li><b>Duplicates</b> commits with a <b>red</b> Execute button — destructive framing.</li>
+        <li><b>Tag Fixer</b> commits with a <b>green</b> Apply Selected button — confirmation framing.</li>
+      </ul>
+      <p>Both write to the user's library. A user who learns one page is primed wrongly for the other.
+      Grouping is also unsettled: Indexer and Duplicates put actions in a bordered
+      <code>actionCard</code>; Tag Fixer, Similarity and Compression leave the same buttons floating
+      loose between cards.</p>
+      <p>Icon convention is a third axis — Duplicates ships
+      <code>🔍 Scan Library</code> / <code>▶ Execute</code> with emoji baked into the label string,
+      Compression ships <code>🔍 Estimate Space Savings</code>, while Help, Graph and Playlists use
+      bare text. Clustered puts emoji in its <em>tab</em> labels
+      (<code>🚀 Quick Start</code>); Genre Normalizer and Playlists do not.</p>
+    </div>
+  </details>
+
+  <details class="defect">
+    <summary><span class="dn">C4</span><span class="dt">Colour — the token file is bypassed 54 times</span></summary>
+    <div class="body">
+      <p>Outside <code>tokens.py</code>, the active app hardcodes <b>54 distinct colours</b>. Three
+      clusters matter:</p>
+      <ul>
+        <li><b>The status triple is copy-pasted into 11 files.</b>
+        <code>#22c55e</code> / <code>#f59e0b</code> / <code>#ef4444</code> appear across Duplicates,
+        Library Sync, Tag Fixer, Genres, Similarity, Playlists, Clustered, Indexer, Tools, and two
+        dialogs. Those are exactly the <em>dark</em> defaults from <code>tokens._d()</code>. Every light
+        theme defines different ones — <code>#16a34a</code> / <code>#d97706</code> /
+        <code>#dc2626</code> — so all 11 files are wrong in all 6 light themes.</li>
+        <li><b><code>#64748b</code> is used 23 times and is not a token in any theme.</b> It is
+        Tailwind's slate-500, standing in for secondary text where
+        <code>text_secondary</code> or <code>text_muted</code> belongs. Four more off-palette greys
+        (<code>#f8fafc</code>, <code>#818cf8</code>, <code>#e2e8f0</code>, <code>#1e2130</code>) appear
+        the same way.</li>
+        <li><b>The root cause is an API shape.</b>
+        <code>WorkspaceBase.status_changed = Signal(str, str)</code> takes a <em>colour string</em> as
+        its second argument, so every caller must hardcode a hex to emit a status at all.</li>
+      </ul>
+      <pre><span class="c"># duplicates.py:482, 590, 596 — the signal's contract forces this</span>
+self.status_changed.emit("Scanning…",     <span class="r">"#f59e0b"</span>)
+self.status_changed.emit("Scan complete", <span class="r">"#22c55e"</span>)
+self.status_changed.emit("Error",         <span class="r">"#ef4444"</span>)</pre>
+      <div class="fix"><b>Fix —</b> change the second argument to a semantic level —
+      <code>"busy"</code> / <code>"ok"</code> / <code>"error"</code> — and let the log drawer resolve it
+      against the live tokens. This deletes roughly 30 hardcoded colours by changing one signature.</div>
+      <div class="swatches">
+        <div class="sw"><div class="chip" style="background:#22c55e"></div><div class="lab"><b>#22c55e</b>success · dark</div></div>
+        <div class="sw"><div class="chip" style="background:#16a34a"></div><div class="lab"><b>#16a34a</b>success · light</div></div>
+        <div class="sw"><div class="chip" style="background:#f59e0b"></div><div class="lab"><b>#f59e0b</b>warning · dark</div></div>
+        <div class="sw"><div class="chip" style="background:#d97706"></div><div class="lab"><b>#d97706</b>warning · light</div></div>
+        <div class="sw"><div class="chip" style="background:#ef4444"></div><div class="lab"><b>#ef4444</b>danger · dark</div></div>
+        <div class="sw"><div class="chip" style="background:#dc2626"></div><div class="lab"><b>#dc2626</b>danger · light</div></div>
+        <div class="sw"><div class="chip" style="background:#64748b"></div><div class="lab"><b>#64748b</b>×23 · no token</div></div>
+      </div>
+    </div>
+  </details>
+
+  <details class="defect">
+    <summary><span class="dn">C5</span><span class="dt">Typography — two systems, different units, one wins by accident</span></summary>
+    <div class="body">
+      <p><code>gui/fonts/loader.py</code> defines a complete <code>TypeScale</code>: named roles
+      (<code>SECTION_HDR</code>, <code>BODY</code>, <code>LABEL</code>, <code>SMALL</code>,
+      <code>NAV_ITEM</code>, <code>BUTTON</code>…), six weights and three letter-spacing steps, all in
+      <b>points</b>. Nothing outside the theme engine imports it. No workspace, no dialog, no widget.</p>
+      <p>Meanwhile the app carries <b>68 hardcoded <code>font-size</code> declarations in pixels</b>
+      across ten distinct values — 9, 10, 11, 12, 13, 14, 15, 16, 18 and 22 px. Because a widget
+      stylesheet beats the font applied in <code>polish()</code>, the ad-hoc px values silently win
+      wherever they appear.</p>
+      <p>Font families are bypassed the same way: <code>UI_STACK</code> and <code>MONO_STACK</code>
+      name Inter and JetBrains Mono, but eight files hardcode
+      <code>font-family: 'Consolas', monospace</code> for their log panes — so the app's monospace face
+      changes depending on which page you are looking at.</p>
+    </div>
+  </details>
+
+  <details class="defect">
+    <summary><span class="dn">C6</span><span class="dt">Spacing — no grid</span></summary>
+    <div class="body">
+      <p>Across the workspaces there are <b>20 distinct <code>setContentsMargins</code> tuples</b> and
+      seven <code>setSpacing</code> values. The dominant card padding
+      <code>(16, 16, 16, 16)</code> is used 37 times, which is the good news; the other 19 variants —
+      <code>(20,16,16,16)</code>, <code>(16,14,16,14)</code>, <code>(18,10,18,16)</code>,
+      <code>(12,8,12,8)</code>, <code>(8,4,8,8)</code> — are each used once or twice with no rule
+      behind them.</p>
+      <p>Spacing splits 18×<code>8</code>, 17×<code>10</code>, 9×<code>12</code>, 8×<code>6</code>,
+      8×<code>4</code>. The 6s and 10s put the app off any consistent 4- or 8-point rhythm, and there
+      are no named constants to reach for — <code>gui/themes/effects.py</code> exports radius constants
+      (<code>R.button</code>, <code>R.card</code>, <code>R.input</code>) but no spacing scale.</p>
+    </div>
+  </details>
+
+  </div>
+</section>
+
+<div class="hr"></div>
+
+<section id="pages">
+  <h2>Page by page</h2>
+  <p class="sub">Every workspace as captured, with what its source says. Pages are grouped in the
+  app's own nav order. Dark captures are Midnight (default); light captures are Pearl.</p>
+</section>
+
+<section id="indexer">
+  <div class="page">
+    <div class="page-hd"><h3>Indexer</h3><span class="pill ok">reference page</span>
+      <span class="file">gui/workspaces/indexer.py · 382 lines</span></div>
+    <div class="page-body">
+      <figure class="shot"><img src="shots/ws_indexer.png" alt="Indexer workspace, Midnight theme">
+        <figcaption>ws_indexer.png · midnight</figcaption></figure>
+      <div class="notes">
+        <div class="tags"><span class="pill ok">headerCard</span><span class="pill ok">stepper</span>
+          <span class="pill ok">actionCard</span><span class="pill ok">0 setStyleSheet</span></div>
+        <h4>Why this is the target</h4>
+        <ul>
+          <li><b>Hero card</b> with accent left border carries title + description together.</li>
+          <li><b>Stepper rail</b> states the whole workflow before you start it.</li>
+          <li><b>Cards</b> group Options, Actions and Progress; each has a <code>cardTitle</code>.</li>
+          <li><b>One primary action</b> — Run Preview — with secondaries beside it in a bordered
+          <code>actionCard</code>.</li>
+          <li><b>Zero</b> <code>setStyleSheet</code> calls. It themes correctly in all 14 themes because
+          it never fights the engine.</li>
+        </ul>
+        <h4>Even here</h4>
+        <ul>
+          <li>Three hardcoded status colours, forced by the <code>status_changed</code> signature (C4).</li>
+          <li>Progress card says <em>Phase A/B/C</em> while the stepper above says <em>1/2/3</em> — two
+          names for one process (C2).</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="library_sync">
+  <div class="page">
+    <div class="page-hd"><h3>Library Sync</h3><span class="pill warn">conforms, but overflows</span>
+      <span class="file">gui/workspaces/library_sync.py · 911 lines</span></div>
+    <div class="page-body">
+      <figure class="shot"><img src="shots/ws_library_sync.png" alt="Library Sync workspace showing clipped Browse buttons">
+        <figcaption>ws_library_sync.png · midnight · note clipped “Bro…” buttons and the horizontal scrollbar</figcaption></figure>
+      <div class="notes">
+        <div class="tags"><span class="pill ok">headerCard</span><span class="pill ok">stepper</span>
+          <span class="pill ok">actionCard</span><span class="pill bad">overflows</span></div>
+        <h4>Structure</h4>
+        <ul>
+          <li>Uses the full page pattern — the third and last workspace that does.</li>
+          <li>Nine cards, six with titles; the most card-dense page in the app.</li>
+        </ul>
+        <h4>Problems</h4>
+        <ul>
+          <li><b>Horizontal overflow (D7).</b> Both Browse buttons are clipped and the content area
+          scrolls sideways at 1440 px — well above the app's own 900 px minimum width.</li>
+          <li>The first two cards carry <b>no card title</b>, so “Existing Library / Incoming Folder”
+          and the threshold block read as one undifferentiated slab.</li>
+          <li>Action buttons are split across two places — a “Scan” <code>actionCard</code> and a
+          loose <code>Recompute Matches</code> / <code>Save Session</code> pair inside the settings card.</li>
+          <li>Nine hardcoded colours including the status triple (C4).</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="duplicates">
+  <div class="page">
+    <div class="page-hd"><h3>Duplicates</h3><span class="pill ok">conforms</span>
+      <span class="file">gui/workspaces/duplicates.py · 658 lines</span></div>
+    <div class="page-body">
+      <figure class="shot"><img src="shots/ws_duplicates.png" alt="Duplicate Finder workspace">
+        <figcaption>ws_duplicates.png · midnight</figcaption></figure>
+      <div class="notes">
+        <div class="tags"><span class="pill ok">headerCard</span><span class="pill ok">stepper</span>
+          <span class="pill ok">actionCard</span><span class="pill warn">red commit</span></div>
+        <h4>Structure</h4>
+        <ul>
+          <li>Full page pattern, cleanly executed — the second-best page in the app.</li>
+        </ul>
+        <h4>Divergences</h4>
+        <ul>
+          <li><b>Commits in red.</b> <code>Execute</code> is a <code>dangerBtn</code>; Tag Fixer's
+          equivalent is green (C3). One of the two has to change.</li>
+          <li><b>Emoji in button labels</b> — <code>🔍 Scan Library</code>, <code>📄 Preview</code>,
+          <code>📊 Open Report</code> — baked into the label strings rather than set as icons.</li>
+          <li>The per-group <b>Disposition combo is decorative</b> — built but not read, per the
+          project's own <code>gui_inventory.md</code>.</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="similarity">
+  <div class="page">
+    <div class="page-hd"><h3>Similarity Inspector</h3><span class="pill warn">drift</span>
+      <span class="file">gui/workspaces/similarity.py · 243 lines</span></div>
+    <div class="page-body">
+      <figure class="shot"><img src="shots/ws_similarity.png" alt="Similarity Inspector workspace">
+        <figcaption>ws_similarity.png · midnight</figcaption></figure>
+      <div class="notes">
+        <div class="tags"><span class="pill warn">bare title</span><span class="pill warn">no card titles</span>
+          <span class="pill warn">loose actions</span></div>
+        <h4>Divergences</h4>
+        <ul>
+          <li><b>Bare title</b> — no hero card, no stepper, despite being a three-step task
+          (pick A, pick B, compare).</li>
+          <li><b>No card titles.</b> Both cards are untitled, so the Advanced Overrides group is
+          introduced by a loose checkbox floating above it instead of a heading.</li>
+          <li><b>Loose actions.</b> <code>Run Comparison</code> / <code>Clear</code> sit directly on the
+          background rather than in an <code>actionCard</code>.</li>
+          <li>Form labels are right-aligned here and left-aligned on Compression — no rule.</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="tag_fixer">
+  <div class="page">
+    <div class="page-hd"><h3>Tag Fixer</h3><span class="pill warn">drift</span>
+      <span class="file">gui/workspaces/tag_fixer.py · 416 lines</span></div>
+    <div class="page-body">
+      <figure class="shot"><img src="shots/ws_tag_fixer.png" alt="Tag Fixer workspace with green Apply Selected button">
+        <figcaption>ws_tag_fixer.png · midnight · commits in green</figcaption></figure>
+      <div class="notes">
+        <div class="tags"><span class="pill warn">bare title</span><span class="pill bad">green commit</span>
+          <span class="pill warn">loose actions</span></div>
+        <h4>Divergences</h4>
+        <ul>
+          <li><b>Commits in green.</b> <code>✓ Apply Selected</code> is a <code>successBtn</code> and it
+          writes tags to disk. Duplicates frames the same class of action in red (C3). This is the
+          single clearest semantic contradiction in the app.</li>
+          <li><b>Bare title, no stepper</b> — though the page is explicitly scan → review → apply.</li>
+          <li><b>Five loose buttons</b> in a row with no grouping container.</li>
+          <li><code>#64748b</code> twice for status text (C4); hardcoded
+          <code>'Consolas'</code> for the log pane (C5).</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="genres">
+  <div class="page">
+    <div class="page-hd"><h3>Genre Normalizer</h3><span class="pill warn">own step idiom</span>
+      <span class="file">gui/workspaces/genres.py · 648 lines</span></div>
+    <div class="page-body">
+      <figure class="shot"><img src="shots/tab_genres__1_normalize_with_a_mapping.png" alt="Genre Normalizer, mapping tab, numbered card headings">
+        <figcaption>tab_genres__1_normalize_with_a_mapping.png · midnight</figcaption></figure>
+      <div class="notes">
+        <div class="tags"><span class="pill ok">6 card titles</span><span class="pill warn">numbered cards</span>
+          <span class="pill warn">plain tabs</span></div>
+        <h4>Notes</h4>
+        <ul>
+          <li><b>Best card discipline in the app</b> — six cards, six titles. The content model is right.</li>
+          <li><b>Third step idiom (C2).</b> Steps live in the card headings —
+          <code>1 · Collect the raw genres</code>, <code>2 · Build the mapping</code>,
+          <code>3 · Preview what would change</code> — rather than in a stepper rail. Arguably better
+          for a long page, but it is a third dialect.</li>
+          <li><b>Tab labels are plain text</b> here and emoji-prefixed on Clustered (C3).</li>
+          <li>Tabs render tight against the card edge with a hairline underline; the Settings dialog
+          renders the same widget flush to x=0. No shared tab chrome.</li>
+        </ul>
+        <h4>Also captured</h4>
+        <ul><li><code>tab_genres__0_fill_from_musicbrainz.png</code> — the sibling tab.</li></ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="playlists">
+  <div class="page">
+    <div class="page-hd"><h3>Playlists</h3><span class="pill warn">drift</span>
+      <span class="file">gui/workspaces/playlists.py · 394 lines</span></div>
+    <div class="page-body">
+      <figure class="shot"><img src="shots/tab_playlists__1_tempo___energy.png" alt="Playlists workspace, Tempo / Energy tab">
+        <figcaption>tab_playlists__1_tempo___energy.png · midnight</figcaption></figure>
+      <div class="notes">
+        <div class="tags"><span class="pill warn">bare title</span><span class="pill warn">1 card / 4 tabs</span>
+          <span class="pill n">decorative controls</span></div>
+        <h4>Divergences</h4>
+        <ul>
+          <li><b>Four tabs, one card.</b> Each tab is a loose stack of subtitle + controls with no card
+          container — the only page using <code>_make_subtitle</code> five times as a substitute for
+          card titles.</li>
+          <li>Four primary buttons across four tabs, so “the primary action” is ambiguous per page.</li>
+          <li>Per <code>gui_inventory.md</code>, the <b>tempo/energy range fields and “Prefer Opus”
+          checkbox are decorative</b> — rendered but never read.</li>
+        </ul>
+        <h4>Also captured</h4>
+        <ul><li>Folder Playlists, Auto-DJ, Playlist Repair tabs.</li></ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="clustered">
+  <div class="page">
+    <div class="page-hd"><h3>Clustered Playlists</h3><span class="pill warn">drift</span>
+      <span class="file">gui/workspaces/clustered_enhanced.py · 561 lines</span></div>
+    <div class="page-body">
+      <figure class="shot"><img src="shots/tab_clustered__1_advanced.png" alt="Clustered Playlists, Advanced tab">
+        <figcaption>tab_clustered__1_advanced.png · midnight · emoji tab labels</figcaption></figure>
+      <div class="notes">
+        <div class="tags"><span class="pill warn">emoji tabs</span><span class="pill warn">no card titles</span>
+          <span class="pill n">dead twin file</span></div>
+        <h4>Divergences</h4>
+        <ul>
+          <li><b>Emoji tab labels</b> — <code>🚀 Quick Start</code>, <code>⚙ Advanced</code>,
+          <code>📊 Results</code> — unique to this page (C3).</li>
+          <li>Four cards, <b>zero card titles</b>; headings are raw labels instead.</li>
+          <li>Hardcoded <code>#ef4444</code> and <code>#22c55e</code> for inline result messages (C4).</li>
+          <li><b>A dead twin exists.</b> <code>clustered.py</code> (263 lines) is a complete second
+          implementation that <code>main_window.py</code> never routes to — it imports
+          <code>clustered_enhanced</code> under the <code>"clustered"</code> key. Two files to keep in
+          sync, one of which nobody sees.</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="graph">
+  <div class="page">
+    <div class="page-hd"><h3>Music Graph</h3><span class="pill warn">drift, but clean</span>
+      <span class="file">gui/workspaces/graph.py · 367 lines</span></div>
+    <div class="page-body">
+      <figure class="shot"><img src="shots/ws_graph.png" alt="Music Graph workspace">
+        <figcaption>ws_graph.png · midnight · PyQtGraph absent, empty state shown</figcaption></figure>
+      <div class="notes">
+        <div class="tags"><span class="pill ok">0 hardcoded colors</span><span class="pill warn">bare title</span>
+          <span class="pill warn">8 unstyled buttons</span></div>
+        <h4>Notes</h4>
+        <ul>
+          <li><b>The cleanest non-conforming page</b> — zero <code>setStyleSheet</code>, zero hardcoded
+          colours. It drifts structurally, not chromatically.</li>
+          <li><b>Eight buttons, none semantic.</b> Pan / Rectangle / Lasso are a mode group but render
+          as eight identical neutral buttons — no toggle or segmented-control treatment exists in the
+          vocabulary (C3).</li>
+          <li>Right panel headings (“Clusters”, “Track Details”) sit outside their cards, unlike every
+          card-titled page.</li>
+          <li>Its empty state is the most helpful in the app — it names the missing dependency and the
+          exact install command. Worth making the standard.</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="player">
+  <div class="page">
+    <div class="page-hd"><h3>Player</h3><span class="pill bad">off-system</span>
+      <span class="file">gui/workspaces/player.py · 1,980 lines</span></div>
+    <div class="pair">
+      <figure><img src="shots/ws_player.png" alt="Player workspace in Midnight theme">
+        <figcaption>midnight — reads as intended</figcaption></figure>
+      <figure><img src="shots/light_player.png" alt="Player workspace in Pearl theme with a dark slab">
+        <figcaption>pearl — the table stays Midnight (D6)</figcaption></figure>
+    </div>
+    <div class="page-body" style="grid-template-columns:1fr">
+      <div class="notes">
+        <div class="tags"><span class="pill bad">16 setStyleSheet</span><span class="pill bad">0 tokens</span>
+          <span class="pill bad">0 cards</span><span class="pill bad">11 px font rules</span></div>
+        <h4>The biggest divergence in the app</h4>
+        <ul>
+          <li><b>Does not theme.</b> Sixteen stylesheets, sixteen hardcoded colours, zero token reads.
+          In Pearl the track table, its header, the album-art placeholders and the separators all stay
+          Midnight — a black rectangle across two-thirds of a white window (D6).</li>
+          <li><b>No cards, no scroll area.</b> It bypasses <code>WorkspaceBase</code>'s content layout
+          entirely and lays out full-bleed, so it has none of the 24 px gutter every other page has.</li>
+          <li><b>Third header pattern</b> — title inline with a search field and four buttons (C1).</li>
+          <li><b>Off-accent transport.</b> Shuffle and repeat render orange in every theme, including
+          themes whose accent is blue, green or pink.</li>
+          <li><b>Eleven hardcoded <code>font-size</code> rules</b> — more than any other file (C5).</li>
+        </ul>
+        <p style="font-size:13.5px;color:var(--tx3);margin:12px 0 0">A full-bleed media view is a
+        legitimate exception to a card layout — players do look like this. The defensible version of
+        that exception still reads its colours from the theme. Treat Player as its own migration phase.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="compression">
+  <div class="page">
+    <div class="page-hd"><h3>Compression</h3><span class="pill warn">drift</span>
+      <span class="file">gui/workspaces/compression.py · 448 lines</span></div>
+    <div class="page-body">
+      <figure class="shot"><img src="shots/ws_compression.png" alt="Library Compression workspace">
+        <figcaption>ws_compression.png · midnight</figcaption></figure>
+      <div class="notes">
+        <div class="tags"><span class="pill warn">bare title</span><span class="pill ok">3 card titles</span>
+          <span class="pill warn">8 setStyleSheet</span></div>
+        <h4>Divergences</h4>
+        <ul>
+          <li><b>Bare title</b> on a page that is explicitly configure → estimate → run — a textbook
+          stepper candidate (C1, C2).</li>
+          <li><b>Loose action row</b> between two cards instead of an <code>actionCard</code>.</li>
+          <li><b>Colour-codes results by hand</b> — <code>#4ade80</code> on success,
+          <code>#f87171</code> on failure, <code>#64748b</code> at rest — four separate stylesheet
+          swaps on one label where a semantic state would do (C4).</li>
+          <li>Trailing note (“FFmpeg must be installed…”) is a bare label outside any card, a pattern
+          used nowhere else.</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="tools">
+  <div class="page">
+    <div class="page-hd"><h3>Utilities</h3><span class="pill warn">a parallel design system</span>
+      <span class="file">gui/workspaces/tools.py · 1,443 lines</span></div>
+    <div class="pair">
+      <figure><img src="shots/ws_tools.png" alt="Utilities workspace in Midnight">
+        <figcaption>midnight — tiles, status pills, chip rows</figcaption></figure>
+      <figure><img src="shots/light_tools.png" alt="Utilities workspace in Pearl">
+        <figcaption>pearl — themes correctly; it reads tokens</figcaption></figure>
+    </div>
+    <div class="page-body" style="grid-template-columns:1fr">
+      <div class="notes">
+        <div class="tags"><span class="pill ok">16 token reads</span><span class="pill warn">0 WorkspaceBase cards</span>
+          <span class="pill warn">own components</span></div>
+        <h4>The interesting case</h4>
+        <ul>
+          <li><b>The only workspace that reads the theme</b> — 16 token references, and it is the only
+          page besides the conformers that survives a theme switch intact.</li>
+          <li><b>But it built its own components to do it.</b> Icon tiles in rounded squares, “Ready.”
+          status pills, codec chip rows, and a two-column grid — none of which exist anywhere else, and
+          none of which use <code>_make_card()</code>.</li>
+          <li><b>Diagnostics buttons invert the usual order</b>, putting the label above the icon; every
+          other button in the app is icon-then-label.</li>
+          <li>Its status pill is a genuinely good component. It is the strongest argument for the
+          <a href="#direction">component-library direction</a> — the vocabulary needs to grow, and
+          this page shows what it should grow into.</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="help">
+  <div class="page">
+    <div class="page-hd"><h3>Help</h3><span class="pill warn">drift</span>
+      <span class="file">gui/workspaces/help.py · 96 lines</span></div>
+    <div class="page-body">
+      <figure class="shot"><img src="shots/ws_help.png" alt="Help workspace">
+        <figcaption>ws_help.png · midnight</figcaption></figure>
+      <div class="notes">
+        <div class="tags"><span class="pill warn">no subtitle</span><span class="pill warn">full-width buttons</span>
+          <span class="pill warn">no card titles</span></div>
+        <h4>Divergences</h4>
+        <ul>
+          <li><b>The only page with no subtitle</b> under its title (C1).</li>
+          <li><b>Full-width buttons as list rows</b> — the three doc links and “Report an Issue” stretch
+          edge to edge, a control shape used nowhere else in the app.</li>
+          <li>Three cards, no card titles; headings are plain labels at a different weight than
+          <code>cardTitle</code> elsewhere.</li>
+          <li>No primary action, so the page has no visual entry point.</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+<div class="hr"></div>
+
+<section id="chrome">
+  <h2>Chrome</h2>
+  <p class="sub">The frame around every workspace — and the first screen anyone sees.</p>
+
+  <div class="page">
+    <div class="page-hd"><h3>Landing</h3><span class="pill bad">clipped wordmark</span>
+      <span class="file">gui/widgets/landing.py · 1,113 lines</span></div>
+    <div class="page-body">
+      <figure class="shot"><img src="shots/chrome_landing.png" alt="Mosaic landing screen with clipped AlphaDEX wordmark">
+        <figcaption>chrome_landing.png · the product name renders as “lphaDE”</figcaption></figure>
+      <div class="notes">
+        <div class="tags"><span class="pill bad">D8 clipping</span><span class="pill warn">42 hardcoded colors</span></div>
+        <h4>Notes</h4>
+        <ul>
+          <li><b>The wordmark is clipped on both sides (D8)</b> — the A and the X are cut off by the CTA
+          card's fixed width. This is the first frame of the application.</li>
+          <li><b>42 hardcoded colours</b>, second only to the orphaned <code>qt_launcher.py</code>.</li>
+          <li>Its centred hero card, gradient ground and generous scale are a genuinely distinct
+          moment — appropriate for a landing, but it shares no tokens, radii or type with the app it
+          opens into, so the transition is a hard cut.</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+
+  <div class="page">
+    <div class="page-hd"><h3>Activity Log drawer</h3><span class="file">gui/widgets/log_drawer.py</span></div>
+    <div class="pair">
+      <figure><img src="shots/chrome_log_drawer.png" alt="Activity log drawer expanded, Midnight">
+        <figcaption>midnight — expanded with all four levels</figcaption></figure>
+      <figure><img src="shots/light_chrome_log_drawer.png" alt="Indexer in Pearl with the dark log strip">
+        <figcaption>pearl — the drawer stays dark by design</figcaption></figure>
+    </div>
+    <div class="page-body" style="grid-template-columns:1fr">
+      <div class="notes">
+        <h4>Notes</h4>
+        <ul>
+          <li>The dark log surface in light themes is <b>deliberate</b> — every light theme defines a
+          dark <code>log_bg</code>. It is a defensible “console” convention, but it is currently the
+          only inverted surface in the app and it reads as unfinished rather than intentional. The
+          standard should either commit to it (give it a console frame and a header) or drop it.</li>
+          <li>The handle hardcodes <code>#1e293b</code> and the toggle icon <code>#94a3b8</code>,
+          ignoring the <code>log_handle</code> token that exists for exactly this (C4).</li>
+          <li>Status chip colour arrives from the workspace as a raw hex string (C4).</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+<div class="hr"></div>
+
+<section id="dialogs">
+  <h2>Dialogs</h2>
+  <p class="sub">Eleven modal surfaces. As a group they are the least systematised part of the app:
+  none uses <code>_make_card()</code>, none reads a token, and two were broken.</p>
+
+  <div class="page">
+    <div class="page-hd"><h3>Cluster Quality Report</h3><span class="pill bad">unusable</span>
+      <span class="file">gui/dialogs/cluster_quality_report_dialog.py</span></div>
+    <div class="page-body">
+      <figure class="shot"><img src="shots/dlg_cluster_quality_report.png" alt="Cluster Quality Report dialog rendering white on white">
+        <figcaption>dlg_cluster_quality_report.png · populated with real metrics — and invisible (D3)</figcaption></figure>
+      <div class="notes">
+        <div class="tags"><span class="pill bad">D3</span><span class="pill bad">14 setStyleSheet</span>
+          <span class="pill bad">light-only colors</span></div>
+        <h4>Notes</h4>
+        <ul>
+          <li>This capture is populated with six clusters and full metrics. Everything you cannot see is
+          present in the widget tree and rendering white on white.</li>
+          <li><code>#fafafa</code> card fills and <code>#333</code> body copy assume a light host;
+          the default theme is dark (D3).</li>
+          <li><b>Fourteen stylesheets</b> — the densest of any dialog — including three hardcoded
+          <code>font-size</code> values and a hand-rolled score-to-colour ramp that duplicates the
+          <code>success</code>/<code>warning</code>/<code>danger</code> tokens.</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+
+  <div class="page">
+    <div class="page-hd"><h3>Theme Picker</h3><span class="pill bad">unreadable labels</span>
+      <span class="file">gui/themes/picker.py</span></div>
+    <div class="page-body">
+      <figure class="shot"><img src="shots/dlg_theme_picker.png" alt="Theme picker with unreadable light theme names">
+        <figcaption>dlg_theme_picker.png · Pearl, Blossom, Meadow, Lavender and Sunset are unlabelled (D5)</figcaption></figure>
+      <div class="notes">
+        <div class="tags"><span class="pill bad">D5</span><span class="pill warn">clipped copy</span></div>
+        <h4>Notes</h4>
+        <ul>
+          <li><b>Five of seven light theme names are invisible (D5)</b> — drawn in the active dark
+          theme's ink on the swatch's own light ground.</li>
+          <li>The Auto row's description is clipped mid-word (“…day/night cycl”).</li>
+          <li>Otherwise the strongest custom component in the app: the swatch genuinely previews
+          sidebar, card, text and accent together. Fixing one word makes it excellent.</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+
+  <div class="page">
+    <div class="page-hd"><h3>Clustering Wizard &amp; Settings</h3>
+      <span class="file">clustering_wizard_dialog.py · settings_drawer.py</span></div>
+    <div class="pair">
+      <figure><img src="shots/dlg_clustering_wizard.png" alt="Clustering wizard step 1">
+        <figcaption>wizard — third step idiom, green progress bar on a blue-accent app</figcaption></figure>
+      <figure><img src="shots/dlg_settings.png" alt="Settings dialog">
+        <figcaption>settings — tab strip breaks the dialog gutter</figcaption></figure>
+    </div>
+    <div class="page-body" style="grid-template-columns:1fr">
+      <div class="notes">
+        <h4>Notes</h4>
+        <ul>
+          <li><b>Wizard:</b> nine hardcoded <code>font-size</code> rules and eight colours; a
+          <code>Step 1 … 1 of 5</code> counter that is the app's third progress idiom (C2); ASCII
+          chevrons (<code>&lt; Back</code>, <code>Next &gt;</code>) where every other page uses glyphs;
+          and a green progress bar that ignores <code>progress_fg</code>.</li>
+          <li><b>Settings:</b> the title is inset ~56 px while the tab strip starts at x=0, so the
+          dialog has two competing left edges. Header hardcodes <code>#0f172a</code> and
+          <code>#f8fafc</code> — neither is a token in any theme (C4).</li>
+          <li>Neither dialog uses a card. Both would collapse to near-zero custom styling on the
+          shared vocabulary.</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+
+  <div class="page">
+    <div class="page-hd"><h3>The remaining eight</h3><span class="file">gui/dialogs/</span></div>
+    <div class="pair">
+      <figure><img src="shots/dlg_pair_review.png" alt="Pair Review dialog">
+        <figcaption>pair_review — opens only after the D2 fix</figcaption></figure>
+      <figure><img src="shots/dlg_scan_engine.png" alt="Scan Engine dialog">
+        <figcaption>scan_engine — 0 stylesheets, the cleanest dialog</figcaption></figure>
+    </div>
+    <div class="page-body" style="grid-template-columns:1fr">
+      <div class="notes">
+        <h4>Notes</h4>
+        <ul>
+          <li><b>Scan Engine and Bucketing POC are the model.</b> Zero stylesheets, zero hardcoded
+          colours, <code>primaryBtn</code> used correctly. They prove a dialog needs no custom styling
+          at all.</li>
+          <li><b>Pair Review</b> could not open until D2 was fixed. It then renders acceptably, though
+          it hardcodes <code>#22c55e</code> for the winner label.</li>
+          <li><b>Fuzzy Duplicate Finder</b> — three stylesheets, three px font rules; per
+          <code>gui_inventory.md</code> most of its search and filter fields are decorative.</li>
+          <li><b>Media Tester</b> paints its art placeholder <code>#e2e8f0</code> — a light grey slab
+          that glares on every dark theme.</li>
+          <li>Also captured: <code>dlg_crash_log</code>, <code>dlg_bucketing_poc</code>,
+          <code>dlg_media_tester</code>, <code>dlg_fuzzy_dupe</code>,
+          <code>dlg_light_settings</code>, <code>dlg_light_cluster_quality_report</code>.</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+<div class="hr"></div>
+
+<section id="direction">
+  <h2>Recommended direction</h2>
+  <p class="sub">One recommendation, stated plainly, plus the two alternatives and why they lose.</p>
+
+  <div class="verdict">
+    <p><b>Adopt the Indexer page as the standard, and make the system mandatory rather than
+    available.</b> Do not design a new look. The target is already shipping, already themed across 14
+    palettes, and already the page users meet first. The work is enforcement and migration, not
+    invention.</p>
+    <p>Name it <b>“Workbench”</b>: every workspace is a <em>hero card</em> stating what the tool does,
+    a <em>stepper</em> stating the workflow, <em>titled cards</em> for each stage, and exactly one
+    <em>primary action</em> in a bordered action bar. Preview-first is the project's core architectural
+    rule; the stepper is that rule made visible, which is why this direction fits AlphaDEX
+    specifically rather than being generic tidiness.</p>
+  </div>
+
+  <div class="rec">
+    <div class="reccard">
+      <h3>Why not a fresh visual direction?</h3>
+      <p>Because nothing here is ugly — it is <em>inconsistent</em>. The token layer, the custom
+      painter and the 14 themes represent real, working investment. A restyle would discard that and
+      leave the same structural problem: twelve pages that each invent their own layout. Consistency is
+      the deliverable; a new palette would not produce it.</p>
+    </div>
+    <div class="reccard">
+      <h3>Why not standardise on Utilities instead?</h3>
+      <p>It is tempting — Utilities is the only page that reads tokens, and its tile-and-pill treatment
+      is attractive. But it suits a <em>launcher</em> of small independent actions, which is what that
+      page is. It does not suit the eight pages that are long-running, multi-stage, preview-then-execute
+      workflows. Take its <b>status pill</b> and <b>icon tile</b> into the shared library; do not take
+      its page layout.</p>
+    </div>
+    <div class="reccard">
+      <h3>What the vocabulary is missing</h3>
+      <p>Four gaps explain most of the ad-hoc styling. Close these and the escape hatches lose their
+      reason to exist:</p>
+      <ul>
+        <li><b>A secondary / ghost button.</b> Only <code>primaryBtn</code>, <code>dangerBtn</code> and
+        <code>successBtn</code> exist, so every toolbar and mode control falls back to neutral or rolls
+        its own — Graph's eight buttons, Player's transport, Help's full-width rows.</li>
+        <li><b>A status pill.</b> Utilities built one; Tag Fixer, Compression and Library Sync each
+        hand-colour a plain label instead.</li>
+        <li><b>A spacing scale.</b> <code>effects.py</code> exports radii but no spacing, so 20 margin
+        variants accumulated. Add <code>S.xs/sm/md/lg</code> beside <code>R</code>.</li>
+        <li><b>Reachable tokens.</b> Give <code>WorkspaceBase</code> a <code>self.tokens</code> property
+        and a <code>_on_theme_changed()</code> hook. Today a workspace must import the manager by hand,
+        which is precisely why twelve of them never bothered.</li>
+      </ul>
+    </div>
+    <div class="reccard">
+      <h3>Decisions this settles</h3>
+      <ul>
+        <li><b>Commit actions are red</b>, everywhere. Green marks completed state, not a button that
+        writes to the library. Tag Fixer changes, not Duplicates.</li>
+        <li><b>One step idiom:</b> the stepper rail. Genre Normalizer's numbered headings become a
+        stepper; the wizard's counter stays (it is a genuine modal sequence) but adopts the accent.</li>
+        <li><b>Icons are icons, not label text.</b> Strip emoji from button and tab strings; pass a
+        <code>QIcon</code>.</li>
+        <li><b>Phases are steps.</b> Retire “Phase A/B/C” in favour of the step numbers already shown
+        above it.</li>
+        <li><b>The log drawer stays dark</b> in light themes — but gets a deliberate console treatment
+        so it reads as a choice.</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section id="plan">
+  <h2>Migration plan</h2>
+  <p class="sub">Ordered so that each phase is independently shippable and the early phases make the
+  later ones mechanical. Phases 0–2 are the ones worth doing regardless of which direction you pick.</p>
+
+  <div class="phase">
+    <div class="phase-n">PHASE 0</div>
+    <div class="phase-b">
+      <h4>Fix the eight defects</h4>
+      <p>Independent of any design decision. D1 and D2 are two-word fixes that currently break tab
+      labels, group-box titles and an entire dialog; D3–D5 are contrast bugs that make three surfaces
+      unreadable; D7 and D8 are layout clipping.</p>
+      <ul><li>D1 and D2 are already applied in this branch — they had to be, to capture the screenshots
+      above. The rest are listed with line numbers in <a href="#defects">Defects</a>.</li></ul>
+    </div>
+  </div>
+  <div class="phase">
+    <div class="phase-n">PHASE 1</div>
+    <div class="phase-b">
+      <h4>Close the escape hatches</h4>
+      <p>No visual change; this is the step that makes everything after it cheap.</p>
+      <ul>
+        <li>Change <code>status_changed</code> to carry a semantic level, not a hex. Deletes ~30
+        hardcoded colours across 11 files by itself.</li>
+        <li>Add <code>self.tokens</code> and a theme hook to <code>WorkspaceBase</code>.</li>
+        <li>Add <code>secondaryBtn</code> / <code>ghostBtn</code> to the painter and a
+        <code>StatusPill</code> widget lifted from Utilities.</li>
+        <li>Add a spacing scale to <code>effects.py</code>.</li>
+        <li>Add a CI grep that fails on a new hex literal or <code>font-size:</code> outside
+        <code>gui/themes/</code>. Without this the drift returns.</li>
+      </ul>
+    </div>
+  </div>
+  <div class="phase">
+    <div class="phase-n">PHASE 2</div>
+    <div class="phase-b">
+      <h4>Delete what nobody sees</h4>
+      <p>Three files carry styling that no user can reach, and every one of them is a place future
+      drift can hide.</p>
+      <ul>
+        <li><code>gui/qt_launcher.py</code> — 698 lines, 47 stylesheets, 45 colours, reachable only
+        from the legacy Tkinter app.</li>
+        <li><code>gui/workspaces/clustered.py</code> — a complete second Clustered page that is never
+        routed to.</li>
+        <li><code>gui/theme.py</code> — a shim whose <code>build_stylesheet()</code> returns
+        <code>""</code>.</li>
+      </ul>
+    </div>
+  </div>
+  <div class="phase">
+    <div class="phase-n">PHASE 3</div>
+    <div class="phase-b">
+      <h4>Migrate the eight bare-title pages</h4>
+      <p>Compression, Similarity, Tag Fixer, Genre Normalizer, Playlists, Clustered, Music Graph, Help.
+      Each gets a hero card, a stepper where it has stages, titled cards, and one action bar. Largely
+      mechanical after Phase 1. Start with <b>Compression</b> — 448 lines, a clear three-stage
+      workflow, and it exercises every new component once.</p>
+    </div>
+  </div>
+  <div class="phase">
+    <div class="phase-n">PHASE 4</div>
+    <div class="phase-b">
+      <h4>Player, Utilities, dialogs</h4>
+      <p>The three that need judgement rather than mechanics.</p>
+      <ul>
+        <li><b>Player</b> keeps its full-bleed layout — that exception is legitimate — but every colour
+        moves to tokens. Largest single job in the app at 1,980 lines.</li>
+        <li><b>Utilities</b> keeps its tiles; they get promoted into the shared widget library so other
+        pages can use them.</li>
+        <li><b>Dialogs</b> adopt <code>workspaceCard</code> and the button vocabulary. Scan Engine and
+        Bucketing POC already show the target shape.</li>
+      </ul>
+    </div>
+  </div>
+  <div class="phase">
+    <div class="phase-n">PHASE 5</div>
+    <div class="phase-b">
+      <h4>Re-run this audit</h4>
+      <p>The capture harness used here is reproducible — it drives the real app under
+      <code>xvfb-run</code>, walks every workspace and sub-tab, and writes 51 PNGs. Wiring it into CI
+      turns this document into a regression check rather than a one-off.</p>
+    </div>
+  </div>
+</section>
+
+<footer>
+  AlphaDEX visual consistency audit · captured 2026-09-12 · PySide6 6.11.2 under Xvfb at 1440×900<br>
+  51 captures · 14 workspaces · 9 sub-tabs · 11 dialogs · 2 themes (midnight, pearl)<br>
+  Screenshots in <code>docs/design_audit/shots/</code> · source read at commit 316a13a
+</footer>
+
+</main>
+</div>

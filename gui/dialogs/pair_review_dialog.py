@@ -352,10 +352,10 @@ class PairReviewDialog(QtWidgets.QDialog):
         root.addLayout(action_row)
 
         # Keyboard shortcuts
-        QtWidgets.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key.Key_Return),    self, self._handle_yes)
-        QtWidgets.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key.Key_Backspace), self, self._handle_no)
-        QtWidgets.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key.Key_Left),      self, self._go_previous)
-        QtWidgets.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key.Key_Right),     self, self._go_next)
+        QtGui.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key.Key_Return),    self, self._handle_yes)
+        QtGui.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key.Key_Backspace), self, self._handle_no)
+        QtGui.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key.Key_Left),      self, self._go_previous)
+        QtGui.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key.Key_Right),     self, self._go_next)
 
         self._reload_pairs()
 
