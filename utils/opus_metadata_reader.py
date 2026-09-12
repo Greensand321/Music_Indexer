@@ -42,6 +42,12 @@ TAG_KEYS = (
     "discnumber",
     "genre",
     "compilation",
+    # Source-provenance tags — see the matching block in audio_metadata_reader.
+    # Opus is yt-dlp's default YouTube audio container, so this reader is the one
+    # that matters most for recovering which upload a file came from.
+    "comment",
+    "purl",
+    "website",
 )
 
 SIDECAR_ARTWORK_SUFFIXES = (".artwork", ".cover", ".jpg")
@@ -158,6 +164,11 @@ def read_opus_metadata(
     tags["date"] = _first_value(_get_tag(raw_tags, "date") or _get_tag(raw_tags, "year"))
     tags["genre"] = _first_value(_get_tag(raw_tags, "genre"))
     tags["compilation"] = _first_value(_get_tag(raw_tags, "compilation"))
+    tags["comment"] = _first_value(
+        _get_tag(raw_tags, "comment") or _get_tag(raw_tags, "description")
+    )
+    tags["purl"] = _first_value(_get_tag(raw_tags, "purl"))
+    tags["website"] = _first_value(_get_tag(raw_tags, "website"))
 
     track_raw = _first_value(_get_tag(raw_tags, "tracknumber") or _get_tag(raw_tags, "track"))
     disc_raw = _first_value(_get_tag(raw_tags, "discnumber") or _get_tag(raw_tags, "disc"))

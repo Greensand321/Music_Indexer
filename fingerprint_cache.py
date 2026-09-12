@@ -1,10 +1,11 @@
 import json
 import os
 import queue
+import re
 import sqlite3
 import threading
 import time
-from typing import Callable, Dict, Optional
+from typing import Callable, Dict, Mapping, Optional
 from utils.path_helpers import ensure_long_path
 
 verbose: bool = True
@@ -24,6 +25,34 @@ def _dlog(label: str, msg: str, cb: Optional[Callable[[str], None]] = None) -> N
 _writer_lock = threading.Lock()
 _writer: "FingerprintWriter | None" = None
 _writer_db_path: str | None = None
+
+
+def normalized_key(text: object) -> str | None:
+    """Normalize a tag value for the cache's ``normalized_*`` columns.
+
+    Identical to the algorithm the legacy Tkinter writer and
+    ``near_duplicate_detector._normalized`` already use — lowercase, then keep
+    only alphanumeric runs joined by single spaces. It is public so every writer
+    produces the same key; a second spelling would silently split the index.
+    """
+    if not isinstance(text, str):
+        return None
+    key = " ".join(re.findall(r"[a-z0-9]+", text.lower()))
+    return key or None
+
+
+def _derive_normalized(
+    tags: Mapping[str, object] | None,
+) -> tuple[str | None, str | None, str | None]:
+    """Derive (artist, title, album) normalized keys from a tag dict."""
+    if not tags:
+        return None, None, None
+    artist = tags.get("artist") or tags.get("albumartist")
+    return (
+        normalized_key(artist),
+        normalized_key(tags.get("title")),
+        normalized_key(tags.get("album")),
+    )
 
 
 def _initialize_db(conn: sqlite3.Connection) -> None:
@@ -666,6 +695,14 @@ def store_fingerprint(
 
     path = ensure_long_path(path)
     os.makedirs(os.path.dirname(db_path), exist_ok=True)
+
+    # Derive the normalized columns from `tags` when the caller did not supply
+    # them. Callers that pass them explicitly (the legacy Tkinter writer) still
+    # win. Without this the Qt Duplicates workspace — which passes tags but not
+    # normalized values — leaves these columns NULL, so anything looking a track
+    # up by normalized artist/title finds nothing.
+    if normalized_artist is None and normalized_title is None and normalized_album is None:
+        normalized_artist, normalized_title, normalized_album = _derive_normalized(tags)
     for attempt in range(retries):
         try:
             try:

@@ -40,6 +40,14 @@ TAG_KEYS = (
     "discnumber",
     "genre",
     "compilation",
+    # Source-provenance tags. Downloaders write the originating web page here:
+    # yt-dlp --embed-metadata passes `purl` (the video URL) to FFmpeg, which lands
+    # as a PURL Vorbis comment, a TXXX:purl / WOAS ID3 frame, or an iTunes freeform
+    # atom depending on container. Without these keys the app cannot tell which
+    # upload a downloaded file actually came from.
+    "comment",
+    "purl",
+    "website",
 )
 
 SIDECAR_ARTWORK_SUFFIXES = (".artwork", ".cover", ".jpg")
@@ -71,7 +79,10 @@ def _normalize_text_value(value: object, key: str) -> str | None:
 
 def _normalize_text_tags(tags: Dict[str, object]) -> Dict[str, object]:
     normalized = dict(tags)
-    for key in ("artist", "albumartist", "title", "album", "genre", "year", "date"):
+    for key in (
+        "artist", "albumartist", "title", "album", "genre", "year", "date",
+        "comment", "purl", "website",
+    ):
         normalized[key] = _normalize_text_value(tags.get(key), key)
     return normalized
 
@@ -168,6 +179,10 @@ def _tags_from_mp4_mapping(tags: Mapping[str, object]) -> Dict[str, object]:
     values["date"] = atom("\xa9day")
     values["genre"] = atom("\xa9gen")
     values["compilation"] = atom("cpil")
+    values["comment"] = atom("\xa9cmt")
+    # FFmpeg writes non-standard keys as iTunes freeform atoms.
+    values["purl"] = atom("----:com.apple.iTunes:purl")
+    values["website"] = atom("----:com.apple.iTunes:WWWAUDIOFILE")
 
     track_raw, track_num = _format_part_of_set(atom("trkn"))
     disc_raw, disc_num = _format_part_of_set(atom("disk"))
@@ -209,6 +224,15 @@ def _tags_from_mutagen_tags(tags: Mapping[str, object]) -> Dict[str, object]:
     values["date"] = pick(["date", "year", "TDRC"])
     values["genre"] = pick(["genre", "TCON"])
     values["compilation"] = pick(["compilation", "TCMP"])
+    values["comment"] = pick(
+        ["comment", "COMMENT", "description", "DESCRIPTION", "COMM", "COMM::eng", "\xa9cmt"]
+    )
+    values["purl"] = pick(
+        ["purl", "PURL", "TXXX:purl", "TXXX:PURL", "WOAS", "----:com.apple.iTunes:purl"]
+    )
+    values["website"] = pick(
+        ["website", "WEBSITE", "WOAR", "WORS", "TXXX:website", "TXXX:WEBSITE"]
+    )
 
     track_raw = pick(["tracknumber", "track", "TRCK"])
     disc_raw = pick(["discnumber", "disc", "TPOS"])

@@ -70,7 +70,7 @@ below):
 |---|---|---|
 | `gui/main_window.py` | Add `"playlist_gap": PlaylistGapWorkspace` to `_WORKSPACE_MAP`. | Register the workspace. |
 | `utils/audio_metadata_reader.py` | Add `comment`, `purl`, `website` to `TAG_KEYS`. | **Prerequisite.** Without these the app cannot see a YouTube URL that `yt-dlp --embed-metadata` already wrote. Three entries; benefits other features too. |
-| `gui/workspaces/duplicates.py` | Pass `normalized_artist` / `normalized_title` / `normalized_album` to `store_fingerprint()`. | **Prerequisite.** Those columns exist in `fingerprint_cache` but only the legacy Tkinter writer fills them, so they are `NULL` in the Qt app. |
+| ~~`gui/workspaces/duplicates.py`~~ → `fingerprint_cache.py` | **Implemented differently — see note.** `store_fingerprint()` now *derives* `normalized_artist` / `normalized_title` / `normalized_album` from the `tags` argument when the caller did not pass them explicitly. | **Prerequisite.** Those columns exist but only the legacy Tkinter writer filled them, so they were `NULL` in the Qt app. Fixing the writer rather than one call site means every current and future caller that passes tags gets them, instead of each having to remember. Explicit values still win, so the legacy writer is unaffected and no call site changed. |
 | `config.py` | `cfg.setdefault("playlist_gap", {...})` in `load_config()`. | Saved sources and thresholds. |
 | `requirements.txt` | Add `ytmusicapi` and `yt-dlp` as **optional**, commented like `essentia`. | Neither may be a hard dependency — the CSV source must work without them. |
 
@@ -897,6 +897,10 @@ Qt Duplicates workspace passes `normalized_*` to `store_fingerprint()`. Two smal
 unblock rungs 0b and 2, both useful independently.
 *Acceptance:* a file with a YouTube URL in its comment tag reports that URL through
 `read_tags`; a Qt duplicate scan populates the normalized columns.
+**Status: done** — `tests/test_playlist_gap_phase0.py`, 23 tests. Note `.opus` has a
+*separate* reader (`utils/opus_metadata_reader.py`) with its own `TAG_KEYS`, and since opus
+is yt-dlp's default YouTube container it needed the same change; the spec's original manifest
+missed it.
 
 **Phase 1 — walking skeleton.** `playlist_gap_types`, `_sources` (CSV only), `_parse`,
 `_snapshot`, `_match` (rungs 0/0b/2/5b/6), `_ledger` (schema + `sync_wanted` + `record`),
