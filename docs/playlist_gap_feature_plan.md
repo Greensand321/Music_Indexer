@@ -10,6 +10,197 @@ Tkinter app.*
 
 ---
 
+## Revision note — what a real export actually looks like
+
+*Added 2026-09-12, after inspecting an actual TuneMyMusic export of a YouTube Music
+"Liked videos" playlist. This section supersedes the optimistic assumptions in §7 and §9
+below; those sections are patched to match, and the changes are called out inline.*
+
+The export has the right *columns* and almost none of the *data*:
+
+| Column | Reality |
+|---|---|
+| `Track name` | **The entire YouTube video title, as one free-text blob.** |
+| `Artist name` | **Empty.** |
+| `Album` | **Empty.** |
+| `ISRC` | **Empty.** |
+| `Playlist name` | `Liked videos` |
+| `Type` | `Favorite` |
+| *(duration)* | **No column at all.** |
+
+Eight real rows, and what each one costs us:
+
+| Raw `Track name` | What it actually is | Difficulty |
+|---|---|---|
+| *(blank)* | A deleted or private video | Must be **reported**, never silently dropped |
+| `Self Aware x Babydoll` | A **mashup**. No artist anywhere. `x` means "mashed with", not "featuring" | Severe — and see the parser bug below |
+| `FIFTY FIFTY - Cupid (Twin Version)` | `Artist - Title (Version)`; "Twin Version" is a distinct official recording | Easy parse, Class B modifier |
+| `French 79 · New Constellations - Colors Collide` | Two different delimiters (`·` and `-`); unclear which marks the artist boundary | Hard |
+| `(Triple Vibe) HOME - Resonance but it's beats 3,3` | Uploader prefix, then artist, then title, then a **fan-edit descriptor** | Severe |
+| `Wavebeatmaker - Resonance` | A *different* "Resonance" than the row above | Easy parse — but proves title-only matching is dangerous |
+| `The Sways - Someday We Will Dream About Today` | `Artist - Title` | Easy |
+| `Kate Bush - Running Up That Hill (A Deal With God)` | The parenthetical is **part of the canonical title**, not a modifier | Easy parse — and a trap for naive paren-stripping |
+
+### What this invalidates
+
+- **Rung 0 (ISRC) is dead** for this source. The column exists and is empty.
+- **Rung 1 (exact artist + title) is dead.** There is no artist field to compare.
+- **Duration corroboration (§9) is dead** for this source. No duration column — which
+  removes the signal the plan was relying on to shrink the confirm bucket.
+- **Artist-blocked matching is dead**, and that was what made the ladder fast. Without an
+  artist there is nothing to block on, so rung 4 collapses into rung 5's full sweep.
+
+So the plan's floor is much lower than assumed: **one free-text string per row.** That
+demands a pipeline stage the plan didn't have — see "Stage 2.5" below.
+
+### Two verified bugs this surfaced
+
+1. **`extract_primary_and_collabs()` would actively mis-parse mashups.** Its separator
+   list is `[" feat.", " ft.", " & ", " x ", ", ", ";"]` — so `Self Aware x Babydoll`
+   parses as primary artist "Self Aware" featuring "Babydoll". It has a second trap too:
+   a fallback that splits on a lowercase→uppercase boundary, which is aggressive on
+   video titles. Do not reuse it unmodified on display strings.
+2. **The metadata reader cannot see a YouTube identity even when the file carries one.**
+   `TAG_KEYS` in `utils/audio_metadata_reader.py` is
+   `artist, albumartist, title, album, date, year, track, tracknumber, disc, discnumber,
+   genre, compilation` — no `comment`, no `purl`, no `website`. `yt-dlp --embed-metadata`
+   writes the source URL into exactly those tags. Three added keys would unlock the
+   identity strategy below.
+
+### The reframe: this is a backfill problem, not a permanent matching problem
+
+The plan treated fuzzy matching as the feature's permanent core. It shouldn't be. Every
+good source (below) returns a **YouTube video ID** — a stable, exact identity key. So
+split the work in two:
+
+- **Backfill (hard, one-time).** Existing files have to be matched the hard way — string
+  parsing, fuzzy comparison, human confirmation. This is genuinely difficult and will
+  never be perfect.
+- **Going forward (easy, permanent).** Capture the video ID at download time, and every
+  future comparison is an exact key lookup. **The problem stops growing.**
+
+Framed that way, the fuzzy work is a bounded cleanup with an end date, not the feature's
+steady state. The single highest-leverage thing the spec can do is make sure that from
+day one, anything newly downloaded is never ambiguous again.
+
+### Stage 2.5 — parse the display string into candidate artist/title splits
+
+A new pipeline stage between "import" and "match", and now the highest-risk component.
+
+The governing principle: **don't commit to a parse.** Getting `French 79 · New
+Constellations - Colors Collide` right up front is guesswork. Instead, generate *several
+candidate* `(artist, title)` splits per row — split at each delimiter, both orderings,
+with and without a leading uploader prefix, with and without trailing descriptors — and
+**probe the library with all of them.** The library is the oracle: if exactly one
+candidate hits, that's both the match and the confirmation that the parse was right. If
+several hit, it's a confirm row. If none hit, it's missing.
+
+This inverts the usual order (parse, then look up) into (enumerate, then let lookups
+choose) and is far more robust on strings this messy. It also composes with the ledger —
+a confirmed parse is remembered, so the same blob never gets re-parsed.
+
+Practical notes for the spec:
+
+- Delimiters seen in real data: ` - `, ` – `, ` — `, ` · `, ` | `, ` _ `, `: `. Treat
+  `x` as a delimiter **only** as a mashup marker, never as an artist separator.
+- Uploader/label prefixes in leading parens or brackets — `(Triple Vibe)`, `[NCS
+  Release]`, `[Free Download]` — should be lifted off as their own token, not folded into
+  the artist.
+- **Parenthetical handling is position- and content-dependent.** `(A Deal With God)` is
+  canonical title; `(Twin Version)` is a Class B modifier; `(Triple Vibe)` is an uploader
+  tag. "Strip all parens" is wrong three different ways. Classify by content against the
+  lexicon, not by bracket type.
+- **Fan-edit descriptors are a new Class B family, and they are common in this library:**
+  `but it's …`, `sped up`, `slowed + reverb`, `nightcore`, `bass boosted`, `8D`, `loop`,
+  `mashup`, `x` (as mashup), `AMV`, `edit`. This moves Class B work from "2% of a rock
+  library" to first-priority.
+
+### The filename inversion
+
+For a YouTube-sourced library, **match against library filenames first and tags second** —
+the reverse of what §14's Option G proposed.
+
+Reasoning: files downloaded from YouTube typically keep the video title as the filename
+(yt-dlp's default template is `%(title)s [%(id)s].%(ext)s`), while their *tags* are
+usually empty or junk — which is exactly why such files end up in `Manual Review/`. So
+comparing the CSV's `Track name` to the library **filename** is close to exact string
+matching, not fuzzy semantics, and it sidesteps the parsing problem entirely for any file
+that still carries its original name.
+
+Better still: if the filename retained yt-dlp's `[videoId]` suffix, or the file carries
+the source URL in a `comment`/`purl` tag, that is **rung 0 restored** — exact identity,
+no fuzz at all.
+
+> **Do this before writing the spec:** look at the actual files already in the library.
+> Are they named like video titles? Do any carry a `[dQw4w9WgXcQ]`-style suffix, or a
+> YouTube URL in a comment tag? If yes, most of this feature's difficulty evaporates and
+> the spec should be built around exact identity matching with fuzzy work as the
+> exception. If no, the fuzzy path is the main path. **This one check changes the
+> architecture**, and it costs five minutes.
+
+### Better sources — ranked
+
+The user's instinct is correct and important: **transferring the playlist to another
+service to get a cleaner CSV is the worst option, not the best one.** Services like
+TuneMyMusic produce clean artist/album fields by *matching your videos against a
+catalogue*, and anything that doesn't match — mashups, fan edits, unofficial uploads,
+obscure tracks, which is a large share of this library — is silently dropped. A dropped
+row never reaches the wanted list, is never reported missing, and is never downloaded.
+That is precisely the **silent-loss error class §3 rules out**, except worse: it happens
+before the app ever sees the data, so no amount of careful matching downstream can
+recover it.
+
+The better sources are not websites. They read YouTube directly:
+
+1. **`ytmusicapi`** *(recommended ceiling).* A Python library, so it fits the app
+   natively. `get_playlist()` returns per-track `videoId`, `title`, `artists[]` (names
+   **and** channel IDs), `album{name, id}`, `duration`, `isExplicit`, and
+   `isAvailable` — which is exactly the structured data the CSV is missing, straight from
+   YouTube Music with no transfer and no drops. `isAvailable` even handles the blank
+   deleted-video row properly. Cost: one-time browser-header authentication.
+2. **`yt-dlp --dump-json`** *(recommended floor, and probably already installed).* No
+   authentication at all. `--flat-playlist` is fast but sparse (id, title, uploader,
+   often duration); full extraction is slower but can surface real `track` / `artist` /
+   `album` fields for videos that carry music metadata. Since yt-dlp is likely already in
+   the download toolchain, this is the cheapest real upgrade — and it's the same tool that
+   can be configured to preserve the video ID on download, which is the permanent fix.
+3. **Google Takeout** *(no-code option, clunky).* `music-library-songs.csv` carries Video
+   ID, Song Title, Album Title, and Artist Name; the per-playlist CSVs are essentially
+   video IDs. Useful as a one-time backfill of identities, awkward as a routine step.
+4. **TuneMyMusic CSV** *(what exists today).* Keep it supported — it is the universal
+   on-ramp and the only option that needs no setup. Just stop treating it as the accuracy
+   baseline; it is the accuracy **floor**.
+5. **Transfer to Spotify, then export.** **Do not.** See above.
+
+### The architectural consequence
+
+**The pluggable "wanted-list source" moves from §14 Option B's Phase 5 wishlist into
+Phase 1 core.** It is no longer an extensibility nicety — it is the thing that decides
+the feature's accuracy ceiling.
+
+Concretely: a source declares which fields it can provide (`display_string`, `title`,
+`artist`, `album`, `duration`, `isrc`, `video_id`, `availability`), and the match ladder
+**skips the rungs its inputs can't support** rather than assuming a schema. Same triage
+UI, same ledger, same reports, regardless of source.
+
+Design for the floor — one free-text string — so the feature works today with the CSV
+already in hand. Let better sources *upgrade* accuracy rather than being required for it.
+Then adding `ytmusicapi` later is a strict improvement to every existing playlist, not a
+rewrite.
+
+### Honest expectation setting
+
+A meaningful share of this particular library — the mashups, the fan edits, the
+`but it's beats 3,3` remixes — will **never** match confidently from a title string
+alone, and shouldn't. Those rows belong in NEEDS CONFIRMATION, and the confirm bucket on
+a first run will be larger than the "few percent" §1 hoped for. That is the correct
+outcome, not a failure: per §3, an unmatched mashup shown to the user costs a glance,
+while a wrongly-matched one costs the song. The bulk pattern-triage in §11 and the ledger
+in §10 are what keep that bucket from being re-litigated every month — which makes them
+more important now, not less.
+
+---
+
 ## 1. The problem
 
 The library is thousands of tracks deep, and it grows by **re-downloading playlists**.
@@ -202,14 +393,22 @@ Six stages. Each is a place the user can stop, look, and go back.
 Rather than one similarity score, a cascade. Each rung is cheaper and more certain than
 the one below it, and a row leaves the ladder as soon as a rung resolves it.
 
+**Which rungs are even available depends on the source** (see the revision note). A
+source declares its fields; the ladder skips the rungs its inputs can't support. Against
+today's TuneMyMusic CSV, rungs 0, 1 and 4 are unavailable and everything funnels into
+3/5/6 via the Stage 2.5 candidate splits — which is exactly why the better sources are
+worth the setup.
+
 | Rung | Comparison | Typical verdict |
 |---|---|---|
-| 0 | **Identity signal** — ISRC, or a stored source track ID, matches | MATCHED (definitive) |
+| 0 | **Identity signal** — a YouTube video ID, an ISRC, or a stored source track ID, matches | MATCHED (definitive) |
+| 0b | **Filename identity** — library filename carries the source `[videoId]`, or a `comment`/`purl` tag carries the source URL | MATCHED (definitive) |
 | 1 | Exact normalized `artist` + `title` | MATCHED |
 | 2 | Exact **core title** + **primary artist**, modifier sets agree | MATCHED |
 | 3 | Core title + primary artist agree, **modifier sets differ** | → modifier adjudication (§8) |
 | 4 | Fuzzy core title *within the same primary artist* | MATCHED / CONFIRM by score + corroboration |
 | 5 | Fuzzy core title **across all artists** (catches artist-credit differences, remixer-credited-as-artist, "The" prefixes) | CONFIRM at best |
+| 5b | Fuzzy **whole display string** against library **filenames** — the primary path for a YouTube-sourced library, since the filename usually *is* the video title | MATCHED / CONFIRM |
 | 6 | Nothing plausible found | MISSING |
 
 Two things matter about the shape:
@@ -219,12 +418,19 @@ Two things matter about the shape:
   restricting fuzzy work to the handful of files by the same artist collapses it. The
   cross-artist sweep (rung 5) only runs for rows that survived everything else — a
   small set.
-- **Rung 0 deserves a look before the spec.** If the TuneMyMusic export carries
-  **ISRC**, that's a definitive recording identifier, and any library file whose tags
-  carry an ISRC can be matched with certainty — no fuzz, no modifiers, no ambiguity.
-  Most library files won't have it, so this can't be the primary path, but it's free
-  accuracy where it exists, and it neatly settles the hardest remix cases. **Action:
-  check an actual export for an ISRC column.**
+- **Rung 0 is where the feature is won or lost.** ✅ *Checked — the TuneMyMusic export's
+  ISRC column is present and empty.* But every better source returns a **YouTube video
+  ID**, which is a stronger identity key than ISRC for this library: it identifies the
+  exact upload, mashups and fan edits included, which an ISRC cannot. So rung 0 isn't
+  dead — the identity just has to come from YouTube rather than from the music industry.
+  Getting video IDs onto both sides is the highest-leverage work in the feature; see the
+  revision note's backfill / going-forward split.
+
+- **Blocking needs a fallback when there is no artist.** With a source that provides no
+  artist field, rung 4 has nothing to block on and the search space stops collapsing.
+  Cheap substitutes worth specifying: block on rare *title tokens* (an inverted token
+  index, which `playlist_generator` already builds), or on the uploader/channel name
+  where the source provides one.
 
 ## 8. The heart of it: what modifiers mean
 
@@ -287,8 +493,13 @@ Three design consequences:
 Title and artist alone will leave an uncomfortably large ambiguous bucket. Other fields
 can resolve many of those rows *without* asking the user.
 
-- **Duration is the strongest and cheapest.** The library side already has it (the
-  fingerprint cache stores `duration`), and TuneMyMusic exports generally carry it.
+- **Duration is the strongest and cheapest — where it exists.** The library side always
+  has it (the fingerprint cache stores `duration`). ⚠️ The wanted side is the problem:
+  the TuneMyMusic export inspected for the revision note has **no duration column at
+  all**, so this signal is simply absent for today's source. Both recommended upgrades
+  (`ytmusicapi`, `yt-dlp`) restore it — which is most of the argument for adopting one.
+  Until then the confirm bucket runs larger, and §11's bulk triage carries the load
+  instead.
   A remix or extended mix is typically 30–120 seconds off the original; the same
   recording tagged two different ways is within a second or two. So:
   matching core titles **+ duration within a couple of seconds** → confidently MATCHED
@@ -436,10 +647,22 @@ input to manual downloading.
 
 Presented with a recommendation each, since several have real merit.
 
-**Option A — CSV import (the proposed core).** Universal: TuneMyMusic bridges Spotify,
-Apple Music, YouTube, Deezer, Tidal. No authentication, no API keys, no rate limits,
-no partnership access. Works offline. Matches the habit the user already has.
-**Recommended as the core, and as the only Phase 1 source.**
+**Option A — CSV import (still the core, but now understood as the floor).** Universal:
+TuneMyMusic bridges Spotify, Apple Music, YouTube, Deezer, Tidal. No authentication, no
+API keys, no rate limits, no partnership access. Works offline. Matches the habit the user
+already has. ⚠️ **Revised:** for YouTube Music it delivers only a free-text video title —
+no artist, no album, no duration, no ISRC (see the revision note). It stays the required
+Phase 1 source because it needs no setup, but it is the **accuracy floor**, not the
+baseline, and the engine must not be built around its schema.
+
+**Option A′ — read YouTube directly (`ytmusicapi` / `yt-dlp`). NEW, and now the
+recommended upgrade path.** `ytmusicapi.get_playlist()` returns `videoId`, `title`,
+`artists[]`, `album`, `duration` and `isAvailable` per track — the structured data the CSV
+lacks, with no transfer step and therefore no dropped rows. `yt-dlp --dump-json` needs no
+authentication at all and yields id, title, uploader and duration. Either restores rungs 0
+and 4 and the duration signal. **Recommendation: not required for Phase 1, but the
+importer must be pluggable from Phase 1 so this drops in as a strict improvement to every
+already-imported playlist.**
 
 **Option B — Connect directly to the playlist service (Spotify API).** `spotipy` is
 already in `requirements.txt`. Upside is real: one-click refresh instead of a manual
@@ -461,8 +684,11 @@ Against it: slow and rate-limited across thousands of tracks; needs network; the
 library side realistically needs AcoustID fingerprinting to resolve reliably; and in
 this codebase MusicBrainz isn't even an independently-discoverable lookup source today
 (it only appears nested inside an AcoustID match — a known, recorded gap).
-**Recommendation: not core. Worth keeping as an opt-in "deep resolve" escalation for
-individual stubborn CONFIRM rows — a right-click, not a pipeline stage.**
+**Recommendation: not core, and *weaker than first assessed*.** The revision note's
+sample shows a library heavy on mashups, fan edits and unofficial uploads — material that
+largely **isn't in MusicBrainz at all**, so canonicalisation would fail on exactly the
+rows that are hardest. Keep it only as an opt-in "deep resolve" right-click for stubborn
+mainstream-catalogue CONFIRM rows, never as a pipeline stage.
 
 **Option D — Close the loop with the existing audio tooling.** After downloading the
 missing tracks, the files *do* exist — so the existing Duplicate Finder and Library
@@ -493,10 +719,14 @@ Decide with a measurement, not up front.
 **Option G — Match on filenames instead of tags.** The library's filenames are
 normalised and structured by the Indexer, so they're unusually reliable here, and
 `playlist_generator` already proves the approach works.
-**Recommendation: use as a documented fallback, not the primary.** Tags are richer
-(they carry duration, album, year) — but filenames are the *only* option for
-`Manual Review/` files with no usable tags, which is precisely the set most likely to
-generate false MISSING. So the fallback matters more than it sounds.
+**Recommendation — REVISED to the primary path for a YouTube-sourced library.** Tags
+are richer in principle (duration, album, year), but files pulled from YouTube usually
+keep the video title as their filename while carrying empty or junk tags — which is why
+they land in `Manual Review/` in the first place. Comparing the wanted list's raw
+`Track name` against library **filenames** is therefore close to exact string matching
+rather than fuzzy semantics, and it bypasses Stage 2.5's parsing problem entirely for any
+file that kept its original name. Match filenames first, tags second, and treat a
+retained `[videoId]` filename suffix as a rung-0 identity.
 
 **Option H — Also flag "owned but not on any list."** The inverse report: library
 tracks that appear in no imported playlist. Cheap to produce once both sides are
@@ -550,11 +780,24 @@ one deliberately rather than discovering them in the field.
 
 Each phase ends with something usable, and Phase 1 alone already beats the status quo.
 
-**Phase 1 — the walking skeleton.** CSV import with column mapping; library snapshot
-with the corrected inclusion policy; rungs 0–2 (identity, exact, core-title-exact);
-two buckets (MATCHED / MISSING) plus an "unsure" pile; plain-text + CSV export.
-**Establish the ledger's data model here, even if nothing reads it yet.**
+**Phase 0 — the five-minute check that decides the architecture.** Look at the files
+already in the library: are they named like video titles, does any keep a `[videoId]`
+suffix, does any carry a YouTube URL in a `comment`/`purl` tag? Add `comment`, `purl` and
+`website` to `TAG_KEYS` so the answer is even visible. If identities are recoverable, most
+of the rest is exact matching; if not, the fuzzy path is the main path.
+→ *Cheapest, highest-leverage step in the plan.*
+
+**Phase 1 — the walking skeleton.** Pluggable source interface (field declaration, not a
+fixed schema) with the CSV as its first implementation; column mapping; library snapshot
+with the corrected inclusion policy **and filename indexing**; Stage 2.5 candidate-split
+parsing; rungs 0/0b, 2, 5b; two buckets plus an "unsure" pile; plain-text + CSV export.
+**Establish the ledger's data model here, keyed on a stable identity, even if nothing
+reads it yet.**
 → *Already answers "what's new in this playlist?" for most rows.*
+
+**Phase 1.5 — stop the problem growing.** Capture and persist a source identity (video
+ID) for every newly acquired track, so future comparisons are exact lookups rather than
+fuzzy guesses. Small, and it bounds all the fuzzy work above to a one-time backfill.
 
 **Phase 2 — the modifier lexicon and the third bucket.** Class A/B/C lexicon as data;
 directional adjudication; duration corroboration; the real three-bucket triage screen
@@ -575,9 +818,19 @@ scorer swap if measurement calls for it (Option F).
 
 ## 17. Open questions to settle before the spec
 
-1. **Look at a real TuneMyMusic export.** Which columns actually come through — and
-   specifically, is there an **ISRC** and a **duration**? These two answers change the
-   accuracy ceiling more than any design choice in this document.
+1. ✅ **ANSWERED — and badly.** The TuneMyMusic export of a YouTube Music playlist has an
+   ISRC column that is empty, no duration column at all, and empty artist and album; the
+   entire payload is a free-text video title. See the revision note at the top, which
+   supersedes several assumptions below.
+
+2. **Look at the library files on disk** — the new highest-value question. Are they named
+   like video titles? Does any carry a `[videoId]` filename suffix, or a YouTube URL in a
+   `comment`/`purl` tag? This decides whether the feature is built around exact identity
+   matching or around fuzzy string work.
+
+3. **Is `yt-dlp` already in the download toolchain**, and can its output template and
+   `--embed-metadata` be turned on going forward? If yes, the "stop the problem growing"
+   half of the reframe is nearly free.
 2. **Feature name**, since it lands in the nav rail and in config keys.
 3. **The normalized-columns prerequisite (§5.1):** fix the Qt cache writer so the
    existing columns get populated, or give this feature its own index? Fixing the
