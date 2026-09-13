@@ -208,7 +208,7 @@ footer{margin-top:56px;padding-top:22px;border-top:1px solid var(--border);
   <h5>Report</h5>
   <a href="#verdict">The verdict</a>
   <a href="#matrix">Adoption matrix</a>
-  <a href="#defects" class="bad">Defects <span class="g">8</span></a>
+  <a href="#defects" class="ok">Defects <span class="g">8 fixed</span></a>
   <a href="#crosscut" class="warn">Inconsistency catalog <span class="g">6</span></a>
   <h5>Organize</h5>
   <a href="#indexer" class="ok">Indexer <span class="g">reference</span></a>
@@ -223,7 +223,7 @@ footer{margin-top:56px;padding-top:22px;border-top:1px solid var(--border);
   <a href="#clustered" class="warn">Clustered <span class="g">drift</span></a>
   <a href="#graph" class="warn">Music Graph <span class="g">drift</span></a>
   <h5>Player</h5>
-  <a href="#player" class="bad">Player <span class="g">off-system</span></a>
+  <a href="#player" class="warn">Player <span class="g">themed, layout next</span></a>
   <a href="#compression" class="warn">Compression <span class="g">drift</span></a>
   <h5>Tools</h5>
   <a href="#tools" class="warn">Utilities <span class="g">own system</span></a>
@@ -233,7 +233,8 @@ footer{margin-top:56px;padding-top:22px;border-top:1px solid var(--border);
   <a href="#dialogs" class="bad">11 dialogs</a>
   <h5>Direction</h5>
   <a href="#direction">Recommendation</a>
-  <a href="#plan">Migration plan</a>
+  <a href="#order">Redesign order</a>
+  <a href="#plan">Sequencing</a>
 </nav>
 
 <main>
@@ -254,7 +255,7 @@ footer{margin-top:56px;padding-top:22px;border-top:1px solid var(--border);
     <div class="stat warn"><b>54</b><span>hardcoded colors outside the token file</span></div>
     <div class="stat warn"><b>68</b><span>hardcoded <code>font-size</code> rules</span></div>
     <div class="stat warn"><b>10</b><span>distinct font sizes in use</span></div>
-    <div class="stat bad"><b>8</b><span>defects that are bugs, not taste</span></div>
+    <div class="stat ok"><b>8/8</b><span>defects found &amp; fixed</span></div>
   </div>
 </header>
 
@@ -330,14 +331,15 @@ footer{margin-top:56px;padding-top:22px;border-top:1px solid var(--border);
 
 <section id="defects">
   <h2>Defects, not taste</h2>
-  <p class="sub">Eight of these are wrong by any style guide. They surfaced while capturing the
-  screenshots — three of them prevented capture entirely until fixed. Each is small; each has a
-  named fix and a line number.</p>
+  <p class="sub">Eight of these were wrong by any style guide. They surfaced while capturing the
+  screenshots — three prevented capture entirely until fixed. <b>All eight are now fixed</b> on
+  <code>claude/lucid-hamilton-o5tywr</code>; each entry records the cause and the change.
+  The screenshots throughout this report remain the <em>before</em> state, as evidence.</p>
 
   <div class="defects">
 
   <details class="defect" open>
-    <summary><span class="dn">D1</span><span class="dt">Every tab label and every group-box title fails to paint</span><span class="pill bad">crash</span></summary>
+    <summary><span class="dn">D1</span><span class="dt">Every tab label and every group-box title fails to paint</span><span class="pill ok">fixed · was crash</span></summary>
     <div class="body">
       <p class="where">gui/themes/style.py:537 · gui/themes/style.py:554</p>
       <p>The custom style engine asks for a font weight that does not exist in Qt 6. Qt's enum is
@@ -357,7 +359,7 @@ if active:
   </details>
 
   <details class="defect">
-    <summary><span class="dn">D2</span><span class="dt">The Pair Review dialog cannot open</span><span class="pill bad">crash</span></summary>
+    <summary><span class="dn">D2</span><span class="dt">The Pair Review dialog cannot open</span><span class="pill ok">fixed · was crash</span></summary>
     <div class="body">
       <p class="where">gui/dialogs/pair_review_dialog.py:355–358</p>
       <p>Four shortcut constructions use the Qt 5 namespace. <code>QShortcut</code> moved from
@@ -372,7 +374,7 @@ if active:
   </details>
 
   <details class="defect">
-    <summary><span class="dn">D3</span><span class="dt">The Cluster Quality Report renders white-on-white</span><span class="pill bad">unusable</span></summary>
+    <summary><span class="dn">D3</span><span class="dt">The Cluster Quality Report renders white-on-white</span><span class="pill ok">fixed · was unusable</span></summary>
     <div class="body">
       <p class="where">gui/dialogs/cluster_quality_report_dialog.py:171, 192, 208</p>
       <p>This dialog styles itself for a light theme that the app does not ship as default. It paints
@@ -391,7 +393,7 @@ suggestion_widget.setStyleSheet(<span class="r">"color: #333; font-size: 11px;"<
   </details>
 
   <details class="defect">
-    <summary><span class="dn">D4</span><span class="dt">The sidebar wordmark disappears in all six light themes</span><span class="pill bad">contrast</span></summary>
+    <summary><span class="dn">D4</span><span class="dt">The sidebar wordmark disappears in all six light themes</span><span class="pill ok">fixed · was contrast</span></summary>
     <div class="body">
       <p class="where">gui/widgets/sidebar.py:139–142</p>
       <p>“AlphaDEX” at the top of the nav rail is pinned to <code>#f8fafc</code> — near-white. Pearl's
@@ -406,7 +408,7 @@ suggestion_widget.setStyleSheet(<span class="r">"color: #333; font-size: 11px;"<
   </details>
 
   <details class="defect">
-    <summary><span class="dn">D5</span><span class="dt">Light-theme names are unreadable in the theme picker</span><span class="pill bad">contrast</span></summary>
+    <summary><span class="dn">D5</span><span class="dt">Light-theme names are unreadable in the theme picker</span><span class="pill ok">fixed · was contrast</span></summary>
     <div class="body">
       <p class="where">gui/themes/picker.py:115</p>
       <p>Each swatch previews its own theme, then writes that theme's name using the
@@ -421,7 +423,7 @@ p.drawText(label_rect, Qt.AlignmentFlag.AlignCenter, <span class="k">t</span>.na
   </details>
 
   <details class="defect">
-    <summary><span class="dn">D6</span><span class="dt">The Player keeps a dark slab in light themes</span><span class="pill bad">theming</span></summary>
+    <summary><span class="dn">D6</span><span class="dt">The Player keeps a dark slab in light themes</span><span class="pill ok">fixed · was theming</span></summary>
     <div class="body">
       <p class="where">gui/workspaces/player.py — 16 setStyleSheet calls, 16 hardcoded colors, 0 token reads</p>
       <p>The Player is the largest workspace (1,980 lines) and reads the theme zero times. Its track
@@ -435,7 +437,7 @@ p.drawText(label_rect, Qt.AlignmentFlag.AlignCenter, <span class="k">t</span>.na
   </details>
 
   <details class="defect">
-    <summary><span class="dn">D7</span><span class="dt">Library Sync overflows its viewport horizontally</span><span class="pill warn">layout</span></summary>
+    <summary><span class="dn">D7</span><span class="dt">Library Sync overflows its viewport horizontally</span><span class="pill ok">fixed · was layout</span></summary>
     <div class="body">
       <p class="where">gui/workspaces/library_sync.py</p>
       <p>At the app's own default window size (1300×860) and at the 1440×900 used for capture, the
@@ -450,7 +452,7 @@ p.drawText(label_rect, Qt.AlignmentFlag.AlignCenter, <span class="k">t</span>.na
   </details>
 
   <details class="defect">
-    <summary><span class="dn">D8</span><span class="dt">The landing wordmark is clipped on both sides</span><span class="pill warn">layout</span></summary>
+    <summary><span class="dn">D8</span><span class="dt">The landing wordmark is clipped on both sides</span><span class="pill ok">fixed · was layout</span></summary>
     <div class="body">
       <p class="where">gui/widgets/landing.py</p>
       <p>The first thing the app shows renders “AlphaDEX” as “lphaDE” — the A and X are cut by the CTA
@@ -461,6 +463,53 @@ p.drawText(label_rect, Qt.AlignmentFlag.AlignCenter, <span class="k">t</span>.na
     </div>
   </details>
 
+  </div>
+
+  <h3 style="font-size:17px;margin:34px 0 0;letter-spacing:-.015em">Before &amp; after</h3>
+  <p class="sub" style="margin-top:6px">The four most visible repairs, captured from the running app.</p>
+
+  <div class="page" style="margin-top:16px">
+    <div class="page-hd"><h3>D3 — Cluster Quality Report</h3><span class="pill ok">fixed</span>
+      <span class="file">two bugs: orphaned layouts + light-only colours</span></div>
+    <div class="pair">
+      <figure><img src="shots/dlg_cluster_quality_report.png" alt="Quality report before, blank">
+        <figcaption>before — titles only; all content orphaned</figcaption></figure>
+      <figure><img src="shots/after/d3_quality_fixed.png" alt="Quality report after, fully populated">
+        <figcaption>after — same data, now built and themed</figcaption></figure>
+    </div>
+  </div>
+
+  <div class="page">
+    <div class="page-hd"><h3>D6 — Player in a light theme</h3><span class="pill ok">fixed</span>
+      <span class="file">16 hardcoded colours → tokens</span></div>
+    <div class="pair">
+      <figure><img src="shots/light_player.png" alt="Player before, dark slab in light theme">
+        <figcaption>before — table stays Midnight-dark</figcaption></figure>
+      <figure><img src="shots/after/d6_player_pearl_fixed.png" alt="Player after, fully light">
+        <figcaption>after — themed, incl. art scrim and transport glyphs</figcaption></figure>
+    </div>
+  </div>
+
+  <div class="page">
+    <div class="page-hd"><h3>D5 — Theme picker</h3><span class="pill ok">fixed</span>
+      <span class="file">swatch labels use their own theme's ink</span></div>
+    <div class="pair">
+      <figure><img src="shots/dlg_theme_picker.png" alt="Theme picker before, unreadable light names">
+        <figcaption>before — five light names invisible</figcaption></figure>
+      <figure><img src="shots/after/d5_picker_fixed.png" alt="Theme picker after, all names readable">
+        <figcaption>after — every theme legible</figcaption></figure>
+    </div>
+  </div>
+
+  <div class="page">
+    <div class="page-hd"><h3>D7 / D8 — Clipping</h3><span class="pill ok">fixed</span>
+      <span class="file">overflow 1164 → 685 px · wordmark fitted</span></div>
+    <div class="pair">
+      <figure><img src="shots/after/d7_libsync_fixed.png" alt="Library Sync after, no overflow">
+        <figcaption>Library Sync at 1300 px — Browse buttons intact</figcaption></figure>
+      <figure><img src="shots/after/d8_landing_fixed.png" alt="Landing after, full wordmark">
+        <figcaption>Landing — “AlphaDEX”, not “lphaDE”</figcaption></figure>
+    </div>
   </div>
 </section>
 
@@ -1043,7 +1092,7 @@ self.status_changed.emit("Error",         <span class="r">"#ef4444"</span>)</pre
   none uses <code>_make_card()</code>, none reads a token, and two were broken.</p>
 
   <div class="page">
-    <div class="page-hd"><h3>Cluster Quality Report</h3><span class="pill bad">unusable</span>
+    <div class="page-hd"><h3>Cluster Quality Report</h3><span class="pill ok">fixed · was unusable</span>
       <span class="file">gui/dialogs/cluster_quality_report_dialog.py</span></div>
     <div class="page-body">
       <figure class="shot"><img src="shots/dlg_cluster_quality_report.png" alt="Cluster Quality Report dialog rendering white on white">
@@ -1211,88 +1260,158 @@ self.status_changed.emit("Error",         <span class="r">"#ef4444"</span>)</pre
   </div>
 </section>
 
+<section id="order">
+  <h2>Redesign order</h2>
+  <p class="sub">All thirteen live pages, ranked hardest to easiest. Rank is by <b>edit surface</b> —
+  widget constructions plus widget mutations — not raw file length, because a redesign touches layout
+  code and the handlers that drive it, never the business logic underneath. Player is 2,024 lines but
+  only 16&nbsp;% of them are UI; Clustered is 561 lines with a 76-point surface.</p>
+
+  <div class="twrap">
+  <table>
+    <thead><tr>
+      <th>#</th><th>Page</th><th>Surface</th><th>Total&nbsp;lines</th><th>UI&nbsp;lines</th>
+      <th>Structure</th><th>State today</th><th>What the redesign has to do</th>
+    </tr></thead>
+    <tbody>
+      <tr><td class="num">1</td><td class="name">Player</td><td class="num">245</td><td class="num">2024</td><td class="num">316</td><td class="num">3 lists · splitter · 4 threads</td><td><span class="pill warn">themed, off-pattern</span></td><td>Keep full-bleed; rebuild transport, queue and library panes</td></tr>
+      <tr><td class="num">2</td><td class="name">Library Sync</td><td class="num">198</td><td class="num">919</td><td class="num">299</td><td class="num">2 tables · 3 threads</td><td><span class="pill ok">conforms</span></td><td>9 cards is too many; consolidate, title the untitled two</td></tr>
+      <tr><td class="num">3</td><td class="name">Genre Normalizer</td><td class="num">159</td><td class="num">648</td><td class="num">198</td><td class="num">2 tabs · 4 threads</td><td><span class="pill warn">own step idiom</span></td><td>Numbered headings → stepper; keep its card discipline</td></tr>
+      <tr><td class="num">4</td><td class="name">Utilities</td><td class="num">149</td><td class="num">1443</td><td class="num">204</td><td class="num">2 threads</td><td><span class="pill warn">parallel system</span></td><td>Harvest tiles + status pill into the shared library</td></tr>
+      <tr><td class="num">5</td><td class="name">Duplicates</td><td class="num">148</td><td class="num">658</td><td class="num">203</td><td class="num">1 table · 2 threads</td><td><span class="pill ok">conforms</span></td><td>Layout only — plus wire the decorative disposition combo</td></tr>
+      <tr><td class="num">6</td><td class="name">Playlists</td><td class="num">115</td><td class="num">394</td><td class="num">189</td><td class="num">4 tabs</td><td><span class="pill warn">drift</span></td><td>Four tabs, one card; 2 decorative controls to wire or cut</td></tr>
+      <tr><td class="num">7</td><td class="name">Indexer</td><td class="num">101</td><td class="num">382</td><td class="num">165</td><td class="num">1 thread</td><td><span class="pill ok">reference</span></td><td>Least work — it <em>is</em> the target. Retire “Phase A/B/C”</td></tr>
+      <tr><td class="num">8</td><td class="name">Compression</td><td class="num">100</td><td class="num">448</td><td class="num">111</td><td class="num">1 thread</td><td><span class="pill warn">drift</span></td><td>Full pattern adoption; no structural complexity</td></tr>
+      <tr><td class="num">9</td><td class="name">Tag Fixer</td><td class="num">93</td><td class="num">416</td><td class="num">116</td><td class="num">1 table · 2 threads</td><td><span class="pill warn">drift</span></td><td>Adopt pattern; green commit → red</td></tr>
+      <tr><td class="num">10</td><td class="name">Clustered</td><td class="num">76</td><td class="num">561</td><td class="num">89</td><td class="num">3 tabs</td><td><span class="pill warn">drift</span></td><td>Strip emoji tabs; add card titles</td></tr>
+      <tr><td class="num">11</td><td class="name">Music Graph</td><td class="num">57</td><td class="num">367</td><td class="num">113</td><td class="num">1 splitter</td><td><span class="pill warn">clean drift</span></td><td>Needs a segmented control for Pan/Rect/Lasso</td></tr>
+      <tr><td class="num">12</td><td class="name">Similarity</td><td class="num">49</td><td class="num">243</td><td class="num">91</td><td class="num">1 thread</td><td><span class="pill warn">drift</span></td><td>Straight pattern adoption</td></tr>
+      <tr><td class="num">13</td><td class="name">Help</td><td class="num">31</td><td class="num">96</td><td class="num">71</td><td class="num">1 list</td><td><span class="pill warn">drift</span></td><td>Trivial; full-width buttons → list rows</td></tr>
+      <tr><td class="num">—</td><td class="name">clustered.py</td><td class="num">82</td><td class="num">263</td><td class="num">114</td><td class="num">—</td><td><span class="pill n">dead</span></td><td><b>Delete, don't redesign</b> — never routed to</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p class="tnote">Surface = <code>QtWidgets.Q*</code> constructions + calls that mutate a widget
+  (<code>setText</code>, <code>setEnabled</code>, <code>addWidget</code>, <code>addRow</code>, …).
+  Structure counts the things that make a rebuild harder than its size suggests: tabs, tables,
+  splitters and worker threads that write back into the UI.</p>
+</section>
+
+<div class="hr"></div>
+
 <section id="plan">
-  <h2>Migration plan</h2>
-  <p class="sub">Ordered so that each phase is independently shippable and the early phases make the
-  later ones mechanical. Phases 0–2 are the ones worth doing regardless of which direction you pick.</p>
+  <h2>Sequencing</h2>
+  <p class="sub">Where to actually start, and why both ends of that list are traps.</p>
+
+  <div class="verdict">
+    <p><b>Do the shared vocabulary first — it is not a page.</b> Whatever page you redesign first will
+    invent the components every later page inherits. If that happens ad hoc, page one's accidents
+    become law and you pay for them twelve more times. This is roughly a day of work and it is the
+    only item with a hard ordering constraint:</p>
+    <ul style="margin:6px 0 0;padding-left:18px;color:var(--tx2)">
+      <li><code>self.tokens</code> + a theme hook on <code>WorkspaceBase</code> — today a workspace
+      cannot reach the palette without importing the manager by hand.</li>
+      <li><code>secondaryBtn</code> / <code>ghostBtn</code> in the painter, and a segmented control.
+      Their absence is why Graph, Help and Player each invented their own.</li>
+      <li>A <code>StatusPill</code> lifted from Utilities, which already has a good one.</li>
+      <li>A spacing scale beside <code>R</code> in <code>effects.py</code>.</li>
+      <li><code>status_changed</code> carrying a semantic level, not a hex.</li>
+    </ul>
+  </div>
+
+  <div class="rec">
+    <div class="reccard">
+      <h3>Why not start at the hard end</h3>
+      <p><b>Player is the worst possible page one.</b> It is the single legitimate exception to the
+      card layout — a full-bleed media view, which is the right shape for a player. Design your
+      system inside the page that least represents it and you will generalise from an exception.
+      It is also the page where a rebuild risks the most behaviour: four worker threads, VLC state,
+      a queue model, and keyboard-mode arrow interception wired up through the main window.</p>
+    </div>
+    <div class="reccard">
+      <h3>Why not start at the easy end either</h3>
+      <p><b>Help is too small to teach you anything.</b> Three cards and four buttons; you would
+      finish it and still own no reusable vocabulary. Similarity and Graph are the same — small, and
+      the least representative of the long preview-then-execute workflows that make up most of the
+      app. You would arrive at the hard pages with the system still undecided.</p>
+    </div>
+    <div class="reccard">
+      <h3>Start in the middle: <b>Compression</b> (#8)</h3>
+      <p>It is the best first page in the app, for reasons that have nothing to do with its size:</p>
+      <ul>
+        <li>It is a complete <b>configure → estimate → execute</b> workflow, so it exercises the whole
+        target vocabulary once: hero card, stepper, titled cards, form rows, action bar, progress,
+        and success/failure result states.</li>
+        <li><b>Zero structural complexity</b> — no tabs, no tables, no splitter, one worker thread.
+        Nothing to fight while you are still deciding the design language.</li>
+        <li>At a surface of 100 it is a real test but still one sitting, so you can iterate on your
+        feedback rather than banking it.</li>
+        <li>It is currently a bare-title drifter, so the before/after is maximally instructive.</li>
+      </ul>
+      <p>Then go <b>hardest-first from there</b>, exactly as you planned: the vocabulary is settled,
+      and the remaining order is just descending risk.</p>
+    </div>
+  </div>
+
+  <h3 style="font-size:17px;margin:34px 0 0;letter-spacing:-.015em">The three pages worth batching</h3>
+  <p class="sub" style="margin-top:6px">One page at a time is right almost everywhere — it is how you
+  get workflow-specific feedback. These are the exceptions, where splitting costs more than it saves.</p>
 
   <div class="phase">
-    <div class="phase-n">PHASE 0</div>
+    <div class="phase-n">BATCH A</div>
     <div class="phase-b">
-      <h4>Fix the eight defects</h4>
-      <p>Independent of any design decision. D1 and D2 are two-word fixes that currently break tab
-      labels, group-box titles and an entire dialog; D3–D5 are contrast bugs that make three surfaces
-      unreadable; D7 and D8 are layout clipping.</p>
-      <ul><li>D1 and D2 are already applied in this branch — they had to be, to capture the screenshots
-      above. The rest are listed with line numbers in <a href="#defects">Defects</a>.</li></ul>
+      <h4>Indexer + Duplicates + Library Sync — the reference trio</h4>
+      <p>All three already share the hero-card + stepper + action-card pattern. They do not need
+      restyling; they need the stepper lifted into a real shared component and their layouts tuned.
+      Doing that once across all three is strictly cheaper than three passes, and it is what
+      produces the component the other ten pages consume.</p>
     </div>
   </div>
   <div class="phase">
-    <div class="phase-n">PHASE 1</div>
+    <div class="phase-n">BATCH B</div>
     <div class="phase-b">
-      <h4>Close the escape hatches</h4>
-      <p>No visual change; this is the step that makes everything after it cheap.</p>
-      <ul>
-        <li>Change <code>status_changed</code> to carry a semantic level, not a hex. Deletes ~30
-        hardcoded colours across 11 files by itself.</li>
-        <li>Add <code>self.tokens</code> and a theme hook to <code>WorkspaceBase</code>.</li>
-        <li>Add <code>secondaryBtn</code> / <code>ghostBtn</code> to the painter and a
-        <code>StatusPill</code> widget lifted from Utilities.</li>
-        <li>Add a spacing scale to <code>effects.py</code>.</li>
-        <li>Add a CI grep that fails on a new hex literal or <code>font-size:</code> outside
-        <code>gui/themes/</code>. Without this the drift returns.</li>
-      </ul>
+      <h4>Clustered + Music Graph</h4>
+      <p>Graph consumes exactly what Clustered produces, and users move between them in one task.
+      How clusters are named, coloured and legended has to be decided once; deciding it in Clustered
+      and then rediscovering it in Graph is how the two drift apart again.</p>
     </div>
   </div>
   <div class="phase">
-    <div class="phase-n">PHASE 2</div>
+    <div class="phase-n">SOLO</div>
     <div class="phase-b">
-      <h4>Delete what nobody sees</h4>
-      <p>Three files carry styling that no user can reach, and every one of them is a place future
-      drift can hide.</p>
-      <ul>
-        <li><code>gui/qt_launcher.py</code> — 698 lines, 47 stylesheets, 45 colours, reachable only
-        from the legacy Tkinter app.</li>
-        <li><code>gui/workspaces/clustered.py</code> — a complete second Clustered page that is never
-        routed to.</li>
-        <li><code>gui/theme.py</code> — a shim whose <code>build_stylesheet()</code> returns
-        <code>""</code>.</li>
-      </ul>
+      <h4>Everything else — one page at a time</h4>
+      <p>Compression, Tag Fixer, Genre Normalizer, Playlists, Similarity, Help, Utilities and Player
+      are each their own workflow with their own feel. Take them singly so you can react to each.</p>
     </div>
   </div>
+
+  <h3 style="font-size:17px;margin:34px 0 0;letter-spacing:-.015em">Recommended running order</h3>
   <div class="phase">
-    <div class="phase-n">PHASE 3</div>
-    <div class="phase-b">
-      <h4>Migrate the eight bare-title pages</h4>
-      <p>Compression, Similarity, Tag Fixer, Genre Normalizer, Playlists, Clustered, Music Graph, Help.
-      Each gets a hero card, a stepper where it has stages, titled cards, and one action bar. Largely
-      mechanical after Phase 1. Start with <b>Compression</b> — 448 lines, a clear three-stage
-      workflow, and it exercises every new component once.</p>
-    </div>
+    <div class="phase-n">01</div><div class="phase-b"><h4>Shared vocabulary</h4><p>Not a page. One day. Everything below depends on it.</p></div>
   </div>
   <div class="phase">
-    <div class="phase-n">PHASE 4</div>
-    <div class="phase-b">
-      <h4>Player, Utilities, dialogs</h4>
-      <p>The three that need judgement rather than mechanics.</p>
-      <ul>
-        <li><b>Player</b> keeps its full-bleed layout — that exception is legitimate — but every colour
-        moves to tokens. Largest single job in the app at 1,980 lines.</li>
-        <li><b>Utilities</b> keeps its tiles; they get promoted into the shared widget library so other
-        pages can use them.</li>
-        <li><b>Dialogs</b> adopt <code>workspaceCard</code> and the button vocabulary. Scan Engine and
-        Bucketing POC already show the target shape.</li>
-      </ul>
-    </div>
+    <div class="phase-n">02</div><div class="phase-b"><h4>Compression</h4><p>Proves the system end to end on a clean workflow.</p></div>
   </div>
   <div class="phase">
-    <div class="phase-n">PHASE 5</div>
-    <div class="phase-b">
-      <h4>Re-run this audit</h4>
-      <p>The capture harness used here is reproducible — it drives the real app under
-      <code>xvfb-run</code>, walks every workspace and sub-tab, and writes 51 PNGs. Wiring it into CI
-      turns this document into a regression check rather than a one-off.</p>
-    </div>
+    <div class="phase-n">03</div><div class="phase-b"><h4>Player</h4><p>Hardest, and now that the vocabulary exists, the exception can be made deliberately.</p></div>
+  </div>
+  <div class="phase">
+    <div class="phase-n">04</div><div class="phase-b"><h4>Batch A — Indexer, Duplicates, Library Sync</h4><p>Lift the stepper; tune the three reference pages together.</p></div>
+  </div>
+  <div class="phase">
+    <div class="phase-n">05</div><div class="phase-b"><h4>Genre Normalizer</h4><p>Then Utilities — harvest its tiles as you go.</p></div>
+  </div>
+  <div class="phase">
+    <div class="phase-n">06</div><div class="phase-b"><h4>Playlists → Tag Fixer</h4><p>Descending surface; wire or cut the decorative controls.</p></div>
+  </div>
+  <div class="phase">
+    <div class="phase-n">07</div><div class="phase-b"><h4>Batch B — Clustered + Music Graph</h4><p>Decide the cluster visual language once.</p></div>
+  </div>
+  <div class="phase">
+    <div class="phase-n">08</div><div class="phase-b"><h4>Similarity → Help</h4><p>The easy tail. By here it is mechanical.</p></div>
+  </div>
+  <div class="phase">
+    <div class="phase-n">09</div><div class="phase-b"><h4>Dialogs, then delete the dead files</h4><p>Eleven dialogs adopt the vocabulary; then remove <code>clustered.py</code>, <code>qt_launcher.py</code> and <code>theme.py</code>. Re-run the capture harness as a regression check.</p></div>
   </div>
 </section>
 
