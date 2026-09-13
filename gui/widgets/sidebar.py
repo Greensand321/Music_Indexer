@@ -134,13 +134,11 @@ class Sidebar(QtWidgets.QWidget):
         root_layout.setSpacing(0)
 
         # ── Logo area ─────────────────────────────────────────────────────
-        logo_lbl = QtWidgets.QLabel("AlphaDEX")
-        logo_lbl.setFixedHeight(44)
-        logo_lbl.setStyleSheet(
-            "color: #f8fafc; font-size: 22px; font-weight: 700; "
-            "padding: 0 8px; letter-spacing: -0.02em;"
-        )
-        root_layout.addWidget(logo_lbl)
+        # Colour comes from the theme, not a literal: every light theme has a
+        # light sidebar, so a hardcoded near-white wordmark is invisible there.
+        self._logo_lbl = QtWidgets.QLabel("AlphaDEX")
+        self._logo_lbl.setFixedHeight(44)
+        root_layout.addWidget(self._logo_lbl)
 
         # ── Scrollable nav ────────────────────────────────────────────────
         scroll = QtWidgets.QScrollArea()
@@ -178,11 +176,10 @@ class Sidebar(QtWidgets.QWidget):
         root_layout.addWidget(scroll, stretch=1)
 
         # ── Separator ─────────────────────────────────────────────────────
-        sep = QtWidgets.QFrame()
-        sep.setFrameShape(QtWidgets.QFrame.Shape.HLine)
-        sep.setFixedHeight(1)
-        sep.setStyleSheet("background: rgba(255,255,255,0.08); border: none;")
-        root_layout.addWidget(sep)
+        self._sep = QtWidgets.QFrame()
+        self._sep.setFrameShape(QtWidgets.QFrame.Shape.HLine)
+        self._sep.setFixedHeight(1)
+        root_layout.addWidget(self._sep)
 
         # ── Exit button (pinned at bottom) ─────────────────────────────────
         self._exit_btn = AnimatedNavButton("Exit", "exit", "⏻", is_exit=True)
@@ -195,6 +192,28 @@ class Sidebar(QtWidgets.QWidget):
             self.activate(first_key)
 
         QtCore.QTimer.singleShot(0, self._snap_pill)
+
+        # ── Theme ─────────────────────────────────────────────────────────
+        from gui.themes.manager import get_manager
+        self._apply_theme(get_manager().current)
+        get_manager().theme_changed.connect(self._apply_theme)
+
+    # ── Theme ─────────────────────────────────────────────────────────────
+
+    def _apply_theme(self, tokens: object) -> None:
+        """Re-colour the chrome the QSS layer does not reach.
+
+        The wordmark and the footer separator are plain widgets with no
+        objectName rule, so they have to be repainted by hand whenever the
+        palette changes.
+        """
+        t = tokens
+        self._logo_lbl.setStyleSheet(
+            f"color: {t.text_primary}; font-size: 22px; font-weight: 700; "
+            "padding: 0 8px; letter-spacing: -0.02em;"
+        )
+        self._sep.setStyleSheet(f"background: {t.card_border}; border: none;")
+        self.update()
 
     # ── Public API ────────────────────────────────────────────────────────
 

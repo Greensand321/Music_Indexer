@@ -5,6 +5,7 @@ import numpy as np
 from typing import Dict, List, Optional
 
 from gui.compat import QtCore, QtGui, QtWidgets
+from gui.themes.manager import get_manager
 
 
 class ClusterQualityReportDialog(QtWidgets.QDialog):
@@ -40,7 +41,7 @@ class ClusterQualityReportDialog(QtWidgets.QDialog):
 
         # Title
         title = QtWidgets.QLabel("Cluster Quality Report")
-        title.setStyleSheet("font-weight: bold; font-size: 14px;")
+        title.setObjectName("sectionTitle")
         layout.addWidget(title)
 
         # Overall metrics
@@ -54,6 +55,8 @@ class ClusterQualityReportDialog(QtWidgets.QDialog):
 
         # Close button
         close_btn = QtWidgets.QPushButton("Close")
+        close_btn.setObjectName("primaryBtn")
+        close_btn.setMinimumHeight(34)
         close_btn.clicked.connect(self.accept)
         layout.addWidget(close_btn)
 
@@ -61,9 +64,7 @@ class ClusterQualityReportDialog(QtWidgets.QDialog):
 
     def _build_metrics_section(self, parent_layout: QtWidgets.QVBoxLayout) -> None:
         """Build overall metrics section."""
-        card = self._create_card("Overall Metrics")
-        card_layout = QtWidgets.QVBoxLayout(card)
-        card_layout.setSpacing(8)
+        card, card_layout = self._create_card("Overall Metrics")
 
         # Silhouette score
         silhouette = self._metrics.get("silhouette_score", None)
@@ -74,7 +75,7 @@ class ClusterQualityReportDialog(QtWidgets.QDialog):
             sil_value.setStyleSheet(f"color: {self._score_color(silhouette, -1, 1)};")
             sil_layout.addWidget(sil_value)
             sil_label = QtWidgets.QLabel(self._score_label(silhouette, -1, 1))
-            sil_label.setStyleSheet("color: #666;")
+            sil_label.setStyleSheet(f"color: {self._t.text_secondary};")
             sil_layout.addWidget(sil_label)
             sil_layout.addStretch()
             card_layout.addLayout(sil_layout)
@@ -89,7 +90,7 @@ class ClusterQualityReportDialog(QtWidgets.QDialog):
             db_value.setStyleSheet(f"color: {self._score_color(1.0 / (1 + db_index), 0, 1)};")
             db_layout.addWidget(db_value)
             db_label = QtWidgets.QLabel("(lower is better)")
-            db_label.setStyleSheet("color: #666;")
+            db_label.setStyleSheet(f"color: {self._t.text_secondary};")
             db_layout.addWidget(db_label)
             db_layout.addStretch()
             card_layout.addLayout(db_layout)
@@ -105,7 +106,7 @@ class ClusterQualityReportDialog(QtWidgets.QDialog):
             ch_value.setStyleSheet(f"color: {self._score_color(normalized_ch, 0, 1)};")
             ch_layout.addWidget(ch_value)
             ch_label = QtWidgets.QLabel("(higher is better)")
-            ch_label.setStyleSheet("color: #666;")
+            ch_label.setStyleSheet(f"color: {self._t.text_secondary};")
             ch_layout.addWidget(ch_label)
             ch_layout.addStretch()
             card_layout.addLayout(ch_layout)
@@ -114,11 +115,12 @@ class ClusterQualityReportDialog(QtWidgets.QDialog):
 
     def _build_cluster_details_section(self, parent_layout: QtWidgets.QVBoxLayout) -> None:
         """Build per-cluster details section."""
-        card = self._create_card("Per-Cluster Breakdown")
+        card, card_layout = self._create_card("Per-Cluster Breakdown")
 
         scroll = QtWidgets.QScrollArea()
         scroll.setWidgetResizable(True)
-        scroll.setStyleSheet("QScrollArea { border: none; }")
+        scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
 
         scroll_widget = QtWidgets.QWidget()
         scroll_layout = QtWidgets.QVBoxLayout(scroll_widget)
@@ -131,21 +133,27 @@ class ClusterQualityReportDialog(QtWidgets.QDialog):
         scroll_layout.addStretch()
         scroll.setWidget(scroll_widget)
 
-        card_layout = QtWidgets.QVBoxLayout(card)
         card_layout.addWidget(scroll)
 
         parent_layout.addWidget(card, 1)
 
     def _build_cluster_card(self, cluster_id: int, info: Dict) -> QtWidgets.QWidget:
         """Create a card for a single cluster."""
-        card = QtWidgets.QWidget()
-        layout = QtWidgets.QFormLayout(card)
-        layout.setContentsMargins(8, 6, 8, 6)
-        layout.setSpacing(4)
+        card = QtWidgets.QFrame()
+        card.setObjectName("workspaceCard")
+        outer = QtWidgets.QVBoxLayout(card)
+        outer.setContentsMargins(10, 8, 10, 8)
+        outer.setSpacing(4)
 
-        # Title
+        # Title — previously built but never added to a layout, so it never showed.
         title = QtWidgets.QLabel(f"Cluster {cluster_id}")
-        title.setStyleSheet("font-weight: bold;")
+        title.setObjectName("cardTitle")
+        outer.addWidget(title)
+
+        layout = QtWidgets.QFormLayout()
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+        outer.addLayout(layout)
 
         # Stats
         size = info.get("size", 0)
@@ -168,13 +176,9 @@ class ClusterQualityReportDialog(QtWidgets.QDialog):
             sil_label.setStyleSheet(f"color: {self._score_color(silhouette, -1, 1)};")
             layout.addRow("Silhouette:", sil_label)
 
-        card.setStyleSheet("border: 1px solid #ddd; border-radius: 4px; padding: 4px;")
-
-        widget = QtWidgets.QWidget()
-        widget_layout = QtWidgets.QVBoxLayout(widget)
-        widget_layout.setContentsMargins(0, 0, 0, 0)
-        widget_layout.addWidget(card)
-        return widget
+        # No stylesheet here: a `border` set on a container cascades to every
+        # child widget in Qt. The workspaceCard objectName handles the frame.
+        return card
 
     def _build_suggestions_section(self, parent_layout: QtWidgets.QVBoxLayout) -> None:
         """Build suggestions section."""
@@ -183,42 +187,57 @@ class ClusterQualityReportDialog(QtWidgets.QDialog):
         if not suggestions:
             return
 
-        card = self._create_card("Suggestions for Improvement")
-        card_layout = QtWidgets.QVBoxLayout(card)
+        card, card_layout = self._create_card("Suggestions for Improvement")
 
         for suggestion in suggestions:
             suggestion_widget = QtWidgets.QLabel(f"• {suggestion}")
             suggestion_widget.setWordWrap(True)
-            suggestion_widget.setStyleSheet("color: #333; font-size: 11px;")
+            suggestion_widget.setStyleSheet(f"color: {self._t.text_secondary};")
             card_layout.addWidget(suggestion_widget)
 
         parent_layout.addWidget(card)
 
-    def _create_card(self, title: str) -> QtWidgets.QWidget:
-        """Create a card widget."""
-        card = QtWidgets.QWidget()
+    @property
+    def _t(self):
+        """Live theme tokens."""
+        return get_manager().current
+
+    def _create_card(
+        self, title: str
+    ) -> tuple[QtWidgets.QFrame, QtWidgets.QVBoxLayout]:
+        """Return (card, content_layout) for a titled card.
+
+        Returns the layout as well as the card: a QWidget accepts only one
+        layout, so callers must add to this one rather than constructing a
+        second QVBoxLayout over the card, which Qt silently refuses — leaving
+        the content orphaned and invisible.
+
+        The card carries the shared `workspaceCard` objectName so the theme
+        QSS supplies background, border and radius in every theme.
+        """
+        card = QtWidgets.QFrame()
+        card.setObjectName("workspaceCard")
         layout = QtWidgets.QVBoxLayout(card)
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(8)
 
         title_label = QtWidgets.QLabel(title)
-        title_label.setStyleSheet("font-weight: bold; font-size: 12px;")
-        layout.insertWidget(0, title_label)
+        title_label.setObjectName("cardTitle")
+        layout.addWidget(title_label)
 
-        card.setStyleSheet("border: 1px solid #ddd; border-radius: 4px; background-color: #fafafa;")
-
-        return card
+        return card, layout
 
     def _score_color(self, value: float, min_val: float, max_val: float) -> str:
         """Get color based on score (normalized to 0-1 range)."""
         normalized = (value - min_val) / (max_val - min_val) if max_val != min_val else 0.5
 
+        t = self._t
         if normalized > 0.7:
-            return "#22c55e"  # Green
+            return t.success
         elif normalized > 0.4:
-            return "#eab308"  # Yellow
+            return t.warning
         else:
-            return "#ef4444"  # Red
+            return t.danger
 
     def _score_label(self, value: float, min_val: float, max_val: float) -> str:
         """Get label based on score."""

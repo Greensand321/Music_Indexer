@@ -112,7 +112,9 @@ class _SwatchCard(QtWidgets.QAbstractButton):
 
         # ── Theme name label ──────────────────────────────────────────────
         label_rect = QtCore.QRect(card_r.left(), card_r.bottom() - 20, card_r.width(), 20)
-        p.setPen(QtGui.QColor(current.text_primary))
+        # Label the swatch in ITS OWN theme's ink, not the active theme's — otherwise
+        # light swatches are drawn with near-white text while browsing from a dark theme.
+        p.setPen(QtGui.QColor(t.text_primary))
         font = p.font()
         font.setPointSize(8)
         font.setBold(self._selected or self.isChecked())
@@ -361,6 +363,9 @@ class ThemePickerDialog(QtWidgets.QDialog):
         name_lbl.setFont(name_font)
         desc_lbl = QtWidgets.QLabel("Switches between dark and light based on system day/night cycle")
         desc_lbl.setObjectName("mutedLabel")
+        # Wrap rather than clip: the dialog's 680 px minimum is narrower than
+        # this sentence once the icon and the two buttons take their share.
+        desc_lbl.setWordWrap(True)
 
         mgr = get_manager()
         dark_name = mgr.current.name if mgr.is_auto() else (

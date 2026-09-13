@@ -6,8 +6,15 @@ import random
 from pathlib import Path
 
 from gui.compat import QtCore, QtGui, QtWidgets, Signal, Slot
+from gui.themes.manager import get_manager
 from gui.widgets.gradient_bg import GradientWidget
 from gui.workspaces.base import WorkspaceBase
+
+
+def _rgba(hex_colour: str, alpha: int) -> str:
+    """Return a CSS rgba() string for a token colour at the given alpha (0-255)."""
+    c = QtGui.QColor(hex_colour)
+    return f"rgba({c.red()},{c.green()},{c.blue()},{alpha})"
 
 _AUDIO_EXTS = {".flac", ".m4a", ".aac", ".mp3", ".wav", ".ogg", ".opus"}
 _ART_SIZE = 200
@@ -252,7 +259,8 @@ class _BgArtWidget(QtWidgets.QWidget):
         p = QtGui.QPainter(self)
         r = self.rect()
 
-        p.fillRect(r, QtGui.QColor(13, 17, 23))
+        t = get_manager().current
+        p.fillRect(r, QtGui.QColor(t.input_bg))
 
         def _blit(pm: QtGui.QPixmap, op: float) -> None:
             if pm is None or pm.isNull():
@@ -273,9 +281,11 @@ class _BgArtWidget(QtWidgets.QWidget):
         else:
             _blit(self._pm_cur, op)
 
-        # Dark vignette so table text stays readable
+        # Scrim so table text stays readable over the art. Uses the theme's own
+        # ground, so it darkens on dark themes and lightens on light ones rather
+        # than stamping a black slab across a light window.
         p.setOpacity(0.70)
-        p.fillRect(r, QtGui.QColor(10, 13, 20))
+        p.fillRect(r, QtGui.QColor(t.content_bg))
         p.setOpacity(1.0)
         p.end()
 
@@ -398,10 +408,11 @@ class NowPlayingCovers(QtWidgets.QWidget):
             p.drawPixmap(x, y, scaled)
         else:
             # Placeholder
+            t = get_manager().current
             p.setPen(QtCore.Qt.PenStyle.NoPen)
-            p.setBrush(QtGui.QColor(25, 30, 42))
+            p.setBrush(QtGui.QColor(t.card_bg))
             p.drawRoundedRect(x, y, sz, sz, self._RAD, self._RAD)
-            p.setPen(QtGui.QColor(60, 72, 90))
+            p.setPen(QtGui.QColor(t.text_muted))
             fnt = p.font()
             fnt.setPointSize(max(10, sz // 5))
             p.setFont(fnt)
@@ -429,13 +440,6 @@ class _TrackHoverPopup(QtWidgets.QFrame):
         self.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setFixedWidth(self._ART_SZ + 200)
         self.setObjectName("trackHoverPopup")
-        self.setStyleSheet("""
-            #trackHoverPopup {
-                background: #1c2128;
-                border: 1px solid #30363d;
-                border-radius: 10px;
-            }
-        """)
 
         lay = QtWidgets.QHBoxLayout(self)
         lay.setContentsMargins(12, 12, 12, 12)
@@ -444,28 +448,23 @@ class _TrackHoverPopup(QtWidgets.QFrame):
         self._art_lbl = QtWidgets.QLabel()
         self._art_lbl.setFixedSize(self._ART_SZ, self._ART_SZ)
         self._art_lbl.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-        self._art_lbl.setStyleSheet(
-            "background: #0d1117; border-radius: 8px;"
-        )
         lay.addWidget(self._art_lbl)
 
         info = QtWidgets.QVBoxLayout()
         info.setSpacing(4)
         self._title_lbl = QtWidgets.QLabel("")
         self._title_lbl.setWordWrap(True)
-        self._title_lbl.setStyleSheet(
-            "color: #e6edf3; font-size: 13px; font-weight: 600;"
-        )
         self._artist_lbl = QtWidgets.QLabel("")
-        self._artist_lbl.setStyleSheet("color: #8b949e; font-size: 11px;")
         self._album_lbl = QtWidgets.QLabel("")
         self._album_lbl.setWordWrap(True)
-        self._album_lbl.setStyleSheet("color: #64748b; font-size: 11px;")
         info.addWidget(self._title_lbl)
         info.addWidget(self._artist_lbl)
         info.addWidget(self._album_lbl)
         info.addStretch()
         lay.addLayout(info, 1)
+
+        self._apply_theme(get_manager().current)
+        get_manager().theme_changed.connect(self._apply_theme)
 
         # Hover delay timer
         self._timer = QtCore.QTimer(self)
@@ -484,6 +483,22 @@ class _TrackHoverPopup(QtWidgets.QFrame):
         self._timer.stop()
         self.hide()
         self._pending_path = ""
+
+    def _apply_theme(self, tokens: object) -> None:
+        """Recolour the popup from the live theme."""
+        t = tokens
+        self.setStyleSheet(
+            f"#trackHoverPopup {{ background: {t.card_bg};"
+            f" border: 1px solid {t.card_border}; border-radius: 10px; }}"
+        )
+        self._art_lbl.setStyleSheet(
+            f"background: {t.input_bg}; border-radius: 8px;"
+        )
+        self._title_lbl.setStyleSheet(
+            f"color: {t.text_primary}; font-size: 13px; font-weight: 600;"
+        )
+        self._artist_lbl.setStyleSheet(f"color: {t.text_secondary}; font-size: 11px;")
+        self._album_lbl.setStyleSheet(f"color: {t.text_muted}; font-size: 11px;")
 
     def show_for(self, path: str, cursor_pos: QtCore.QPoint) -> None:
         """Immediately populate and show the popup."""
@@ -609,6 +624,49 @@ class PlayerWorkspace(WorkspaceBase):
         self._init_vlc()
         self._install_shortcuts()
 
+        # Player paints a lot of chrome the QSS layer never reaches (the track
+        # table, the transport strip, the now-playing labels). Drive all of it
+        # from tokens so the workspace follows the active theme.
+        self._apply_theme(get_manager().current)
+        get_manager().theme_changed.connect(self._apply_theme)
+
+    # ── Theme ──────────────────────────────────────────────────────────────
+
+    def _apply_theme(self, tokens: object) -> None:
+        t = tokens
+        muted  = f"color: {t.text_muted}; font-size: 11px;"
+        second = f"color: {t.text_secondary}; font-size: 11px;"
+
+        self._scan_progress.setStyleSheet(
+            "QProgressBar { background: transparent; border: none;"
+            " border-radius: 3px; }"
+            f"QProgressBar::chunk {{ background: {t.accent}; border-radius: 3px; }}"
+        )
+        self._sep.setStyleSheet(
+            f"background: {t.card_border}; border: none; max-height: 1px;"
+        )
+        self._lib_table.setStyleSheet(
+            "QTableWidget { background: transparent; border: none; }"
+            f"QTableWidget::item {{ background: {_rgba(t.input_bg, 210)}; }}"
+            f"QTableWidget::item:alternate {{ background: {_rgba(t.content_bg, 210)}; }}"
+            f"QTableWidget::item:selected {{ background: {_rgba(t.accent, 100)}; }}"
+            f"QHeaderView::section {{ background: {_rgba(t.card_bg, 240)};"
+            f" color: {t.text_secondary}; border: none; padding: 2px 4px; }}"
+        )
+        self._np_artist.setStyleSheet(muted)
+        self._q_count_lbl.setStyleSheet(muted)
+        self._pos_lbl.setStyleSheet(muted)
+        self._dur_lbl.setStyleSheet(muted)
+        self._vlc_status_lbl.setStyleSheet(second)
+        self._status_lbl.setStyleSheet(
+            f"color: {t.text_muted}; font-size: 11px; padding: 2px 18px 4px;"
+        )
+        self._refresh_art_placeholders(t)
+
+    def _refresh_art_placeholders(self, tokens: object) -> None:
+        """Hook for art placeholder tinting; overridden behaviour lives in the
+        art loaders, which read tokens when they bake a placeholder."""
+
     # ── UI construction ────────────────────────────────────────────────────
 
     def _build_ui(self) -> None:
@@ -636,10 +694,6 @@ class PlayerWorkspace(WorkspaceBase):
         self._scan_progress.setFixedHeight(6)
         self._scan_progress.setTextVisible(False)
         self._scan_progress.setVisible(False)
-        self._scan_progress.setStyleSheet(
-            "QProgressBar { background: transparent; border: none; border-radius: 3px; }"
-            "QProgressBar::chunk { background: #6366f1; border-radius: 3px; }"
-        )
         tb.addWidget(self._scan_progress, 1)
 
         self._reload_btn = QtWidgets.QPushButton("⟳  Reload")
@@ -669,7 +723,7 @@ class PlayerWorkspace(WorkspaceBase):
         # Thin separator
         sep = QtWidgets.QFrame()
         sep.setFrameShape(QtWidgets.QFrame.Shape.HLine)
-        sep.setStyleSheet("background: #30363d; border: none; max-height: 1px;")
+        self._sep = sep
         cl.addWidget(sep)
 
         # ── Main splitter: library table (left) + info/queue (right) ──────
@@ -710,15 +764,6 @@ class PlayerWorkspace(WorkspaceBase):
         self._lib_table.viewport().setAttribute(
             QtCore.Qt.WidgetAttribute.WA_TranslucentBackground, True
         )
-        self._lib_table.setStyleSheet("""
-            QTableWidget            { background: transparent; border: none; }
-            QTableWidget::item      { background: rgba(13,17,23, 210); }
-            QTableWidget::item:alternate { background: rgba(18,22,32, 210); }
-            QTableWidget::item:selected  { background: rgba(99,102,241, 100); }
-            QHeaderView::section    { background: rgba(20,24,35, 240);
-                                      color: #94a3b8; border: none;
-                                      padding: 2px 4px; }
-        """)
 
         self._lib_table.doubleClicked.connect(self._on_table_double_click)
         self._lib_table.clicked.connect(self._on_table_single_click)
@@ -763,7 +808,6 @@ class PlayerWorkspace(WorkspaceBase):
 
         self._np_artist = QtWidgets.QLabel("")
         self._np_artist.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-        self._np_artist.setStyleSheet("color: #64748b; font-size: 11px;")
 
         rl.addWidget(self._np_title)
         rl.addWidget(self._np_artist)
@@ -773,7 +817,7 @@ class PlayerWorkspace(WorkspaceBase):
         q_hdr = QtWidgets.QLabel("Queue")
         q_hdr.setObjectName("cardTitle")
         q_count_lbl = QtWidgets.QLabel("")
-        q_count_lbl.setStyleSheet("color: #64748b; font-size: 11px;")
+        self._q_count_lbl = q_count_lbl
         self._q_count_lbl = q_count_lbl
         q_hdr_row.addWidget(q_hdr)
         q_hdr_row.addStretch()
@@ -847,13 +891,11 @@ class PlayerWorkspace(WorkspaceBase):
         # Seek row
         seek_row = QtWidgets.QHBoxLayout()
         self._pos_lbl = QtWidgets.QLabel("0:00")
-        self._pos_lbl.setStyleSheet("color: #64748b; font-size: 11px;")
         self._pos_lbl.setFixedWidth(36)
         self._seek_slider = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
         self._seek_slider.setRange(0, 1000)
         self._seek_slider.sliderMoved.connect(self._on_seek)
         self._dur_lbl = QtWidgets.QLabel("0:00")
-        self._dur_lbl.setStyleSheet("color: #64748b; font-size: 11px;")
         self._dur_lbl.setFixedWidth(36)
         self._dur_lbl.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight)
         seek_row.addWidget(self._pos_lbl)
@@ -889,12 +931,14 @@ class PlayerWorkspace(WorkspaceBase):
         self._stop_btn.setToolTip("Stop")
         self._stop_btn.clicked.connect(self._on_stop)
 
-        self._shuffle_btn = _tbtn("🔀")
+        # Text-presentation glyph, not the 🔀 emoji: colour emoji render in the
+        # font's own palette (orange) and ignore the theme's button ink.
+        self._shuffle_btn = _tbtn("⤨")
         self._shuffle_btn.setCheckable(True)
         self._shuffle_btn.setToolTip("Shuffle")
         self._shuffle_btn.toggled.connect(self._on_shuffle_toggled)
 
-        self._repeat_btn = _tbtn("🔁")
+        self._repeat_btn = _tbtn("↻")
         self._repeat_btn.setToolTip("Repeat: Off")
         self._repeat_btn.clicked.connect(self._cycle_repeat)
 
@@ -920,7 +964,6 @@ class PlayerWorkspace(WorkspaceBase):
         self._vol_slider.sliderReleased.connect(self._on_volume_released)
 
         self._vlc_status_lbl = QtWidgets.QLabel("VLC: checking…")
-        self._vlc_status_lbl.setStyleSheet("color: #94a3b8; font-size: 11px;")
 
         ctrl_row.addWidget(vol_lbl)
         ctrl_row.addWidget(self._vol_slider)
@@ -932,9 +975,6 @@ class PlayerWorkspace(WorkspaceBase):
 
         # Status strip
         self._status_lbl = QtWidgets.QLabel("Load a library to begin.")
-        self._status_lbl.setStyleSheet(
-            "color: #64748b; font-size: 11px; padding: 2px 18px 4px;"
-        )
         cl.addWidget(self._status_lbl)
 
     def _init_vlc(self) -> None:
@@ -1453,7 +1493,11 @@ class PlayerWorkspace(WorkspaceBase):
 
     def _cycle_repeat(self) -> None:
         self._repeat = (self._repeat + 1) % 3
-        labels = {_REPEAT_OFF: ("🔁", "Repeat: Off"), _REPEAT_TRACK: ("🔂", "Repeat: Track"), _REPEAT_ALL: ("🔁", "Repeat: All")}
+        labels = {
+            _REPEAT_OFF:   ("↻",  "Repeat: Off"),
+            _REPEAT_TRACK: ("↻¹", "Repeat: Track"),
+            _REPEAT_ALL:   ("↻",  "Repeat: All"),
+        }
         icon, tip = labels[self._repeat]
         self._repeat_btn.setText(icon)
         self._repeat_btn.setToolTip(tip)
@@ -1500,7 +1544,7 @@ class PlayerWorkspace(WorkspaceBase):
             item = QtWidgets.QListWidgetItem(label)
             item.setData(QtCore.Qt.ItemDataRole.UserRole, i)
             if i == self._queue_index:
-                item.setForeground(QtGui.QColor("#6366f1"))
+                item.setForeground(QtGui.QColor(get_manager().current.accent))
                 f = item.font()
                 f.setBold(True)
                 item.setFont(f)

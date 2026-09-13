@@ -185,6 +185,11 @@ class _Tile(QtWidgets.QWidget):
 # _CTACard
 # ─────────────────────────────────────────────────────────────────────────────
 
+# Largest wordmark size; _fit_wordmark() steps down from here until it fits.
+_NAME_PT     = 42
+_NAME_PT_MIN = 20
+
+
 class _CTACard(QtWidgets.QFrame):
     """Frosted-glass centre card: app name, tagline, and library buttons."""
 
@@ -235,8 +240,11 @@ class _CTACard(QtWidgets.QFrame):
         lay.addSpacing(20)
 
         # ── App name ──────────────────────────────────────────────────────
+        # The card's width comes from the mosaic grid, not from this text, so
+        # the wordmark is fitted to the card in _fit_wordmark() on every resize.
+        # At a fixed 42 pt it overflowed and rendered as "lphaDE".
         name_lbl = QtWidgets.QLabel("AlphaDEX")
-        nf = QtGui.QFont(UI_FAMILY, 42)
+        nf = QtGui.QFont(UI_FAMILY, _NAME_PT)
         nf.setWeight(QtGui.QFont.Weight.Bold)
         nf.setHintingPreference(QtGui.QFont.HintingPreference.PreferNoHinting)
         name_lbl.setFont(nf)
@@ -244,6 +252,8 @@ class _CTACard(QtWidgets.QFrame):
         name_lbl.setStyleSheet(
             "color: #ffffff; background: transparent; letter-spacing: -1px;"
         )
+        self._name_lbl = name_lbl
+        self._name_margin = 44
 
         # ── Tagline ───────────────────────────────────────────────────────
         tag_lbl = QtWidgets.QLabel("Your library, organized.")
@@ -297,6 +307,30 @@ class _CTACard(QtWidgets.QFrame):
         lay.addWidget(main_btn)
 
     # ── Paint ─────────────────────────────────────────────────────────────
+
+    def resizeEvent(self, event: QtGui.QResizeEvent) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        self._fit_wordmark()
+
+    def _fit_wordmark(self) -> None:
+        """Shrink the wordmark until it fits the card's inner width.
+
+        The card is sized by the mosaic grid, so the text has to adapt to the
+        card rather than the other way round; letter-spacing is applied in the
+        stylesheet, so allow a small slack for it.
+        """
+        lbl = getattr(self, "_name_lbl", None)
+        if lbl is None:
+            return
+        avail = self.width() - 2 * self._name_margin
+        if avail <= 0:
+            return
+        f = lbl.font()
+        for pt in range(_NAME_PT, _NAME_PT_MIN - 1, -1):
+            f.setPointSize(pt)
+            if QtGui.QFontMetrics(f).horizontalAdvance(lbl.text()) <= avail:
+                break
+        lbl.setFont(f)
 
     def paintEvent(self, event: QtGui.QPaintEvent) -> None:  # noqa: N802
         p = QtGui.QPainter(self)

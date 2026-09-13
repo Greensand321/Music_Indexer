@@ -444,14 +444,22 @@ class LibrarySyncWorkspace(WorkspaceBase):
 
         self._output_playlist_cb = QtWidgets.QCheckBox("Write transfer playlist (.m3u8)")
 
+        # Two rows, grouped by intent. A single row of all six controls has a
+        # combined minimum width of ~1116 px, which pushed the whole workspace
+        # wider than its viewport and clipped the Browse buttons further up the
+        # page. Splitting by intent also separates "prepare" from "commit".
         plan_btn_row.addWidget(self._build_plan_btn)
         plan_btn_row.addWidget(self._preview_plan_btn)
         plan_btn_row.addWidget(self._transfer_toggle)
-        plan_btn_row.addWidget(self._execute_plan_btn)
-        plan_btn_row.addWidget(self._export_report_btn)
-        plan_btn_row.addWidget(self._output_playlist_cb)
         plan_btn_row.addStretch(1)
         plan_layout.addLayout(plan_btn_row)
+
+        plan_exec_row = QtWidgets.QHBoxLayout()
+        plan_exec_row.addWidget(self._execute_plan_btn)
+        plan_exec_row.addWidget(self._export_report_btn)
+        plan_exec_row.addWidget(self._output_playlist_cb)
+        plan_exec_row.addStretch(1)
+        plan_layout.addLayout(plan_exec_row)
 
         self._plan_status_lbl = QtWidgets.QLabel("No plan built.")
         self._plan_status_lbl.setObjectName("statusHint")
