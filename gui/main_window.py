@@ -14,6 +14,7 @@ from gui.widgets.now_playing_bar import NowPlayingBar
 # ── Workspace imports ─────────────────────────────────────────────────────────
 from gui.workspaces.indexer import IndexerWorkspace
 from gui.workspaces.library_sync import LibrarySyncWorkspace
+from gui.workspaces.playlist_gap import PlaylistGapWorkspace
 from gui.workspaces.duplicates import DuplicatesWorkspace
 from gui.workspaces.similarity import SimilarityWorkspace
 from gui.workspaces.tag_fixer import TagFixerWorkspace
@@ -32,6 +33,7 @@ from gui.workspaces.base import WorkspaceBase
 _WORKSPACE_MAP: dict[str, type[WorkspaceBase]] = {
     "indexer":      IndexerWorkspace,
     "library_sync": LibrarySyncWorkspace,
+    "playlist_gap": PlaylistGapWorkspace,
     "duplicates":   DuplicatesWorkspace,
     "similarity":   SimilarityWorkspace,
     "tag_fixer":    TagFixerWorkspace,

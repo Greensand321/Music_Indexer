@@ -1,0 +1,34 @@
+{
+  "version": 1,
+  "rules": [
+    {"id": "feat", "pattern": "\\b(?:feat\\.?|ft\\.?|featuring)\\s+(?P<actor>.+)$", "class": "cosmetic"},
+    {"id": "feat_with", "pattern": "\\b(?:w/|with)\\s+(?P<actor>.+)$", "class": "cosmetic", "scope": "bracketed"},
+    {"id": "remaster", "pattern": "\\b(?:\\d{4}\\s+)?remaster(?:ed)?(?:\\s+\\d{4})?\\b", "class": "cosmetic"},
+    {"id": "explicit", "pattern": "\\b(?:explicit|clean|album\\s+version|single\\s+version|bonus\\s+track|deluxe\\s+edition)\\b", "class": "cosmetic"},
+    {"id": "official", "pattern": "\\bofficial\\s+(?:audio|video|music\\s+video|lyric\\s+video|visualizer)\\b", "class": "cosmetic", "scope": "bracketed"},
+    {"id": "hq", "pattern": "\\b(?:hq|hd|full\\s+song|audio|lyrics?)\\b", "class": "cosmetic", "scope": "bracketed"},
+
+    {"id": "remix", "pattern": "\\b(?P<actor>.+?)['\u2019]?s?\\s+(?:remix|rmx|bootleg|flip|rework)\\b", "class": "substantive"},
+    {"id": "remix_bare", "pattern": "\\b(?:remix|bootleg|flip|rework)\\b", "class": "substantive"},
+    {"id": "live", "pattern": "\\blive(?:\\s+(?:at|from|in)\\s+(?P<actor>.+))?\\b", "class": "substantive"},
+    {"id": "alt_take", "pattern": "\\b(?:acoustic|instrumental|karaoke|demo|cover|a\\s*cappella|unplugged|reprise)\\b", "class": "substantive"},
+    {"id": "long_mix", "pattern": "\\b(?:extended|club|dub|vip)\\s+(?:mix|version|edit)\\b", "class": "substantive"},
+    {"id": "fanedit", "pattern": "\\b(?:but\\s+it'?s\\s+.+|sped\\s*[\\s-]?up|slowed(?:\\s*\\+?\\s*reverb)?|nightcore|bass\\s*boost(?:ed)?|8d\\s*audio|mashup|loop(?:ed)?)\\b", "class": "substantive"},
+    {"id": "twin", "pattern": "\\btwin\\s+version\\b", "class": "substantive"},
+
+    {"id": "original_mix", "pattern": "\\boriginal\\s+(?:mix|version)\\b", "class": "ambiguous"},
+    {"id": "radio_edit", "pattern": "\\bradio\\s+edit\\b", "class": "ambiguous"},
+    {"id": "bare_variant", "pattern": "\\b(?:version|mix|edit|deluxe|rmx)\\b", "class": "ambiguous", "scope": "bracketed"}
+  ],
+  "title_parts": [
+    "a deal with god",
+    "what's going on",
+    "sittin' on the dock of the bay"
+  ],
+  "uploader_prefixes": [
+    "ncs release",
+    "free download",
+    "premiere",
+    "out now"
+  ]
+}

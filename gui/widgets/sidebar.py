@@ -26,6 +26,7 @@ NAV_STRUCTURE: list[NavSection] = [
     NavSection("ORGANIZE", [
         NavItem("indexer",      "Indexer",        "🗂"),
         NavItem("library_sync", "Library Sync",   "🔄"),
+        NavItem("playlist_gap", "Playlist Gap",   "🎯"),
     ]),
     NavSection("CLEAN UP", [
         NavItem("duplicates",   "Duplicates",     "🔍"),
