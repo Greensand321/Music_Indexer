@@ -908,6 +908,47 @@ missed it.
 *Acceptance:* import the real TuneMyMusic CSV, produce a missing list, re-run and see zero
 new rows.
 
+**Status: done.** 9 backend modules, 1 Qt workspace, 186 tests. Deviations from this spec
+as written, each deliberate:
+
+- **`playlist_gap_lexicon` shipped in Phase 1, not Phase 2.** The parser cannot work
+  without it: telling `(A Deal With God)` (part of the title) from `(Twin Version)` (a
+  different recording) is a classification question, and bracket type cannot answer it.
+  Only `classify` / `scan` / `modifier_delta` are used; the full `adjudicate()` table and
+  rung 3 proper remain Phase 2, so a modifier difference currently resolves to UNSURE
+  rather than being decided either way.
+- **The duration gate was brought forward**, but only as a *demotion*: it can turn a
+  would-be OWNED into MISSING and never the reverse, so it can only make results safer. It
+  is what catches `Cupid` against `Cupid (Twin Version)` — same title and artist, 41
+  seconds apart.
+- **Lexicon rules gained a `scope` field** (`any` | `bracketed`). Broad patterns such as
+  bare `audio` or `mix` were eating words out of real titles ("Audio Video Disco"), so they
+  fire only inside brackets. For the same reason `with` is a `feat.` synonym only when
+  bracketed — unbracketed it appears in ordinary titles constantly, and it was amputating
+  `Running Up That Hill (A Deal With God)`.
+- **`compare_key` elides apostrophes** rather than splitting on them, so `Don't Stop`
+  matches a file tagged `Dont Stop`. It therefore does *not* share
+  `fingerprint_cache.normalized_key`'s spelling, so §4.2 is amended: the snapshot derives
+  its own keys from tags and treats the cache's `normalized_*` columns only as a fallback.
+  Mixing two spellings across the two sides of a comparison would silently split the index.
+- **`row_id` is not scoped to the source**, amending §8.2. Seeding the fallback hash with
+  `source_id` gives one song two identities when it appears in two playlists, which would
+  make the user answer the same question once per playlist and list the track twice in one
+  download list. Per-source bookkeeping stays in `wanted`, keyed `(row_id, source_id)`.
+- **Mashup markers are case-sensitive for `x` only.** An upper-case ` X ` is far more often
+  part of a name (Malcolm X, Gen X) than a mashup join. Missing a mashup only sends a row
+  to MISSING instead of UNSURE, which is the safe direction.
+- **Injectable collaborators resolve inside the call**, not as default arguments — a
+  default argument binds at import time, so monkeypatching the module attribute silently
+  does nothing.
+
+Three bugs were found only by driving the real Qt workspace against the real export, not
+by the unit tests, and each now has a regression test: the snapshot's injected tag reader
+was never called (the default-argument binding above); mashup detection read
+`splits[0].origin`, but a source supplying a `title` column contributes a word-for-word
+identical higher-prior candidate that dedupe collapsed the mashup reading into, taking the
+marker with it; and `Malcolm X Tribute` was read as a mashup.
+
 **Phase 2 — the lexicon and the third bucket.** `_lexicon`, rung 3 adjudication, duration
 gate, full evidence panel with ranked counterparts and cover art, HTML report.
 *Acceptance:* `Cupid (Twin Version)` lands in `MISSING` with reason `duration_gap`, not
