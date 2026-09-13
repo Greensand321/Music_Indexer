@@ -21,6 +21,30 @@ class R:
     nav_item = 8
 
 
+# ── Spacing scale ─────────────────────────────────────────────────────────────
+
+class S:
+    """Shared spacing steps, in px.
+
+    The audit found 20 distinct setContentsMargins tuples and 7 setSpacing
+    values across the workspaces, with no rule behind them. Every new layout
+    should take its numbers from here instead of inventing one.
+    """
+    xs   = 4     # tightest — icon/label gap inside a control
+    sm   = 8     # related controls on one row
+    md   = 12    # rows within a card
+    lg   = 16    # card padding (all four sides)
+    xl   = 20    # between cards
+    xxl  = 24    # workspace outer gutter
+
+    # Named roles — prefer these at call sites so intent is explicit.
+    card_padding = lg
+    card_gap     = xl
+    row_gap      = md
+    inline_gap   = sm
+    page_margin  = xxl
+
+
 # ── Drop shadow ───────────────────────────────────────────────────────────────
 
 def card_shadow(tokens: ThemeTokens) -> QtWidgets.QGraphicsDropShadowEffect:

@@ -124,10 +124,28 @@ class WorkspaceBase(QtWidgets.QWidget):
 
     # ── Theme handling ────────────────────────────────────────────────────
 
+    @property
+    def tokens(self):
+        """The live ThemeTokens for the active theme.
+
+        Reach for this instead of importing the manager by hand — needing that
+        import is why twelve of fourteen workspaces ended up hardcoding colours.
+        Read it at paint/update time rather than caching it; it changes.
+        """
+        return get_manager().current
+
     def _on_theme_changed_base(self, tokens: object) -> None:
         """Called on every theme change; refreshes shadows then gradient."""
         self.refresh_shadows()
+        self.on_theme_changed(tokens)
         # GradientWidget repaints itself via its own theme_changed connection.
+
+    def on_theme_changed(self, tokens: object) -> None:
+        """Override to re-colour anything the QSS layer cannot reach.
+
+        Called on construction-time theme application and on every subsequent
+        change. Keep it idempotent — it may run many times.
+        """
 
     # ── Logging helpers ───────────────────────────────────────────────────
 

@@ -215,7 +215,17 @@ class AlphaDEXStyle(QtWidgets.QProxyStyle):
             # Detect special button names via objectName
             name = widget.objectName() if widget else ""
 
-            if name == "primaryBtn":
+            # A checked toggle (segmented-control member, Shuffle, Copy/Move)
+            # reads as selected regardless of which variant it otherwise is.
+            if name in ("segmentBtn", "toggleBtn") and _is_on(option):
+                base  = t.accent
+                hover = t.accent_hover
+                press = t.accent_pressed
+            elif name in ("segmentBtn", "toggleBtn"):
+                base  = t.card_bg
+                hover = t.sidebar_hover
+                press = t.card_border
+            elif name == "primaryBtn":
                 base  = t.accent
                 hover = t.accent_hover
                 press = t.accent_pressed
@@ -227,6 +237,18 @@ class AlphaDEXStyle(QtWidgets.QProxyStyle):
                 base  = t.success
                 hover = lerp_color(t.success, "#ffffff", 0.15).name()
                 press = lerp_color(t.success, "#000000", 0.10).name()
+            elif name == "secondaryBtn":
+                # Same shape as the default button but reads as a deliberate
+                # peer to primaryBtn rather than an unstyled leftover.
+                base  = t.card_bg
+                hover = t.sidebar_hover
+                press = t.card_border
+            elif name == "ghostBtn":
+                # Chromeless until hovered — for toolbars and mode rows where a
+                # row of filled buttons would out-shout the content.
+                base  = t.content_bg
+                hover = t.sidebar_hover
+                press = t.card_border
             else:
                 base  = t.card_bg
                 hover = t.sidebar_hover
@@ -239,8 +261,13 @@ class AlphaDEXStyle(QtWidgets.QProxyStyle):
             else:
                 fill_col = lerp_color(base, hover, ht)
 
-            border_col = None if name in ("primaryBtn", "dangerBtn", "successBtn") \
-                         else t.card_border
+            if name in ("primaryBtn", "dangerBtn", "successBtn"):
+                border_col = None
+            elif name == "ghostBtn":
+                # Borderless at rest; the hover fill is the only affordance.
+                border_col = None if ht < 0.02 and not sunken else t.card_border
+            else:
+                border_col = t.card_border
 
             _rounded(painter, option.rect, R.button,
                      fill=fill_col, border=border_col, bw=1.0)
@@ -368,7 +395,12 @@ class AlphaDEXStyle(QtWidgets.QProxyStyle):
                 return
             opt   = option
             name  = widget.objectName() if widget else ""
-            is_accent = name in ("primaryBtn", "dangerBtn", "successBtn")
+            # Accent-filled surfaces need inverse ink; a checked segment/toggle
+            # is accent-filled too (see PE_PanelButtonCommand above).
+            is_accent = (
+                name in ("primaryBtn", "dangerBtn", "successBtn")
+                or (name in ("segmentBtn", "toggleBtn") and _is_on(option))
+            )
             col   = t.text_inverse if is_accent else (
                     t.text_muted if not _is_enabled(option) else t.text_primary)
             _aa(painter)
