@@ -298,8 +298,9 @@ GUI concurrency) turned up further real bugs. The serious ones:
   - "Top 3 genres by popularity" was actually alphabetical.
   - Low-confidence matches contributed genres.
   - M4A cover art was never read, so the Player, landing and track details showed none.
-  - Library Sync's fingerprint matching only matched byte-identical files (being ported to the vendored engine;
-    see below).
+  - Library Sync's matching missed nearly every duplicate: it compared compressed fingerprints and only
+    shortlisted identical prints or the first 50 tracks of the same format. On a synthetic 20k-track library,
+    169 of 170 duplicates were called "new"; after the fix, 0 of 370 tracks are misclassified.
 - **Stability:**
   - The idle fingerprint-cache writer spun at 100 % CPU and starved the GUI (window build went from 0.4 s to 45 s).
   - A live theme switch left 71 widgets on the old palette (invisible sidebar headers on light themes).
@@ -322,5 +323,5 @@ GUI concurrency) turned up further real bugs. The serious ones:
 ### Tests
 
 185 tests at the start of this phase (9 failing; the result depended on file order). At the end of phase 2:
-**904 passing**, including 374 headless GUI tests. The 530 backend tests pass in default, reversed and shuffled file order; the GUI suite passed repeated and reversed-order runs with no flakes.
+**1119 passing**: 731 backend tests (green in default, reversed and shuffled file order) and 388 headless GUI tests (green across repeated and reversed-order runs, no flakes).
 

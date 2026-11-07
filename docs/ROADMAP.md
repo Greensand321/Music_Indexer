@@ -30,14 +30,6 @@ Real defects in the current code, smallest first within each area.
 
 ### Library Sync
 
-- **Library Sync still compares compressed fingerprints** *(Bug, wrong result).* The
-  Duplicate Finder now decodes Chromaprint fingerprints before comparing them; Library
-  Sync uses the vendored engine (`library_sync_indexer_engine/`), whose
-  `fingerprint_distance` still compares the compressed text byte by byte. With that
-  metric a FLAC and its own MP3 score anywhere from 0.08 to 0.46, so with the 0.3
-  default some transcodes are treated as new tracks (copied in as duplicates) or as
-  low-confidence matches instead of upgrades. Per the settled decision below, this
-  needs a deliberate port of the decoded distance into the vendored copy.
 - **"Replace All" / "Replace with Better" in the exported HTML review report do
   nothing** *(Bug: decorative buttons).* The report renders three action buttons
   styled to look clickable. The `ReviewAction` enum and
@@ -101,6 +93,12 @@ headlines, so they don't get re-raised:
 - **Switching library lets a confirmed Duplicates execution finish**, like every other
   page's confirmed writes, instead of stopping it part-way.
 - **The `test_plugin` fixture no longer runs in real Tag Fixer scans.**
+- **Library Sync recognises the library's copies in any codec.** Its vendored engine
+  now compares decoded Chromaprint fingerprints (ported from the Duplicate Finder), and
+  candidates come from an index of decoded sub-fingerprints across all formats instead
+  of "identical print, else the first 50 tracks of the same extension". On a synthetic
+  20k-track library the old code called 169 of 170 duplicates "new"; now 0 of 370
+  tracks are misclassified. Default threshold 0.2 (old saved defaults migrated once).
 
 - **Quitting or re-running a job no longer crashes the app.** Every worker is held by
   a process-wide JobRegistry until its thread has really finished; closing asks only

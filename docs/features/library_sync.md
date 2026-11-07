@@ -84,15 +84,27 @@ classifies the relationship:
 - **Collision / likely duplicate** — close enough to be confidently the same song.
 - **Low confidence** — sitting right on the borderline, worth a human glance.
 
-Two refinements make this trustworthy. First, the strictness is **adjustable**, with a
-default sensitivity that is a little more forgiving than the Duplicate Finder's because
-cross-collection matches naturally vary more; lossy formats like MP3 are given a touch
-more leeway than lossless ones, since compression blurs their fingerprints. Second,
-borderline cases are deliberately surfaced as "low confidence" rather than silently
-decided, because fingerprint distances are noisiest exactly at the boundary — and a
-**match confidence** score (a friendly 0-to-100% reading derived from how far inside or
-outside the threshold a pairing falls) is shown so you can see not just *whether* two
-tracks matched but *how sure* the app is.
+The distance is the share of differing bits between the two *decoded* Chromaprint
+fingerprints: the same recording in any codec scores about 0.01, a copy whose start is
+shifted by a fraction of a second 0.07–0.14, and different recordings 0.43 or more. The
+default threshold is **0.2** for every format (a lossless-vs-lossy pair gets +0.03). The
+strictness is adjustable, but from 0.4 upward unrelated tracks start to match, and the
+page warns you. Borderline cases are deliberately surfaced as "low confidence" rather
+than silently decided — that band reaches 25 % above the threshold but never 0.4 — and
+a **match confidence** score (a friendly 0-to-100% reading derived from how far inside
+or outside the threshold a pairing falls) shows not just *whether* two tracks matched
+but *how sure* the app is.
+
+**Finding candidates.** Library Sync indexes the library's decoded fingerprints, so
+each incoming track is compared with every library track that shares part of its
+fingerprint, whatever its format or position in the library. When that finds no match,
+it is also compared with every track of about the same length (±3 s or 2 %) after a
+quick check of the first ~16 seconds. Fingerprints too short or too uniform to identify
+a recording (under about 4 seconds, silence) never match anything. Building the index
+decodes each library fingerprint once — about 30 seconds for 20,000 tracks — and
+Recompute Matches reuses it. A threshold saved before this change that equals the old
+default (0.3 / 0.35, which meant something else on the old scale) is replaced by 0.2
+once, with a line in the log; any other saved value is kept.
 
 Alongside the match, Library Sync also weighs **quality**: it compares the incoming
 file's format and bitrate against the existing one and labels the pairing as a
