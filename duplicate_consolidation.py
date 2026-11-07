@@ -1420,6 +1420,35 @@ class ConsolidationPlan:
         return signature
 
 
+_COPY_SUFFIX_RE = re.compile(r"\s*\((\d{1,2})\)$")
+
+
+def planned_winner_rename(group: GroupPlan) -> str | None:
+    """Where the executor renames this group's winner after the losers are gone, or None.
+
+    Only a copy-number suffix — ``Song (1).flac`` — is dropped, and only when
+    the suffix-free name is exactly a loser *of this group* that will be moved
+    or deleted: i.e. the suffix only existed because that loser held the name.
+    (The executor used to strip any trailing ``(digits)`` from every winner,
+    unpreviewed, so ``Live (1986).flac`` became ``Live.flac``.)
+    """
+    stem, ext = os.path.splitext(os.path.basename(group.winner_path))
+    match = _COPY_SUFFIX_RE.search(stem)
+    if not match:
+        return None
+    trimmed = stem[: match.start()].rstrip()
+    if not trimmed:
+        return None
+    candidate = os.path.join(os.path.dirname(group.winner_path), f"{trimmed}{ext}")
+    candidate_key = os.path.normcase(os.path.abspath(candidate))
+    for loser in group.losers:
+        if os.path.normcase(os.path.abspath(loser)) != candidate_key:
+            continue
+        if group.loser_disposition.get(loser, "quarantine") in ("quarantine", "delete"):
+            return candidate
+    return None
+
+
 def _planned_actions(group: GroupPlan) -> List[Dict[str, object]]:
     actions: List[Dict[str, object]] = []
     for path, changes in group.metadata_changes.items():
@@ -4559,6 +4588,14 @@ def export_consolidation_preview_html(
         html_lines.append("<div class='kv context-card-details'>")
         html_lines.append("<div class='k'>Kept file (winner)</div>")
         html_lines.append(f"<div class='v'>{_path_row(group.winner_path)}</div>")
+        renamed_to = planned_winner_rename(group)
+        if renamed_to:
+            html_lines.append("<div class='k'>Then renamed to</div>")
+            html_lines.append(
+                f"<div class='v'>{_path_row(renamed_to)}"
+                "<div class='tiny muted'>Drops the copy-number suffix once the same-named loser "
+                "has been moved out of the way.</div></div>"
+            )
         html_lines.append("<div class='k'>Group ID</div>")
         html_lines.append(f"<div class='v mono'>{esc(group.group_id)}</div>")
         html_lines.append("<div class='k'>Metadata bucket key</div>")

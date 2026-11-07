@@ -15,6 +15,7 @@ from __future__ import annotations
 import base64
 import concurrent.futures
 import datetime
+import errno
 import hashlib
 import html
 import importlib.util
@@ -26,6 +27,7 @@ import re
 import shutil
 import tempfile
 import threading
+import unicodedata
 from dataclasses import dataclass, field
 from typing import Callable, Dict, Iterable, List, Mapping, Sequence
 
@@ -36,6 +38,7 @@ from duplicate_consolidation import (
     _hamming_distance,
     _capture_library_state,
     consolidation_plan_from_dict,
+    planned_winner_rename,
 )
 from indexer_control import IndexCancelled, cancel_event as global_cancel_event
 from utils.audio_metadata_reader import _extract_cover_payloads, read_sidecar_artwork_bytes
@@ -328,6 +331,30 @@ def _backup_playlist(path: str, backup_root: str) -> str:
     return dest
 
 
+def _rename_no_overwrite(src: str, dest: str) -> None:
+    """Rename ``src`` to ``dest``; raise ``FileExistsError`` rather than replace a file.
+
+    ``os.replace`` (and ``os.rename`` off Windows) silently overwrite. A hard
+    link refuses an existing name atomically; where links are unsupported
+    (FAT/exFAT, some shares) a checked rename is the fallback.
+    """
+    safe_src = ensure_long_path(src)
+    safe_dest = ensure_long_path(dest)
+    if os.name == "nt":
+        os.rename(safe_src, safe_dest)  # never replaces an existing file on Windows
+        return
+    try:
+        os.link(safe_src, safe_dest, follow_symlinks=False)
+    except FileExistsError:
+        raise
+    except (OSError, NotImplementedError):
+        if os.path.lexists(safe_dest):
+            raise FileExistsError(errno.EEXIST, "Destination exists", dest)
+        os.rename(safe_src, safe_dest)
+        return
+    os.unlink(safe_src)
+
+
 def _strip_trailing_numeric_suffix(path: str) -> str | None:
     base = os.path.basename(path)
     stem, ext = os.path.splitext(base)
@@ -547,21 +574,125 @@ def _close_mutagen_audio(audio: object | None) -> None:
                 pass
 
 
+def _name_key(path: str) -> str:
+    """Comparison key for a destination path, as a case-insensitive file system sees it.
+
+    Windows and macOS treat ``Song.mp3``/``song.mp3`` — and the NFC/NFD forms
+    of ``Café.mp3`` — as one file. Two losers whose names differ only that way
+    must never be given "different" quarantine names that are really the same.
+    """
+    return unicodedata.normalize("NFC", os.path.normcase(os.path.abspath(path))).casefold()
+
+
+def _same_path(left: str, right: str) -> bool:
+    return os.path.normcase(os.path.abspath(left)) == os.path.normcase(os.path.abspath(right))
+
+
 def _unique_destination(dest: str, taken: set[str]) -> str:
     """Return ``dest``, or ``name (n).ext`` if that file exists or is ``taken``.
 
     The chosen path is added to ``taken`` so concurrent cleanup tasks in one
     run never pick the same destination. (Moving onto an existing path made
-    ``shutil.move`` silently replace an earlier quarantined loser.)
+    ``shutil.move`` silently replace an earlier quarantined loser.) Names in
+    ``taken`` are compared case- and Unicode-normalisation-insensitively.
     """
+    taken_keys = {_name_key(t) for t in taken}
     stem, ext = os.path.splitext(dest)
     candidate = dest
     counter = 1
-    while candidate in taken or os.path.lexists(ensure_long_path(candidate)):
+    while _name_key(candidate) in taken_keys or os.path.lexists(ensure_long_path(candidate)):
         candidate = f"{stem} ({counter}){ext}"
         counter += 1
     taken.add(candidate)
     return candidate
+
+
+_MAX_DESTINATION_ATTEMPTS = 100_000
+
+
+def _reserve_destination(dest: str, taken_keys: set[str]) -> str:
+    """Claim a free quarantine path for one loser and return it.
+
+    The claim is an empty placeholder file created with ``O_EXCL``, so the file
+    system itself refuses a name that already exists — including one that only
+    differs in case or Unicode form on Windows/macOS — and the loser is then
+    renamed *over its own placeholder*, never over anybody else's file.
+    ``taken_keys`` (see ``_name_key``) keeps one run's concurrent moves apart.
+    """
+    stem, ext = os.path.splitext(dest)
+    flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_BINARY", 0)
+    for counter in range(_MAX_DESTINATION_ATTEMPTS):
+        candidate = dest if counter == 0 else f"{stem} ({counter}){ext}"
+        key = _name_key(candidate)
+        if key in taken_keys:
+            continue
+        try:
+            fd = os.open(ensure_long_path(candidate), flags, 0o644)
+        except FileExistsError:
+            continue
+        os.close(fd)
+        taken_keys.add(key)
+        return candidate
+    raise RuntimeError(f"No free quarantine name for {dest}")
+
+
+def _discard_placeholder(path: str | None) -> None:
+    """Remove a destination claimed by ``_reserve_destination`` if it is still empty."""
+    if not path:
+        return
+    safe = ensure_long_path(path)
+    try:
+        if os.path.isfile(safe) and not os.path.islink(safe) and os.path.getsize(safe) == 0:
+            os.remove(safe)
+    except OSError:
+        pass
+
+
+class _OriginalNotRemoved(OSError):
+    """A cross-device move copied the loser but could not delete the original."""
+
+
+def _move_onto_placeholder(src: str, dest: str) -> None:
+    """Move ``src`` onto ``dest``, an empty placeholder this run created.
+
+    Same file system: one atomic rename. Across file systems (a Quarantine on
+    another drive): copy to a temporary file beside ``dest``, rename it over
+    the placeholder, then delete ``src``. If ``src`` cannot be deleted (open
+    in a player, read-only, …) the copy is removed again and the error is
+    raised, so the loser is simply still where it was — never in two places
+    while the report claims one. A failed or partial copy is removed too.
+    """
+    safe_src = ensure_long_path(src)
+    safe_dest = ensure_long_path(dest)
+    try:
+        os.replace(safe_src, safe_dest)
+        return
+    except OSError as exc:
+        if exc.errno != errno.EXDEV:
+            raise
+    fd, tmp_path = tempfile.mkstemp(prefix=".alphadex-move-", suffix=".part", dir=os.path.dirname(safe_dest))
+    os.close(fd)
+    try:
+        shutil.copy2(safe_src, tmp_path)
+        os.replace(tmp_path, safe_dest)
+        tmp_path = ""
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+    try:
+        os.remove(safe_src)
+    except OSError as exc:
+        try:
+            os.remove(safe_dest)
+            undo = "the quarantine copy was removed again; the file is still in the library"
+        except OSError as undo_exc:
+            undo = f"the quarantine copy at {dest} could not be removed either ({undo_exc})"
+        raise _OriginalNotRemoved(
+            exc.errno, f"copied to quarantine but the original could not be deleted ({exc}); {undo}"
+        ) from exc
 
 
 def _quarantine_path(path: str, quarantine_root: str, library_root: str, *, flatten: bool) -> str:
@@ -605,6 +736,72 @@ def _detect_state_drift(expected: Mapping[str, object], actual: Mapping[str, obj
         if key in expected and key in actual and expected[key] != actual[key]:
             return f"{key} mismatch (expected {expected.get(key)}, found {actual.get(key)})."
     return None
+
+
+def _plan_structure_problems(plan: ConsolidationPlan) -> List[str]:
+    """Reasons the plan's groups are not a safe partition, or [] when they are.
+
+    Every loser must belong to exactly one group, and no path may be both a
+    winner and a loser: otherwise one group's loser cleanup removes another
+    group's winner, and a group can end with no surviving copy at all.
+    """
+    problems: List[str] = []
+    winners: Dict[str, str] = {}
+    losers_seen: Dict[str, str] = {}
+    for group in plan.groups:
+        winners[os.path.normcase(os.path.abspath(group.winner_path))] = group.group_id
+    for group in plan.groups:
+        winner_key = os.path.normcase(os.path.abspath(group.winner_path))
+        for loser in group.losers:
+            key = os.path.normcase(os.path.abspath(loser))
+            if key == winner_key:
+                problems.append(f"group {group.group_id}: the winner is also listed as a loser ({loser})")
+            elif key in winners:
+                problems.append(
+                    f"group {group.group_id}: loser {loser} is the winner of group {winners[key]}"
+                )
+            if key in losers_seen and losers_seen[key] != group.group_id:
+                problems.append(f"{loser} is a loser in groups {losers_seen[key]} and {group.group_id}")
+            losers_seen.setdefault(key, group.group_id)
+    return problems
+
+
+def _run_in_pool(
+    items: Sequence[object],
+    fn: Callable[[object], object],
+    *,
+    max_workers: int,
+    on_done: Callable[[object, "concurrent.futures.Future[object]"], None],
+    stop_requested: Callable[[], bool],
+) -> List[object]:
+    """Run ``fn(item)`` on a thread pool, at most ``max_workers`` at a time.
+
+    ``on_done(item, future)`` runs on the calling thread for every task that
+    was started, in completion order — so every file operation that happened
+    is reported, even when the run stops early. ``stop_requested`` is checked
+    before each submission: once it is true (cancel, or a failure ``on_done``
+    noted) nothing new starts, and the tasks already running finish and are
+    reported. (Submitting everything up front used to let every queued move
+    and delete run after a cancel or an error, unrecorded.)
+
+    Returns the items that were never started, in order.
+    """
+    queue = list(items)
+    position = 0
+    pending: Dict["concurrent.futures.Future[object]", object] = {}
+    workers = max(1, int(max_workers or 1))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+        while True:
+            while position < len(queue) and len(pending) < workers and not stop_requested():
+                item = queue[position]
+                position += 1
+                pending[executor.submit(fn, item)] = item
+            if not pending:
+                break
+            done, _ = concurrent.futures.wait(pending, return_when=concurrent.futures.FIRST_COMPLETED)
+            for future in done:
+                on_done(pending.pop(future), future)
+    return queue[position:]
 
 
 def _coerce_consolidation_plan(
@@ -855,6 +1052,18 @@ def execute_consolidation_plan(
                 "Plan missing source snapshot; rerun preview to capture library state.",
             )
             raise RuntimeError("Execution blocked: missing source snapshot.")
+
+        structure_problems = _plan_structure_problems(plan)
+        if structure_problems:
+            success = False
+            for problem in structure_problems:
+                _record(
+                    "preflight",
+                    "plan",
+                    "blocked",
+                    f"Plan groups overlap — {problem}. Rerun Preview.",
+                )
+            raise RuntimeError("Execution blocked: plan groups overlap.")
 
         if plan.requires_review and not config.allow_review_required:
             success = False
@@ -1190,17 +1399,77 @@ def execute_consolidation_plan(
         quarantine_lock = threading.Lock()
         quarantine_taken: set[str] = set()
 
-        def _cleanup_loser_task(
-            loser: str,
-            disposition: str,
-        ) -> tuple[str, str, bool, str | None, str | None]:
-            if disposition == "delete":
-                os.remove(loser)
-                verified = not os.path.exists(loser)
-                verification_detail = (
-                    "Loser deletion verified." if verified else "Loser still present after delete."
+        def _loser_refusal(loser: str) -> tuple[str, str] | None:
+            """(skip_reason, detail) when ``loser`` must not be touched, else None.
+
+            Checked immediately before the file operation, not only at
+            preflight: steps 1-5 can take long, and a loser is only ever
+            removed while its winner is still there to replace it.
+            """
+            winner = loser_to_winner.get(loser)
+            if not winner:
+                return "no_winner", "Not removed: the plan names no winner for this loser."
+            safe_winner = ensure_long_path(winner)
+            if not os.path.exists(safe_winner):
+                return "winner_missing", f"Not removed: its winner is missing ({winner})."
+            try:
+                if os.path.samefile(safe_winner, ensure_long_path(loser)):
+                    return (
+                        "same_file",
+                        f"Not removed: it is the same file as its winner {winner} (a link or alias).",
+                    )
+            except OSError as exc:
+                return "winner_unreadable", f"Not removed: could not compare with its winner ({exc})."
+            expected = plan.source_snapshot.get(loser) if plan else None
+            if not expected:
+                return "no_snapshot", "Not removed: the preview recorded no state for this file. Rerun Preview."
+            drift = _detect_state_drift(expected, _capture_library_state(loser))
+            if drift:
+                return "changed_since_preview", f"Not removed: changed since the preview ({drift})."
+            return None
+
+        def _cleanup_loser_task(item: object) -> Dict[str, object]:
+            loser, disposition = item  # type: ignore[misc]
+            outcome: Dict[str, object] = {
+                "loser": loser,
+                "action": disposition,
+                "status": "failed",
+                "verified": False,
+                "verification_detail": None,
+                "dest": None,
+                "detail": "",
+                "skip_reason": None,
+            }
+            if not os.path.lexists(ensure_long_path(loser)):
+                outcome.update(
+                    status="skipped",
+                    detail="Missing source; loser not moved or deleted.",
+                    verification_detail="Source missing.",
+                    skip_reason="missing_source",
                 )
-                return loser, "delete", verified, verification_detail, None
+                return outcome
+            refusal = _loser_refusal(loser)
+            if refusal:
+                outcome.update(
+                    status="failed",
+                    detail=refusal[1],
+                    verification_detail="Refused before touching the file.",
+                    skip_reason=refusal[0],
+                    refused=True,
+                )
+                return outcome
+            if disposition == "delete":
+                os.remove(ensure_long_path(loser))
+                verified = not os.path.lexists(ensure_long_path(loser))
+                outcome.update(
+                    status="success" if verified else "failed",
+                    verified=verified,
+                    detail="Loser deleted.",
+                    verification_detail=(
+                        "Loser deletion verified." if verified else "Loser still present after delete."
+                    ),
+                )
+                return outcome
             dest = _quarantine_path(
                 loser,
                 quarantine_dir,
@@ -1208,13 +1477,23 @@ def execute_consolidation_plan(
                 flatten=config.quarantine_flatten,
             )
             with quarantine_lock:
-                dest = _unique_destination(dest, quarantine_taken)
-            shutil.move(loser, dest)
-            verified = os.path.exists(dest) and not os.path.exists(loser)
-            verification_detail = (
-                "Loser quarantine verified." if verified else "Quarantine move not confirmed."
+                dest = _reserve_destination(dest, quarantine_taken)
+            outcome["dest"] = dest
+            try:
+                _move_onto_placeholder(loser, dest)
+            except BaseException:
+                _discard_placeholder(dest)
+                raise
+            verified = os.path.exists(ensure_long_path(dest)) and not os.path.lexists(ensure_long_path(loser))
+            outcome.update(
+                status="success" if verified else "failed",
+                verified=verified,
+                detail="Loser quarantined.",
+                verification_detail=(
+                    "Loser quarantine verified." if verified else "Quarantine move not confirmed."
+                ),
             )
-            return loser, "quarantine", verified, verification_detail, dest
+            return outcome
 
         # Step 4: apply artwork transfers
         if config.dry_run_execute and config.apply_artwork:
@@ -1233,49 +1512,74 @@ def execute_consolidation_plan(
                     skip_reason="dry_run",
                 )
         elif config.apply_artwork:
-            with concurrent.futures.ThreadPoolExecutor(max_workers=io_workers) as executor:
-                futures = {executor.submit(_apply_artwork_task, art): art for art in artwork_actions}
-                for future in concurrent.futures.as_completed(futures):
-                    _check_cancel("artwork")
-                    art = futures[future]
-                    try:
-                        art, ok, detail, verified, verification_detail = future.result()
-                    except Exception as exc:
-                        success = False
-                        _record(
-                            "artwork",
-                            art.target,
-                            "failed",
-                            f"Artwork copy failed: {exc}",
-                            planned=True,
-                            attempted=True,
-                            verified=False,
-                            verification_detail="Artwork task failed.",
-                            source=art.source,
-                            group_id=path_to_group.get(art.target),
-                        )
-                        raise RuntimeError(f"Artwork copy failed for {art.target}") from exc
-                    status = "success" if ok and verified else "failed"
-                    if status == "failed":
-                        success = False
-                        if ok and verification_detail:
-                            detail = f"{detail} Verification failed: {verification_detail}"
+            artwork_errors: List[str] = []
+
+            def _artwork_done(item: object, future: "concurrent.futures.Future[object]") -> None:
+                nonlocal success
+                art = item  # type: ignore[assignment]
+                try:
+                    _art, ok, detail, verified, verification_detail = future.result()  # type: ignore[misc]
+                except Exception as exc:
+                    success = False
+                    artwork_errors.append(f"Artwork copy failed for {art.target}: {exc}")
                     _record(
                         "artwork",
                         art.target,
-                        status,
-                        f"{detail or art.reason} (source: {art.source})",
+                        "failed",
+                        f"Artwork copy failed: {exc}",
                         planned=True,
                         attempted=True,
-                        verified=verified,
-                        verification_detail=verification_detail,
+                        verified=False,
+                        verification_detail="Artwork task failed.",
                         source=art.source,
                         group_id=path_to_group.get(art.target),
                     )
-                    if not ok:
-                        raise RuntimeError(f"Artwork copy failed for {art.target}")
-                    if ok and not verified:
-                        raise RuntimeError(f"Artwork verification failed for {art.target}")
+                    return
+                status = "success" if ok and verified else "failed"
+                if status == "failed":
+                    success = False
+                    if ok and verification_detail:
+                        detail = f"{detail} Verification failed: {verification_detail}"
+                    artwork_errors.append(
+                        f"Artwork {'verification' if ok else 'copy'} failed for {art.target}"
+                    )
+                _record(
+                    "artwork",
+                    art.target,
+                    status,
+                    f"{detail or art.reason} (source: {art.source})",
+                    planned=True,
+                    attempted=True,
+                    verified=verified,
+                    verification_detail=verification_detail,
+                    source=art.source,
+                    group_id=path_to_group.get(art.target),
+                )
+
+            not_started = _run_in_pool(
+                artwork_actions,
+                _apply_artwork_task,  # type: ignore[arg-type]
+                max_workers=io_workers,
+                on_done=_artwork_done,
+                stop_requested=lambda: cancel.is_set() or bool(artwork_errors),
+            )
+            for art in not_started:
+                _record(
+                    "artwork",
+                    art.target,  # type: ignore[attr-defined]
+                    "skipped",
+                    "Execution stopped; artwork not applied.",
+                    planned=True,
+                    attempted=False,
+                    verified=False,
+                    verification_detail="Not attempted.",
+                    source=art.source,  # type: ignore[attr-defined]
+                    group_id=path_to_group.get(art.target),  # type: ignore[attr-defined]
+                    skip_reason="not_attempted",
+                )
+            if artwork_errors:
+                raise RuntimeError(artwork_errors[0])
+            _check_cancel("artwork")
 
         # Step 5: apply metadata normalization
         if config.dry_run_execute and config.apply_metadata:
@@ -1308,172 +1612,250 @@ def execute_consolidation_plan(
                         skip_reason="mutagen_unavailable",
                     )
             else:
-                with concurrent.futures.ThreadPoolExecutor(max_workers=io_workers) as executor:
-                    futures = {}
-                    for target, tags in planned_tags.items():
-                        _check_cancel("metadata")
-                        if not os.path.exists(target):
-                            _record(
-                                "metadata",
-                                target,
-                                "skipped",
-                                "Missing source; metadata not written.",
-                                planned=True,
-                                attempted=False,
-                                verified=False,
-                                verification_detail="Source missing.",
-                                group_id=path_to_group.get(target),
-                                skip_reason="missing_source",
-                            )
-                            continue
-                        futures[executor.submit(_apply_metadata_task, target, tags)] = target
-                    for future in concurrent.futures.as_completed(futures):
-                        _check_cancel("metadata")
-                        target = futures[future]
-                        try:
-                            (
-                                _target,
-                                ok,
-                                detail,
-                                verified,
-                                verification_detail,
-                                skipped_keys,
-                            ) = future.result()
-                        except Exception as exc:
-                            success = False
-                            _record(
-                                "metadata",
-                                target,
-                                "failed",
-                                f"Metadata normalization failed: {exc}",
-                                planned=True,
-                                attempted=True,
-                                verified=False,
-                                verification_detail="Metadata task failed.",
-                                group_id=path_to_group.get(target),
-                            )
-                            raise RuntimeError(f"Metadata normalization failed for {target}") from exc
-                        status = "success" if ok and verified else "failed"
-                        if status == "failed":
-                            success = False
-                            if ok and verification_detail:
-                                detail = f"{detail} Verification failed: {verification_detail}"
+                metadata_items: List[tuple[str, Dict[str, object]]] = []
+                for target, tags in planned_tags.items():
+                    if not os.path.exists(ensure_long_path(target)):
                         _record(
                             "metadata",
                             target,
-                            status,
-                            detail,
-                            planned=True,
-                            attempted=True,
-                            verified=verified,
-                            verification_detail=verification_detail,
-                            group_id=path_to_group.get(target),
-                        )
-                        if not ok:
-                            raise RuntimeError(f"Metadata normalization failed for {target}")
-                        if ok and not verified:
-                            raise RuntimeError(f"Metadata verification failed for {target}")
-
-        # Step 6: quarantine or delete losers
-        cleanup_futures: Dict[concurrent.futures.Future[tuple[str, str, bool, str | None, str | None]], str] = {}
-        if not config.dry_run_execute:
-            with concurrent.futures.ThreadPoolExecutor(max_workers=io_workers) as executor:
-                for loser, disposition in loser_disposition.items():
-                    _check_cancel("loser_cleanup")
-                    effective = disposition if disposition in ("retain", "quarantine", "delete") else None
-                    if effective is None:
-                        effective = "retain" if config.retain_losers else "quarantine"
-                    if effective == "retain":
-                        quarantine_index[loser] = "retained"
-                        _record(
-                            "loser_cleanup",
-                            loser,
                             "skipped",
-                            "Loser retained by plan disposition.",
-                            planned=True,
-                            attempted=False,
-                            verified=False,
-                            verification_detail="Loser retained.",
-                            disposition=effective,
-                            group_id=path_to_group.get(loser),
-                            skip_reason="retain",
-                        )
-                        continue
-                    if not os.path.exists(loser):
-                        _record(
-                            "loser_cleanup",
-                            loser,
-                            "skipped",
-                            "Missing source; loser not moved or deleted.",
+                            "Missing source; metadata not written.",
                             planned=True,
                             attempted=False,
                             verified=False,
                             verification_detail="Source missing.",
-                            disposition=effective,
-                            group_id=path_to_group.get(loser),
+                            group_id=path_to_group.get(target),
                             skip_reason="missing_source",
                         )
                         continue
-                    cleanup_futures[executor.submit(_cleanup_loser_task, loser, effective)] = loser
+                    metadata_items.append((target, tags))
+                metadata_errors: List[str] = []
 
-                for future in concurrent.futures.as_completed(cleanup_futures):
-                    _check_cancel("loser_cleanup")
-                    loser = cleanup_futures[future]
-                    effective = loser_disposition.get(loser, "quarantine")
+                def _metadata_done(item: object, future: "concurrent.futures.Future[object]") -> None:
+                    nonlocal success
+                    target = item[0]  # type: ignore[index]
                     try:
-                        loser, action, verified, verification_detail, dest = future.result()
+                        (
+                            _target,
+                            ok,
+                            detail,
+                            verified,
+                            verification_detail,
+                            _skipped_keys,
+                        ) = future.result()  # type: ignore[misc]
                     except Exception as exc:
                         success = False
+                        metadata_errors.append(f"Metadata normalization failed for {target}: {exc}")
                         _record(
-                            "loser_cleanup",
-                            loser,
+                            "metadata",
+                            target,
                             "failed",
-                            f"Failed to clean up loser: {exc}",
+                            f"Metadata normalization failed: {exc}",
                             planned=True,
                             attempted=True,
-                            disposition=effective,
-                            group_id=path_to_group.get(loser),
+                            verified=False,
+                            verification_detail="Metadata task failed.",
+                            group_id=path_to_group.get(target),
                         )
-                        raise RuntimeError(f"Failed to cleanup loser: {loser}") from exc
-
-                    status = "success" if verified else "failed"
-                    if not verified:
+                        return
+                    status = "success" if ok and verified else "failed"
+                    if status == "failed":
                         success = False
-                    if action == "delete":
-                        if verified:
-                            quarantine_index[loser] = "deleted"
-                        _record(
-                            "loser_cleanup",
-                            loser,
-                            status,
-                            "Loser deleted.",
-                            planned=True,
-                            attempted=True,
-                            verified=verified,
-                            verification_detail=verification_detail,
-                            disposition="delete",
-                            group_id=path_to_group.get(loser),
+                        if ok and verification_detail:
+                            detail = f"{detail} Verification failed: {verification_detail}"
+                        metadata_errors.append(
+                            f"Metadata {'verification' if ok else 'normalization'} failed for {target}"
                         )
-                        if not verified:
-                            raise RuntimeError(f"Loser delete verification failed for {loser}")
-                    else:
-                        if verified and dest:
-                            quarantine_index[loser] = dest
-                        _record(
-                            "loser_cleanup",
-                            loser,
-                            status,
-                            "Loser quarantined.",
-                            planned=True,
-                            attempted=True,
-                            verified=verified,
-                            verification_detail=verification_detail,
-                            quarantine_path=dest,
-                            disposition="quarantine",
-                            group_id=path_to_group.get(loser),
-                        )
-                        if not verified:
-                            raise RuntimeError(f"Loser quarantine verification failed for {loser}")
+                    _record(
+                        "metadata",
+                        target,
+                        status,
+                        detail,
+                        planned=True,
+                        attempted=True,
+                        verified=verified,
+                        verification_detail=verification_detail,
+                        group_id=path_to_group.get(target),
+                    )
+
+                not_started = _run_in_pool(
+                    metadata_items,
+                    lambda item: _apply_metadata_task(*item),  # type: ignore[misc]
+                    max_workers=io_workers,
+                    on_done=_metadata_done,
+                    stop_requested=lambda: cancel.is_set() or bool(metadata_errors),
+                )
+                for target, _tags in not_started:  # type: ignore[misc]
+                    _record(
+                        "metadata",
+                        target,
+                        "skipped",
+                        "Execution stopped; metadata not written.",
+                        planned=True,
+                        attempted=False,
+                        verified=False,
+                        verification_detail="Not attempted.",
+                        group_id=path_to_group.get(target),
+                        skip_reason="not_attempted",
+                    )
+                if metadata_errors:
+                    raise RuntimeError(metadata_errors[0])
+                _check_cancel("metadata")
+
+        # Step 6: quarantine or delete losers
+        if not config.dry_run_execute:
+            cleanup_items: List[tuple[str, str]] = []
+            for loser, disposition in loser_disposition.items():
+                effective = disposition if disposition in ("retain", "quarantine", "delete") else None
+                if effective is None:
+                    effective = "retain" if config.retain_losers else "quarantine"
+                if effective == "retain":
+                    quarantine_index[loser] = "retained"
+                    _record(
+                        "loser_cleanup",
+                        loser,
+                        "skipped",
+                        "Loser retained by plan disposition.",
+                        planned=True,
+                        attempted=False,
+                        verified=False,
+                        verification_detail="Loser retained.",
+                        disposition=effective,
+                        group_id=path_to_group.get(loser),
+                        skip_reason="retain",
+                    )
+                    continue
+                cleanup_items.append((loser, effective))
+
+            cleanup_errors: List[str] = []
+            refused_losers: List[str] = []
+
+            def _cleanup_done(item: object, future: "concurrent.futures.Future[object]") -> None:
+                nonlocal success
+                loser, effective = item  # type: ignore[misc]
+                try:
+                    outcome = future.result()
+                except Exception as exc:
+                    success = False
+                    verb = "delete" if effective == "delete" else "quarantine"
+                    cleanup_errors.append(f"Failed to {verb} {loser}: {exc}")
+                    _record(
+                        "loser_cleanup",
+                        loser,
+                        "failed",
+                        f"Failed to clean up loser ({verb}): {exc}",
+                        planned=True,
+                        attempted=True,
+                        disposition=effective,
+                        group_id=path_to_group.get(loser),
+                    )
+                    return
+                assert isinstance(outcome, dict)
+                status = str(outcome["status"])
+                action = str(outcome["action"])
+                dest = outcome.get("dest")
+                verified = bool(outcome.get("verified"))
+                if status == "skipped":
+                    _record(
+                        "loser_cleanup",
+                        loser,
+                        "skipped",
+                        str(outcome["detail"]),
+                        planned=True,
+                        attempted=False,
+                        verified=False,
+                        verification_detail=outcome.get("verification_detail"),
+                        disposition=effective,
+                        group_id=path_to_group.get(loser),
+                        skip_reason=outcome.get("skip_reason"),
+                    )
+                    return
+                if outcome.get("refused"):
+                    # The file was not touched: a per-file safety refusal, not
+                    # an I/O error, so independent groups carry on.
+                    success = False
+                    refused_losers.append(loser)
+                    log(f"Loser left in place: {loser} — {outcome['detail']}")
+                    _record(
+                        "loser_cleanup",
+                        loser,
+                        "failed",
+                        str(outcome["detail"]),
+                        planned=True,
+                        attempted=False,
+                        verified=False,
+                        verification_detail=outcome.get("verification_detail"),
+                        disposition=effective,
+                        group_id=path_to_group.get(loser),
+                        skip_reason=outcome.get("skip_reason"),
+                    )
+                    return
+                if not verified:
+                    success = False
+                    cleanup_errors.append(f"{outcome.get('verification_detail')} ({loser})")
+                if action == "delete":
+                    if verified:
+                        quarantine_index[loser] = "deleted"
+                    _record(
+                        "loser_cleanup",
+                        loser,
+                        status,
+                        "Loser deleted.",
+                        planned=True,
+                        attempted=True,
+                        verified=verified,
+                        verification_detail=outcome.get("verification_detail"),
+                        disposition="delete",
+                        group_id=path_to_group.get(loser),
+                    )
+                else:
+                    if verified and dest:
+                        quarantine_index[loser] = str(dest)
+                    _record(
+                        "loser_cleanup",
+                        loser,
+                        status,
+                        "Loser quarantined.",
+                        planned=True,
+                        attempted=True,
+                        verified=verified,
+                        verification_detail=outcome.get("verification_detail"),
+                        quarantine_path=dest,
+                        disposition="quarantine",
+                        group_id=path_to_group.get(loser),
+                    )
+
+            not_started = _run_in_pool(
+                cleanup_items,
+                _cleanup_loser_task,
+                max_workers=io_workers,
+                on_done=_cleanup_done,
+                stop_requested=lambda: cancel.is_set() or bool(cleanup_errors),
+            )
+            stop_detail = (
+                "Execution cancelled by user request"
+                if cancel.is_set() and not cleanup_errors
+                else "Execution stopped after an error"
+            )
+            for loser, effective in not_started:  # type: ignore[misc]
+                _record(
+                    "loser_cleanup",
+                    loser,
+                    "skipped",
+                    f"{stop_detail}; loser not moved or deleted.",
+                    planned=True,
+                    attempted=False,
+                    verified=False,
+                    verification_detail="Not attempted.",
+                    disposition=effective,
+                    group_id=path_to_group.get(loser),
+                    skip_reason="not_attempted",
+                )
+            if cleanup_errors:
+                raise RuntimeError(cleanup_errors[0])
+            _check_cancel("loser_cleanup")
+            if refused_losers:
+                log(f"{len(refused_losers)} loser(s) were left in place; see the report.")
         else:
             for loser, disposition in loser_disposition.items():
                 _check_cancel("loser_cleanup")
@@ -1502,11 +1884,23 @@ def execute_consolidation_plan(
                 )
 
         # Step 7: cleanup redundant numeric suffixes on winners
+        # Only the renames the preview showed (``planned_winner_rename``), and
+        # only once the same-named loser really left this run.
         cleanup_candidates: List[tuple[str, str]] = []
         for group in plan.groups if plan else []:
-            candidate = _strip_trailing_numeric_suffix(group.winner_path)
-            if candidate and candidate != group.winner_path:
-                cleanup_candidates.append((group.winner_path, candidate))
+            candidate = planned_winner_rename(group)
+            if not candidate:
+                continue
+            if not config.dry_run_execute:
+                freed = [
+                    loser
+                    for loser in group.losers
+                    if _same_path(loser, candidate)
+                    and quarantine_index.get(loser) not in (None, "retained")
+                ]
+                if not freed:
+                    continue
+            cleanup_candidates.append((group.winner_path, candidate))
 
         rename_map: Dict[str, str] = {}
         if cleanup_candidates:
@@ -1543,7 +1937,7 @@ def execute_consolidation_plan(
                             skip_reason="missing_source",
                         )
                         continue
-                    if os.path.exists(candidate):
+                    if os.path.lexists(ensure_long_path(candidate)):
                         _record(
                             "filename_cleanup",
                             original,
@@ -1559,11 +1953,10 @@ def execute_consolidation_plan(
                         )
                         continue
                     try:
-                        os.replace(
-                            ensure_long_path(original),
-                            ensure_long_path(candidate),
+                        _rename_no_overwrite(original, candidate)
+                        verified = os.path.exists(ensure_long_path(candidate)) and not os.path.lexists(
+                            ensure_long_path(original)
                         )
-                        verified = os.path.exists(candidate) and not os.path.exists(original)
                         verification_detail = (
                             "Filename cleanup verified."
                             if verified
