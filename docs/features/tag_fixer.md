@@ -64,6 +64,16 @@ applying, the written rows drop out of the table and the log is kept; there is n
 automatic re-scan. Only one tag-writing job runs at a time across the Tag Fixer and
 both Genre Normalizer tabs.
 
+**Undoing an apply.** Those logs are enough to put the old values back, and
+`controllers/tag_revert.py` does it the preview-first way: pick a log (newest first),
+see per file and field what would be restored, then write exactly that. A file whose
+tags changed since the logged write is skipped and reported, never overwritten; a
+file that has been moved or deleted is reported as missing. Every value of a
+multi-value field comes back, a field that did not exist before is removed again, and
+WAV files with ID3 tags work too. The revert is itself logged
+(`Docs/tag_changes_revert_<timestamp>.jsonl`), so it can be reverted. *(Backend only
+for now: the page that offers it is part of the GUI redesign.)*
+
 ### An honest note on the "score tiers"
 
 If you read the code, you'll find two named thresholds:  a 0.90 "apply
