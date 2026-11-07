@@ -28,16 +28,22 @@ folders `Not Sorted/`, `Quarantine/`, `Trash/`, `Docs/` and `Playlists/` are nev
 entered; `Manual Review/` *is* scanned, because its tracks are exactly the ones
 missing metadata), the Tag Fixer:
 
-1. **Reads the file's current tags** — every genre value, not just the first. This
-   becomes the "before" side of any proposed change.
+1. **Reads the file's current tags** — every value of every field it can write, not
+   just the first (a track tagged with two artists shows both). This becomes the
+   "before" side of any proposed change.
 2. **Asks every available lookup source to identify the track**, and keeps whichever
    answer came back with the highest confidence score.
 3. **Only turns that answer into a proposal if the winning score clears a
    threshold** (0.75 out of 1.0 today). Below that, the track is left alone — the app
-   would rather show you nothing than a guess it isn't confident about.
+   would rather show you nothing than a guess it isn't confident about. Genres are
+   gathered only from answers that clear the same threshold, so a weak match can't
+   slip its genres in beside a confident one.
 4. **Compares the proposed values to what's already on the file** and shows you only
    the fields that would actually change. A field the service didn't return is never
-   proposed as blank.
+   proposed as blank. An artist, title or album proposal **replaces every value** of
+   that field with the one proposed value, and the row says so: a file tagged
+   "Artist A" and "Artist B" shows "Artist A; Artist B → New Artist", and the change
+   log records both old values.
 
 The result is a table: one row per proposed *field* change, built from the same
 function the writer uses, so a row shows exactly what applying it writes. Each row's

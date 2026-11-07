@@ -446,12 +446,14 @@ class PlaylistsWorkspace(WorkspaceBase):
         }[role]
         self.status_changed.emit(text, colour)
 
-    def _start(self, worker: PlaylistWorker, name: str) -> None:
+    def _start(self, worker: PlaylistWorker, name: str, *, library_write: bool = False) -> None:
         self._worker = worker
         worker.log_line.connect(self._on_worker_log)
         worker.done.connect(self._on_worker_done)
         self._set_busy(True)
-        self._start_worker(worker, name)
+        # Planning only reads; writing playlists changes files in the library
+        # and takes part in the one-library-writer-at-a-time rule.
+        self._start_worker(worker, name, library_write=library_write)
 
     # ── Slots ─────────────────────────────────────────────────────────────
 
@@ -542,6 +544,11 @@ class PlaylistsWorkspace(WorkspaceBase):
             self._status("Nothing to write", "neutral")
             return
 
+        if self._library_writes_blocked("Playlist write"):
+            self._log("Another job is changing the library — nothing was written.", "warn")
+            self._log_area.appendPlainText("Nothing was written (library busy).")
+            self._status("Not saved", "neutral")
+            return
         if not self._confirm_plan(worker.mode, plan):
             self._log("Nothing was written.", "info")
             self._log_area.appendPlainText("Nothing was written.")
@@ -552,6 +559,7 @@ class PlaylistsWorkspace(WorkspaceBase):
         self._start(
             PlaylistWorker(library_path=self._library_path, mode="write", plan=plan),
             "Write playlists",
+            library_write=True,
         )
 
     def _confirm_plan(self, mode: str, plan: list) -> bool:
@@ -605,7 +613,15 @@ class PlaylistsWorkspace(WorkspaceBase):
         return path
 
     def _on_library_changed(self, path: str) -> None:
-        # A plan is only valid for the library it was computed against.
+        # A plan is only valid for the library it was computed against. A
+        # confirmed write is left to finish (it writes exactly the confirmed
+        # plan, in the old library) and keeps the page busy until it does.
+        if self._worker is not None and self._worker.mode == "write":
+            self._log(
+                "Library changed — the confirmed playlist write for the previous "
+                "library will finish first.", "warn",
+            )
+            return
         if self._worker is not None:
             self._worker.cancel()
             self._worker = None

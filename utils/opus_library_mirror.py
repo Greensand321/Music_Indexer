@@ -114,26 +114,47 @@ def mirror_library(
         dest_root = destination if rel == "." else os.path.join(destination, rel)
         os.makedirs(dest_root, exist_ok=True)
 
+        entries: list[tuple[str, str, str]] = []  # (filename, dest_name, action)
         for filename in files:
             if _PARTIAL_MARKER in filename:
                 continue
             total_files += 1
+            stem, ext = os.path.splitext(filename)
+            if ext.lower() == ".flac":
+                entries.append((filename, f"{stem}.opus", "convert"))
+            else:
+                entries.append((filename, filename, "copy"))
+
+        # Two source files can target one destination name: "Song.flac"
+        # (converted to Song.opus) beside an existing "Song.opus", or names
+        # that differ only in letter case (the mirror often lands on a
+        # case-insensitive card or drive). Decide deterministically, before
+        # any worker runs: a file copied as-is (the existing .opus) wins over
+        # a conversion, then the first name in sorted order. The others are
+        # skipped and reported — never left to whichever worker finishes last.
+        claimed: dict[str, str] = {}
+        for filename, dest_name, action in sorted(
+            entries, key=lambda e: (e[2] != "copy", e[0])
+        ):
             src_path = os.path.join(root, filename)
-            ext = os.path.splitext(filename)[1].lower()
-            if ext == ".flac":
-                dest_name = f"{os.path.splitext(filename)[0]}.opus"
-                dest_path = os.path.join(dest_root, dest_name)
-                if os.path.exists(dest_path) and not overwrite:
-                    counters["skipped"] += 1
-                    skipped_files.append((src_path, "Destination already exists."))
-                    continue
+            key = dest_name.casefold()
+            if key in claimed:
+                counters["skipped"] += 1
+                skipped_files.append((
+                    src_path,
+                    f"Same destination name ({dest_name}) as {claimed[key]}; "
+                    f"{claimed[key]} was mirrored instead.",
+                ))
+                continue
+            claimed[key] = filename
+            dest_path = os.path.join(dest_root, dest_name)
+            if os.path.exists(dest_path) and not overwrite:
+                counters["skipped"] += 1
+                skipped_files.append((src_path, "Destination already exists."))
+                continue
+            if action == "convert":
                 tasks.append(("convert", src_path, dest_path, bitrate_kbps))
             else:
-                dest_path = os.path.join(dest_root, filename)
-                if os.path.exists(dest_path) and not overwrite:
-                    counters["skipped"] += 1
-                    skipped_files.append((src_path, "Destination already exists."))
-                    continue
                 tasks.append(("copy", src_path, dest_path, 0))
 
     total_tasks = len(tasks)

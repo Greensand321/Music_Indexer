@@ -11,7 +11,7 @@ per file, with its final lines) without touching the disk, and
 overwrites first.
 """
 
-import os, hashlib, difflib, re, shutil, time
+import codecs, os, hashlib, difflib, re, shutil, time
 from collections import defaultdict
 from dataclasses import dataclass, field
 from crash_watcher import record_event
@@ -20,6 +20,9 @@ from crash_logger import watcher
 # Default extensions for playlist generation
 DEFAULT_EXTS = {".mp3", ".flac", ".wav", ".aac", ".m4a", ".opus"}
 SKIP_SCAN_DIRS = {"trash", "docs", "not sorted", "playlists", "quarantine"}
+#: Where :func:`update_playlists` keeps a copy of every playlist it rewrites
+#: (under the library's ``Docs/``).
+PLAYLIST_BACKUP_DIR = "playlist_backups"
 
 
 _COPY_SUFFIX_RE = re.compile(r"(?:\s*-\s*copy|\s+copy)(?:\s*\d+)?$", re.IGNORECASE)
@@ -154,8 +157,9 @@ def generate_playlists(
         Function for logging messages.
     only_existing : bool
         Only touch folder playlists that already exist (never create new
-        ones). ``update_playlists`` uses this so that renaming a few files
-        does not create a playlist for every folder they live in.
+        ones). Note that merging (``overwrite=False``) rewrites the playlist
+        as a sorted set of lines, so it must never be used to patch a
+        user's playlist: :func:`update_playlists` edits entries in place.
     """
     if log_callback is None:
         log_callback = lambda msg: None
@@ -192,11 +196,13 @@ def generate_playlists(
         if os.path.exists(playlist_file):
             if not overwrite:
                 try:
-                    with open(playlist_file, "r", encoding="utf-8") as f:
-                        existing = {line.strip() for line in f if line.strip()}
-                except Exception as e:
-                    log_callback(f"\u2717 Failed to read {playlist_file}: {e}")
-                    existing = set()
+                    text = _read_playlist_text(playlist_file).text
+                except OSError as e:
+                    # Merging into a playlist we could not read would replace
+                    # it with only the new tracks: leave it alone instead.
+                    log_callback(f"\u2717 Failed to read {playlist_file}; left unchanged: {e}")
+                    continue
+                existing = {line.strip() for line in text.splitlines() if line.strip()}
                 rel_files.update(existing)
             log_callback(f"\u2192 Writing playlist: {playlist_file}")
         else:
@@ -245,19 +251,175 @@ def _find_library_root(paths) -> str | None:
     return None
 
 
+# ── Reading / writing existing playlists faithfully ──────────────────────
+
+#: Encodings tried, in order, for a playlist that is not valid UTF-8. latin-1
+#: decodes any byte string, so reading never fails on encoding alone; cp1252
+#: comes first because that is what Windows tools write into ``.m3u`` files.
+_FALLBACK_ENCODINGS = ("cp1252", "latin-1")
+
+
+@dataclass
+class PlaylistText:
+    """A playlist file's text and the encoding it was read with.
+
+    ``encoding`` is what :func:`_encode_playlist_text` writes back with, so an
+    edit never silently changes a file's encoding (``utf-8-sig`` keeps a BOM).
+    ``.m3u8`` files are UTF-8 by definition and are always written as UTF-8.
+    """
+
+    text: str
+    encoding: str
+
+
+def _read_playlist_text(path: str) -> PlaylistText:
+    """Read ``path`` with a UTF-8 → cp1252 → latin-1 fallback.
+
+    Raises ``OSError`` only when the file itself cannot be read.
+    """
+    with open(path, "rb") as fh:
+        data = fh.read()
+    if data.startswith(codecs.BOM_UTF8):
+        try:
+            return PlaylistText(data[len(codecs.BOM_UTF8):].decode("utf-8"), "utf-8-sig")
+        except UnicodeDecodeError:
+            data = data[len(codecs.BOM_UTF8):]
+    elif data.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)):
+        try:
+            return PlaylistText(data.decode("utf-16"), "utf-16")
+        except UnicodeDecodeError:
+            pass
+    try:
+        return PlaylistText(data.decode("utf-8"), "utf-8")
+    except UnicodeDecodeError:
+        pass
+    for enc in _FALLBACK_ENCODINGS:
+        try:
+            return PlaylistText(data.decode(enc), enc)
+        except UnicodeDecodeError:
+            continue
+    raise AssertionError("latin-1 decodes every byte string")  # pragma: no cover
+
+
+def _write_encoding(path: str, encoding: str) -> str:
+    if path.lower().endswith(".m3u8") and encoding not in ("utf-8", "utf-8-sig"):
+        return "utf-8"
+    return encoding or "utf-8"
+
+
+def _encode_playlist_text(path: str, text: str, encoding: str) -> bytes:
+    """``text`` in the encoding ``path`` was read with.
+
+    Raises ``UnicodeEncodeError`` when a new entry can't be represented in the
+    file's own encoding (e.g. a Japanese file name in a cp1252 ``.m3u``): the
+    caller must then leave the file alone rather than corrupt it.
+    """
+    return text.encode(_write_encoding(path, encoding))
+
+
+def _append_write_log(log_dir, log_lines, log_callback) -> None:
+    """Append ``log_lines`` to ``<log_dir>/playlist_writes.log``."""
+    if not log_dir or not log_lines:
+        return
+    try:
+        os.makedirs(log_dir, exist_ok=True)
+        stamp = time.strftime("%Y-%m-%d %H:%M:%S")
+        with open(os.path.join(log_dir, "playlist_writes.log"), "a", encoding="utf-8") as fh:
+            for line in log_lines:
+                fh.write(f"{stamp} {line}\n")
+    except OSError as exc:
+        log_callback(f"! Could not append to the playlist write log: {exc}")
+
+
+def _split_line(raw: str) -> tuple:
+    """``raw`` (one line, ending included) -> ``(content, line_ending)``."""
+    content = raw.rstrip("\r\n")
+    return content, raw[len(content):]
+
+
+def _rewrite_playlist_lines(text: str, playlist_dir: str, normalized_map: dict) -> tuple:
+    """Rewrite only the entries of ``text`` whose path is in ``normalized_map``.
+
+    Everything else — order, comments, blank lines, line endings, ``#EXTINF``
+    lines — is kept byte for byte. An entry mapped to ``None`` (deleted with
+    no replacement) is removed together with the ``#EXTINF``/``#EXT…`` lines
+    directly above it, so no orphaned ``#EXTINF`` is left pointing at the
+    next track. Returns ``(new_text, n_changed_entries)``.
+    """
+    out: list = []
+    # Index in ``out`` where the current entry's directive block starts
+    # (its #EXTINF line), or None.
+    block_start = None
+    changed = 0
+    for raw in text.splitlines(keepends=True):
+        content, ending = _split_line(raw)
+        entry = content.strip()
+        if not entry:
+            out.append(raw)
+            block_start = None
+            continue
+        if entry.startswith("#"):
+            if entry.upper().startswith("#EXTINF"):
+                block_start = len(out)
+            elif not entry.upper().startswith("#EXT") or entry.upper().startswith("#EXTM3U"):
+                block_start = None  # a plain comment / the header is not part of the entry
+            out.append(raw)
+            continue
+        is_abs = os.path.isabs(entry)
+        abs_line = os.path.normcase(os.path.normpath(
+            entry if is_abs else os.path.join(playlist_dir, entry)
+        ))
+        if abs_line not in normalized_map:
+            out.append(raw)
+            block_start = None
+            continue
+        new = normalized_map[abs_line]
+        if new is None:
+            if block_start is not None:
+                del out[block_start:]
+            changed += 1
+            block_start = None
+            continue
+        try:
+            new_entry = os.path.abspath(new) if is_abs else os.path.relpath(new, playlist_dir)
+        except ValueError:  # different drive on Windows: only an absolute path works
+            new_entry = os.path.abspath(new)
+        if new_entry != entry:
+            changed += 1
+            lead = content[: len(content) - len(content.lstrip())]
+            trail = content[len(content.rstrip()):]
+            out.append(f"{lead}{new_entry}{trail}{ending}")
+        else:
+            out.append(raw)
+        block_start = None
+    return "".join(out), changed
+
+
 @watcher.traced
 def update_playlists(changes, library_root=None, log_callback=None):
-    """Update ``.m3u`` playlists based on moved or deleted tracks.
+    """Update the playlists in ``<library>/Playlists`` for moved or deleted tracks.
 
-    ``changes`` may be either an iterable of new track paths or a mapping of
-    ``old_path -> new_path``. A ``None`` value means the old path was removed
-    without a replacement.
+    ``changes`` is a mapping of ``old_path -> new_path``; a ``None`` value
+    means the old path was removed without a replacement (its entry, and the
+    ``#EXTINF`` line above it, are dropped). An iterable of paths is accepted
+    for backward compatibility and treated as "nothing moved", so it changes
+    nothing.
+
+    Only entries whose path is a key of ``changes`` are rewritten. Order,
+    comments, ``#EXTINF`` pairing, line endings and the file's encoding are
+    kept. Missing entries that are *not* in ``changes`` are left alone — fuzzy
+    repair belongs to the previewed Repair tab (:func:`plan_playlist_repair`),
+    never to a side effect of a rename. No new playlist is ever created.
+
+    Each playlist is copied to ``<library>/Docs/playlist_backups/`` before it
+    is overwritten, and every backup and write is appended to
+    ``<library>/Docs/playlist_writes.log``. A playlist that can't be read, or
+    whose new entries can't be written in its own encoding, is left untouched
+    (and reported through ``log_callback``).
 
     ``library_root`` is the library whose ``Playlists/`` folder is updated.
     Pass it whenever you know it. When omitted, the nearest ancestor of the
-    changed paths that has a ``Playlists`` folder is used (the old code looked
-    only at the common path itself, so changes confined to one album silently
-    updated nothing).
+    changed paths that has a ``Playlists`` folder is used.
 
     Returns the number of playlist files rewritten (0 when nothing needed
     changing or no ``Playlists`` folder was found), so callers can report what
@@ -275,7 +437,9 @@ def update_playlists(changes, library_root=None, log_callback=None):
         move_map = {p: p for p in changes}
 
     normalized_map = {
-        os.path.normcase(os.path.normpath(old)): new for old, new in move_map.items()
+        os.path.normcase(os.path.normpath(os.path.abspath(old))): new
+        for old, new in move_map.items()
+        if old and new != old
     }
 
     all_paths = list(move_map.keys()) + [p for p in move_map.values() if p]
@@ -288,73 +452,67 @@ def update_playlists(changes, library_root=None, log_callback=None):
     if not os.path.isdir(playlists_dir):
         log_callback(f"• {playlists_dir} does not exist; nothing to update")
         return 0
+    if not normalized_map:
+        return 0
     record_event("playlist_generator: updating existing playlists")
 
-    name_index = None
-    token_index = None
-    valid_exts = {e.lower() for e in DEFAULT_EXTS}
+    docs_dir = os.path.join(root, "Docs")
+    backup_dir = os.path.join(docs_dir, PLAYLIST_BACKUP_DIR)
+    log_lines: list = []
     rewritten = 0
 
-    for dirpath, _dirs, files in os.walk(playlists_dir):
-        for fname in files:
+    for dirpath, dirnames, files in os.walk(playlists_dir):
+        dirnames.sort()
+        for fname in sorted(files):
             if not fname.lower().endswith((".m3u", ".m3u8")):
                 continue
             pl_path = os.path.join(dirpath, fname)
             try:
-                with open(pl_path, "r", encoding="utf-8") as f:
-                    lines = [ln.rstrip("\n") for ln in f]
-            except Exception:
+                original = _read_playlist_text(pl_path)
+            except OSError as exc:
+                # Never write a playlist we could not read.
+                log_callback(f"! Could not read {pl_path}; left unchanged: {exc}")
+                log_lines.append(f"ERROR {pl_path}: unreadable, left unchanged: {exc}")
                 continue
 
-            changed = False
-            new_lines = []
-            for ln in lines:
-                if ln.startswith("#"):
-                    new_lines.append(ln)
-                    continue
-                abs_line = os.path.normcase(os.path.normpath(os.path.join(dirpath, ln)))
-                if abs_line in normalized_map:
-                    new = normalized_map[abs_line]
-                    if new is None:
-                        changed = True
-                        continue
-                    rel_new = os.path.relpath(new, dirpath)
-                    if rel_new != ln:
-                        changed = True
-                    new_lines.append(rel_new)
-                else:
-                    if not os.path.exists(abs_line):
-                        if name_index is None or token_index is None:
-                            name_index, token_index = _build_audio_index(root, valid_exts)
-                        repaired = _pick_best_match(abs_line, name_index, token_index)
-                        if repaired:
-                            rel_repaired = os.path.relpath(repaired, dirpath)
-                            new_lines.append(rel_repaired)
-                            changed = True
-                            continue
-                    new_lines.append(ln)
+            new_text, n_changed = _rewrite_playlist_lines(
+                original.text, dirpath, normalized_map
+            )
+            if not n_changed:
+                continue
+            try:
+                data = _encode_playlist_text(pl_path, new_text, original.encoding)
+            except UnicodeEncodeError as exc:
+                log_callback(
+                    f"! {pl_path} is {original.encoding}-encoded and can't hold the new "
+                    f"file name(s); left unchanged: {exc}"
+                )
+                log_lines.append(f"ERROR {pl_path}: encoding {original.encoding}: {exc}")
+                continue
+            try:
+                rel = os.path.relpath(pl_path, playlists_dir).replace(os.sep, "_")
+                os.makedirs(backup_dir, exist_ok=True)
+                bak = _backup_path(os.path.join(backup_dir, rel))
+                shutil.copy2(pl_path, bak)
+                log_lines.append(f"BACKUP {pl_path} -> {bak}")
+            except OSError as exc:
+                log_callback(f"! Could not back up {pl_path}; left unchanged: {exc}")
+                log_lines.append(f"ERROR {pl_path}: backup failed, left unchanged: {exc}")
+                continue
+            try:
+                with open(pl_path, "wb") as fh:
+                    fh.write(data)
+            except OSError as exc:
+                log_callback(f"! Could not update {pl_path} (backup: {bak}): {exc}")
+                log_lines.append(f"ERROR {pl_path}: {exc}")
+                continue
+            rewritten += 1
+            log_lines.append(
+                f"UPDATE {pl_path} ({n_changed} entr{'y' if n_changed == 1 else 'ies'})"
+            )
+            log_callback(f"✓ Updated playlist {pl_path}")
 
-            if changed:
-                try:
-                    with open(pl_path, "w", encoding="utf-8") as f:
-                        for l in new_lines:
-                            f.write(l + "\n")
-                    rewritten += 1
-                    log_callback(f"✓ Updated playlist {pl_path}")
-                except Exception as exc:
-                    log_callback(f"! Could not update {pl_path}: {exc}")
-
-    new_tracks = [p for p in move_map.values() if p]
-    if new_tracks:
-        # Merge moved tracks into folder playlists that already exist; never
-        # create new playlists as a side effect of a rename.
-        generate_playlists(
-            {p: p for p in new_tracks},
-            root,
-            overwrite=False,
-            log_callback=lambda m: None,
-            only_existing=True,
-        )
+    _append_write_log(docs_dir, log_lines, log_callback)
     record_event("playlist_generator: playlist update complete")
     return rewritten
 
@@ -373,6 +531,9 @@ class PlannedPlaylist:
     changes: list = field(default_factory=list)     # repair: (old_line, new_line)
     unresolved: list = field(default_factory=list)  # repair: entries still missing
     error: str = ""                 # repair: the playlist could not be read
+    #: Encoding the file is written with. A repaired playlist keeps the
+    #: encoding it was read with (``.m3u8`` is always UTF-8).
+    encoding: str = "utf-8"
 
     @property
     def action(self) -> str:
@@ -457,13 +618,16 @@ def plan_playlist_repair(playlist_paths, library_root, prefer_opus=False, log_ca
         pl_dir = os.path.dirname(pl_path)
         item = PlannedPlaylist(path=pl_path, exists=os.path.exists(pl_path))
         try:
-            with open(pl_path, "r", encoding="utf-8-sig") as fh:
-                raw_lines = [ln.rstrip("\r\n") for ln in fh]
+            # A cp1252/latin-1 playlist (common for Windows-made .m3u files)
+            # is read with a fallback instead of aborting the whole preview.
+            original = _read_playlist_text(pl_path)
         except OSError as exc:
             item.error = str(exc)
             log_callback(f"! Could not read {pl_path}: {exc}")
             plan.append(item)
             continue
+        item.encoding = _write_encoding(pl_path, original.encoding)
+        raw_lines = [ln.rstrip("\r\n") for ln in original.text.splitlines()]
 
         for raw in raw_lines:
             entry = raw.strip()
@@ -489,7 +653,10 @@ def plan_playlist_repair(playlist_paths, library_root, prefer_opus=False, log_ca
                 found = _pick_best_match(target, name_index, token_index)
 
             if found:
-                new_line = found if was_abs else os.path.relpath(found, pl_dir)
+                try:
+                    new_line = found if was_abs else os.path.relpath(found, pl_dir)
+                except ValueError:  # different drive on Windows
+                    new_line = found
                 item.lines.append(new_line)
                 item.changes.append((entry, new_line))
             else:
@@ -515,7 +682,9 @@ def write_playlist_plan(plan, backup=True, log_callback=None, log_dir=None) -> d
     Any file that exists at write time is first copied to
     ``<name>.<timestamp>.bak`` beside it (when ``backup``). With ``log_dir``
     (normally ``<library>/Docs``) every write and backup is appended to
-    ``playlist_writes.log`` there.
+    ``playlist_writes.log`` there. Each file is written in its item's
+    ``encoding``; an item whose lines can't be encoded that way is reported in
+    ``errors`` and left untouched.
 
     Returns ``{"written": [...], "backups": [...], "errors": [(path, msg)]}``.
     """
@@ -526,15 +695,23 @@ def write_playlist_plan(plan, backup=True, log_callback=None, log_dir=None) -> d
         path = item.path
         try:
             os.makedirs(os.path.dirname(path), exist_ok=True)
+            encoding =_write_encoding(path, getattr(item, "encoding", "") or "utf-8")
+            try:
+                data = "".join(line + "\n" for line in item.lines).encode(encoding)
+            except UnicodeEncodeError as exc:
+                # Never re-encode a playlist behind the user's back: report it.
+                raise OSError(
+                    f"the new entries can't be written in this playlist's encoding "
+                    f"({encoding}): {exc}"
+                ) from exc
             if backup and os.path.exists(path):
                 bak = _backup_path(path)
                 shutil.copy2(path, bak)
                 backups.append(bak)
                 log_lines.append(f"BACKUP {path} -> {bak}")
                 log_callback(f"• Backed up {os.path.basename(path)} → {os.path.basename(bak)}")
-            with open(path, "w", encoding="utf-8") as fh:
-                for line in item.lines:
-                    fh.write(line + "\n")
+            with open(path, "wb") as fh:
+                fh.write(data)
             written.append(path)
             log_lines.append(f"WRITE {path} ({item.entries} entries)")
             log_callback(
@@ -544,13 +721,5 @@ def write_playlist_plan(plan, backup=True, log_callback=None, log_dir=None) -> d
             errors.append((path, str(exc)))
             log_lines.append(f"ERROR {path}: {exc}")
             log_callback(f"! Could not write {path}: {exc}")
-    if log_dir and log_lines:
-        try:
-            os.makedirs(log_dir, exist_ok=True)
-            stamp = time.strftime("%Y-%m-%d %H:%M:%S")
-            with open(os.path.join(log_dir, "playlist_writes.log"), "a", encoding="utf-8") as fh:
-                for line in log_lines:
-                    fh.write(f"{stamp} {line}\n")
-        except OSError as exc:
-            log_callback(f"! Could not append to the playlist write log: {exc}")
+    _append_write_log(log_dir, log_lines, log_callback)
     return {"written": written, "backups": backups, "errors": errors}
