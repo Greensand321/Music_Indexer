@@ -1,29 +1,39 @@
 """AlphaDEX — Mosaic Reveal landing page.
 
-Shown once after the splash screen fades.  A 7 × 5 grid of colourful
-album-art placeholder tiles flies in from off-screen with a staggered delay,
-assembling into a full-window mosaic.  A frosted-glass CTA card floats in the
-reserved centre block with the app name and an "Open Library" button.
+The first window the app shows (it replaced the old splash screen).  A 7 × 5
+grid of colourful album-art placeholder tiles flies in from off-screen with a
+staggered delay, assembling into a full-window mosaic.  A frosted-glass CTA
+card floats in the reserved centre block with the app name and one button:
+"Initialize" when a saved library exists, otherwise "Choose Library Folder".
 
 Sequence
 --------
-1. ``show_animated()`` — fade the window in, then start tile fly-in.
-2. User clicks "Open Library" → ``QFileDialog`` → ``_accept(path)``.
-   (Or "Continue" if a saved library path is available.)
-3. Any still-running fly-in is stopped; all tiles snap to their resting
-   positions, then scatter to random off-screen targets.
+1. ``show_animated()`` — fade the window in (``faded_in`` is emitted when it
+   is fully visible), pause on the logo, then start the tile fly-in.
+2. User clicks "Initialize" (saved library) or "Choose Library Folder"
+   → ``QFileDialog`` → ``_accept(path)``.
+3. The pending fly-in (timer and animation) is cancelled; tiles scatter to
+   random off-screen targets from wherever they are.  ``_accept`` runs once:
+   later clicks are ignored.
 4. ``library_selected(path)`` is emitted at the *start* of the fade-out so
-   the caller can cross-fade the main window in simultaneously.
+   the caller can cross-fade the main window in simultaneously.  A safety
+   timer guarantees the fade-out happens even if the scatter animation is
+   interrupted.
 5. ``finished`` is emitted after the landing window is hidden.
+
+The album-art scanner runs under ``gui.workers.start_worker`` and is
+cancelled (never terminated) when the landing exits or is closed.
 """
 from __future__ import annotations
 
 import concurrent.futures
 import hashlib
 import json
+import logging
 import os
 import random
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -52,9 +62,8 @@ FADE_OUT_MS  = 420   # landing window fade-out / main-window fade-in
 _SCAN_DEPTH = 7   # max folder depth searched for art (root = 0)
 
 # ── Art-scanner diagnostics ────────────────────────────────────────────────────
-# Set True to print per-file extraction results to the terminal on startup.
-# Flip to False once you have confirmed which extraction path your library uses.
-_ART_SCAN_DEBUG: bool = True
+# A one-line scan summary is logged at DEBUG level (never printed).
+_log = logging.getLogger(__name__)
 
 # Pause between the window finishing its fade-in and the tiles starting to fly.
 # During this window the CTA card ("AlphaDEX") is the only visible element —
@@ -87,6 +96,20 @@ _GRADS: list[tuple[str, str]] = [
 # ─────────────────────────────────────────────────────────────────────────────
 # Helpers
 # ─────────────────────────────────────────────────────────────────────────────
+
+def _nearest_existing_dir(path: str) -> str:
+    """The deepest existing ancestor of *path* (or "" if none / no path)."""
+    if not path:
+        return ""
+    p = Path(path)
+    for candidate in (p, *p.parents):
+        try:
+            if candidate.is_dir():
+                return str(candidate)
+        except OSError:
+            continue
+    return ""
+
 
 def _darken(hex_color: str, pct: int) -> str:
     """Return a version of *hex_color* darkened by *pct* percent (HSV value)."""
@@ -191,9 +214,17 @@ class _CTACard(QtWidgets.QFrame):
     open_clicked  = Signal()
     reuse_clicked = Signal()
 
-    def __init__(self, parent: QtWidgets.QWidget, saved_path: str = "") -> None:
+    def __init__(
+        self,
+        parent: QtWidgets.QWidget,
+        saved_path: str = "",
+        missing_path: str = "",
+    ) -> None:
         super().__init__(parent)
         self._saved = saved_path
+        self._missing = missing_path
+        self.main_button: QtWidgets.QPushButton | None = None
+        self.tagline: QtWidgets.QLabel | None = None
         self.setAutoFillBackground(False)
         self.setAttribute(QtCore.Qt.WidgetAttribute.WA_NoSystemBackground)
         self._build()
@@ -246,10 +277,18 @@ class _CTACard(QtWidgets.QFrame):
         )
 
         # ── Tagline ───────────────────────────────────────────────────────
-        tag_lbl = QtWidgets.QLabel("Your library, organized.")
+        if self._missing:
+            # The saved library is gone (folder deleted, drive unplugged):
+            # say so instead of offering an "Initialize" that cannot work.
+            tag_lbl = QtWidgets.QLabel("Saved library not found.\nChoose a folder to continue.")
+            tag_lbl.setToolTip(f"Not found: {self._missing}")
+            tag_lbl.setWordWrap(True)
+        else:
+            tag_lbl = QtWidgets.QLabel("Your library, organized.")
         tf = QtGui.QFont(UI_FAMILY, 15)
         tag_lbl.setFont(tf)
         tag_lbl.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        self.tagline = tag_lbl
         tag_lbl.setStyleSheet(
             f"color: {text_muted}; background: transparent; letter-spacing: 0.3px;"
         )
@@ -295,6 +334,7 @@ class _CTACard(QtWidgets.QFrame):
         """)
         main_btn.clicked.connect(btn_action)
         lay.addWidget(main_btn)
+        self.main_button = main_btn
 
     # ── Paint ─────────────────────────────────────────────────────────────
 
@@ -475,7 +515,17 @@ class _ArtScanner(QtCore.QThread):
         super().__init__()
         self._library = library_path
         self._n       = tile_count
+        # Set by cancel(); also polled by the pool workers (thread-safe).
+        self._cancel  = threading.Event()
         self.setObjectName("ArtScanner")
+
+    def cancel(self) -> None:
+        """Stop at the next safe point (directory walk, file, or future)."""
+        self._cancel.set()
+        self.requestInterruption()
+
+    def _stopping(self) -> bool:
+        return self._cancel.is_set() or self.isInterruptionRequested()
 
     # ── Low-level helpers ─────────────────────────────────────────────────
 
@@ -561,7 +611,7 @@ class _ArtScanner(QtCore.QThread):
 
         def _walk(dirpath: str, depth: int) -> None:
             """Recursively walk directories, tracking depth incrementally."""
-            if depth >= _SCAN_DEPTH:
+            if depth >= _SCAN_DEPTH or self._stopping():
                 return
 
             try:
@@ -634,6 +684,8 @@ class _ArtScanner(QtCore.QThread):
 
         # ── 2. Embedded art — every audio file in the directory ────────────
         for name in self._scandir_files(dirpath):
+            if self._cancel.is_set():
+                break
             if not _is_audio_file(name):
                 continue
             result = self._cover_from_file(os.path.join(dirpath, name))
@@ -654,7 +706,7 @@ class _ArtScanner(QtCore.QThread):
         history  = _ArtHistory()
         dirpaths = self._ordered_dirs(history)
 
-        if self.isInterruptionRequested():
+        if self._stopping():
             return
 
         selected:       list[str]              = []
@@ -686,7 +738,7 @@ class _ArtScanner(QtCore.QThread):
 
         try:
             _fill()
-            while pending and tile_index < self._n and not self.isInterruptionRequested():
+            while pending and tile_index < self._n and not self._stopping():
                 done, _ = concurrent.futures.wait(
                     pending,
                     return_when=concurrent.futures.FIRST_COMPLETED,
@@ -734,7 +786,11 @@ class _ArtScanner(QtCore.QThread):
                                 tile_index += 1
                 _fill()
         finally:
-            executor.shutdown(wait=False, cancel_futures=True)
+            # Tell in-flight directory reads to stop at the next file, then
+            # wait for them: no pool thread outlives this QThread (so the
+            # JobRegistry's wait on quit really covers all of the scan).
+            self._cancel.set()
+            executor.shutdown(wait=True, cancel_futures=True)
 
         # ── Fill-cycle: fewer unique covers than tiles ─────────────────────
         # If the library has fewer unique albums than tile slots, cycle through
@@ -751,7 +807,7 @@ class _ArtScanner(QtCore.QThread):
                 tile_index += 1
                 fill_count += 1
 
-        if _ART_SCAN_DEBUG:
+        if _log.isEnabledFor(logging.DEBUG):
             unique = tile_index - fill_count
             parts = [f"tiles={tile_index}/{self._n}"]
             if fill_count:
@@ -761,7 +817,7 @@ class _ArtScanner(QtCore.QThread):
                 parts.append(f"no-cover={no_cover_dirs}")
             parts.append(f"dirs={len(dirpaths)}")
             parts.append(f"elapsed={time.monotonic() - t0:.2f}s")
-            print(f"[ArtScan] {', '.join(parts)}", file=sys.stderr, flush=True)
+            _log.debug("[ArtScan] %s", ", ".join(parts))
 
         # Mark history as dirty (deferred write), then persist it
         history.add_and_save(selected)
@@ -787,12 +843,17 @@ class MosaicLanding(QtWidgets.QWidget):
     library_selected = Signal(str)   # emitted at start of fade-out; path is ready
     finished         = Signal()      # emitted after window is hidden
     tile_clicked     = Signal(str)   # emitted when user clicks a tile; payload is dirpath
+    faded_in         = Signal()      # emitted once the window is fully visible
 
     def __init__(
         self,
         geometry: QtCore.QRect,
         saved_path: str = "",
+        missing_path: str = "",
     ) -> None:
+        """``saved_path``: a saved library that exists ("Initialize").
+        ``missing_path``: a saved library that no longer exists; the card
+        says so and offers "Choose Library Folder" instead."""
         super().__init__(None, QtCore.Qt.WindowType.FramelessWindowHint)
         self.setGeometry(geometry)
         # Prevent the OS from maximizing or resizing a frameless window,
@@ -801,7 +862,11 @@ class MosaicLanding(QtWidgets.QWidget):
         self._w       = geometry.width()
         self._h       = geometry.height()
         self._saved   = saved_path
+        self._missing = "" if saved_path else missing_path
         self._pending = ""
+        # Set by the first _accept(); makes the exit sequence run once.
+        self._exiting = False
+        self._fading_out = False
 
         self._tiles: list[_Tile] = []
         self._fly_in_grp:  QtCore.QParallelAnimationGroup | None = None
@@ -811,6 +876,27 @@ class MosaicLanding(QtWidgets.QWidget):
         self._fade_out_anim: object = None
         self._scanner: object = None   # _ArtScanner | None
         self._art_history: _ArtHistory | None = None  # Track for deferred save
+
+        # The logo-moment pause before the fly-in. A member timer (not a bare
+        # singleShot) so _accept() can cancel it: a fly-in that starts during
+        # the scatter stops the scatter's animations and the landing never
+        # exits (DS-01).
+        self._fly_in_timer = QtCore.QTimer(self)
+        self._fly_in_timer.setSingleShot(True)
+        self._fly_in_timer.setInterval(_LOGO_PAUSE_MS)
+        self._fly_in_timer.timeout.connect(self._fly_in)
+        # Fallback in case the scatter group never reports ``finished``.
+        self._exit_safety_timer = QtCore.QTimer(self)
+        self._exit_safety_timer.setSingleShot(True)
+        self._exit_safety_timer.timeout.connect(self._fade_out)
+
+        # The landing lives for a few seconds; read the gradient setting once
+        # instead of re-reading the config file on every paint.
+        try:
+            from gui.widgets.gradient_bg import _gradient_enabled
+            self._gradient_on = bool(_gradient_enabled())
+        except Exception:
+            self._gradient_on = True
 
         self._compute_grid()
         self._build_tiles()
@@ -896,7 +982,7 @@ class MosaicLanding(QtWidgets.QWidget):
             self._start_art_scanner()
 
     def _build_cta(self) -> None:
-        self._cta = _CTACard(self, self._saved)
+        self._cta = _CTACard(self, self._saved, self._missing)
         self._cta.setGeometry(self._center_rect)
         self._cta.open_clicked.connect(self._on_open_clicked)
         self._cta.reuse_clicked.connect(
@@ -925,16 +1011,21 @@ class MosaicLanding(QtWidgets.QWidget):
         anim.setDuration(_FADE_IN_MS)
         anim.setEasingCurve(QtCore.QEasingCurve.Type.OutCubic)
         anim.valueChanged.connect(lambda v: self.setWindowOpacity(float(v)))
-        anim.finished.connect(
-            lambda: QtCore.QTimer.singleShot(_LOGO_PAUSE_MS, self._fly_in)
-        )
+        anim.finished.connect(self._on_faded_in)
         self._fade_in_anim = anim
         anim.start()
+
+    def _on_faded_in(self) -> None:
+        if not self._exiting:
+            self._fly_in_timer.start()
+        self.faded_in.emit()
 
     # ── Fly-in ────────────────────────────────────────────────────────────
 
     def _fly_in(self) -> None:
         """Staggered fly-in: tiles arrive in random order from off-screen edges."""
+        if self._exiting:
+            return
         order = list(range(len(self._tiles)))
         random.shuffle(order)
 
@@ -944,7 +1035,7 @@ class MosaicLanding(QtWidgets.QWidget):
             seq  = QtCore.QSequentialAnimationGroup(grp)
             seq.addAnimation(QtCore.QPauseAnimation(seq_i * _STAGGER_MS))
 
-            anim = QtCore.QPropertyAnimation(tile, b"pos")
+            anim = QtCore.QPropertyAnimation(tile, b"pos", seq)
             anim.setStartValue(self._off_screen(tile._target))
             anim.setEndValue(tile._target)
             anim.setDuration(_FLY_IN_MS)
@@ -959,7 +1050,9 @@ class MosaicLanding(QtWidgets.QWidget):
     # ── User action handlers ───────────────────────────────────────────────
 
     def _on_open_clicked(self) -> None:
-        start = self._saved or str(Path.home())
+        if self._exiting:
+            return
+        start = self._saved or _nearest_existing_dir(self._missing) or str(Path.home())
 
         # Standalone top-level dialog (no parent) to avoid compositor
         # blank-outs on Linux; manually centred over this landing window.
@@ -984,20 +1077,25 @@ class MosaicLanding(QtWidgets.QWidget):
                 self._accept(selected[0])
 
     def _accept(self, path: str) -> None:
-        """Validate the chosen path and start the exit sequence."""
-        if not path:
+        """Start the exit sequence for *path*. Runs once; later calls (a second
+        click, a tile click mid-scatter) are ignored."""
+        if not path or self._exiting:
             return
+        self._exiting = True
         self._pending = path
 
-        # Stop any running fly-in and snap all tiles to their resting positions
+        # Cancel the pending fly-in (timer and animation). Tiles scatter from
+        # wherever they are, so a click mid-fly-in never snaps them.
+        self._fly_in_timer.stop()
         if (
             self._fly_in_grp is not None
             and self._fly_in_grp.state()
             == QtCore.QAbstractAnimation.State.Running
         ):
             self._fly_in_grp.stop()
-        for tile in self._tiles:
-            tile.move(tile._target)
+
+        # The scanner's remaining covers would never be seen.
+        self._stop_scanner()
 
         self._do_scatter()
 
@@ -1015,7 +1113,7 @@ class MosaicLanding(QtWidgets.QWidget):
             seq.addAnimation(
                 QtCore.QPauseAnimation(random.randint(0, _SCATTER_MAX))
             )
-            anim = QtCore.QPropertyAnimation(tile, b"pos")
+            anim = QtCore.QPropertyAnimation(tile, b"pos", seq)
             anim.setStartValue(tile.pos())
             anim.setEndValue(self._scatter_target(tile._target))
             anim.setDuration(_FLY_OUT_MS)
@@ -1026,14 +1124,25 @@ class MosaicLanding(QtWidgets.QWidget):
         self._fly_out_grp = grp
         grp.finished.connect(self._fade_out)
         grp.start()
+        # Safety net: whatever happens to the scatter, the landing exits.
+        self._exit_safety_timer.start(_SCATTER_MAX + _FLY_OUT_MS + 500)
 
     def _fade_out(self) -> None:
+        if self._fading_out:
+            return
+        self._fading_out = True
+        self._exit_safety_timer.stop()
+        if self._fade_in_anim is not None:
+            try:
+                self._fade_in_anim.stop()
+            except RuntimeError:
+                pass
         # Emit path now so the caller can start fading the main window in,
         # creating a simultaneous cross-dissolve while we fade out.
         self.library_selected.emit(self._pending)
 
         anim = QtCore.QVariantAnimation(self)
-        anim.setStartValue(1.0)
+        anim.setStartValue(float(self.windowOpacity()))
         anim.setEndValue(0.0)
         anim.setDuration(FADE_OUT_MS)
         anim.setEasingCurve(QtCore.QEasingCurve.Type.InCubic)
@@ -1043,24 +1152,25 @@ class MosaicLanding(QtWidgets.QWidget):
         anim.start()
 
     def _done(self) -> None:
-        if self._scanner is not None:
-            # Disconnect signals before cleanup to prevent race conditions
-            self._scanner.art_found.disconnect()
-            self._scanner.requestInterruption()
-            if not self._scanner.wait(2000):
-                # Thread did not exit cleanly; force termination
-                self._scanner.terminate()
-                self._scanner.wait()
-            self._scanner = None
+        self._stop_scanner()
         self.hide()
         self.finished.emit()
+
+    def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # noqa: N802
+        """Alt+F4 on the landing: stop the scan so quitting never destroys a
+        running thread. (The app quits; ``alpha_dex_gui.main`` waits for the
+        JobRegistry before returning.)"""
+        self._fly_in_timer.stop()
+        self._exit_safety_timer.stop()
+        self._stop_scanner()
+        super().closeEvent(event)
 
     # ── Tile click handler ────────────────────────────────────────────────
 
     def _on_tile_clicked(self, dirpath: str) -> None:
         """User clicked an album-art tile — begin the exit sequence and signal
         the caller to navigate to the player and start playing *dirpath*."""
-        if not dirpath:
+        if not dirpath or self._exiting:
             return
         self.tile_clicked.emit(dirpath)
         # Reuse the same exit flow as clicking Initialize.
@@ -1071,10 +1181,29 @@ class MosaicLanding(QtWidgets.QWidget):
     # ── Art scanner ───────────────────────────────────────────────────────
 
     def _start_art_scanner(self) -> None:
+        from gui.workers import start_worker
+
         scanner = _ArtScanner(self._saved, len(self._tiles))
         scanner.art_found.connect(self._on_art_found)
         self._scanner = scanner
-        scanner.start()
+        # The JobRegistry keeps the thread alive until it really finishes, so
+        # dropping our reference (or closing the landing) mid-scan is safe.
+        start_worker(scanner, owner=self, name="Album-art scan")
+
+    def _stop_scanner(self) -> None:
+        """Ask the scanner to stop and forget it: never block, never terminate."""
+        scanner = self._scanner
+        self._scanner = None
+        if scanner is None:
+            return
+        try:
+            scanner.art_found.disconnect(self._on_art_found)
+        except (RuntimeError, TypeError):
+            pass
+        try:
+            scanner.cancel()
+        except RuntimeError:
+            pass
 
     def _on_art_found(self, tile_index: int, image: QtGui.QImage, dirpath: str) -> None:
         # We are back on the main thread here; QPixmap conversion is safe.
@@ -1092,14 +1221,11 @@ class MosaicLanding(QtWidgets.QWidget):
         p = QtGui.QPainter(self)
         try:
             from gui.themes.manager import get_manager
-            from gui.widgets.gradient_bg import (
-                _gradient_enabled,
-                paint_window_gradient,
-            )
+            from gui.widgets.gradient_bg import paint_window_gradient
             t = get_manager().current
             # Solid base (same as sidebar_bg so it blends with the main window)
             p.fillRect(self.rect(), QtGui.QColor(t.sidebar_bg))
-            if _gradient_enabled():
+            if self._gradient_on:
                 paint_window_gradient(
                     p, self, t,
                     radius_scale=0.85,
