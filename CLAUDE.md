@@ -37,9 +37,9 @@ The core workflows, in order of user importance:
 3. **Library Sync** — compares an existing library against an incoming folder,
    produces a copy/move plan, previews it, then executes.
 4. **Tag Fixer** — looks up AcoustID metadata (MusicBrainz enrichment nested
-   inside an AcoustID match; MusicBrainz is not an independently-discovered
-   lookup source today — see `docs/features/tag_fixer.md`) and proposes tag
-   corrections for review before writing.
+   inside an AcoustID match; MusicBrainz is also a search source of its own when
+   selected in Settings — see `docs/features/tag_fixer.md`) and proposes per-field
+   tag corrections for review before writing exactly what is ticked.
 5. **Playlist Creator** — tempo/energy bucketing, Auto-DJ chaining, K-Means
    and HDBSCAN clustering, genre tag-filling. (A "year-gap assistant" is
    referenced in some older material; no such feature exists — see
@@ -316,10 +316,10 @@ section kept separate from planned-but-unbuilt features. Summary:
   and have stub functions in `metadata_service.py` that return `{}` (placeholders,
   not implementations) — but the Settings UI now shows them visibly disabled with an
   explanatory tooltip rather than silently omitting or misrepresenting them.
-  Discogs is roadmap-only. Separately: `MusicBrainzService` doesn't subclass
-  `MetadataPlugin`, so it isn't independently discovered by the Tag Fixer's
-  automatic scan — MusicBrainz only ever contributes via nested enrichment inside
-  an AcoustID match.
+  Discogs is roadmap-only. MusicBrainz contributes via enrichment inside an
+  AcoustID match and, when chosen in Settings, as its own search source
+  (`plugins/musicbrainz_plugin.py`). Keys: `metadata_api_key` is the AcoustID key
+  (empty = built-in key), `lastfm_api_key` the Last.fm key.
 - **Tidal-dl sync:** referenced historically but has no UI or workflow. Dormant.
 - **Library Sync per-item flags:** ✅ IMPLEMENTED and wired in the Qt app. Right-click
   an incoming track in `gui/workspaces/library_sync.py` to flag copy/replace/clear or
@@ -336,7 +336,8 @@ section kept separate from planned-but-unbuilt features. Summary:
   is canonical for new work; leave the vendored copy alone unless you are
   specifically changing it.** Unifying them is explicitly not planned. The one
   consequence to remember: a fix to a root module does not reach Library Sync
-  automatically — port it across deliberately if Library Sync needs it. See
+  automatically — port it across deliberately if Library Sync needs it (the
+  decoded-Chromaprint fingerprint distance was ported this way). See
   `docs/architecture.md`.
 - **Canonical genre mapping is in the Qt app** (`gui/workspaces/genres.py`,
   "Normalize with a mapping" tab), backed by `controllers/normalize_controller.py`
@@ -361,10 +362,16 @@ section kept separate from planned-but-unbuilt features. Summary:
   downsampling (>5,000 tracks) without subsetting labels/tracks, which broke the 3-D
   generator outright and would have mislabelled points. If you touch that block,
   keep every array subset together.
-- **Several UI controls across the app are decorative** (built, but not read by
-  the code they appear to control) — the Duplicates workspace's per-group
-  disposition combo, the Playlist Generator's tempo/energy range fields and
-  "Prefer Opus" checkbox, and
-  most of the Fuzzy Duplicate Finder dialog's search/filter fields. Don't assume a
-  visible checkbox has an effect without checking its handler — see
-  `docs/gui_inventory.md` for the full list.
+- **Decorative controls were wired or switched off** in the 2026-11 fix phase (the
+  Duplicates per-group disposition, the Playlist Generator's tempo/energy ranges and
+  "Prefer Opus" now work; controls the engine ignores — e.g. the Indexer's Phase C /
+  Flush cache / Max workers — are disabled with an explanatory tooltip). Don't add
+  new controls that nothing reads; `docs/ROADMAP.md` "Controls that are still
+  switched off" lists the rest.
+- **Every file-changing job takes the library-write lock.** Start it with
+  `self._start_worker(..., library_write=True)` after checking
+  `self._library_writes_blocked("Action name")`, so two pages never change library
+  files at once. Read-only jobs pass `ask_before_quit=False`.
+- **GUI redesign groundwork lives in `docs/redesign/`** — the intent of every page,
+  the proposed information architecture, design-system and motion plan, and the
+  owner's open decisions. Read `docs/redesign/README.md` before restructuring pages.
