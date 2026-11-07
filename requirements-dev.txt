@@ -1,0 +1,27 @@
+# Development / test dependencies for AlphaDEX.
+#
+#   pip install -r requirements-dev.txt
+#   pytest                      # whole suite (GUI tests run headless)
+#
+# The GUI suite (tests/ui) runs Qt with QT_QPA_PLATFORM=offscreen, so no
+# display is needed. On Linux it needs the system libs libegl1 and
+# libxkbcommon0 (see .github/workflows/tests.yml). ffmpeg on PATH lets the
+# synthetic test library use real MP3/FLAC/M4A/OGG/Opus files; without it the
+# factory falls back to WAV.
+
+pytest>=8
+pytest-qt>=4.4
+pytest-timeout>=2.3
+
+# Runtime libraries the tests import
+PySide6>=6.6
+pyqtgraph>=0.13.0
+colorama            # pyqtgraph 0.14 imports it unconditionally
+mutagen
+numpy
+scikit-learn
+scipy
+Pillow
+requests
+musicbrainzngs
+pyacoustid

@@ -3,6 +3,12 @@ import sys
 import io
 import os
 
+# Qt must never try to open a real display during tests (CI has none, and a
+# developer's desktop should not flash windows). Set before anything imports Qt.
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+import pytest
+
 # Provide minimal pydub stubs when real package is unavailable
 if 'pydub' not in sys.modules:
     pydub = types.ModuleType('pydub')
@@ -60,3 +66,62 @@ if 'pydub' not in sys.modules:
     sys.modules['pydub'] = pydub
     sys.modules['pydub.generators'] = gens
 
+
+
+# ── Isolation: never touch the real user profile ─────────────────────────────
+#
+# ``config.CONFIG_PATH`` is computed from HOME at import time, the landing page
+# keeps an art-history file in HOME, and Library Sync writes logs under HOME.
+# Every test gets a fresh, empty HOME so a test run can never read or clobber
+# the developer's real ~/.soundvault_config.json (and so tests can't silently
+# depend on whatever happens to be configured on the machine running them).
+
+@pytest.fixture(autouse=True)
+def _isolated_home(tmp_path_factory, monkeypatch):
+    home = tmp_path_factory.mktemp("home")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))  # Windows expanduser()
+    cfg_path = str(home / ".soundvault_config.json")
+    try:
+        import config
+    except Exception:  # pragma: no cover - config import must never break the suite
+        config = None
+    if config is not None:
+        monkeypatch.setattr(config, "CONFIG_PATH", cfg_path)
+    # Modules that copied CONFIG_PATH by value at import time.
+    for mod_name in ("plugins.acoustid_plugin",):
+        mod = sys.modules.get(mod_name)
+        if mod is not None and hasattr(mod, "CONFIG_PATH"):
+            monkeypatch.setattr(mod, "CONFIG_PATH", cfg_path)
+    yield home
+
+
+# ── Synthetic music library ───────────────────────────────────────────────────
+
+@pytest.fixture(scope="session")
+def _synthetic_library_template(tmp_path_factory):
+    from library_factory import build_standard_library
+
+    root = tmp_path_factory.mktemp("synthetic_template") / "Music"
+    return build_standard_library(root)
+
+
+@pytest.fixture
+def synthetic_library(_synthetic_library_template, tmp_path):
+    """A fresh copy of the standard synthetic library (see tests/library_factory.py).
+
+    Real, tagged audio files: an MP3 album, a FLAC album, a cross-codec
+    duplicate, M4A/OGG/Opus tracks, an untagged file, non-audio leftovers and
+    a playlist. Safe to mutate — every test gets its own copy.
+    """
+    import shutil
+    from library_factory import SyntheticLibrary
+
+    template = _synthetic_library_template
+    root = tmp_path / "Music"
+    shutil.copytree(template.root, root)
+    return SyntheticLibrary(
+        root=root,
+        tracks={root / p.relative_to(template.root): spec for p, spec in template.tracks.items()},
+        extras=[root / p.relative_to(template.root) for p in template.extras],
+    )
