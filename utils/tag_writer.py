@@ -60,11 +60,13 @@ def _as_list(values: object) -> list[str]:
     return [str(values)]
 
 
-def assign_fields(audio, values: Mapping[str, Sequence[str] | str]) -> None:
+def assign_fields(audio, values: Mapping[str, Sequence[str] | str | None]) -> None:
     """Put ``values`` (field -> list of strings) into a loaded mutagen object.
 
-    Does not save. Raises :class:`TagWriteError` when the format cannot hold
-    the tags (e.g. raw ADTS ``.aac``).
+    A value of ``None`` removes the field (every value of it), which is how
+    an undo restores "this file had no genre". Does not save. Raises
+    :class:`TagWriteError` when the format cannot hold the tags (e.g. raw
+    ADTS ``.aac``).
     """
     if getattr(audio, "tags", None) is None:
         add_tags = getattr(audio, "add_tags", None)
@@ -83,11 +85,18 @@ def assign_fields(audio, values: Mapping[str, Sequence[str] | str]) -> None:
             frame_id = _ID3_FRAMES.get(key)
             if frame_id is None:
                 raise TagWriteError(f"can't write {key!r} to this file's ID3 tags")
+            if raw is None:
+                tags.delall(frame_id)
+                continue
             frame_cls = getattr(id3, frame_id)
             tags.setall(frame_id, [frame_cls(encoding=3, text=_as_list(raw))])
         return
     for key, raw in values.items():
         try:
+            if raw is None:
+                if key in audio:
+                    del audio[key]
+                continue
             audio[key] = _as_list(raw)
         except Exception as exc:  # noqa: BLE001
             raise TagWriteError(f"can't write {key!r} to this file ({exc})") from exc
@@ -95,11 +104,14 @@ def assign_fields(audio, values: Mapping[str, Sequence[str] | str]) -> None:
 
 def write_fields(
     path: str,
-    values: Mapping[str, Sequence[str] | str],
+    values: Mapping[str, Sequence[str] | str | None],
     *,
     opener: Optional[Callable[..., object]] = None,
 ) -> None:
-    """Open ``path``, write ``values`` and save. Raises :class:`TagWriteError`."""
+    """Open ``path``, write ``values`` and save. Raises :class:`TagWriteError`.
+
+    ``None`` for a field removes it (see :func:`assign_fields`).
+    """
     open_file = opener or MutagenFile
     if open_file is None:
         raise TagWriteError("mutagen is not installed")

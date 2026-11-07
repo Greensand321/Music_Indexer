@@ -4,8 +4,10 @@ Tag edits happen in place, so once a file is saved its old values are gone.
 Each apply run of the Tag Fixer or the Genre Normalizer therefore writes a
 JSON-lines file ``Docs/tag_changes_<tool>_<timestamp>.jsonl`` with one line
 per file: what each field held before, what was written, and whether the
-write succeeded. That is enough to see — and, by hand or with a future
-"revert" tool, undo — exactly what an apply changed.
+write succeeded. That is enough to see — and undo, with
+``controllers.tag_revert`` — exactly what an apply changed. A revert is
+itself logged (tool ``revert``, every entry naming the log it reverts in
+``"reverts"``), so a revert can be reverted too.
 
 Lines are flushed as they are written, so the log survives a crash mid-run.
 Backend only: no Qt, no Tk.
@@ -23,8 +25,10 @@ FieldChange = Tuple[object, object]  # (before, after)
 class TagChangeLog:
     """One apply run's change log. Use as a context manager or call close()."""
 
-    def __init__(self, library_root: str, tool: str) -> None:
+    def __init__(self, library_root: str, tool: str, *, reverts: Optional[str] = None) -> None:
         self.tool = tool
+        #: file name of the change log this run undoes (revert runs only)
+        self.reverts = os.path.basename(reverts) if reverts else None
         docs = os.path.join(library_root, "Docs")
         os.makedirs(docs, exist_ok=True)
         stamp = time.strftime("%Y%m%d-%H%M%S")
@@ -60,6 +64,8 @@ class TagChangeLog:
         }
         if error:
             entry["error"] = error
+        if self.reverts:
+            entry["reverts"] = self.reverts
         if status == "written":
             self.written += 1
         elif status == "failed":
