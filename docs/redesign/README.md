@@ -167,7 +167,9 @@ From [02_design_system_motion.md](pages/02_design_system_motion.md), refined by 
 - **Elevation:** painted shadows, not `QGraphicsDropShadowEffect`. A widget has only one effect slot, which fades
   need, and blur re-renders on every child repaint.
 - **Theme switching:** a fixed stylesheet that refers to palette roles, changing only palette and tokens on a
-  switch. The target is under one frame of freeze, not ~1.1 s.
+  switch. *Done in this phase:* ~1.1 s → ~60–80 ms (about 4 dropped frames), verified by a test that compares a
+  live-switched window against one started in the target theme, widget by widget. The redesign's target is
+  under one frame.
 - **Motion:** `gui/themes/motion.py` (added in this phase) provides duration and easing tokens, a reduced-motion
   switch, and parented, re-entrancy-safe helpers. Rules for the redesign:
   - never animate geometry a layout owns (animate opacity or transforms, or a painter offset);
@@ -213,8 +215,9 @@ path.
 
 1. **IA:** adopt §5 (merge Clustered + Graph into Sound Map; fold Similarity and Pair Review into Duplicates; one
    Metadata page)?
-2. **Permanent delete:** keep a "delete permanently" option in Duplicates (behind a double confirmation), or make
-   quarantine the only disposition?
+2. **Permanent delete:** Duplicates now really deletes when asked, behind a confirm listing every deletion and a
+   typed `DELETE` (the executor's existing double gate); quarantine is the default. Keep that in the redesign,
+   or make quarantine the only disposition?
 3. **Prototype dialogs** (Fuzzy Finder, Scan Engine, Bucketing POC): delete, or keep behind a developer menu?
 4. **Dead files:** OK to delete `gui/widgets/splash.py`, `gui/workspaces/clustered.py`,
    `gui/widgets/interactive_3d_scatter.py`, the stray repo-root files (`player_106bd0e.py`, `player_diff.txt`,
@@ -260,4 +263,64 @@ Full guide: [`tests/ui/README.md`](../../tests/ui/README.md). The essentials:
 29 cosmetic. The per-area status after the fix phase is in the table below; each report's bug table remains the
 detailed record.
 
-<!-- BUG-STATUS-TABLE -->
+### Recorded bugs, by area
+
+| Area | Recorded | Fixed | Partial / not fixed |
+|---|---|---|---|
+| Shell, startup & navigation (`SHELL-`) | 27 | 26 | SHELL-27: Ctrl+1..9 now follow the sidebar, but there are still no shortcuts beyond the 9th page and Ctrl+W still clears the log |
+| Design system & motion (`DS-`) | 26 | 26 | none |
+| Indexer & Library Sync (`LIB-`) | 24 | 24 | LIB-12 / LIB-17: controls the engine ignores are disabled with an explanatory tooltip, not implemented |
+| Duplicates & Similarity (`DUP-`) | 21 | 21 | Proof-of-concept dialogs fixed so they don't crash or lie; folding them in is a redesign decision |
+| Tag Fixer & Genres (`META-`) | 25 | 25 | META-23: every write is logged with before/after values; an in-app *revert* is not built yet |
+| Playlists, clustering & graph (`PL-`) | 32 | 32 | PL-15: cluster playlists are honestly marked "not available" rather than built; PL-23: hard-coded colours remain in files that weren't otherwise rewritten |
+| Player (`PLY-`) | 27 | 27 | none (the direct-play vs queue model is a redesign decision) |
+| Tools, Compression & Help (`TOOL-`) | 23 | 23 | none |
+| **Total** | **205** | **204** | 1 partial (SHELL-27), plus the noted limitations |
+
+### Found and fixed beyond the recorded 205
+
+The fixers, the integration work and three independent reviews (library data safety, file/tag/playlist writers,
+GUI concurrency) turned up further real bugs. The serious ones:
+
+- **Data loss:**
+  - Duplicate quarantine let same-named losers overwrite each other (3 files became 1, and the run still reported
+    success).
+  - The duplicate planner would write `YEAR=Unknown` into FLAC files.
+  - Playlist auto-update after a rename emptied non-UTF-8 playlists and scrambled the order of all others.
+  - Tag Fixer dropped every artist/title/album value after the first.
+  - In Library Sync Move mode, a failed Replace stranded the incoming file under a temp name.
+  - Failed copies left truncated files under the real track name.
+- **Wrong result:**
+  - Library Sync wrote every path it created in lowercase on Windows.
+  - Library Sync had no "library changed since plan" check.
+  - The Indexer swept Opus files into `Trash/`, and re-running it added `(1)` to every file.
+  - The Indexer rewrote artist tags it never previewed.
+  - "Top 3 genres by popularity" was actually alphabetical.
+  - Low-confidence matches contributed genres.
+  - M4A cover art was never read, so the Player, landing and track details showed none.
+  - Library Sync's fingerprint matching only matched byte-identical files (being ported to the vendored engine;
+    see below).
+- **Stability:**
+  - The idle fingerprint-cache writer spun at 100 % CPU and starved the GUI (window build went from 0.4 s to 45 s).
+  - A live theme switch left 71 widgets on the old palette (invisible sidebar headers on light themes).
+  - Nothing stopped two pages from changing library files at once; there is now a library-write lock across
+    Indexer, Library Sync, Duplicates, File Cleanup, the tag tools and playlist writes.
+  - Closing could hang forever on a job that ignored cancel, and jobs started after closing began slipped past
+    the confirmation.
+
+### Hygiene ratchets (gui/)
+
+| Metric | Before | After |
+|---|---|---|
+| Hard-coded hex colours outside tokens | 237 | 116 |
+| Inline `setStyleSheet` calls | 168 | 94 |
+| `font-size` literals outside the theme | 81 | 38 |
+| Direct `QThread.start()` (bypassing the JobRegistry) | 28 | **0** (now zero tolerance) |
+| Unparented animations | 7 | 2 (both in the Tk-only `qt_launcher.py`) |
+| Lambdas connected to the theme singleton | 3 | 0 (zero tolerance) |
+
+### Tests
+
+185 tests at the start of this phase (9 failing; the result depended on file order). At the end of phase 2:
+**904 passing**, including 374 headless GUI tests (backend verified in default, reversed and shuffled order).
+
