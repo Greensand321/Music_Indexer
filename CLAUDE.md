@@ -116,7 +116,7 @@ former "SoundVault" identity — do not rename it).
 - Exact duplicate: `0.02`
 - Near duplicate: `0.1`
 - Mixed-codec boost: `0.03`
-- Library sync default: `0.3`
+- Library sync default: `0.2` (decoded-Chromaprint bit error rate; old saved 0.3/0.35 are migrated once — see `docs/CONTRADICTING_UPDATES.md`)
 
 **Reserved library folders** — the indexer and duplicate finder skip these
 during scans:
@@ -298,6 +298,8 @@ second pass found and corrected substantial drift, especially in
 | `docs/gui_inventory.md` | Detailed map of every screen and control in the Qt app, including which controls are currently decorative |
 | `docs/redesign/README.md` | **GUI redesign groundwork:** the intent of every page, how pages connect, systemic problems, proposed IA, design-system/motion plan, open decisions, bug status. Per-area detail (with bug tables) in `docs/redesign/pages/` |
 | `tests/ui/README.md` | The headless Qt test harness: fixtures, guards, ratchets, snapshots |
+| `docs/CONTRADICTING_UPDATES.md` | Every change that contradicts older docs, code comments or the original design (kept so the owner can walk any of them back) |
+| `docs/specs/` | Feature specs (e.g. `cluster_playlists.md`) |
 | `docs/archive/` | Superseded planning notes / audit snapshots — history only, not current |
 
 ---
