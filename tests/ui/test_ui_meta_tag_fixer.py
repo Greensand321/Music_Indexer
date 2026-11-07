@@ -227,6 +227,17 @@ def test_apply_refused_while_another_tool_writes_tags(make_workspace, tmp_path, 
     assert get_field(files["a.flac"], "artist") == ["Art"]
 
 
+def test_scan_of_the_standard_library(make_workspace, library, monkeypatch, qtbot):
+    """Every container, an untagged file, and a Playlists/ folder (reserved, skipped)."""
+    source = install_source(monkeypatch, {"Loose Wire": {"album": "Found", "score": 0.9}})
+    ws = make_workspace("tag_fixer", library_path=library.root)
+    _scan(ws, qtbot)
+    assert len(source.calls) == len(library.audio_paths)
+    assert table_rows(ws) == [("Echo Park - Loose Wire.mp3", "Album", "(empty)", "Found", True)]
+    assert ws._nomatch_list.count() == len(library.audio_paths) - 1
+    assert "Lookup sources: FakeID" in ws._reason_lbl.text()
+
+
 def test_labels_use_theme_roles_not_inline_colours(make_workspace):
     """META-22."""
     ws = make_workspace("tag_fixer")
