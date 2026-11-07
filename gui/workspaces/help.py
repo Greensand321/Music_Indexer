@@ -8,6 +8,29 @@ from gui.compat import QtCore, QtGui, QtWidgets, Signal, Slot
 from gui.workspaces.base import WorkspaceBase
 
 
+# (button label, path relative to the repository root). The maintained,
+# plain-English docs suite lives in docs/ (index: docs/README.md). Every entry
+# must exist — tests/ui/test_ui_tools_help.py checks it.
+DOC_LINKS: tuple[tuple[str, str], ...] = (
+    ("Documentation index", "docs/README.md"),
+    ("Overview — what AlphaDEX is", "docs/overview.md"),
+    ("Architecture", "docs/architecture.md"),
+    ("Indexer", "docs/features/indexer.md"),
+    ("Duplicate Finder", "docs/features/duplicate_finder.md"),
+    ("Library Sync", "docs/features/library_sync.md"),
+    ("Tag Fixer & Genres", "docs/features/tag_fixer.md"),
+    ("Playlists, Clustering & Music Graph", "docs/features/playlists_and_clustering.md"),
+    ("Screen-by-screen GUI inventory", "docs/gui_inventory.md"),
+    ("Roadmap & known bugs", "docs/ROADMAP.md"),
+)
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def doc_path(rel_path: str) -> Path:
+    return REPO_ROOT / rel_path
+
+
 class HelpWorkspace(WorkspaceBase):
     def __init__(self, library_path: str = "", parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(library_path, parent)
@@ -25,14 +48,14 @@ class HelpWorkspace(WorkspaceBase):
         links_layout.setSpacing(8)
         links_layout.addWidget(QtWidgets.QLabel("Documentation"))
 
-        for label, path in (
-            ("Project Documentation (HTML)", "docs/project_documentation.html"),
-            ("GUI Inventory", "docs/gui_inventory.md"),
-            ("Library Sync Redesign Notes", "docs/library_sync_redesign.md"),
-        ):
+        self._doc_buttons: list[QtWidgets.QPushButton] = []
+        for label, path in DOC_LINKS:
             btn = QtWidgets.QPushButton(f"📄  {label}")
+            btn.setProperty("docPath", path)
+            btn.setToolTip(path)
             btn.clicked.connect(lambda checked=False, p=path: self._open_doc(p))
             links_layout.addWidget(btn)
+            self._doc_buttons.append(btn)
         cl.addWidget(links_card)
 
         # ── Keyboard shortcuts ─────────────────────────────────────────────
@@ -73,7 +96,7 @@ class HelpWorkspace(WorkspaceBase):
             "Config stored in: ~/.soundvault_config.json\n"
             "Supported formats: .flac  .m4a  .aac  .mp3  .wav  .ogg  .opus\n"
         )
-        about_text.setStyleSheet("color: #64748b; font-size: 12px;")
+        about_text.setObjectName("statusHint")  # themed muted text (was hard-coded slate)
         about_layout.addWidget(about_text)
 
         issues_btn = QtWidgets.QPushButton("Report an Issue (GitHub)")
@@ -87,9 +110,10 @@ class HelpWorkspace(WorkspaceBase):
 
     @Slot()
     def _open_doc(self, rel_path: str) -> None:
-        base = Path(__file__).resolve().parents[2]
-        p = base / rel_path
+        p = doc_path(rel_path)
         if p.exists():
-            webbrowser.open(f"file://{p}")
+            # as_uri() is correct on every platform ("file://" + a Windows
+            # path with backslashes is not).
+            webbrowser.open(p.as_uri())
         else:
             QtWidgets.QMessageBox.information(self, "Not Found", f"File not found:\n{p}")
