@@ -9,7 +9,6 @@ from __future__ import annotations
 import json
 import shutil
 import threading
-from pathlib import Path
 
 import pytest
 from PySide6 import QtCore
