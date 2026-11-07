@@ -1,4 +1,11 @@
-"""Settings dialog (modal) — metadata services, default library, thresholds.
+"""Settings controls and their load/save logic — metadata services, default
+library, thresholds, appearance.
+
+``SettingsForm`` owns every control and the save logic; the Settings *page*
+(``gui/workspaces/settings.py``) lays its widgets out in three sections
+(Metadata services · General · Appearance). ``SettingsDrawer`` is the same
+form in a modal dialog (the app no longer opens it: Ctrl+, and the top bar's
+Settings button go to the page).
 
 Every control persists through ``config.load_config()/save_config()`` under
 these keys (other pages read them, so the names must not change):
@@ -92,61 +99,53 @@ def check_service_connection(
         return False, str(exc) or type(exc).__name__
 
 
-class SettingsDrawer(QtWidgets.QDialog):
-    """Modal settings dialog for metadata services and global preferences."""
+class SettingsForm(QtCore.QObject):
+    """Every Settings control, plus load / save.
+
+    The controls live in three widgets the host lays out: ``services_widget``
+    (service, keys, MusicBrainz user agent, connection test),
+    ``general_widget`` (default library, thresholds) and
+    ``appearance_widget`` (background gradient). ``save()`` validates, writes
+    the keys above with load-modify-save, sets ``library_changed`` and emits
+    ``settings_saved``.
+    """
 
     settings_saved = Signal()
 
-    def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
-        super().__init__(parent)
-        self.setWindowTitle("Settings")
-        self.setMinimumWidth(520)
-        self.setMinimumHeight(500)
+    # The controls, by attribute name (hosts expose them under these names).
+    WIDGET_NAMES = (
+        "_service_combo", "_acoustid_frame", "_api_key_entry", "_mb_frame",
+        "_mb_app", "_mb_ver", "_mb_contact", "_test_btn", "_test_status",
+        "_library_entry", "_near_dup_spin", "_exact_dup_spin", "_bg_gradient_cb",
+    )
+
+    def __init__(self, host: QtWidgets.QWidget | None = None) -> None:
+        super().__init__(host)
+        self._host = host
         self._loaded_library = ""
-        # True after Save when the default library was changed in this dialog.
+        self._loaded_values: dict | None = None
+        # True after save() when the default library was changed here.
         self.library_changed = False
-        self._build_ui()
-        self._load_config()
-
-    def _build_ui(self) -> None:
-        root = QtWidgets.QVBoxLayout(self)
-        root.setContentsMargins(0, 0, 0, 0)
-        root.setSpacing(0)
-
-        # Header (theme-aware: follows the current palette, light or dark)
         try:
             from gui.themes.manager import get_manager
             t = get_manager().current
-            hdr_bg, hdr_fg, hdr_muted = t.sidebar_bg, t.text_primary, t.text_secondary
             self._ok_colour, self._err_colour = t.success, t.danger
         except Exception:
-            hdr_bg, hdr_fg, hdr_muted = "palette(window)", "palette(text)", "palette(mid)"
             self._ok_colour, self._err_colour = "green", "red"
-        header = QtWidgets.QFrame()
-        header.setStyleSheet(f"background: {hdr_bg}; padding: 16px;")
-        h_layout = QtWidgets.QHBoxLayout(header)
-        h_layout.setContentsMargins(20, 16, 20, 16)
-        title = QtWidgets.QLabel("Settings")
-        title.setStyleSheet(f"color: {hdr_fg}; font-size: 16px; font-weight: 700;")
-        h_layout.addWidget(title)
-        h_layout.addStretch(1)
-        close_btn = QtWidgets.QPushButton("✕")
-        close_btn.setFixedSize(28, 28)
-        close_btn.setStyleSheet(
-            f"background: transparent; border: none; color: {hdr_muted}; font-size: 16px;"
-        )
-        close_btn.clicked.connect(self.reject)
-        h_layout.addWidget(close_btn)
-        root.addWidget(header)
+        self.services_widget = self._build_services()
+        self.general_widget = self._build_general()
+        self.appearance_widget = self._build_appearance()
+        self._load_config()
 
-        # Tabs
-        tabs = QtWidgets.QTabWidget()
-        tabs.setContentsMargins(16, 16, 16, 16)
+    def _parent_widget(self) -> QtWidgets.QWidget | None:
+        return self._host
 
-        # ── Metadata Services tab ──────────────────────────────────────────
+    # ── Build ─────────────────────────────────────────────────────────────
+
+    def _build_services(self) -> QtWidgets.QWidget:
         meta_w = QtWidgets.QWidget()
         meta_l = QtWidgets.QFormLayout(meta_w)
-        meta_l.setContentsMargins(20, 20, 20, 20)
+        meta_l.setContentsMargins(0, 0, 0, 0)
         meta_l.setSpacing(12)
         meta_l.setFieldGrowthPolicy(
             QtWidgets.QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow
@@ -205,12 +204,12 @@ class SettingsDrawer(QtWidgets.QDialog):
         test_row.addWidget(self._test_status)
         test_row.addStretch(1)
         meta_l.addRow("", test_row)
-        tabs.addTab(meta_w, "Metadata Services")
+        return meta_w
 
-        # ── General tab ────────────────────────────────────────────────────
+    def _build_general(self) -> QtWidgets.QWidget:
         gen_w = QtWidgets.QWidget()
         gen_l = QtWidgets.QFormLayout(gen_w)
-        gen_l.setContentsMargins(20, 20, 20, 20)
+        gen_l.setContentsMargins(0, 0, 0, 0)
         gen_l.setSpacing(12)
         gen_l.setFieldGrowthPolicy(
             QtWidgets.QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow
@@ -225,7 +224,7 @@ class SettingsDrawer(QtWidgets.QDialog):
         gen_l.addRow("Default library:", lib_row)
 
         # Both ranges match the Duplicates page's spin boxes (0–1), so a saved
-        # value is never silently clamped when this dialog re-saves it.
+        # value is never silently clamped when this form re-saves it.
         self._near_dup_spin = QtWidgets.QDoubleSpinBox()
         self._near_dup_spin.setRange(0.0, 1.0)
         self._near_dup_spin.setSingleStep(0.01)
@@ -239,7 +238,13 @@ class SettingsDrawer(QtWidgets.QDialog):
         self._exact_dup_spin.setDecimals(4)
         self._exact_dup_spin.setValue(0.02)
         gen_l.addRow("Exact-duplicate threshold:", self._exact_dup_spin)
+        return gen_w
 
+    def _build_appearance(self) -> QtWidgets.QWidget:
+        app_w = QtWidgets.QWidget()
+        app_l = QtWidgets.QFormLayout(app_w)
+        app_l.setContentsMargins(0, 0, 0, 0)
+        app_l.setSpacing(12)
         self._bg_gradient_cb = QtWidgets.QCheckBox(
             "Background gradient — subtle accent glow behind workspace panels"
         )
@@ -248,38 +253,42 @@ class SettingsDrawer(QtWidgets.QDialog):
             "Paints two faint radial glows (accent colour) in opposing corners "
             "of each workspace.  Uncheck for a flat, solid background."
         )
-        gen_l.addRow("Appearance:", self._bg_gradient_cb)
+        app_l.addRow("Background:", self._bg_gradient_cb)
+        return app_w
 
-        tabs.addTab(gen_w, "General")
+    # ── Load / save ───────────────────────────────────────────────────────
 
-        # ── MusicBrainz User-Agent ─────────────────────────────────────────
-        # (already in Metadata Services; stub tab for extended config)
-        tabs.addTab(QtWidgets.QWidget(), "Advanced")
+    def reload(self) -> None:
+        """Show what is saved now (drops unsaved edits)."""
+        self._load_config()
 
-        root.addWidget(tabs)
+    def values(self) -> dict:
+        """What ``save()`` would write, by config key."""
+        self._stash_key()
+        keys = dict(self.__dict__.get("_keys", {}))
+        values = {
+            "metadata_service": self._service_combo.currentText(),
+            "musicbrainz_useragent": {
+                "app": self._mb_app.text(),
+                "version": self._mb_ver.text(),
+                "contact": self._mb_contact.text(),
+            },
+            "library_root": self._library_entry.text().strip(),
+            "near_duplicate_threshold": self._near_dup_spin.value(),
+            "exact_duplicate_threshold": self._exact_dup_spin.value(),
+            "bg_gradient_enabled": self._bg_gradient_cb.isChecked(),
+        }
+        for svc_name, cfg_key in _KEY_CONFIG.items():
+            values[cfg_key] = keys.get(svc_name, "").strip()
+        return values
 
-        # Footer buttons
-        footer = QtWidgets.QWidget()
-        foot_l = QtWidgets.QHBoxLayout(footer)
-        foot_l.setContentsMargins(20, 12, 20, 16)
-        foot_l.addStretch(1)
-        cancel_btn = QtWidgets.QPushButton("Cancel")
-        cancel_btn.clicked.connect(self.reject)
-        self._save_btn = QtWidgets.QPushButton("Save")
-        self._save_btn.setObjectName("primaryBtn")
-        self._save_btn.clicked.connect(self._on_save)
-        foot_l.addWidget(cancel_btn)
-        foot_l.addWidget(self._save_btn)
-        root.addWidget(footer)
-
-        self._on_service_changed(self._service_combo.currentText())
-
-    # ── Private ───────────────────────────────────────────────────────────
+    def is_dirty(self) -> bool:
+        """True when a control differs from what was last loaded or saved."""
+        return self._loaded_values is not None and self.values() != self._loaded_values
 
     def _load_config(self) -> None:
         try:
             from config import load_config
-            import tag_fixer
             cfg = load_config()
             svc = cfg.get("metadata_service", "AcoustID")
             # Empty AcoustID key = the built-in key (plugins.acoustid_plugin);
@@ -300,44 +309,42 @@ class SettingsDrawer(QtWidgets.QDialog):
             self._bg_gradient_cb.setChecked(bool(cfg.get("bg_gradient_enabled", True)))
         except Exception:
             pass
+        self._key_service = None
         self._on_service_changed(self._service_combo.currentText())
+        self._loaded_values = self.values()
 
     @Slot()
-    def _on_save(self) -> None:
+    def save(self) -> bool:
+        """Validate and save. True when saved (and ``settings_saved`` emitted)."""
         library = self._library_entry.text().strip()
         changed = library != self._loaded_library
         # Only a library typed/browsed here is validated: an unchanged saved
         # path that has gone missing must not block saving other settings.
         if changed and library and not os.path.isdir(os.path.expanduser(library)):
             QtWidgets.QMessageBox.warning(
-                self,
+                self._parent_widget(),
                 "Library folder not found",
                 f"The default library folder\n{library}\ndoes not exist. "
                 "Choose an existing folder, or clear the field.",
             )
-            return
+            return False
         try:
             from config import load_config, save_config
             cfg = load_config()
-            cfg["metadata_service"] = self._service_combo.currentText()
-            self._stash_key()
-            for svc_name, cfg_key in _KEY_CONFIG.items():
-                cfg[cfg_key] = self._keys.get(svc_name, "").strip()
-            cfg["musicbrainz_useragent"] = {
-                "app": self._mb_app.text(),
-                "version": self._mb_ver.text(),
-                "contact": self._mb_contact.text(),
-            }
-            cfg["library_root"] = library
-            cfg["near_duplicate_threshold"] = self._near_dup_spin.value()
-            cfg["exact_duplicate_threshold"] = self._exact_dup_spin.value()
-            cfg["bg_gradient_enabled"] = self._bg_gradient_cb.isChecked()
+            cfg.update(self.values())
             save_config(cfg)
-            self.library_changed = changed
-            self.settings_saved.emit()
-            self.accept()
         except Exception as exc:  # noqa: BLE001
-            QtWidgets.QMessageBox.critical(self, "Save Error", str(exc))
+            QtWidgets.QMessageBox.critical(self._parent_widget(), "Save Error", str(exc))
+            return False
+        self._loaded_library = library
+        self._loaded_values = self.values()
+        self.library_changed = changed
+        self.settings_saved.emit()
+        return True
+
+    def _on_save(self) -> bool:
+        """The dialog-era name (older callers and tests use it)."""
+        return self.save()
 
     @Slot()
     def _on_test(self) -> None:
@@ -360,7 +367,7 @@ class SettingsDrawer(QtWidgets.QDialog):
                     QtCore.Q_ARG(str, msg),
                 )
             except RuntimeError:
-                pass  # the dialog was closed and deleted meanwhile
+                pass  # the form was closed and deleted meanwhile
 
         import threading
         threading.Thread(target=_run, daemon=True, name="SettingsConnectionTest").start()
@@ -395,7 +402,97 @@ class SettingsDrawer(QtWidgets.QDialog):
     @Slot()
     def _on_browse_library(self) -> None:
         folder = QtWidgets.QFileDialog.getExistingDirectory(
-            self, "Select Default Library Folder", self._library_entry.text()
+            self._parent_widget(), "Select Default Library Folder", self._library_entry.text()
         )
         if folder:
             self._library_entry.setText(folder)
+
+
+class SettingsDrawer(QtWidgets.QDialog):
+    """``SettingsForm`` in a modal dialog (tabs: Metadata Services · General)."""
+
+    settings_saved = Signal()
+
+    def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Settings")
+        self.setMinimumWidth(520)
+        self.setMinimumHeight(500)
+        self.form = SettingsForm(self)
+        for name in SettingsForm.WIDGET_NAMES:
+            setattr(self, name, getattr(self.form, name))
+        self.form.settings_saved.connect(self.settings_saved)
+        self._build_ui()
+
+    @property
+    def library_changed(self) -> bool:
+        return self.form.library_changed
+
+    def _build_ui(self) -> None:
+        root = QtWidgets.QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        # Header (theme-aware: follows the current palette, light or dark)
+        try:
+            from gui.themes.manager import get_manager
+            t = get_manager().current
+            hdr_bg, hdr_fg, hdr_muted = t.sidebar_bg, t.text_primary, t.text_secondary
+        except Exception:
+            hdr_bg, hdr_fg, hdr_muted = "palette(window)", "palette(text)", "palette(mid)"
+        header = QtWidgets.QFrame()
+        header.setStyleSheet(f"background: {hdr_bg}; padding: 16px;")
+        h_layout = QtWidgets.QHBoxLayout(header)
+        h_layout.setContentsMargins(20, 16, 20, 16)
+        title = QtWidgets.QLabel("Settings")
+        title.setStyleSheet(f"color: {hdr_fg}; font-size: 16px; font-weight: 700;")
+        h_layout.addWidget(title)
+        h_layout.addStretch(1)
+        close_btn = QtWidgets.QPushButton("✕")
+        close_btn.setFixedSize(28, 28)
+        close_btn.setStyleSheet(
+            f"background: transparent; border: none; color: {hdr_muted}; font-size: 16px;"
+        )
+        close_btn.clicked.connect(self.reject)
+        h_layout.addWidget(close_btn)
+        root.addWidget(header)
+
+        tabs = QtWidgets.QTabWidget()
+        tabs.setContentsMargins(16, 16, 16, 16)
+
+        def padded(*widgets: QtWidgets.QWidget) -> QtWidgets.QWidget:
+            page = QtWidgets.QWidget()
+            lay = QtWidgets.QVBoxLayout(page)
+            lay.setContentsMargins(20, 20, 20, 20)
+            lay.setSpacing(12)
+            for w in widgets:
+                lay.addWidget(w)
+            lay.addStretch(1)
+            return page
+
+        tabs.addTab(padded(self.form.services_widget), "Metadata Services")
+        tabs.addTab(padded(self.form.general_widget, self.form.appearance_widget), "General")
+        root.addWidget(tabs)
+
+        # Footer buttons
+        footer = QtWidgets.QWidget()
+        foot_l = QtWidgets.QHBoxLayout(footer)
+        foot_l.setContentsMargins(20, 12, 20, 16)
+        foot_l.addStretch(1)
+        cancel_btn = QtWidgets.QPushButton("Cancel")
+        cancel_btn.clicked.connect(self.reject)
+        self._save_btn = QtWidgets.QPushButton("Save")
+        self._save_btn.setObjectName("primaryBtn")
+        self._save_btn.clicked.connect(self._on_save)
+        foot_l.addWidget(cancel_btn)
+        foot_l.addWidget(self._save_btn)
+        root.addWidget(footer)
+
+    @Slot()
+    def _on_save(self) -> None:
+        if self.form.save():
+            self.accept()
+
+    @Slot()
+    def _on_test(self) -> None:
+        self.form._on_test()
