@@ -192,6 +192,11 @@ class WorkspaceBase(QtWidgets.QWidget):
         from gui.workers import job_registry
         job_registry().cancel_all(self.running_jobs())
 
+    def on_settings_saved(self) -> None:
+        """Called by the main window after the Settings dialog saves. Pages
+        that cache config values (e.g. thresholds) re-read them here — not on
+        every show or paint."""
+
     def shutdown(self) -> None:
         """Called once by the main window when the app is closing, after all
         jobs have stopped. Override to stop timers / release resources;

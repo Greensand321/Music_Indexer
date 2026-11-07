@@ -456,14 +456,25 @@ def test_thresholds_start_from_config_and_follow_settings(make_workspace, qtbot)
     ws._near_spin.setValue(0.2)              # a local tweak survives re-showing...
     ws.hide()
     ws.show()
+    ws.on_settings_saved()                   # ...and an unrelated Settings save
     assert ws._near_spin.value() == 0.2
 
     cfg = load_config()
     cfg["near_duplicate_threshold"] = 0.123  # ...until Settings saves a new value
     save_config(cfg)
-    ws.hide()
-    ws.show()
+    ws.on_settings_saved()                   # the main window calls this after a save
     assert ws._near_spin.value() == 0.123
+
+
+def test_settings_save_reaches_pages_through_the_main_window(main_window):
+    from config import load_config, save_config
+
+    cfg = load_config()
+    cfg["near_duplicate_threshold"] = 0.045
+    save_config(cfg)
+    main_window._on_settings_saved()
+    assert main_window._workspaces["duplicates"]._near_spin.value() == 0.045
+    assert main_window._workspaces["similarity"]._near_t.text() == "0.045"
 
 
 def test_scan_uses_the_thresholds_shown(dupes, qtbot, monkeypatch):

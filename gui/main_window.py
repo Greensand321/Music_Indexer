@@ -425,6 +425,11 @@ class AlphaDEXWindow(QtWidgets.QMainWindow):
         from gui.widgets.gradient_bg import refresh_gradient_setting
         refresh_gradient_setting()   # also repaints every window
         refresh_reduced_motion()
+        for ws in self._workspaces.values():
+            try:
+                ws.on_settings_saved()
+            except Exception as exc:  # noqa: BLE001 - one page must not block the rest
+                self._on_log_message(f"{type(ws).__name__}: could not apply settings ({exc})", "warn")
 
         # Switch library only if the default library was changed in the dialog
         if dlg is not None and not getattr(dlg, "library_changed", True):

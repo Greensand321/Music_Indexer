@@ -540,6 +540,16 @@ class PairReviewDialog(QtWidgets.QDialog):
             self._set_status("No winner set and no FLAC in pair; nothing moved. Use Switch to pick one.")
             return
         kept_path = pair.right_path if loser_path == pair.left_path else pair.left_path
+        from gui.workers import LIBRARY_WRITES, job_registry
+        busy = [j.name for j in job_registry().group_jobs(LIBRARY_WRITES)]
+        if busy:
+            QtWidgets.QMessageBox.information(
+                self, "Library Busy",
+                f"{', '.join(busy)} is changing files in your library right now. "
+                "Quarantine this pair when it has finished.",
+            )
+            self._set_status("Not moved — library busy.")
+            return
         reply = QtWidgets.QMessageBox.question(
             self,
             "Quarantine duplicate?",

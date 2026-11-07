@@ -310,3 +310,19 @@ def test_start_detaches_worker_from_a_widget_parent(qtbot):
     start_worker(worker, name="parented")
     assert worker.parent() is None, "deleting the widget must not destroy a running thread"
     assert job_registry().wait_all(3000)
+
+
+def test_duplicate_execute_refuses_while_another_page_writes(main_window, dialogs, qtbot):
+    dupes = main_window._workspaces["duplicates"]
+    dupes._plan = object()           # pretend a plan exists; the gate runs first
+    dupes._groups = [object()]
+    dupes._plan_executed = False
+    other = _install_job_workspace(main_window)
+    writer = SlowWorker(30.0)
+    other._start_worker(writer, "Indexer execute", library_write=True)
+    dupes._on_execute()
+    assert dupes._exec_worker is None or not dupes._exec_running
+    info = dialogs.calls_of("information")[-1]
+    assert "Indexer execute" in info.text and dialogs.calls_of("question") == []
+    writer.cancel()
+    assert job_registry().wait_all(3000)

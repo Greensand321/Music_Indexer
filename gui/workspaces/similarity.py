@@ -272,9 +272,8 @@ class SimilarityWorkspace(WorkspaceBase):
         self._near_t.setText(f"{near:g}")
         self._codec_boost.setText(f"{boost:g}")
 
-    def showEvent(self, event) -> None:  # noqa: N802
+    def on_settings_saved(self) -> None:
         self._show_config_thresholds()
-        super().showEvent(event)
 
     def _collect_params(self) -> dict | None:
         """Parameters for the worker, or None after telling the user what's wrong."""

@@ -729,10 +729,10 @@ class DuplicatesWorkspace(WorkspaceBase):
         self._near_spin.setValue(near)
         self._boost_spin.setValue(boost)
 
-    def showEvent(self, event) -> None:  # noqa: N802
-        # Settings may have been saved while this page was hidden.
+    def on_settings_saved(self) -> None:
+        # Follow thresholds saved in Settings (only reloads when they changed,
+        # so a value the user typed here survives an unrelated save).
         self._load_thresholds_from_config(force=False)
-        super().showEvent(event)
 
     def _global_disposition(self) -> str:
         return "delete" if self._delete_rb.isChecked() else "quarantine"
@@ -939,6 +939,8 @@ class DuplicatesWorkspace(WorkspaceBase):
             return
         if self._scan_running or self._exec_running:
             return
+        if self._library_writes_blocked("Duplicate execution"):
+            return
 
         proceed, allow_review = self._review_gate()
         if not proceed:
@@ -1030,7 +1032,7 @@ class DuplicatesWorkspace(WorkspaceBase):
         self._exec_worker.done.connect(self._on_execute_finished)
         self._exec_running = True
         self._refresh_buttons()
-        self._start_worker(self._exec_worker, "Duplicate execution")
+        self._start_worker(self._exec_worker, "Duplicate execution", library_write=True)
 
     @Slot()
     def _on_open_report(self) -> None:
