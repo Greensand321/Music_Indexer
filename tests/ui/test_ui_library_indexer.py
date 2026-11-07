@@ -15,7 +15,6 @@ import pytest
 from PySide6 import QtCore
 
 import indexer_control
-import music_indexer_api
 from library_helpers import (
     add_reserved_content,
     content_multiset,
@@ -155,6 +154,7 @@ def test_execute_refuses_a_stale_plan(make_workspace, library, dialogs, qtbot):
 
 def test_cancel_clicked_right_after_run_is_honoured(make_workspace, library, dialogs, qtbot, monkeypatch):
     """LIB-09: the worker used to clear the global cancel flag at run() start."""
+    import music_indexer_api  # the module the worker will import (not a stale copy)
     root = library.root
     ws = _indexer(make_workspace, root)
     _run(qtbot, ws)
@@ -205,6 +205,7 @@ def test_cancel_preview_then_rerun_immediately(make_workspace, library, qtbot, t
 
 
 def test_library_change_cancels_a_running_preview(make_workspace, library, qtbot, monkeypatch, threads):
+    import music_indexer_api  # the module the worker will import (not a stale copy)
     started = threading.Event()
     real = music_indexer_api.compute_moves_and_tag_index
 
@@ -259,7 +260,7 @@ def test_quit_during_preview_cancels_and_waits(main_window, library, dialogs, qt
             progress_callback(0, 0, "x", "A")   # raises IndexCancelled once cancelled
             time.sleep(0.01)
 
-    monkeypatch.setattr(music_indexer_api, "compute_moves_and_tag_index", slow)
+    monkeypatch.setattr("music_indexer_api.compute_moves_and_tag_index", slow)
     main_window.set_library(str(library.root))
     ws = main_window._workspaces["indexer"]
     qtbot.mouseClick(ws._run_btn, QtCore.Qt.MouseButton.LeftButton)

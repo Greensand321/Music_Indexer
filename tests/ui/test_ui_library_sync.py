@@ -14,7 +14,6 @@ from pathlib import Path
 import pytest
 from PySide6 import QtCore
 
-import library_sync
 from library_helpers import (
     build_incoming,
     content_multiset,
@@ -207,6 +206,7 @@ def test_bad_folders_are_refused_not_created(make_workspace, env, dialogs, qtbot
 
 def test_threshold_input_is_validated_and_normalised(make_workspace, env, dialogs, qtbot, monkeypatch):
     """LIB-18: parse errors were swallowed and 'flac=0.1' never matched."""
+    import library_sync  # the module the worker will import (not a stale copy)
     lib, incoming, _paths = env
     seen = {}
     real = library_sync.compare_libraries
@@ -269,7 +269,7 @@ def test_recompute_rematches_without_rescanning(make_workspace, env, qtbot, monk
     ws = _page(make_workspace, lib, incoming)
     _scan(qtbot, ws)
     calls = []
-    monkeypatch.setattr(library_sync, "compare_libraries", lambda *a, **k: calls.append(1))
+    monkeypatch.setattr("library_sync.compare_libraries", lambda *a, **k: calls.append(1))
     ws._threshold_entry.setText("0.1")
     _click(qtbot, ws._recompute_btn)
     wait_idle(qtbot, ws, ALL_WORKERS)
@@ -291,6 +291,7 @@ def test_save_session_is_restored(make_workspace, env, qtbot):
 
 def test_cancel_scan_then_rescan_immediately(make_workspace, env, qtbot, monkeypatch, threads):
     """LIB-07 / LIB-21: cancel, re-run; a cancel is neutral, not a red Error."""
+    import library_sync  # the module the worker will import (not a stale copy)
     lib, incoming, _paths = env
     gate = threading.Event()
     real = library_sync.fingerprint_generator.compute_fingerprints_parallel
@@ -321,6 +322,7 @@ def test_cancel_scan_then_rescan_immediately(make_workspace, env, qtbot, monkeyp
 
 def test_cancelled_execute_is_not_reported_as_success(make_workspace, env, dialogs, qtbot, monkeypatch):
     """LIB-11: cancelled / failed runs were reported as 'Execution complete'."""
+    import library_sync  # the module the worker will import (not a stale copy)
     lib, incoming, _paths = env
     ws = _page(make_workspace, lib, incoming)
     _scan(qtbot, ws)
@@ -346,6 +348,7 @@ def test_cancelled_execute_is_not_reported_as_success(make_workspace, env, dialo
 
 def test_quit_during_scan_cancels_and_waits(main_window, env, dialogs, qtbot, monkeypatch):
     """LIB-08: closing the window mid-scan used to abort the process."""
+    import library_sync  # the module the worker will import (not a stale copy)
     lib, incoming, _paths = env
     started = threading.Event()
 
