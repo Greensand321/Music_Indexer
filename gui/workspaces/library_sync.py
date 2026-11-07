@@ -20,8 +20,30 @@ from pathlib import Path
 from gui.compat import QtCore, QtWidgets, Signal, Slot
 from gui.themes.manager import get_manager
 from gui.workspaces.base import WorkspaceBase
+from gui.workspaces.label_tone import refresh_tones, set_tone
 
 _STEPS = ("1. Configure paths", "2. Scan & match", "3. Build & execute plan")
+
+
+def _threshold_defaults() -> tuple[float, tuple[float, ...], str, float]:
+    """``(default, legacy defaults, scale marker, different-recording floor)``.
+
+    From ``config``, whose values mirror Library Sync's engine (a test keeps
+    them equal); importing the engine itself would pull the whole scanner
+    into the GUI thread just to show a number.
+    """
+    import config
+
+    return (
+        float(config.DEFAULT_FP_THRESHOLDS["default"]),
+        tuple(float(v) for v in config.LEGACY_SYNC_THRESHOLDS),
+        str(config.SYNC_THRESHOLD_SCALE),
+        float(config.SYNC_DIFFERENT_RECORDING_FLOOR),
+    )
+
+
+def _format_threshold(value: float) -> str:
+    return f"{value:g}"
 
 
 def _chip_colour(kind: str) -> str:
@@ -173,7 +195,8 @@ class SyncScanWorker(QtCore.QThread):
         try:
             if self.rematch_from is not None:
                 result = library_sync.rematch_scan_result(
-                    self.rematch_from, thresholds=self.thresholds, log_callback=_log
+                    self.rematch_from, thresholds=self.thresholds, log_callback=_log,
+                    cancel_event=self._cancel_event,
                 )
             else:
                 docs = Path(self.existing) / "Docs"
@@ -378,6 +401,7 @@ class LibrarySyncWorkspace(WorkspaceBase):
 
         self._build_ui()
         self._load_session()
+        self._update_threshold_warning()
         self._refresh_controls()
 
     def _build_ui(self) -> None:
@@ -459,11 +483,21 @@ class LibrarySyncWorkspace(WorkspaceBase):
             QtWidgets.QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow
         )
 
-        self._threshold_entry = QtWidgets.QLineEdit("0.3")
+        default, _legacy, _scale, floor = _threshold_defaults()
+        self._threshold_entry = QtWidgets.QLineEdit(_format_threshold(default))
         self._threshold_entry.setToolTip(
-            "Default fingerprint distance cutoff (0–1). Lower = stricter match."
+            "Fingerprint distance (0–1) at or below which two tracks count as the same "
+            f"recording. Default {_format_threshold(default)}: the same recording in another "
+            "codec measures about 0.01, a slightly shifted start up to about 0.15, different "
+            f"recordings 0.43 or more — from {_format_threshold(floor)} up, unrelated tracks match."
         )
         cfg_layout.addRow("Global threshold:", self._threshold_entry)
+        self._threshold_warning = QtWidgets.QLabel()
+        self._threshold_warning.setObjectName("syncThresholdWarning")
+        self._threshold_warning.setWordWrap(True)
+        self._threshold_warning.setVisible(False)
+        set_tone(self._threshold_warning, "warning")
+        cfg_layout.addRow("", self._threshold_warning)
 
         self._preset_entry = QtWidgets.QLineEdit()
         self._preset_entry.setPlaceholderText("Optional label for this session")
@@ -474,10 +508,12 @@ class LibrarySyncWorkspace(WorkspaceBase):
         self._overrides_text = QtWidgets.QPlainTextEdit()
         self._overrides_text.setPlaceholderText(
             "Per-format overrides, one per line:\n"
-            ".flac=0.3\n.mp3=0.35\n.m4a=0.35"
+            ".flac=0.15\n.opus=0.25"
         )
         self._overrides_text.setFixedHeight(80)
         cfg_layout.addRow("Format overrides:", self._overrides_text)
+        self._threshold_entry.textChanged.connect(self._update_threshold_warning)
+        self._overrides_text.textChanged.connect(self._update_threshold_warning)
 
         btn_row_cfg = QtWidgets.QHBoxLayout()
         self._recompute_btn = QtWidgets.QPushButton("↺  Recompute Matches")
@@ -773,11 +809,12 @@ class LibrarySyncWorkspace(WorkspaceBase):
     def _parse_thresholds(self) -> tuple[dict | None, str | None]:
         """``(thresholds, None)`` or ``(None, error message)``. Extension keys
         are normalised to ``.ext`` (``flac=0.1`` used to never match)."""
-        text = self._threshold_entry.text().strip() or "0.3"
+        engine_default = _format_threshold(_threshold_defaults()[0])
+        text = self._threshold_entry.text().strip() or engine_default
         try:
             default = float(text)
         except ValueError:
-            return None, f"Global threshold “{text}” is not a number (use e.g. 0.3)."
+            return None, f"Global threshold “{text}” is not a number (use e.g. {engine_default})."
         if not 0 < default <= 1:
             return None, f"Global threshold {default} must be between 0 and 1."
         thresholds = {"default": default}
@@ -802,6 +839,27 @@ class LibrarySyncWorkspace(WorkspaceBase):
             thresholds[ext] = val
         return thresholds, None
 
+    @Slot()
+    def _update_threshold_warning(self) -> None:
+        """Warn when a threshold is so high that different recordings match."""
+        thresholds, error = self._parse_thresholds()
+        floor = _threshold_defaults()[3]
+        high = sorted(
+            (value, key) for key, value in (thresholds or {}).items() if value >= floor
+        ) if not error else []
+        if not high:
+            self._threshold_warning.setVisible(False)
+            self._threshold_warning.clear()
+            return
+        value, key = high[-1]
+        where = "The global threshold" if key == "default" else f"The {key} threshold"
+        self._threshold_warning.setText(
+            f"⚠ {where} ({_format_threshold(value)}) is at or above {_format_threshold(floor)}: "
+            "different recordings measure about 0.43 apart, so unrelated tracks will be treated "
+            f"as duplicates and skipped. The default is {_format_threshold(_threshold_defaults()[0])}."
+        )
+        self._threshold_warning.setVisible(True)
+
     # ── Session ───────────────────────────────────────────────────────────
 
     def _load_session(self) -> None:
@@ -814,9 +872,45 @@ class LibrarySyncWorkspace(WorkspaceBase):
         if cfg.get("sync_incoming"):
             self._incoming_entry.setText(str(cfg["sync_incoming"]))
         if cfg.get("sync_threshold"):
-            self._threshold_entry.setText(str(cfg["sync_threshold"]))
+            self._threshold_entry.setText(self._migrated_threshold(cfg))
         if not self._library_path and cfg.get("sync_existing"):
             self._existing_entry.setText(str(cfg["sync_existing"]))
+
+    def _migrated_threshold(self, cfg: dict) -> str:
+        """The saved ``sync_threshold`` as text, moved to the current scale.
+
+        Saved before the fingerprint distance was rescaled (no
+        ``sync_threshold_scale`` marker), the old defaults 0.3 / 0.35 now mean
+        "match unrelated tracks": they become the new default, written back
+        through ``save_config``. Any other value is the user's choice and is
+        kept as it is (a warning shows if it is high enough to match
+        unrelated tracks).
+        """
+        default, legacy, scale, _floor = _threshold_defaults()
+        raw = str(cfg["sync_threshold"]).strip()
+        if cfg.get("sync_threshold_scale") == scale:
+            return raw
+        try:
+            value = float(raw)
+        except ValueError:
+            return raw
+        if not any(abs(value - old) < 1e-9 for old in legacy):
+            return raw
+        new = _format_threshold(default)
+        cfg["sync_threshold"] = new
+        cfg["sync_threshold_scale"] = scale
+        try:
+            from config import save_config
+            save_config(cfg)
+        except Exception as exc:  # noqa: BLE001
+            self._log(f"Library Sync: could not save the migrated match threshold: {exc}", "warn")
+        self._log(
+            f"Library Sync: saved match threshold {raw} was the old default of a fingerprint "
+            f"distance that has since been rescaled (it would now match unrelated tracks); "
+            f"using the new default {new}.",
+            "warn",
+        )
+        return new
 
     # ── Slots ─────────────────────────────────────────────────────────────
 
@@ -898,6 +992,7 @@ class LibrarySyncWorkspace(WorkspaceBase):
             cfg["sync_existing"] = self._existing_entry.text()
             cfg["sync_incoming"] = self._incoming_entry.text()
             cfg["sync_threshold"] = self._threshold_entry.text()
+            cfg["sync_threshold_scale"] = _threshold_defaults()[2]
             save_config(cfg)
             self._log("Session saved to config.", "ok")
         except Exception as exc:  # noqa: BLE001
@@ -1276,6 +1371,10 @@ class LibrarySyncWorkspace(WorkspaceBase):
         folder = QtWidgets.QFileDialog.getExistingDirectory(self, title, start)
         if folder:
             entry.setText(folder)
+
+    def _on_theme_changed_base(self, tokens: object) -> None:
+        super()._on_theme_changed_base(tokens)
+        refresh_tones(self, tokens)
 
     def _on_library_changed(self, path: str) -> None:
         # Results of a scan or plan build for the old library are useless:

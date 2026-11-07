@@ -40,15 +40,32 @@ PREVIEW_ARTWORK_QUALITY = 20
 # File format quality priority used during Library Sync
 FORMAT_PRIORITY = {".flac": 3, ".wav": 2, ".mp3": 1}
 
-# Default fingerprint matching thresholds by file extension. The ``default`` key
-# is used when a specific extension is not provided.
+# Default fingerprint matching thresholds by file extension (Library Sync).
+# The ``default`` key is used when a specific extension is not provided.
+#
+# These mirror Library Sync's engine (``library_sync_indexer_engine`` config,
+# which is what ``library_sync`` itself uses) so the pages that only import
+# this module show the same values; tests/test_syncmatch_config.py keeps the
+# two equal. The scale is the bit error rate of the *decoded* Chromaprint
+# fingerprints: the same recording in any codec <= 0.008, a start shifted by
+# 0.3-0.6 s 0.07-0.14, different recordings >= 0.43. The old 0.3 / 0.35 were
+# tuned for the previous metric (Hamming distance of the compressed bytes).
 DEFAULT_FP_THRESHOLDS = {
-    "default": 0.3,
-    ".flac": 0.3,
-    ".mp3": 0.35,
-    ".m4a": 0.35,
-    ".aac": 0.35,
+    "default": 0.2,
+    ".flac": 0.2,
+    ".mp3": 0.2,
+    ".m4a": 0.2,
+    ".aac": 0.2,
 }
+# Library Sync defaults of the old metric. A saved ``sync_threshold`` equal
+# to one of them is migrated to the new default (see the Library Sync page).
+LEGACY_SYNC_THRESHOLDS = (0.3, 0.35)
+# Value of ``sync_threshold_scale`` once ``sync_threshold`` is on the scale above.
+SYNC_THRESHOLD_SCALE = "chromaprint-ber"
+# Distance from which different recordings start to match (they measure
+# >= 0.43). Equal to ``library_sync.DIFFERENT_RECORDING_FLOOR``; a threshold
+# at or above it treats unrelated tracks as duplicates.
+SYNC_DIFFERENT_RECORDING_FLOOR = 0.4
 
 # Default threshold for simple duplicate detection
 DEFAULT_DUP_THRESHOLD = 0.03

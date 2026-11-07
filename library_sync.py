@@ -8,8 +8,12 @@ import json
 import logging
 import os
 import shutil
+import struct
 import threading
 import time
+from array import array
+from bisect import bisect_left, bisect_right
+from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
@@ -47,8 +51,39 @@ _file_handler: Optional[logging.Handler] = None
 
 NEAR_MISS_MARGIN_RATIO = 0.25
 NEAR_MISS_MARGIN_FLOOR = 0.02
-SHORTLIST_FALLBACK = 50
+# Different recordings measure >= 0.43 on the decoded-fingerprint scale (see
+# the vendored ``config.DEFAULT_FP_THRESHOLDS``). The "low confidence" band
+# above a threshold never reaches past this, so a raised threshold cannot
+# send unrelated tracks to review; a threshold at or above it makes them
+# outright matches (the Library Sync page warns about that).
+DIFFERENT_RECORDING_FLOOR = 0.4
 LOSSLESS_EXTS = {".flac", ".wav", ".alac", ".ape", ".aiff", ".aif"}
+
+# ── Candidate shortlist (see _CandidateIndex) ────────────────────────────────
+# A print needs at least this many sub-fingerprints (~4 s of audio) and this
+# many distinct ones to identify a recording. Shorter or uniform prints
+# (fpcalc's empty "AQAAAA", silence) are never candidates and never match.
+MIN_MATCH_ITEMS = 32
+MIN_DISTINCT_ITEMS = 8
+# Index a hash-selected 1/8 of each print's distinct items. The same items are
+# selected on both sides, so an item that survived the transcode is found
+# either way; ~70-90 % of the items survive, so a 30 s clip still has a
+# dozen chances to be found and a full-length track ~80.
+INDEX_SAMPLE_MASK = 0xE0000000
+_INDEX_HASH = 0x9E3779B1
+# Items shared by more library tracks than this (silence, digital zero, ...)
+# identify nothing and are ignored at query time.
+STOP_ITEM_MIN_TRACKS = 16
+STOP_ITEM_TRACK_RATIO = 0.002
+SHORTLIST_MAX_CANDIDATES = 50
+# When the index finds no match, the incoming track is compared with every
+# library track whose audio length is within this window ("same duration").
+DURATION_TOLERANCE_S = 3.0
+DURATION_TOLERANCE_RATIO = 0.02
+# ... after a pre-screen on the first ~16 s of both prints (the exact distance
+# runs only for those within PRESCREEN_SLACK of the pair's review limit).
+PRESCREEN_ITEMS = 128
+PRESCREEN_SLACK = 0.1
 
 
 def set_debug(enabled: bool, log_root: str | None = None) -> None:
@@ -138,7 +173,14 @@ class ReviewAction(str, Enum):
 
 @dataclass
 class PerformanceProfile:
-    """Capture lightweight performance metrics for profiling runs."""
+    """Capture lightweight performance metrics for profiling runs.
+
+    ``signature_shortlists`` counts incoming tracks whose candidates came
+    from the fingerprint index, ``fallback_shortlists`` those compared only
+    with same-duration tracks. ``extension_shortlists`` is always 0 now (the
+    first-50-of-the-same-extension shortlist is gone); it stays in the
+    profile dict for compatibility.
+    """
 
     cache_hits: int = 0
     fingerprints_computed: int = 0
@@ -196,7 +238,20 @@ class PlannedItem:
 
 
 def _select_threshold(ext: str, thresholds: Dict[str, float]) -> float:
-    return float(thresholds.get(ext, thresholds.get("default", 0.3)))
+    return float(thresholds.get(ext, thresholds.get("default", DEFAULT_FP_THRESHOLDS["default"])))
+
+
+def _near_miss_margin(threshold: float) -> float:
+    """Width of the "low confidence" band above ``threshold``.
+
+    25 % of the threshold (at least ``NEAR_MISS_MARGIN_FLOOR``), but never
+    past ``DIFFERENT_RECORDING_FLOOR``: with the old metric's 0.35 a band of
+    25 % reached 0.47 and sent unrelated tracks (0.43 apart) to review.
+    """
+    margin = max(NEAR_MISS_MARGIN_FLOOR, threshold * NEAR_MISS_MARGIN_RATIO)
+    if threshold + margin <= DIFFERENT_RECORDING_FLOOR:
+        return margin
+    return max(0.0, DIFFERENT_RECORDING_FLOOR - threshold)
 
 
 def _select_pair_threshold(
@@ -254,6 +309,14 @@ def _compute_confidence(distance: float | None, threshold: float, margin: float)
     return score
 
 
+def _positive_seconds(value: object) -> float | None:
+    try:
+        seconds = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    return seconds if seconds > 0 and seconds == seconds and seconds != float("inf") else None
+
+
 def _scan_folder(
     folder: str,
     db_path: str,
@@ -302,10 +365,12 @@ def _scan_folder(
                 continue
             tags = idx.get_tags(path)
             bitrate = 0
+            audio_length = None
             try:
                 audio = idx.MutagenFile(path)
                 if audio and getattr(audio, "info", None):
                     bitrate = getattr(audio.info, "bitrate", 0) or getattr(audio.info, "sample_rate", 0) or 0
+                    audio_length = _positive_seconds(getattr(audio.info, "length", None))
             except Exception:
                 bitrate = 0
             entries.append(
@@ -317,6 +382,7 @@ def _scan_folder(
                     "tags": tags,
                     "mtime": mtime,
                     "size": size,
+                    "audio_length": audio_length,
                 }
             )
             total_files += 1
@@ -341,7 +407,9 @@ def _scan_folder(
         cached_size = row[1] if row else None
         if row and abs(cached_mtime - entry["mtime"]) < 1e-6 and int(cached_size or 0) == int(entry["size"]):
             entry["duration"] = row[2]
-            entry["fingerprint"] = row[3]
+            # Older caches stored pyacoustid's ``bytes`` as a BLOB; records
+            # always carry text (signature(), to_dict() / JSON reports).
+            entry["fingerprint"] = idx_near_duplicate_detector._fp_text(row[3])
             _dlog(f"DEBUG: cache hit {entry['path']}", log_callback)
             if log_callback:
                 log_callback(json.dumps({"event": "cache_hit", "path": entry["path"]}))
@@ -406,7 +474,7 @@ def _scan_folder(
         ):
             path = result[0]
             duration = result[1] if len(result) > 2 else None
-            fp = result[-1]
+            fp = idx_near_duplicate_detector._fp_text(result[-1])
             if profiler:
                 profiler.fingerprints_computed += 1
             entry = entry_map.get(path)
@@ -437,6 +505,7 @@ def _scan_folder(
             fingerprint=entry.get("fingerprint"),
             tags=entry.get("tags", {}),
             duration=entry.get("duration"),
+            audio_length=entry.get("audio_length"),
         )
         records.append(rec)
         if on_record:
@@ -446,44 +515,243 @@ def _scan_folder(
     return records
 
 
-def _build_candidate_index(records: Iterable[TrackRecord]) -> Tuple[Dict[str, List[TrackRecord]], Dict[str, List[TrackRecord]]]:
-    sig_index: Dict[str, List[TrackRecord]] = {}
-    ext_index: Dict[str, List[TrackRecord]] = {}
-    for rec in records:
-        sig = rec.signature()
-        if sig:
-            sig_index.setdefault(sig, []).append(rec)
-        ext_index.setdefault(rec.ext, []).append(rec)
-    return sig_index, ext_index
+_NO_PRINT: Tuple[str, None, int, bytes, frozenset] = ("none", None, 0, b"", frozenset())
+
+
+def _print_info(fp: object) -> Tuple[str, str | None, int, bytes, frozenset | set]:
+    """Classify a fingerprint for the shortlist.
+
+    Returns ``(kind, text, algorithm, packed_items, distinct_items)``. ``kind``:
+
+    * ``"chromaprint"`` — a compressed Chromaprint print (``str`` or ``bytes``)
+      with enough content to identify a recording;
+    * ``"plain"`` — anything else that is not empty (the ``"1,2,3"`` integer
+      lists of synthetic fixtures); compared with ``fingerprint_distance`` only;
+    * ``"none"`` — missing, fpcalc's empty ``AQAAAA``, or shorter than
+      ``MIN_MATCH_ITEMS`` / fewer than ``MIN_DISTINCT_ITEMS`` distinct items
+      (silence): never a candidate, never a match.
+    """
+    nd = idx_near_duplicate_detector
+    text = nd._fp_text(fp)
+    text = text.strip() if text else ""
+    if not text or nd.is_empty_chromaprint(text):
+        return _NO_PRINT
+    decoded = nd._decoded_packed(text)
+    if decoded is None:
+        return ("plain", text, 0, b"", frozenset())
+    algorithm, packed = decoded
+    count = len(packed) // 4
+    if count < MIN_MATCH_ITEMS:
+        return _NO_PRINT
+    distinct = set(struct.unpack(f"<{count}I", packed))
+    if len(distinct) < MIN_DISTINCT_ITEMS:
+        return _NO_PRINT
+    return ("chromaprint", text, algorithm, packed, distinct)
+
+
+def _sampled_items(distinct: Iterable[int]) -> List[int]:
+    """The items of a print that go into (and are looked up in) the index."""
+    return [item for item in distinct if not (item * _INDEX_HASH) & INDEX_SAMPLE_MASK]
+
+
+class _LengthPool:
+    """Library record indices ordered by audio length ("same duration")."""
+
+    def __init__(self, records: List[TrackRecord], indices: Iterable[int]) -> None:
+        known: List[Tuple[float, int]] = []
+        self._unknown: List[int] = []
+        for i in indices:
+            length = getattr(records[i], "audio_length", None)
+            if length:
+                known.append((float(length), i))
+            else:
+                self._unknown.append(i)
+        known.sort()
+        self._lengths = [length for length, _i in known]
+        self._indices = [i for _length, i in known]
+
+    def around(self, length: float | None) -> List[int]:
+        """Records within the duration tolerance of ``length``, plus every
+        record whose length is unknown (all of them when ``length`` is)."""
+        if not length:
+            return self._indices + self._unknown
+        tolerance = max(DURATION_TOLERANCE_S, DURATION_TOLERANCE_RATIO * float(length))
+        lo = bisect_left(self._lengths, float(length) - tolerance)
+        hi = bisect_right(self._lengths, float(length) + tolerance)
+        return self._indices[lo:hi] + self._unknown
+
+
+@dataclass
+class _Query:
+    kind: str
+    text: str | None
+    algorithm: int
+    sampled: List[int]
+    window: bytes
+    length: float | None
+
+
+class _CandidateIndex:
+    """Find the library tracks worth an exact fingerprint comparison.
+
+    The old shortlist keyed on the whole compressed fingerprint string (so it
+    only ever found byte-identical prints) and otherwise compared the first
+    50 library tracks *with the incoming track's extension*: a FLAC was not
+    compared with its MP3 copy once the library held a few other FLACs, and a
+    copy sorted after the first 50 tracks was never compared at all.
+
+    Now every library print is reachable, whatever its extension or position:
+
+    * an identical fingerprint is found directly;
+    * an inverted index of decoded Chromaprint sub-fingerprints (exact 32-bit
+      items; a hash-selected 1/8 of each print's distinct items) finds every
+      print that shares an item with the incoming one. A transcode keeps most
+      items bit-exact, unrelated recordings share none; items found in very
+      many tracks (silence, digital zero) are skipped;
+    * :meth:`fallback` (used when those find no match) compares the incoming
+      print with every library print of about the same audio length — a
+      cheap pre-screen on the first ~16 s, then the exact distance — so a
+      copy too distorted to keep exact items is still found.
+
+    Built once per library scan (decoding every print is most of the cost:
+    ~1.5 ms per 2-minute print); ``compare_libraries`` keeps it with its
+    result so Recompute Matches does not decode the library again. A set
+    ``cancel_event`` stops the build early (``complete`` is then False).
+    """
+
+    def __init__(self, records: Iterable[TrackRecord], cancel_event: threading.Event | None = None) -> None:
+        self.records: List[TrackRecord] = list(records)
+        self.complete = True
+        self._by_text: Dict[str, List[int]] = {}
+        self._windows: Dict[int, Tuple[int, bytes]] = {}
+        plain: List[int] = []
+        keys: List[int] = []
+        for i, rec in enumerate(self.records):
+            if cancel_event is not None and not i % 256 and cancel_event.is_set():
+                self.complete = False
+                break
+            kind, text, algorithm, packed, distinct = _print_info(rec.fingerprint)
+            if kind == "none" or text is None:
+                continue
+            self._by_text.setdefault(text, []).append(i)
+            if kind == "plain":
+                plain.append(i)
+                continue
+            self._windows[i] = (algorithm, packed[: PRESCREEN_ITEMS * 4])
+            keys.extend((item << 32) | i for item in _sampled_items(distinct))
+        keys.sort()
+        self._postings = array("Q", keys)
+        self._stop_limit = max(STOP_ITEM_MIN_TRACKS, int(len(self.records) * STOP_ITEM_TRACK_RATIO))
+        self._chromaprint_pool = _LengthPool(self.records, list(self._windows))
+        self._plain_pool = _LengthPool(self.records, plain)
+
+    def built_from(self, records: Iterable[TrackRecord]) -> bool:
+        records = list(records)
+        return (
+            self.complete
+            and len(records) == len(self.records)
+            and all(a is b for a, b in zip(records, self.records))
+        )
+
+    def query(self, incoming: TrackRecord) -> _Query:
+        kind, text, algorithm, packed, distinct = _print_info(incoming.fingerprint)
+        return _Query(
+            kind=kind,
+            text=text,
+            algorithm=algorithm,
+            sampled=sorted(_sampled_items(distinct)),
+            window=packed[: PRESCREEN_ITEMS * 4],
+            length=getattr(incoming, "audio_length", None),
+        )
+
+    def shortlist(self, query: _Query) -> List[int]:
+        """Record indices with the same print text or a shared indexed item,
+        most shared items first."""
+        if query.kind == "none" or query.text is None:
+            return []
+        found: Dict[int, None] = dict.fromkeys(self._by_text.get(query.text, ()))
+        if query.sampled:
+            hits: Counter = Counter()
+            postings = self._postings
+            for item in query.sampled:
+                base = item << 32
+                lo = bisect_left(postings, base)
+                hi = bisect_left(postings, base + 0x100000000, lo)
+                if lo == hi or hi - lo > self._stop_limit:
+                    continue
+                for key in postings[lo:hi]:
+                    hits[key & 0xFFFFFFFF] += 1
+            for i, _count in hits.most_common(SHORTLIST_MAX_CANDIDATES):
+                found.setdefault(i, None)
+        return list(found)
+
+    def fallback(
+        self,
+        query: _Query,
+        exclude: set,
+        review_limit: Callable[[TrackRecord], float],
+    ) -> List[int]:
+        """Same-duration record indices that pass the pre-screen.
+
+        ``review_limit(record)`` is the largest distance that still counts as
+        a (low-confidence) match for that pair; a pre-screen distance more
+        than ``PRESCREEN_SLACK`` above it cannot come close.
+        """
+        if query.kind == "plain":
+            return [i for i in self._plain_pool.around(query.length) if i not in exclude]
+        if query.kind != "chromaprint":
+            return []
+        packed_distance = idx_near_duplicate_detector._packed_distance
+        out: List[int] = []
+        for i in self._chromaprint_pool.around(query.length):
+            if i in exclude:
+                continue
+            algorithm, window = self._windows[i]
+            if algorithm != query.algorithm:
+                continue
+            if packed_distance(query.window, window) <= review_limit(self.records[i]) + PRESCREEN_SLACK:
+                out.append(i)
+        return out
+
+
+def _classify_distance(dist: float, threshold: float, margin: float) -> MatchStatus:
+    if dist == 0:
+        return MatchStatus.EXACT_MATCH
+    if dist <= threshold:
+        return MatchStatus.COLLISION
+    if dist <= threshold + margin:
+        return MatchStatus.LOW_CONFIDENCE
+    return MatchStatus.NEW
 
 
 def _shortlist_candidates(
     incoming: TrackRecord,
-    sig_index: Dict[str, List[TrackRecord]],
-    ext_index: Dict[str, List[TrackRecord]],
-    fallback_pool: List[TrackRecord],
+    index: _CandidateIndex,
+    evaluate: Callable[[List[int]], List[MatchStatus]],
+    review_limit: Callable[[TrackRecord], float],
     log_callback: Callable[[str], None] | None = None,
     profiler: PerformanceProfile | None = None,
-) -> List[TrackRecord]:
-    sig = incoming.signature()
-    candidates: List[TrackRecord] = []
-    shortlist_source = "fallback"
-    if sig and sig in sig_index:
-        candidates.extend(sig_index[sig])
-        shortlist_source = "signature"
-    if not candidates:
-        ext_candidates = ext_index.get(incoming.ext, [])[:SHORTLIST_FALLBACK]
-        candidates.extend(ext_candidates)
-        shortlist_source = "extension" if ext_candidates else shortlist_source
-    if not candidates and fallback_pool:
-        candidates.extend(fallback_pool[:SHORTLIST_FALLBACK])
+) -> None:
+    """Shortlist library candidates for ``incoming`` and ``evaluate`` them.
+
+    The index shortlist is evaluated first; only when it yields no match
+    (no exact match or collision) are the same-duration tracks that pass the
+    pre-screen evaluated as well.
+    """
+    query = index.query(incoming)
+    primary = index.shortlist(query)
+    statuses = evaluate(primary)
+    extra: List[int] = []
+    if not any(s in (MatchStatus.EXACT_MATCH, MatchStatus.COLLISION) for s in statuses):
+        extra = index.fallback(query, set(primary), review_limit)
+        evaluate(extra)
     if profiler:
-        profiler.record_shortlist(len(candidates), shortlist_source)
+        profiler.record_shortlist(len(primary) + len(extra), "signature" if primary else "fallback")
     _dlog(
-        f"DEBUG: shortlist for {incoming.path} -> {len(candidates)} candidates",
+        f"DEBUG: shortlist for {incoming.path} -> {len(primary)} by fingerprint index, "
+        f"{len(extra)} more of about the same duration",
         log_callback,
     )
-    return candidates
 
 
 def _match_tracks(
@@ -494,38 +762,55 @@ def _match_tracks(
     mixed_codec_threshold_boost: float = MIXED_CODEC_THRESHOLD_BOOST,
     log_callback: Callable[[str], None] | None = None,
     profiler: PerformanceProfile | None = None,
+    index: _CandidateIndex | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> List[MatchResult]:
-    sig_index, ext_index = _build_candidate_index(library)
-    fallback_pool = sorted([r for r in library if r.fingerprint], key=lambda r: r.normalized_path)
+    """Match each incoming record against the library (see :class:`_CandidateIndex`).
+
+    ``index`` may be a ``_CandidateIndex`` already built from ``library``
+    (the same record objects); otherwise one is built here. A set
+    ``cancel_event`` stops early: the result then covers only the incoming
+    records matched so far (callers mark it partial).
+    """
+    if index is None or not index.built_from(library):
+        index = _CandidateIndex(library, cancel_event=cancel_event)
     results: List[MatchResult] = []
     start_time = time.perf_counter()
     for inc in incoming:
-        candidates = _shortlist_candidates(
-            inc, sig_index, ext_index, fallback_pool, log_callback=log_callback, profiler=profiler
-        )
-        cand_dist: List[CandidateDistance] = []
+        if cancel_event is not None and cancel_event.is_set():
+            break
+        pair_limits: Dict[str, Tuple[float, float]] = {}
+
+        def pair(ext: str) -> Tuple[float, float]:
+            got = pair_limits.get(ext)
+            if got is None:
+                thr = _select_pair_threshold(inc.ext, ext, thresholds, mixed_codec_threshold_boost)
+                got = pair_limits[ext] = (thr, _near_miss_margin(thr))
+            return got
+
         candidate_meta: List[Tuple[TrackRecord, float, float, float, MatchStatus]] = []
-        for cand in candidates:
-            dist = fingerprint_distance(inc.fingerprint, cand.fingerprint)
-            threshold_for_pair = _select_pair_threshold(
-                inc.ext, cand.ext, thresholds, mixed_codec_threshold_boost
-            )
-            near_miss_margin = max(NEAR_MISS_MARGIN_FLOOR, threshold_for_pair * NEAR_MISS_MARGIN_RATIO)
-            if dist == 0:
-                status = MatchStatus.EXACT_MATCH
-            elif dist <= threshold_for_pair:
-                status = MatchStatus.COLLISION
-            elif dist <= threshold_for_pair + near_miss_margin:
-                status = MatchStatus.LOW_CONFIDENCE
-            else:
-                status = MatchStatus.NEW
-            candidate_meta.append((cand, dist, threshold_for_pair, near_miss_margin, status))
-            cand_dist.append(CandidateDistance(distance=dist, track=cand))
+
+        def evaluate(indices: List[int]) -> List[MatchStatus]:
+            statuses: List[MatchStatus] = []
+            for i in indices:
+                cand = index.records[i]
+                dist = fingerprint_distance(inc.fingerprint, cand.fingerprint)
+                thr, margin = pair(cand.ext)
+                status = _classify_distance(dist, thr, margin)
+                candidate_meta.append((cand, dist, thr, margin, status))
+                statuses.append(status)
+            return statuses
+
+        _shortlist_candidates(
+            inc, index, evaluate, lambda rec: sum(pair(rec.ext)),
+            log_callback=log_callback, profiler=profiler,
+        )
+        cand_dist = [CandidateDistance(distance=dist, track=cand) for cand, dist, *_rest in candidate_meta]
         cand_dist.sort()
         best_track = None
         best_distance = None
         threshold_used = _select_threshold(inc.ext, thresholds)
-        near_miss_margin = max(NEAR_MISS_MARGIN_FLOOR, threshold_used * NEAR_MISS_MARGIN_RATIO)
+        near_miss_margin = _near_miss_margin(threshold_used)
         status = MatchStatus.NEW
         best_rank = -1
         for cand, dist, thr, margin, cand_status in candidate_meta:
@@ -656,6 +941,17 @@ def compare_libraries(
     if profiler:
         profiler.incoming_scan_duration = time.perf_counter() - start
 
+    if log_callback and lib_records and inc_records and not cancel_event.is_set():
+        log_callback(
+            f"Matching {len(inc_records)} incoming track(s) against {len(lib_records)} library track(s)…"
+        )
+    start = time.perf_counter()
+    candidate_index = _CandidateIndex(lib_records, cancel_event=cancel_event)
+    _dlog(
+        f"DEBUG: candidate index for {len(lib_records)} library tracks built in "
+        f"{time.perf_counter() - start:.2f}s",
+        log_callback,
+    )
     match_results = _match_tracks(
         inc_records,
         lib_records,
@@ -664,11 +960,13 @@ def compare_libraries(
         mixed_codec_threshold_boost=mixed_codec_threshold_boost,
         log_callback=log_callback,
         profiler=profiler,
+        index=candidate_index,
+        cancel_event=cancel_event,
     )
 
     result = _comparison_result(
         lib_records, inc_records, match_results, partial=cancel_event.is_set(),
-        include_match_objects=include_match_objects,
+        include_match_objects=include_match_objects, candidate_index=candidate_index,
     )
     if include_profile and profiler:
         result["profile"] = profiler.to_dict()
@@ -682,6 +980,7 @@ def _comparison_result(
     *,
     partial: bool,
     include_match_objects: bool,
+    candidate_index: "_CandidateIndex | None" = None,
 ) -> Dict[str, object]:
     new_paths: List[str] = []
     existing_matches: List[Tuple[str, str]] = []
@@ -714,6 +1013,9 @@ def _comparison_result(
         result["match_objects"] = match_results
         result["library_record_objects"] = lib_records
         result["incoming_record_objects"] = inc_records
+        if candidate_index is not None and candidate_index.complete:
+            # Threshold-independent: rematch_scan_result reuses it.
+            result["candidate_index"] = candidate_index
     record_event(
         "library_sync: comparison complete "
         f"library_existing={len(lib_records)} incoming_tracks={len(inc_records)} "
@@ -767,6 +1069,7 @@ def _record_from_dict(data: Dict[str, object]) -> TrackRecord:
         fingerprint=data.get("fingerprint"),  # type: ignore[arg-type]
         tags=dict(data.get("tags") or {}),  # type: ignore[arg-type]
         duration=data.get("duration"),  # type: ignore[arg-type]
+        audio_length=_positive_seconds(data.get("audio_length")),
     )
 
 
@@ -777,12 +1080,14 @@ def rematch_scan_result(
     fmt_priority: Dict[str, int] | None = None,
     mixed_codec_threshold_boost: float | None = None,
     log_callback: Callable[[str], None] | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> Dict[str, object]:
     """Re-run matching on an earlier scan's records with new thresholds.
 
     No file is read or fingerprinted again: the records (with their
-    fingerprints) come from ``scan_result`` (a ``compare_libraries`` result).
-    Returns a result of the same shape, with match objects.
+    fingerprints) come from ``scan_result`` (a ``compare_libraries`` result),
+    and so does the candidate index when the scan kept one. Returns a result
+    of the same shape, with match objects (``partial`` when cancelled).
     """
     lib_records = scan_result.get("library_record_objects") or [
         _record_from_dict(d) for d in scan_result.get("library_records", [])  # type: ignore[union-attr]
@@ -795,17 +1100,25 @@ def rematch_scan_result(
         mixed_codec_threshold_boost = float(
             cfg.get("mixed_codec_threshold_boost", MIXED_CODEC_THRESHOLD_BOOST)
         )
+    lib_records = list(lib_records)  # type: ignore[arg-type]
+    index = scan_result.get("candidate_index")
+    if not isinstance(index, _CandidateIndex) or not index.built_from(lib_records):
+        index = _CandidateIndex(lib_records, cancel_event=cancel_event)  # type: ignore[arg-type]
     match_results = _match_tracks(
         list(inc_records),  # type: ignore[arg-type]
-        list(lib_records),  # type: ignore[arg-type]
+        lib_records,  # type: ignore[arg-type]
         thresholds or DEFAULT_FP_THRESHOLDS,
         fmt_priority or FORMAT_PRIORITY,
         mixed_codec_threshold_boost=mixed_codec_threshold_boost,
         log_callback=log_callback,
+        index=index,
+        cancel_event=cancel_event,
     )
+    cancelled = cancel_event is not None and cancel_event.is_set()
     return _comparison_result(
-        list(lib_records), list(inc_records), match_results,  # type: ignore[arg-type]
-        partial=bool(scan_result.get("partial")), include_match_objects=True,
+        lib_records, list(inc_records), match_results,  # type: ignore[arg-type]
+        partial=bool(scan_result.get("partial")) or cancelled, include_match_objects=True,
+        candidate_index=index,
     )
 
 
