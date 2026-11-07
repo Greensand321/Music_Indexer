@@ -1,8 +1,9 @@
 import os
 import sqlite3
+import threading
 import time
+from collections import OrderedDict
 from typing import Callable, Optional
-from functools import lru_cache
 from .utils.path_helpers import ensure_long_path
 
 verbose: bool = True
@@ -51,7 +52,38 @@ def _ensure_db(db_path: str) -> sqlite3.Connection:
     return conn
 
 
-@lru_cache(maxsize=128)
+# In-process memo of recent lookups. It used to be ``@lru_cache`` on
+# ``get_fingerprint`` itself, keyed on the path (and callbacks) only, so a file
+# edited mid-process kept its old fingerprint. Entries are now keyed on the
+# file's (mtime, size) as well, exactly like the SQLite rows.
+_MEMO_MAX = 128
+_memo: "OrderedDict[tuple[str, str, float, int], str]" = OrderedDict()
+_memo_lock = threading.Lock()
+
+
+def _memo_get(db_path: str, path: str, mtime: float, size: int) -> Optional[str]:
+    key = (db_path, path, mtime, int(size))
+    with _memo_lock:
+        fp = _memo.get(key)
+        if fp is not None:
+            _memo.move_to_end(key)
+        return fp
+
+
+def _memo_put(db_path: str, path: str, mtime: float, size: int, fp: str) -> None:
+    key = (db_path, path, mtime, int(size))
+    with _memo_lock:
+        _memo[key] = fp
+        _memo.move_to_end(key)
+        while len(_memo) > _MEMO_MAX:
+            _memo.popitem(last=False)
+
+
+def _memo_clear() -> None:
+    with _memo_lock:
+        _memo.clear()
+
+
 def get_fingerprint(
     path: str,
     db_path: str,
@@ -63,15 +95,18 @@ def get_fingerprint(
         log_callback = lambda msg: None
 
     path = ensure_long_path(path)
-    os.makedirs(os.path.dirname(db_path), exist_ok=True)
-    conn = _ensure_db(db_path)
     try:
         mtime = os.path.getmtime(path)
         size = os.path.getsize(path)
     except OSError as e:
         log_callback(f"! Could not stat {path}: {e}")
-        conn.close()
         return None
+    fp = _memo_get(db_path, path, mtime, size)
+    if fp is not None:
+        _dlog("FP", f"cache hit (memory) {path}", log_callback)
+        return fp
+    os.makedirs(os.path.dirname(db_path), exist_ok=True)
+    conn = _ensure_db(db_path)
     row = conn.execute(
         "SELECT mtime, size, fingerprint FROM fingerprints WHERE path=?",
         (path,),
@@ -87,7 +122,9 @@ def get_fingerprint(
                 fp = fp.decode("utf-8")
             except Exception:
                 fp = fp.decode("latin1", errors="ignore")
-        _dlog("FP", f"fingerprint={fp} prefix={fp[:16]}", log_callback)
+        if fp:
+            _dlog("FP", f"fingerprint={fp} prefix={fp[:16]}", log_callback)
+            _memo_put(db_path, path, mtime, size, fp)
         return fp
     if row:
         _dlog(
@@ -105,12 +142,17 @@ def get_fingerprint(
             (path, mtime, size, duration, fp_hash),
         )
         conn.commit()
+        _memo_put(db_path, path, mtime, size, fp_hash)
     conn.close()
     return fp_hash
 
 
+# ``get_fingerprint.cache_clear()`` existed while it was an ``lru_cache``.
+get_fingerprint.cache_clear = _memo_clear  # type: ignore[attr-defined]
+
+
 def flush_cache(db_path: str) -> None:
-    get_fingerprint.cache_clear()
+    _memo_clear()
     if not os.path.exists(db_path):
         return
     try:
