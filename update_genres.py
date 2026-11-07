@@ -4,12 +4,23 @@ update_genres.py
 
 Walk a chosen folder and all subfolders for audio files. For each file, read
 its “artist” and “title” tags, query MusicBrainz for a matching recording, pull
-the MB recording’s tags (genres), pick the top 3 by popularity, and write them
-back into the file’s own “genre” tag field (using Mutagen).
+the MB recording’s tags (genres), pick the top 3 by popularity, and add them
+to the file’s own “genre” tag (using Mutagen).
+
+Rules, shared with the Qt app's "Fill from MusicBrainz" tab:
+
+* files that already carry two or more genre values are left untouched;
+* otherwise the MusicBrainz tags are **added after** the existing genre —
+  nothing already on the file is removed (see
+  ``controllers.normalize_controller.add_genres``).
+
+The Qt app looks everything up first, shows the result, and writes only after
+the user confirms (``normalize_controller.plan_genre_fill`` +
+``apply_genre_changes``). This script's ``main()`` is the legacy command-line
+version and writes as it goes.
 
 While processing, the script prints simple progress messages like
-``[index/total] Processing <file>``. Install ``tqdm`` if you’d prefer a fancy
-progress bar instead.
+``[index/total] Processing <file>``.
 
 Produces a log file “genre_update_log.txt” summarizing each file’s result.
 
@@ -32,38 +43,23 @@ if sys.platform == "win32":
             pass
 
 import musicbrainzngs
-from utils.audio_metadata_reader import read_tags
+from utils.audio_metadata_reader import read_tags, read_genres
+from utils.tag_writer import SUPPORTED_TAG_EXTS, TagWriteError, write_fields
+
 try:
-    from mutagen import File as MutagenFile
-    from mutagen.easyid3 import EasyID3
-    from mutagen.flac import FLAC
+    from mutagen import File as MutagenFile  # noqa: F401 - kept for importers
 except Exception:  # pragma: no cover - optional dependency
-    class _DummyAudio:
-        def __init__(self, *a, **k):
-            self.tags = {}
-
-        def get(self, key, default=None):
-            return self.tags.get(key, default)
-
-    def MutagenFile(*_a, **_k):
-        return _DummyAudio()
-
-    class EasyID3(_DummyAudio):
-        pass
-
-    class FLAC(_DummyAudio):
-        pass
+    MutagenFile = None  # type: ignore
 
 # ─── CONFIGURATION ─────────────────────────────────────────────────────
-
-musicbrainzngs.set_useragent(
-    "SoundVaultGenreUpdater",
-    "1.0",
-    "youremail@example.com"
-)
+#
+# The MusicBrainz user agent is no longer set as an import side effect (with
+# a placeholder e-mail address). Every lookup sets it from Settings first —
+# see metadata_service.ensure_musicbrainz_useragent.
 
 RATE_LIMIT_SECONDS = 1.0
-SUPPORTED_EXTS = {".mp3", ".flac", ".m4a", ".aac", ".wav", ".ogg"}
+#: One extension set for every tag tool (this used to omit ``.opus``).
+SUPPORTED_EXTS = set(SUPPORTED_TAG_EXTS)
 
 # ─── UTILITY FUNCTIONS ──────────────────────────────────────────────────
 
@@ -80,7 +76,10 @@ def choose_top_genres(mb_tag_list, top_n=3):
 
     for t in valid:
         if not isinstance(t.get("count"), int):
-            t["count"] = 0
+            try:
+                t["count"] = int(t.get("count"))
+            except (TypeError, ValueError):
+                t["count"] = 0
 
     sorted_tags = sorted(valid, key=lambda t: (-t["count"], t["name"].lower()))
     return [t["name"].strip() for t in sorted_tags[:top_n]]
@@ -102,15 +101,10 @@ def extract_artist_title(filepath):
 
 def extract_genre_list(filepath):
     """
-    Return a list of existing genres from the file, or [] if none.
+    Return every genre value in the file (not just the first), or [] if none.
     """
     try:
-        raw = read_tags(filepath).get("genre")
-        if raw in (None, ""):
-            return []
-        if isinstance(raw, (list, tuple)):
-            return [str(v) for v in raw if isinstance(v, str)]
-        return [str(raw)]
+        return list(read_genres(filepath))
     except Exception:
         return []
 
@@ -118,24 +112,15 @@ def extract_genre_list(filepath):
 def update_genre_tag(filepath, new_genres):
     """
     Write new_genres (list of strings) into file’s 'genre' tag. Return True/False.
+
+    Writes a real multi-value genre list in every supported format, including
+    WAV/AIFF files with ID3 tags (which the easy interface can't write).
     """
-    ext = os.path.splitext(filepath)[1].lower()
     try:
-        if ext == ".mp3":
-            audio = EasyID3(filepath)
-            audio["genre"] = new_genres
-            audio.save()
-        elif ext == ".flac":
-            audio = FLAC(filepath)
-            audio["genre"] = new_genres
-            audio.save()
-        else:
-            audio = MutagenFile(filepath, easy=True)
-            if not audio or not audio.tags:
-                return False
-            audio.tags["genre"] = new_genres
-            audio.save()
+        write_fields(filepath, {"genre": [str(g) for g in new_genres]})
         return True
+    except TagWriteError:
+        return False
     except Exception:
         return False
 
@@ -148,54 +133,71 @@ def log_line(logfile, message):
     logfile.flush()
 
 
-# ─── CORE PROCESSING ───────────────────────────────────────────────────
+def lookup_musicbrainz_genres(filepath, top_n=3):
+    """Look ``filepath`` up on MusicBrainz by artist + title. Never writes.
 
-def process_file(filepath, logfile):
-    relative = os.path.relpath(filepath)
+    Returns a ``normalize_controller.FillLookup``. No rate-limit sleep here;
+    callers space out their requests.
+    """
+    from controllers.normalize_controller import FillLookup
+    from metadata_service import ensure_musicbrainz_useragent
+
     artist, title = extract_artist_title(filepath)
     if not artist or not title:
-        log_line(logfile, f"{relative}  → skipped (missing artist/title).")
-        return
-
+        return FillLookup(status="missing_artist_title", detail="skipped (missing artist/title)", queried=False)
     try:
+        ensure_musicbrainz_useragent(musicbrainzngs)
         result = musicbrainzngs.search_recordings(
             recording=title,
             artist=artist,
             limit=1,
-            strict=True
+            strict=True,
         )
-    except Exception as e:
-        log_line(logfile, f"{relative}  → MB search error: {e}")
-        time.sleep(RATE_LIMIT_SECONDS)
-        return
-
-    recordings = result.get("recording-list", [])
+    except Exception as e:  # noqa: BLE001
+        return FillLookup(status="error", detail=f"MusicBrainz search error: {e}")
+    recordings = (result or {}).get("recording-list", [])
     if not recordings:
-        log_line(logfile, f"{relative}  → no MB match.")
-        time.sleep(RATE_LIMIT_SECONDS)
-        return
-
+        return FillLookup(status="no_match", detail="no MusicBrainz match")
     rec = recordings[0]
-    mb_tags = rec.get("tag-list", [])
-    top_genres = choose_top_genres(mb_tags, top_n=3)
-
+    top_genres = choose_top_genres(rec.get("tag-list", []), top_n=top_n)
     if not top_genres:
-        log_line(logfile, f"{relative}  → matched MB but no tags.")
-        time.sleep(RATE_LIMIT_SECONDS)
-        return
+        return FillLookup(status="no_tags", detail="matched on MusicBrainz, but it has no tags")
+    match = " – ".join(x for x in (artist, rec.get("title") or title) if x)
+    return FillLookup(genres=top_genres, status="matched", detail=f"MusicBrainz: {match}")
 
+
+# ─── CORE PROCESSING ───────────────────────────────────────────────────
+
+def process_file(filepath, logfile):
+    """Legacy one-shot path (CLI): look up and write immediately.
+
+    Same rules as the app's preview: skip files with 2+ genres, otherwise add
+    the MusicBrainz tags after the existing genre.
+    """
+    from controllers.normalize_controller import FILL_SKIP_AT, add_genres
+
+    relative = os.path.relpath(filepath)
     existing = extract_genre_list(filepath)
-    if existing and len(existing) >= 2:
+    if len(existing) >= FILL_SKIP_AT:
         log_line(logfile, f"{relative}  → skipped (already has genres {existing}).")
-        time.sleep(RATE_LIMIT_SECONDS)
         return
 
-    success = update_genre_tag(filepath, top_genres)
+    found = lookup_musicbrainz_genres(filepath)
+    if found.queried:
+        time.sleep(RATE_LIMIT_SECONDS)
+    if not found.genres:
+        log_line(logfile, f"{relative}  → {found.detail}.")
+        return
+
+    after = add_genres(existing, found.genres)
+    if after == existing:
+        log_line(logfile, f"{relative}  → already has [{', '.join(existing)}].")
+        return
+    success = update_genre_tag(filepath, after)
     if success:
-        log_line(logfile, f"{relative}  → updated genres to [{', '.join(top_genres)}].")
+        log_line(logfile, f"{relative}  → updated genres to [{', '.join(after)}].")
     else:
-        log_line(logfile, f"{relative}  → failed to write genres [{', '.join(top_genres)}].")
-    time.sleep(RATE_LIMIT_SECONDS)
+        log_line(logfile, f"{relative}  → failed to write genres [{', '.join(after)}].")
 
 
 def main():
@@ -226,11 +228,11 @@ def main():
     log_line(logfile, f"Started: {time.ctime()}")
     log_line(logfile, "--------------------------------------")
 
-    all_files = []
-    for dirpath, _, filenames in os.walk(folder):
-        for fname in filenames:
-            if os.path.splitext(fname)[1].lower() in SUPPORTED_EXTS:
-                all_files.append(os.path.join(dirpath, fname))
+    # Same discovery as the app: reserved folders (Not Sorted, Quarantine…)
+    # are never entered.
+    from controllers.tagfix_controller import discover_files
+
+    all_files = discover_files(folder)
 
     total = len(all_files)
 
