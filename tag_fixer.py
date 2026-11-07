@@ -4,7 +4,7 @@ import argparse
 from collections import Counter
 from pathlib import Path
 from dataclasses import dataclass, field
-from typing import Iterable, Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Iterable, Callable, Dict, List, Optional, Sequence, Tuple, Union
 import importlib
 from mutagen import File as MutagenFile
 from utils.audio_metadata_reader import read_tags, read_tags_checked, read_genres_checked
@@ -85,6 +85,10 @@ for name in _PLUGIN_MODULE_NAMES:
 
 # ─── Data Classes ────────────────────────────────────────────────────────
 
+#: A text tag's current value: ``None`` (absent), one ``str``, or the full
+#: ``list`` of values when the file holds several.
+FieldValue = Union[str, List[str]]
+
 @dataclass
 class FileRecord:
     """Representation of a single audio file and proposed tags."""
@@ -92,11 +96,15 @@ class FileRecord:
     path: Path
     status: str
     score: Optional[float] = None
-    old_artist: Optional[str] = None
+    #: What the file holds now. A single value is a ``str``; a field with
+    #: several values (``["Artist A", "Artist B"]``) is the full ``list`` so
+    #: the preview, the change log and the "changed since preview" check see
+    #: every value, not just the first.
+    old_artist: Optional[FieldValue] = None
     new_artist: Optional[str] = None
-    old_title: Optional[str] = None
+    old_title: Optional[FieldValue] = None
     new_title: Optional[str] = None
-    old_album: Optional[str] = None
+    old_album: Optional[FieldValue] = None
     new_album: Optional[str] = None
     old_genres: List[str] = field(default_factory=list)
     new_genres: List[str] = field(default_factory=list)
@@ -138,6 +146,90 @@ def find_files(root):
     return audio_files
 
 
+#: Text fields the Tag Fixer reads in full and can rewrite.
+_TEXT_FIELDS = ("artist", "title", "album")
+# ID3 frames for containers mutagen doesn't wrap in EasyID3 (WAV, AIFF).
+_ID3_TEXT_FRAMES = {"artist": "TPE1", "title": "TIT2", "album": "TALB"}
+
+
+def _value_list(value: object) -> List[str]:
+    """``None`` / ``""`` -> ``[]``, ``"x"`` -> ``["x"]``, a list -> its strings."""
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple)):
+        return [str(v) for v in value if v is not None and str(v) != ""]
+    text = str(value)
+    return [text] if text else []
+
+
+def _shape(values: Sequence[str]) -> Optional[FieldValue]:
+    """The ``FileRecord.old_*`` form of ``values``: None, one str, or the list."""
+    values = list(values)
+    if not values:
+        return None
+    if len(values) == 1:
+        return values[0]
+    return values
+
+
+def _read_text_field_lists(path: str) -> Optional[Dict[str, List[str]]]:
+    """Every value of artist / title / album on disk, read with mutagen.
+
+    ``utils.audio_metadata_reader.read_tags`` returns only the *first* value
+    of each field, and the Tag Fixer writes a whole field: a second artist
+    the preview never showed would be deleted. Returns ``None`` when mutagen
+    can't open the file (the caller then falls back to ``read_tags``).
+    """
+    try:
+        audio = MutagenFile(ensure_long_path(path), easy=True)
+    except Exception:  # noqa: BLE001
+        return None
+    if audio is None:
+        return None
+    out: Dict[str, List[str]] = {name: [] for name in _TEXT_FIELDS}
+    tags = getattr(audio, "tags", None)
+    if tags is None:
+        return out
+    try:
+        if hasattr(tags, "getall"):  # raw ID3 in WAV / AIFF
+            for name, frame_id in _ID3_TEXT_FRAMES.items():
+                for frame in tags.getall(frame_id):
+                    out[name].extend(_value_list(list(getattr(frame, "text", []) or [])))
+        else:
+            for name in _TEXT_FIELDS:
+                try:
+                    raw = tags[name] if name in tags else None
+                except Exception:  # noqa: BLE001 - e.g. a key the easy map lacks
+                    raw = None
+                out[name] = _value_list(raw)
+    except Exception:  # noqa: BLE001
+        return None
+    return out
+
+
+def _text_values(path: str, first_values: Dict[str, object]) -> Dict[str, Optional[FieldValue]]:
+    """``{field: value}`` for artist/title/album with every value kept.
+
+    ``first_values`` is ``read_tags``' result, used for a field the full
+    reader found nothing for (or when mutagen couldn't open the file).
+    """
+    lists = _read_text_field_lists(path)
+    out: Dict[str, Optional[FieldValue]] = {}
+    for name in _TEXT_FIELDS:
+        full = lists.get(name) if lists is not None else None
+        out[name] = _shape(full) if full else _shape(_value_list(first_values.get(name)))
+    return out
+
+
+def _same_value(a: object, b: object) -> bool:
+    return _value_list(a) == _value_list(b)
+
+
+def _db_text(value: object) -> Optional[str]:
+    values = _value_list(value)
+    return "; ".join(values) if values else None
+
+
 def planned_changes(
     rec: "FileRecord", fields: Optional[Iterable[str]] = None
 ) -> Dict[str, Tuple[object, object]]:
@@ -148,6 +240,13 @@ def planned_changes(
     A field is planned only when the lookup returned a non-empty value that
     differs from the file's; genres are planned only when the lookup adds at
     least one genre (see :func:`add_genres`). Never blanks a field.
+
+    Artist / title / album proposals **replace every value** of the field
+    with the one proposed value. ``before`` is the full current value — a
+    list when the file holds several (``["Artist A", "Artist B"]``), which
+    the preview shows as "Artist A; Artist B → New Artist" — so the preview
+    shows exactly what the write removes. A proposal equal to the current
+    values joined with "; " is treated as no change.
     """
     wanted = set(TAG_FIELDS if fields is None else fields)
     out: Dict[str, Tuple[object, object]] = {}
@@ -159,7 +258,10 @@ def planned_changes(
         if name not in wanted or new is None:
             continue
         new_text = str(new).strip()
-        if not new_text or new_text == (old or ""):
+        if not new_text:
+            continue
+        old_values = _value_list(old)
+        if old_values == [new_text] or (len(old_values) > 1 and "; ".join(old_values) == new_text):
             continue
         out[name] = (old, new_text)
     if "genres" in wanted and rec.new_genres:
@@ -224,12 +326,9 @@ def _current_values(path: str) -> Tuple[Optional[Dict[str, object]], str]:
     genres, gerror = read_genres_checked(ensure_long_path(path))
     if gerror and gerror.startswith("read failed"):
         return None, gerror
-    return {
-        "artist": tags.get("artist"),
-        "title": tags.get("title"),
-        "album": tags.get("album"),
-        "genres": genres,
-    }, ""
+    values: Dict[str, object] = dict(_text_values(path, tags))
+    values["genres"] = genres
+    return values, ""
 
 
 def _write_record(
@@ -264,7 +363,12 @@ def _write_record(
         current, error = _current_values(path)
         if current is None:
             return _finish("failed", f"Failed to read {path}: {error}")
-        stale = [f for f, (before, _after) in changes.items() if current.get(f) != before]
+        # Full value lists on both sides: a second artist added since the
+        # preview makes the file stale too.
+        stale = [
+            f for f, (before, _after) in changes.items()
+            if not _same_value(current.get(f), before)
+        ]
         if stale:
             return _finish(
                 "skipped",
@@ -358,8 +462,11 @@ def apply_tag_changes(
 
 def prompt_user_about_tags(f, old_artist, old_title, new_tags):
     """Show side-by-side old vs new and ask Y/N."""
-    new_artist = new_tags["artist"]
-    new_title  = new_tags["title"]
+    new_artist = new_tags["artist"] or "—"
+    new_title  = new_tags["title"] or "—"
+    # Several values show as "A; B" (FileRecord keeps multi-value fields as lists).
+    old_artist = _db_text(old_artist)
+    old_title = _db_text(old_title)
     print(f"\nFile: {f}")
     print(f"{'Field':10} │ {'Current':30} │ {'New from AcoustID':30}")
     print("-" * 75)
@@ -457,9 +564,12 @@ def build_file_records(
             log_callback(f"Failed to read {f}: {read_error}")
             _progress(idx)
             continue
-        old_artist = tags.get("artist")
-        old_title = tags.get("title")
-        old_album = tags.get("album")
+        # Every value of each text field, not just the first: a proposal
+        # replaces the whole field, so the preview must show all of it.
+        text_values = _text_values(f, tags)
+        old_artist = text_values["artist"]
+        old_title = text_values["title"]
+        old_album = text_values["album"]
         # Every genre value, not just the first: the genre write appends to
         # this list, so a value missing here would be deleted on apply.
         old_genres, _genre_error = read_genres_checked(ensure_long_path(f))
@@ -497,12 +607,14 @@ def build_file_records(
             enrichment_error = result.get("enrichment_error")
             if enrichment_error:
                 diag.errors[f"{label}: {enrichment_error}"] += 1
-            if result.get('genres'):
-                merged_genres = add_genres(merged_genres, list(result['genres']))
             try:
                 score = float(result.get('score') or 0)
             except (TypeError, ValueError):
                 score = 0.0
+            # Genres only from matches confident enough to propose at all —
+            # the same threshold that gates artist/title/album below.
+            if result.get('genres') and score >= MIN_INTERACTIVE_SCORE:
+                merged_genres = add_genres(merged_genres, list(result['genres']))
             if score > best_score:
                 best_score = score
                 best_result = result
@@ -537,9 +649,9 @@ def build_file_records(
         genres_new = ";".join(rec.new_genres)
         vals = (
             str(rec.path), rec.status, rec.score,
-            rec.old_artist, rec.new_artist,
-            rec.old_title, rec.new_title,
-            rec.old_album, rec.new_album,
+            _db_text(rec.old_artist), rec.new_artist,
+            _db_text(rec.old_title), rec.new_title,
+            _db_text(rec.old_album), rec.new_album,
             genres_old, genres_new,
         )
         db_conn.execute(
