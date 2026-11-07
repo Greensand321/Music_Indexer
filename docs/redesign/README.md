@@ -332,5 +332,6 @@ GUI concurrency) turned up further real bugs. The serious ones:
 185 tests at the start of this phase (9 failing; the result depended on file order). At the end of phase 2:
 **1138 passing** on Linux (CI: Python 3.12 and 3.13), including about 390 headless GUI tests. The backend
 tests pass in default, reversed and shuffled file order, and the GUI suite passed repeated and reversed-order runs
-with no flakes. The Windows CI job (informational) failed 21 tests before the Windows portability fixes; see the latest CI run for its current state.
+with no flakes. The Windows CI job went from 21 failures to 10 to **0** across the Windows portability fixes
+and is now a required job.
 

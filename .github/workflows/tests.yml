@@ -13,10 +13,8 @@ jobs:
   pytest:
     name: pytest (${{ matrix.os }}, py${{ matrix.python }})
     runs-on: ${{ matrix.os }}
-    # Windows is the primary desktop platform for AlphaDEX users, but the
-    # suite was developed on Linux; treat Windows as informational until it
-    # has been green for a while.
-    continue-on-error: ${{ matrix.os == 'windows-latest' }}
+    # Windows is the primary desktop platform for AlphaDEX users: it is a
+    # required job (green since 2026-11-07, after the Windows portability fixes).
     strategy:
       fail-fast: false
       matrix:
