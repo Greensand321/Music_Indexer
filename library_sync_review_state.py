@@ -61,6 +61,52 @@ class ReviewStateStore:
         self.flags.replace.clear()
         self.flags.notes.clear()
 
+    def clear_flags(self, incoming_track_id: str) -> None:
+        """Remove the Copy and Replace flags of one row (its note stays)."""
+        self.flags.copy.discard(incoming_track_id)
+        self.flags.replace.pop(incoming_track_id, None)
+
+    def has_flags(self) -> bool:
+        return bool(self.flags.copy or self.flags.replace or self.flags.notes)
+
+    def decision_signature(self) -> tuple:
+        """Hashable snapshot of the flags that change a plan (notes do not)."""
+        return (frozenset(self.flags.copy), frozenset(self.flags.replace.items()))
+
+    def carry_over(self, results: Iterable[MatchResult]) -> List[str]:
+        """Keep the flags that still make sense after a re-scan; drop the rest.
+
+        * Copy flags and notes survive for incoming tracks that are still there.
+        * A Replace flag survives only while the track's best match is the same
+          existing track — it is *not* silently re-pointed at a different file.
+
+        Returns one warning per flag or note that could not be carried over.
+        """
+        results = list(results)
+        present = {res.incoming.track_id: res for res in results}
+        names = {tid: res.incoming.path for tid, res in present.items()}
+        warnings: List[str] = []
+        for track_id in sorted(self.flags.copy):
+            if track_id not in present:
+                self.flags.copy.discard(track_id)
+                warnings.append(f"Dropped a Copy flag: track {track_id[:8]}… is no longer in the incoming folder.")
+        for track_id, existing_id in sorted(self.flags.replace.items()):
+            res = present.get(track_id)
+            if res is None:
+                del self.flags.replace[track_id]
+                warnings.append(f"Dropped a Replace flag: track {track_id[:8]}… is no longer in the incoming folder.")
+            elif res.existing is None or res.existing.track_id != existing_id:
+                del self.flags.replace[track_id]
+                warnings.append(
+                    f"Cleared the Replace flag on {names[track_id]}: its best match changed. "
+                    "Flag it again if you still want it to replace a library track."
+                )
+        for track_id in sorted(self.flags.notes):
+            if track_id not in present:
+                self.flags.notes.pop(track_id, None)
+                warnings.append(f"Dropped a note: track {track_id[:8]}… is no longer in the incoming folder.")
+        return warnings
+
     def reconcile_best_matches(self, results: Iterable[MatchResult]) -> List[str]:
         """Rebind replacement flags when the best match changes.
 

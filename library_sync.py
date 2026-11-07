@@ -16,6 +16,7 @@ from typing import Callable, Dict, Iterable, List, Optional, Tuple
 
 from library_sync_indexer_engine import (
     config as idx_config,
+    dry_run_coordinator as idx_dry_run_coordinator,
     fingerprint_cache as idx_fingerprint_cache,
     fingerprint_generator as idx_fingerprint_generator,
     music_indexer_api as idx,
@@ -35,6 +36,7 @@ from crash_logger import watcher
 from indexer_control import IndexCancelled
 from library_sync_types import MatchResult, MatchStatus, TrackRecord, CandidateDistance
 from library_sync_review_state import ReviewStateStore
+from utils.reserved_folders import prune_reserved_dirs
 
 debug: bool = False
 _logger = logging.getLogger(__name__)
@@ -238,19 +240,29 @@ def _scan_folder(
     cancel_event: threading.Event | None = None,
     profiler: PerformanceProfile | None = None,
     fingerprint_settings: Dict[str, object] | None = None,
+    skip_reserved: bool = False,
 ) -> List[TrackRecord]:
-    """Enumerate audio files, normalize paths, and attach cached fingerprints."""
+    """Enumerate audio files, normalize paths, and attach cached fingerprints.
+
+    With ``skip_reserved`` the folder's reserved top-level folders
+    (Quarantine/, Trash/, Docs/, Manual Review/, Playlists/, Not Sorted/ — see
+    ``utils.reserved_folders``) are not scanned, so quarantined duplicate
+    losers and Library Sync's own backups are never "existing" tracks.
+    """
     cancel_event = cancel_event or threading.Event()
     record_event(f"library_sync: scanning folder {folder}")
     _dlog(f"DEBUG: Scanning folder {folder}", log_callback)
     entries: List[Dict[str, object]] = []
     total_files = 0
     for dirpath, _dirs, files in os.walk(folder):
+        if skip_reserved:
+            prune_reserved_dirs(dirpath, _dirs, folder)
+        _dirs.sort()
         if cancel_event.is_set():
             if log_callback:
                 log_callback(json.dumps({"event": "scan_cancelled", "folder": folder, "stage": "walk"}))
             break
-        for fname in files:
+        for fname in sorted(files):
             ext = os.path.splitext(fname)[1].lower()
             if ext not in idx.SUPPORTED_EXTS:
                 continue
@@ -575,6 +587,7 @@ def compare_libraries(
         Optional mapping of file extensions to fingerprint distance thresholds.
         The ``default`` key is used when an extension is not present.
     """
+    validate_sync_folders(library_folder, incoming_folder)
     record_event(
         f"library_sync: comparing {library_folder} to {incoming_folder}"
     )
@@ -602,6 +615,7 @@ def compare_libraries(
         cancel_event=cancel_event,
         profiler=profiler,
         fingerprint_settings=fingerprint_settings,
+        skip_reserved=True,
     )
     if profiler:
         profiler.library_scan_duration = time.perf_counter() - start
@@ -614,6 +628,7 @@ def compare_libraries(
         cancel_event=cancel_event,
         profiler=profiler,
         fingerprint_settings=fingerprint_settings,
+        skip_reserved=True,
     )
     if profiler:
         profiler.incoming_scan_duration = time.perf_counter() - start
@@ -628,6 +643,23 @@ def compare_libraries(
         profiler=profiler,
     )
 
+    result = _comparison_result(
+        lib_records, inc_records, match_results, partial=cancel_event.is_set(),
+        include_match_objects=include_match_objects,
+    )
+    if include_profile and profiler:
+        result["profile"] = profiler.to_dict()
+    return result
+
+
+def _comparison_result(
+    lib_records: List[TrackRecord],
+    inc_records: List[TrackRecord],
+    match_results: List[MatchResult],
+    *,
+    partial: bool,
+    include_match_objects: bool,
+) -> Dict[str, object]:
     new_paths: List[str] = []
     existing_matches: List[Tuple[str, str]] = []
     improved: List[Tuple[str, str]] = []
@@ -653,18 +685,105 @@ def compare_libraries(
         "library_records": [r.to_dict() for r in lib_records],
         "incoming_records": [r.to_dict() for r in inc_records],
         "matches": [m.to_dict() for m in match_results],
-        "partial": cancel_event.is_set(),
+        "partial": partial,
     }
     if include_match_objects:
         result["match_objects"] = match_results
-    if include_profile and profiler:
-        result["profile"] = profiler.to_dict()
+        result["library_record_objects"] = lib_records
+        result["incoming_record_objects"] = inc_records
     record_event(
         "library_sync: comparison complete "
         f"library_existing={len(lib_records)} incoming_tracks={len(inc_records)} "
         f"new={len(new_paths)} existing_matches={len(existing_matches)} improved={len(improved)}"
     )
     return result
+
+
+def validate_sync_folders(library_folder: str, incoming_folder: str) -> None:
+    """Raise ``ValueError`` unless both folders exist and are distinct, non-nested
+    directories. (A typo'd library path used to be silently created and every
+    incoming track then looked "new".)"""
+    for label, folder in (("Existing library", library_folder), ("Incoming folder", incoming_folder)):
+        if not folder or not os.path.isdir(folder):
+            raise ValueError(f"{label} not found: {folder or '(empty)'}")
+    lib = _normalize_path(library_folder)
+    inc = _normalize_path(incoming_folder)
+    if lib == inc:
+        raise ValueError("The incoming folder is the existing library itself.")
+    if inc.startswith(lib + os.sep):
+        raise ValueError("The incoming folder is inside the existing library; choose a folder outside it.")
+    if lib.startswith(inc + os.sep):
+        raise ValueError("The existing library is inside the incoming folder; choose separate folders.")
+
+
+def summarize_matches(match_results: Iterable[MatchResult]) -> Dict[str, int]:
+    """Counts by outcome, for user-facing summaries."""
+    counts = {"incoming": 0, "new": 0, "matched": 0, "upgrades": 0, "low_confidence": 0}
+    for res in match_results:
+        counts["incoming"] += 1
+        if res.status == MatchStatus.NEW or res.existing is None:
+            counts["new"] += 1
+        elif res.status == MatchStatus.LOW_CONFIDENCE:
+            counts["low_confidence"] += 1
+        else:
+            counts["matched"] += 1
+            if res.quality_label == "Potential Upgrade":
+                counts["upgrades"] += 1
+    return counts
+
+
+def _record_from_dict(data: Dict[str, object]) -> TrackRecord:
+    return TrackRecord(
+        track_id=str(data["track_id"]),
+        path=str(data["path"]),
+        normalized_path=str(data.get("normalized_path") or _normalize_path(str(data["path"]))),
+        ext=str(data.get("ext") or ""),
+        bitrate=int(data.get("bitrate") or 0),
+        size=int(data.get("size") or 0),
+        mtime=float(data.get("mtime") or 0.0),
+        fingerprint=data.get("fingerprint"),  # type: ignore[arg-type]
+        tags=dict(data.get("tags") or {}),  # type: ignore[arg-type]
+        duration=data.get("duration"),  # type: ignore[arg-type]
+    )
+
+
+def rematch_scan_result(
+    scan_result: Dict[str, object],
+    *,
+    thresholds: Dict[str, float] | None = None,
+    fmt_priority: Dict[str, int] | None = None,
+    mixed_codec_threshold_boost: float | None = None,
+    log_callback: Callable[[str], None] | None = None,
+) -> Dict[str, object]:
+    """Re-run matching on an earlier scan's records with new thresholds.
+
+    No file is read or fingerprinted again: the records (with their
+    fingerprints) come from ``scan_result`` (a ``compare_libraries`` result).
+    Returns a result of the same shape, with match objects.
+    """
+    lib_records = scan_result.get("library_record_objects") or [
+        _record_from_dict(d) for d in scan_result.get("library_records", [])  # type: ignore[union-attr]
+    ]
+    inc_records = scan_result.get("incoming_record_objects") or [
+        _record_from_dict(d) for d in scan_result.get("incoming_records", [])  # type: ignore[union-attr]
+    ]
+    if mixed_codec_threshold_boost is None:
+        cfg = idx_config.load_config()
+        mixed_codec_threshold_boost = float(
+            cfg.get("mixed_codec_threshold_boost", MIXED_CODEC_THRESHOLD_BOOST)
+        )
+    match_results = _match_tracks(
+        list(inc_records),  # type: ignore[arg-type]
+        list(lib_records),  # type: ignore[arg-type]
+        thresholds or DEFAULT_FP_THRESHOLDS,
+        fmt_priority or FORMAT_PRIORITY,
+        mixed_codec_threshold_boost=mixed_codec_threshold_boost,
+        log_callback=log_callback,
+    )
+    return _comparison_result(
+        list(lib_records), list(inc_records), match_results,  # type: ignore[arg-type]
+        partial=bool(scan_result.get("partial")), include_match_objects=True,
+    )
 
 
 def profile_compare_libraries(
@@ -708,7 +827,13 @@ def replace_tracks(*_args, **_kwargs):
 
 @dataclass
 class LibrarySyncPlan:
-    """Move/route plan computed by the indexer engine for Library Sync."""
+    """Move/route plan computed by the indexer engine for Library Sync.
+
+    ``items`` is the reviewed, executable plan: ``execute_plan`` performs
+    exactly these decisions (it only recomputes them for legacy plans built
+    without items). ``copy_only`` / ``allowed_replacements`` /
+    ``replacement_targets`` record the user's flags that produced them.
+    """
 
     library_root: str
     incoming_root: str
@@ -721,6 +846,7 @@ class LibrarySyncPlan:
     replacement_targets: Dict[str, str] = field(default_factory=dict)
     items: List[PlannedItem] = field(default_factory=list)
     transfer_mode: str = "move"
+    match_based: bool = False   # items decided from the scan's match results
 
     def planned_moves(self) -> Dict[str, str]:
         """Return a copy of the planned move mapping for execution."""
@@ -728,10 +854,27 @@ class LibrarySyncPlan:
             return {item.source: item.destination for item in self.items}
         return dict(self.moves)
 
+    def counts(self) -> Dict[str, int]:
+        """How many items transfer (copy/move), replace, skip or need review."""
+        counts = {"total": len(self.items), "copy": 0, "move": 0, "replace": 0, "skip": 0, "review": 0}
+        for item in self.items:
+            if item.decision == ExecutionDecision.COPY:
+                counts["copy" if item.action == "copy" else "move"] += 1
+            elif item.decision == ExecutionDecision.REPLACE:
+                counts["replace"] += 1
+            elif item.decision == ExecutionDecision.REVIEW_REQUIRED:
+                counts["review"] += 1
+            else:
+                counts["skip"] += 1
+        return counts
+
     def render_preview(self, output_html_path: str) -> str:
         """Generate a dry-run HTML preview from this plan."""
         heading = "Library Sync (Dry Run Preview)"
         preview_items = [item.to_dict() for item in self.items] if self.items else None
+        coord = idx_dry_run_coordinator.DryRunCoordinator()
+        if self.items:
+            coord.set_html_section("B", _render_plan_summary_html(self))
         idx.render_dry_run_html_from_plan(
             self.destination_root,
             output_html_path,
@@ -740,8 +883,57 @@ class LibrarySyncPlan:
             plan_items=preview_items,
             heading_text=heading,
             title_prefix=heading,
+            coord=coord,
         )
         return output_html_path
+
+
+def _rel_to(path: str, root: str) -> str:
+    try:
+        rel = os.path.relpath(path, root)
+    except ValueError:
+        return path
+    return path if rel.startswith("..") else rel
+
+
+def _render_plan_summary_html(plan: LibrarySyncPlan) -> str:
+    """Counts, mode and per-item reasons — what the folder tree cannot show."""
+    import html as _html
+
+    esc = _html.escape
+    c = plan.counts()
+    mode_text = (
+        "copy — originals stay in the incoming folder"
+        if plan.transfer_mode == "copy" else
+        "move — originals are moved out of the incoming folder"
+    )
+    lines = [
+        "<h2>What Execute will do</h2>",
+        f"<p>Transfer mode: <strong>{esc(mode_text)}</strong></p>",
+        "<ul>",
+        f"<li>{c['copy'] + c['move']} track(s) added ({c['copy']} copied, {c['move']} moved)</li>",
+        f"<li>{c['replace']} existing track(s) replaced — each replaced file is backed up to "
+        "Docs/Backups/LibrarySync/ first</li>",
+        f"<li>{c['skip']} skipped (already in the library)</li>",
+        f"<li>{c['review']} need review — skipped unless you flag them Copy or Replace</li>",
+        "</ul>",
+    ]
+    others = [i for i in plan.items if i.decision != ExecutionDecision.COPY or i.reason]
+    if others:
+        lines.append("<h3>Decisions</h3>")
+        lines.append("<table border='1' cellpadding='4' cellspacing='0'>")
+        lines.append("<tr><th>Incoming track</th><th>Decision</th><th>Destination</th><th>Why</th></tr>")
+        for item in others:
+            lines.append(
+                "<tr>"
+                f"<td>{esc(_rel_to(item.source, plan.incoming_root))}</td>"
+                f"<td>{esc(item.decision.value)} ({esc(item.action)})</td>"
+                f"<td>{esc(_rel_to(item.destination, plan.library_root))}</td>"
+                f"<td>{esc(item.reason or '')}</td>"
+                "</tr>"
+            )
+        lines.append("</table>")
+    return "\n".join(lines)
 
 
 def _files_match(path_a: str, path_b: str) -> bool:
@@ -749,6 +941,18 @@ def _files_match(path_a: str, path_b: str) -> bool:
         return filecmp.cmp(path_a, path_b, shallow=False)
     except Exception:
         return False
+
+
+def _unique_destination(path: str, taken: set[str]) -> str:
+    if path not in taken and not os.path.exists(path):
+        return path
+    base, ext = os.path.splitext(path)
+    n = 1
+    while True:
+        candidate = _normalize_path(f"{base} ({n}){ext}")
+        if candidate not in taken and not os.path.exists(candidate):
+            return candidate
+        n += 1
 
 
 def _compute_plan_items(
@@ -799,23 +1003,116 @@ def _compute_plan_items(
     return items
 
 
+def _decide_items_from_matches(
+    moves: Dict[str, str],
+    match_results: Iterable[MatchResult],
+    review_flags: ReviewStateStore | None,
+    *,
+    library_root: str,
+    transfer_mode: str,
+) -> Tuple[List[PlannedItem], set[str], set[str], Dict[str, str]]:
+    """Decide every incoming track from its match result and the user's flags.
+
+    * New track → transferred to its routed destination.
+    * Exact match / collision → skipped (already in the library); a "Potential
+      Upgrade" needs review instead.
+    * Low-confidence match → needs review.
+    * Flag **Copy** → added regardless (as a copy; the original stays), under
+      a ``(n)`` name if its destination is taken.
+    * Flag **Replace** → takes the matched track's place (same folder and
+      name, incoming extension); the old file is backed up and retired.
+    * Files the reviewed scan never saw → need review (scan again).
+
+    Returns ``(items, copy_only, allowed_replacements, replacement_targets)``.
+    """
+    mode = "copy" if str(transfer_mode).lower() == "copy" else "move"
+    by_source = {_normalize_path(m.incoming.path): m for m in match_results}
+    copy_ids = set(review_flags.flags.copy) if review_flags else set()
+    replace_ids = dict(review_flags.flags.replace) if review_flags else {}
+    items: List[PlannedItem] = []
+    copy_only: set[str] = set()
+    allowed: set[str] = set()
+    targets: Dict[str, str] = {}
+    taken: set[str] = set()
+
+    def add(src: str, dst: str, decision: ExecutionDecision, reason: str, action: str = mode) -> None:
+        items.append(PlannedItem(source=src, destination=dst, decision=decision, reason=reason, action=action))
+
+    for src, dst in sorted(moves.items(), key=lambda kv: kv[1]):
+        match = by_source.get(src)
+        if match is None:
+            add(src, dst, ExecutionDecision.REVIEW_REQUIRED,
+                "Not part of the reviewed scan — scan again to include it")
+            continue
+        track_id = match.incoming.track_id
+        existing = match.existing
+        existing_path = _normalize_path(existing.path) if existing is not None else ""
+        existing_rel = _rel_to(existing_path, library_root) if existing_path else ""
+
+        if track_id in replace_ids and existing is not None:
+            stem = os.path.splitext(os.path.basename(existing_path))[0]
+            new_dst = _normalize_path(os.path.join(os.path.dirname(existing_path), stem + match.incoming.ext))
+            if new_dst != existing_path and (os.path.exists(new_dst) or new_dst in taken):
+                add(src, new_dst, ExecutionDecision.REVIEW_REQUIRED,
+                    f"Flagged Replace, but {_rel_to(new_dst, library_root)} already exists "
+                    "and is not the matched track")
+                continue
+            taken.add(new_dst)
+            allowed.add(new_dst)
+            targets[src] = existing_path
+            add(src, new_dst, ExecutionDecision.REPLACE,
+                f"Flagged Replace: takes the place of {existing_rel} (backed up first)")
+            continue
+
+        if track_id in copy_ids:
+            final = _unique_destination(dst, taken)
+            taken.add(final)
+            copy_only.add(src)
+            reason = "Flagged Copy"
+            if existing is not None and match.status != MatchStatus.NEW:
+                reason += f": added even though it matches {existing_rel}"
+            add(src, final, ExecutionDecision.COPY, reason, action="copy")
+            continue
+
+        if match.status == MatchStatus.NEW or existing is None:
+            if os.path.exists(dst) or dst in taken:
+                if os.path.exists(dst) and _files_match(src, dst):
+                    add(src, dst, ExecutionDecision.SKIP_DUPLICATE, "Exact duplicate already at its destination")
+                else:
+                    add(src, dst, ExecutionDecision.SKIP_KEEP_EXISTING,
+                        "Destination already exists; keeping the library copy")
+            else:
+                taken.add(dst)
+                add(src, dst, ExecutionDecision.COPY, "New track")
+            continue
+
+        if match.status == MatchStatus.LOW_CONFIDENCE:
+            add(src, existing_path, ExecutionDecision.REVIEW_REQUIRED,
+                f"Low-confidence match with {existing_rel} — flag Copy to add it or Replace to swap it in")
+            continue
+
+        if match.quality_label == "Potential Upgrade":
+            add(src, existing_path, ExecutionDecision.REVIEW_REQUIRED,
+                f"Possible upgrade of {existing_rel} — flag Replace to use it")
+        else:
+            add(src, existing_path, ExecutionDecision.SKIP_DUPLICATE,
+                f"Already in the library as {existing_rel}")
+
+    return items, copy_only, allowed, targets
+
+
 def resolve_review_flags_to_paths(
     review_flags: ReviewStateStore | None,
     match_results: Iterable[MatchResult] | None = None,
 ) -> Tuple[List[str], List[str]]:
     """Convert ReviewStateStore flags to source and destination path lists.
 
-    Parameters
-    ----------
-    review_flags : ReviewStateStore | None
-        The review state store containing user flags.
-    match_results : Iterable[MatchResult] | None
-        Match results from compare_libraries (needed to resolve track_ids to paths).
+    Legacy helper: the Qt workspace now passes the flags and match results
+    straight to :func:`compute_library_sync_plan`, which also handles Replace
+    (whose "allowed" path here is the matched *existing* file, which a
+    destination-based plan never compares equal to).
 
-    Returns
-    -------
-    Tuple[List[str], List[str]]
-        (copy_only_paths, allowed_replacement_paths)
+    Returns ``(copy_only_paths, allowed_replacement_paths)``.
     """
     if not review_flags or not match_results:
         return [], []
@@ -854,8 +1151,19 @@ def compute_library_sync_plan(
     transfer_mode: str = "move",
     copy_only_paths: Iterable[str] | None = None,
     allowed_replacement_paths: Iterable[str] | None = None,
+    match_results: Iterable[MatchResult] | None = None,
+    review_flags: ReviewStateStore | None = None,
 ) -> LibrarySyncPlan:
-    """Compute a deterministic move/route plan for Library Sync."""
+    """Compute a deterministic move/route plan for Library Sync.
+
+    With ``match_results`` (from ``compare_libraries``) the plan follows the
+    reviewed matches and ``review_flags`` (see
+    :func:`_decide_items_from_matches`): duplicates are not copied in and
+    Copy/Replace flags win. Without them, the legacy destination-exists rules
+    apply. Either way the plan stores the decisions in ``items`` and the flags
+    in ``copy_only`` / ``allowed_replacements`` / ``replacement_targets``, and
+    ``execute_plan`` runs exactly those items.
+    """
     cancel_event = cancel_event or threading.Event()
     if log_callback is None:
         def log_callback(msg: str) -> None:
@@ -898,15 +1206,35 @@ def compute_library_sync_plan(
 
     remapped_moves = {_normalize_path(src): _remap_path(dst) for src, dst in moves.items()}
     remapped_tag_index = {_remap_path(dst): data for dst, data in tag_index.items()}
+    normalized_mode = "copy" if str(transfer_mode).lower() == "copy" else "move"
 
-    plan_items = _compute_plan_items(
-        remapped_moves,
-        destination_root=_normalize_path(destination_root),
-        copy_only=copy_only_paths,
-        allow_all_replacements=False,
-        allowed_replacements=allowed_replacement_paths,
-        transfer_mode=transfer_mode,
-    )
+    if match_results is not None:
+        plan_items, copy_only, allowed, targets = _decide_items_from_matches(
+            remapped_moves,
+            list(match_results),
+            review_flags,
+            library_root=_normalize_path(library_root),
+            transfer_mode=normalized_mode,
+        )
+        for item in plan_items:
+            original = remapped_moves.get(item.source)
+            if original and original != item.destination and original in remapped_tag_index:
+                remapped_tag_index.setdefault(item.destination, remapped_tag_index[original])
+        decision_log = list(decision_log) + [
+            f"{os.path.basename(i.source)}: {i.decision.value} — {i.reason}" for i in plan_items
+        ]
+    else:
+        copy_only = {_normalize_path(p) for p in (copy_only_paths or [])}
+        allowed = {_normalize_path(p) for p in (allowed_replacement_paths or [])}
+        targets = {}
+        plan_items = _compute_plan_items(
+            remapped_moves,
+            destination_root=_normalize_path(destination_root),
+            copy_only=copy_only,
+            allow_all_replacements=False,
+            allowed_replacements=allowed,
+            transfer_mode=transfer_mode,
+        )
 
     return LibrarySyncPlan(
         library_root=_normalize_path(library_root),
@@ -915,8 +1243,12 @@ def compute_library_sync_plan(
         moves=remapped_moves,
         tag_index=remapped_tag_index,
         decision_log=decision_log,
+        copy_only=set(copy_only),
+        allowed_replacements=set(allowed),
+        replacement_targets=dict(targets),
         items=plan_items,
-        transfer_mode="copy" if str(transfer_mode).lower() == "copy" else "move",
+        transfer_mode=normalized_mode,
+        match_based=match_results is not None,
     )
 
 
@@ -1019,6 +1351,8 @@ def build_library_sync_preview(
     transfer_mode: str = "move",
     copy_only_paths: Iterable[str] | None = None,
     allowed_replacement_paths: Iterable[str] | None = None,
+    match_results: Iterable[MatchResult] | None = None,
+    review_flags: ReviewStateStore | None = None,
 ) -> LibrarySyncPlan:
     """Compute a Library Sync plan and write the dry-run preview.
 
@@ -1028,6 +1362,9 @@ def build_library_sync_preview(
         Source paths that should always be copied regardless of auto-decision.
     allowed_replacement_paths : Iterable[str] | None
         Destination paths where replacement is allowed regardless of auto-decision.
+    match_results, review_flags
+        The reviewed scan and the user's flags; when given, the plan follows
+        them (see :func:`compute_library_sync_plan`).
     """
     plan = compute_library_sync_plan(
         library_root,
@@ -1040,6 +1377,8 @@ def build_library_sync_preview(
         transfer_mode=transfer_mode,
         copy_only_paths=copy_only_paths,
         allowed_replacement_paths=allowed_replacement_paths,
+        match_results=match_results,
+        review_flags=review_flags,
     )
     plan.render_preview(output_html_path)
     return plan
@@ -1113,6 +1452,36 @@ def _render_execution_report(
     return output_html_path
 
 
+def _unique_file_path(path: str) -> str:
+    if not os.path.lexists(path):
+        return path
+    base, ext = os.path.splitext(path)
+    n = 1
+    while os.path.lexists(f"{base} ({n}){ext}"):
+        n += 1
+    return f"{base} ({n}){ext}"
+
+
+def _transfer(src: str, dst: str, action: str, *, replace: bool) -> None:
+    """Copy or move ``src`` to ``dst``. With ``replace`` the existing ``dst`` is
+    swapped out atomically (never left missing if the transfer fails)."""
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    if not replace:
+        if os.path.lexists(dst):
+            raise FileExistsError(f"destination exists: {dst}")
+        if action == "copy":
+            shutil.copy2(src, dst)
+        else:
+            shutil.move(src, dst)
+        return
+    tmp = _unique_file_path(dst + ".alphadex-incoming")
+    if action == "copy":
+        shutil.copy2(src, tmp)
+    else:
+        shutil.move(src, tmp)
+    os.replace(tmp, dst)
+
+
 def execute_plan(
     plan: LibrarySyncPlan,
     dry_run: bool = False,
@@ -1128,11 +1497,18 @@ def execute_plan(
 ) -> Dict[str, object]:
     """Execute a Library Sync plan with auditing and HTML reporting.
 
-    The execution routine performs only the operations expressed by the plan,
-    capturing a JSON audit trail and an executed HTML report. Existing files
-    are only replaced when explicitly allowed (via ``allow_replacements`` or
-    ``plan.allowed_replacements``). Backups are written for any destructive
-    action before the destination is overwritten.
+    A plan with ``items`` (every plan built by :func:`compute_library_sync_plan`)
+    is executed **exactly as previewed**: its decisions, copy/move actions and
+    replacement targets are used verbatim (``allow_replacements`` cannot widen
+    them). Only a legacy plan without items has its decisions computed here,
+    from ``plan.moves`` plus ``plan.copy_only`` / ``plan.allowed_replacements``
+    / ``allow_replacements``.
+
+    Safety checks still apply per item at execution time: a missing source
+    fails, an existing destination is never overwritten unless the item is a
+    REPLACE, and every replaced file is backed up (into a per-run folder under
+    ``Docs/Backups/LibrarySync/``) before it is swapped out. Everything is
+    recorded in a JSON audit and an executed-report HTML.
     """
 
     log_callback = log_callback or (lambda _msg: None)
@@ -1143,29 +1519,32 @@ def execute_plan(
     audit_path = audit_path or os.path.join(docs_dir, "LibrarySyncAudit.json")
     executed_report_path = executed_report_path or os.path.join(docs_dir, "LibrarySyncExecuted.html")
     playlist_root = os.path.join(plan.library_root, "Playlists")
-    os.makedirs(playlist_root, exist_ok=True)
     if playlist_path is None:
         playlist_stamp = datetime.now().strftime("%Y-%m-%d_%H%M")
         playlist_path = os.path.join(playlist_root, f"LibrarySync_Added_{playlist_stamp}.m3u8")
-    backup_root = os.path.join(docs_dir, "Backups", "LibrarySync")
-    os.makedirs(backup_root, exist_ok=True)
-
-    allow_all_replacements = allow_replacements is True
-    allowed_replacements = set(getattr(plan, "allowed_replacements", set()) or [])
-    if allow_replacements not in (None, False, True):
-        allowed_replacements.update(allow_replacements)  # type: ignore[arg-type]
+    # One backup folder per run: an earlier run's backup is never overwritten.
+    backup_root = os.path.join(
+        docs_dir, "Backups", "LibrarySync", datetime.now().strftime("%Y%m%d_%H%M%S")
+    )
 
     copy_only = set(getattr(plan, "copy_only", set()) or [])
-
-    plan_items = _compute_plan_items(
-        plan.planned_moves(),
-        destination_root=plan.destination_root,
-        copy_only=copy_only,
-        allow_all_replacements=allow_all_replacements,
-        allowed_replacements=allowed_replacements,
-        transfer_mode=getattr(plan, "transfer_mode", "move"),
-    )
-    plan.items = plan_items
+    if plan.items:
+        plan_items = list(plan.items)
+        if allow_replacements not in (None, False):
+            log_callback("! allow_replacements ignored: a previewed plan runs exactly as previewed.")
+    else:
+        allow_all_replacements = allow_replacements is True
+        allowed_replacements = set(getattr(plan, "allowed_replacements", set()) or [])
+        if allow_replacements not in (None, False, True):
+            allowed_replacements.update(allow_replacements)  # type: ignore[arg-type]
+        plan_items = _compute_plan_items(
+            plan.planned_moves(),
+            destination_root=plan.destination_root,
+            copy_only=copy_only,
+            allow_all_replacements=allow_all_replacements,
+            allowed_replacements=allowed_replacements,
+            transfer_mode=getattr(plan, "transfer_mode", "move"),
+        )
 
     total = len(plan_items)
     timestamp = datetime.now(timezone.utc).isoformat()
@@ -1173,6 +1552,7 @@ def execute_plan(
     summary: Dict[str, object] = {
         "moved": 0,
         "copied": 0,
+        "replaced": 0,
         "transferred": 0,
         "errors": [],
         "skipped": [],
@@ -1185,6 +1565,15 @@ def execute_plan(
     executed_moves: Dict[str, str] = {}
     playlist_updates: Dict[str, str] = {}
     replacement_targets = dict(getattr(plan, "replacement_targets", {}) or {})
+    backup_base = plan.destination_root if os.path.isdir(plan.destination_root) else plan.library_root
+
+    def _backup_path_for(path: str) -> str:
+        rel = os.path.relpath(path, backup_base)
+        if rel.startswith(".."):
+            rel = os.path.relpath(path, plan.library_root)
+        if rel.startswith(".."):
+            rel = os.path.basename(path)
+        return _unique_file_path(os.path.join(backup_root, rel))
 
     if cancel_event.is_set():
         log_callback("✘ Execution cancelled before start.")
@@ -1192,7 +1581,7 @@ def execute_plan(
     else:
         log_callback(f"Executing plan with {total} operations…")
 
-    for idx, item in enumerate(plan_items, start=1):
+    for idx_num, item in enumerate(plan_items, start=1):
         if cancel_event.is_set():
             summary["cancelled"] = True
             log_callback("✘ Execution cancelled.")
@@ -1200,12 +1589,13 @@ def execute_plan(
 
         src = item.source
         dst = item.destination
-        progress_callback(idx, total, src, "execute")
+        progress_callback(idx_num, total, src, "execute")
         action = item.action or ("copy" if src in copy_only else "move")
         outcome: Dict[str, object] = {
             "source": src,
             "destination": dst,
             "action": action,
+            "decision": item.decision.value,
             "timestamp": timestamp,
         }
         replacement_target = replacement_targets.get(src)
@@ -1218,11 +1608,7 @@ def execute_plan(
             reason = item.reason or "Skipped by plan decision"
             skip_entry = {"source": src, "destination": dst, "reason": reason}
             summary["skipped"].append(skip_entry)
-            if item.decision in (
-                ExecutionDecision.SKIP_DUPLICATE,
-                ExecutionDecision.SKIP_KEEP_EXISTING,
-                ExecutionDecision.REVIEW_REQUIRED,
-            ):
+            if item.decision != ExecutionDecision.SKIP_DUPLICATE:
                 summary["review_required"].append(skip_entry)
             outcome["status"] = "skipped"
             outcome["reason"] = reason
@@ -1250,70 +1636,67 @@ def execute_plan(
             audit_items.append(outcome)
             continue
 
-        backup_path = None
-        if dest_exists and replacement_allowed:
-            rel = os.path.relpath(dst, plan.destination_root if os.path.isdir(plan.destination_root) else plan.library_root)
-            backup_path = os.path.join(backup_root, rel)
-            if not dry_run:
-                try:
-                    os.makedirs(os.path.dirname(backup_path), exist_ok=True)
-                    shutil.copy2(dst, backup_path)
-                    summary["backups"].append(backup_path)
-                except Exception as exc:  # pragma: no cover - OS interaction
-                    summary["errors"].append(f"Backup failed for {dst}: {exc}")  # type: ignore[arg-type]
-            outcome["backup_path"] = backup_path
-
-        if replacement_target and replacement_target != dst:
-            if os.path.exists(replacement_target):
-                rel_old = os.path.relpath(
-                    replacement_target,
-                    plan.destination_root if os.path.isdir(plan.destination_root) else plan.library_root,
-                )
-                old_backup_path = os.path.join(backup_root, rel_old)
-                if not dry_run:
-                    try:
-                        os.makedirs(os.path.dirname(old_backup_path), exist_ok=True)
-                        shutil.copy2(replacement_target, old_backup_path)
-                        summary["backups"].append(old_backup_path)
-                        os.remove(replacement_target)
-                    except Exception as exc:  # pragma: no cover - OS interaction
-                        summary["errors"].append(f"Backup failed for {replacement_target}: {exc}")  # type: ignore[arg-type]
-                outcome["replaced_path"] = replacement_target
-                outcome["replaced_backup_path"] = old_backup_path
-
         if dry_run:
             outcome["status"] = "dry_run"
-            outcome["reason"] = outcome.get("reason", "No changes written (dry run)")
+            outcome["reason"] = "No changes written (dry run)"
+            if replacement_target and replacement_target != dst:
+                outcome["replaced_path"] = replacement_target
             executed_moves[src] = dst
             audit_items.append(outcome)
             continue
 
+        if dest_exists and replacement_allowed:
+            # Never replace a file without a backup of it.
+            backup_path = _backup_path_for(dst)
+            try:
+                os.makedirs(os.path.dirname(backup_path), exist_ok=True)
+                shutil.copy2(dst, backup_path)
+            except Exception as exc:  # pragma: no cover - OS interaction
+                msg = f"Backup failed for {dst}: {exc}; nothing replaced"
+                summary["errors"].append(msg)  # type: ignore[arg-type]
+                outcome["status"] = "failed"
+                outcome["reason"] = msg
+                audit_items.append(outcome)
+                log_callback(msg)
+                continue
+            summary["backups"].append(backup_path)
+            outcome["backup_path"] = backup_path
+
         try:
-            os.makedirs(os.path.dirname(dst), exist_ok=True)
-            if dest_exists and replacement_allowed:
-                try:
-                    os.remove(dst)
-                except FileNotFoundError:
-                    pass
-            if action == "copy":
-                shutil.copy2(src, dst)
-                summary["copied"] = int(summary["copied"]) + 1
-            else:
-                shutil.move(src, dst)
-                summary["moved"] = int(summary["moved"]) + 1
-            summary["transferred"] = int(summary["transferred"]) + 1
-            executed_moves[src] = dst
-            outcome["status"] = "success"
-            if backup_path:
-                outcome["backup_path"] = backup_path
-            if replacement_target and replacement_target != dst:
-                playlist_updates[replacement_target] = dst
+            _transfer(src, dst, action, replace=dest_exists and replacement_allowed)
         except Exception as exc:  # pragma: no cover - OS interaction
             msg = f"Failed to {action} {src} → {dst}: {exc}"
             summary["errors"].append(msg)  # type: ignore[arg-type]
             outcome["status"] = "failed"
             outcome["reason"] = str(exc)
             log_callback(msg)
+            audit_items.append(outcome)
+            continue
+
+        if action == "copy":
+            summary["copied"] = int(summary["copied"]) + 1
+        else:
+            summary["moved"] = int(summary["moved"]) + 1
+        if replacement_allowed:
+            summary["replaced"] = int(summary["replaced"]) + 1
+        executed_moves[src] = dst
+        outcome["status"] = "success"
+
+        # Retire the file this one replaces (e.g. an MP3 upgraded to FLAC):
+        # moved into the run's backup folder, never deleted outright.
+        if replacement_target and replacement_target != dst and os.path.exists(replacement_target):
+            old_backup = _backup_path_for(replacement_target)
+            try:
+                os.makedirs(os.path.dirname(old_backup), exist_ok=True)
+                shutil.move(replacement_target, old_backup)
+                summary["backups"].append(old_backup)
+                outcome["replaced_path"] = replacement_target
+                outcome["replaced_backup_path"] = old_backup
+                playlist_updates[replacement_target] = dst
+            except Exception as exc:  # pragma: no cover - OS interaction
+                msg = f"Could not retire replaced file {replacement_target}: {exc} (left in place)"
+                summary["errors"].append(msg)  # type: ignore[arg-type]
+                log_callback(msg)
 
         audit_items.append(outcome)
 
@@ -1343,6 +1726,7 @@ def execute_plan(
             "library_root": plan.library_root,
             "incoming_root": plan.incoming_root,
             "destination_root": plan.destination_root,
+            "transfer_mode": getattr(plan, "transfer_mode", "move"),
             "total_operations": total,
         },
         "summary": summary,
@@ -1364,7 +1748,7 @@ def execute_plan(
             log_callback(f"✘ Failed to write playlist: {exc}")
     summary["playlist_path"] = playlist_created
 
-    if playlist_updates and not dry_run and not summary.get("cancelled"):
+    if playlist_updates and not dry_run:
         try:
             update_playlists(playlist_updates)
         except Exception as exc:  # pragma: no cover - OS interaction
