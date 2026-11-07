@@ -1,4 +1,9 @@
-"""Clustered Playlists workspace — K-Means / HDBSCAN clustering."""
+"""Clustered Playlists workspace — K-Means / HDBSCAN clustering.
+
+DEAD CODE: nothing imports this module. The app's "clustered" page is
+``gui.workspaces.clustered_enhanced.EnhancedClusteredWorkspace`` (see
+``gui/main_window.py``). Kept only until the redesign decides its fate.
+"""
 from __future__ import annotations
 
 import os
@@ -218,7 +223,7 @@ class ClusteredWorkspace(WorkspaceBase):
         self._worker.log_line.connect(self._log_area.appendPlainText)
         self._worker.log_line.connect(lambda m: self._log(m))
         self._worker.finished.connect(self._on_finished)
-        self._worker.start()
+        self._start_worker(self._worker, "Clustering (legacy page)")
 
     @Slot()
     def _on_cancel(self) -> None:
