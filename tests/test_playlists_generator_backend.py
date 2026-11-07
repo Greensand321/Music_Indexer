@@ -160,7 +160,7 @@ def test_repair_codec_swap_follows_prefer_opus(tmp_path, prefer_opus, missing, e
     pl = lib / "Playlists" / "p.m3u"
     pl.write_text(f"../A/{missing}\n", encoding="utf-8")
     item = pg.plan_playlist_repair([str(pl)], str(lib), prefer_opus=prefer_opus)[0]
-    assert item.changes == [(f"../A/{missing}", os.path.join("..", "A", expected))]
+    assert item.changes == [(f"../A/{missing}", f"../A/{expected}")]   # entry's "/" style kept
 
 
 def test_repair_plan_reports_unreadable_playlist(tmp_path):

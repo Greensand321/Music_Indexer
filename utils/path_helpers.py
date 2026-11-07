@@ -8,10 +8,12 @@ def ensure_long_path(path: str) -> str:
     """Return ``path`` in a form the Windows file APIs accept beyond 260 chars.
 
     Use it only at the point where the path is handed to the operating system
-    (``open``, ``os.stat``, ``shutil.move``, mutagen, ...). Never store, display
-    or compare the result: keep the caller's path for that, so the ``\\\\?\\``
-    prefix doesn't leak into logs, cache keys, playlists or the UI. A no-op off
-    Windows.
+    (``open``, ``os.stat``, ``shutil.move``, mutagen, ...). Never display or
+    compare the result: keep the caller's path for that, so the ``\\\\?\\``
+    prefix doesn't leak into logs, playlists or the UI. (One deliberate
+    exception: the fingerprint cache keys its rows by this long form, as it
+    always has, so existing Windows caches stay valid; it hands the caller's
+    own path back.) A no-op off Windows.
     """
     if os.name == "nt":
         path = os.path.abspath(path)

@@ -171,7 +171,7 @@ def test_repair_of_listed_playlist_is_previewed_then_applied(make_workspace, tmp
     q = dialogs.calls_of("question")[0]
     assert "1 entry will be re-pointed" in q.text and "1 still missing" in q.text
     lines = pl.read_text(encoding="utf-8").splitlines()
-    assert lines[0] == os.path.join("..", "Artist A", "Album 1", "01 a.mp3")
+    assert lines[0] == "../Artist A/Album 1/01 a.mp3"   # the repaired entry keeps its "/" style
     assert lines[1] == "../gone/zzz qqq.mp3"
     assert list(pl.parent.glob("mine.m3u.*.bak"))
 

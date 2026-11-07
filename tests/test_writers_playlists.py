@@ -54,7 +54,7 @@ def test_latin1_playlist_keeps_every_entry_order_and_encoding(tmp_path):
 
     assert pl.read_bytes() == original.replace(
         b"../Artist/Album/03 - Song (1).mp3",
-        os.path.join("..", "Artist", "Album", "03 - Song.mp3").encode("latin-1"),
+        b"../Artist/Album/03 - Song.mp3",   # keeps the entry's "/" style on every OS
     )
     # Still latin-1 (the é is one byte), still in the user's order.
     assert b"Caf\xe9" in pl.read_bytes()
@@ -86,7 +86,7 @@ def test_extinf_pairing_and_order_survive_a_rename(tmp_path):
 
     assert pg.update_playlists({old: new}, library_root=str(tmp_path)) == 1
     expected = text.replace(
-        "../Artist/Album/01 - A (1).mp3", os.path.join("..", "Artist", "Album", "01 - A.mp3")
+        "../Artist/Album/01 - A (1).mp3", "../Artist/Album/01 - A.mp3"
     )
     assert pl.read_text(encoding="utf-8") == expected
 
@@ -217,7 +217,7 @@ def test_unrelated_missing_entries_are_not_fuzzy_repaired(tmp_path):
     out = mix.read_text(encoding="utf-8")
     assert "05 - Love Me Tender (Live).mp3" in out, "an unrelated entry was rewritten"
     assert out == text.replace(
-        "../Artist/Album/03 - Song (1).mp3", os.path.join("..", "Artist", "Album", "03 - Song.mp3")
+        "../Artist/Album/03 - Song (1).mp3", "../Artist/Album/03 - Song.mp3"
     )
 
 
@@ -238,7 +238,7 @@ def test_repair_preview_reads_latin1_playlists_and_keeps_their_encoding(tmp_path
 
     assert [p.error for p in plan] == ["", ""]
     item = plan[1]
-    assert item.changes == [("../Old/Café.mp3", os.path.join("..", "A", "Café.mp3"))]
+    assert item.changes == [("../Old/Café.mp3", "../A/Café.mp3")]   # entry's "/" style kept
     result = pg.write_playlist_plan([item], log_dir=str(lib / "Docs"))
     assert result["errors"] == []
     data = latin.read_bytes()

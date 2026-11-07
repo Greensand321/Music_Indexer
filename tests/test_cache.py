@@ -143,7 +143,10 @@ def test_schema_less_db_file_is_an_empty_cache(tmp_path):
         rows = conn.execute("SELECT path, fingerprint FROM fingerprints").fetchall()
     finally:
         conn.close()
-    assert rows == [(str(path), "hash")]
+    # On Windows the cache key is the \\?\ long-path form (kept so existing
+    # caches stay valid); callers always get their own path back.
+    from utils.path_helpers import ensure_long_path
+    assert rows == [(ensure_long_path(str(path)), "hash")]
 
 
 def test_changed_file_is_recomputed_not_served_from_memory(tmp_path):

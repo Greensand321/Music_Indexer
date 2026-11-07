@@ -50,7 +50,8 @@ def test_strip_ext_prefix_strips_the_real_prefix(windows):
         assert path_helpers.ensure_long_path("C:\\Music\\a.flac") == long
         assert path_helpers.ensure_long_path(long) == long
         assert path_helpers.strip_ext_prefix(path_helpers.ensure_long_path("C:/Music/a.flac")) == "C:\\Music\\a.flac"
-    assert path_helpers.strip_ext_prefix(long) == long  # only ever stripped on Windows
+    if os.name != "nt":
+        assert path_helpers.strip_ext_prefix(long) == long  # only ever stripped on Windows
 
 
 # ── relpath across drives / playlist entries ────────────────────────────────
@@ -75,6 +76,7 @@ def test_playlist_entry_keeps_the_entry_form(windows, like, target, expected):
         assert path_helpers.playlist_entry(target, "C:\\Music\\Playlists", like=like) == expected
 
 
+@pytest.mark.skipif(os.name == "nt", reason="checks POSIX semantics: there \\ is a file-name character")
 def test_playlist_entry_is_unchanged_off_windows():
     # "\\" is an ordinary file-name character on POSIX: never a separator.
     assert path_helpers.playlist_entry("/m/New/a.mp3", "/m/Playlists", like="..\\Old\\a.mp3") == "../New/a.mp3"
