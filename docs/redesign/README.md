@@ -322,5 +322,5 @@ GUI concurrency) turned up further real bugs. The serious ones:
 ### Tests
 
 185 tests at the start of this phase (9 failing; the result depended on file order). At the end of phase 2:
-**904 passing**, including 374 headless GUI tests (backend verified in default, reversed and shuffled order).
+**904 passing**, including 374 headless GUI tests. The 530 backend tests pass in default, reversed and shuffled file order; the GUI suite passed repeated and reversed-order runs with no flakes.
 
