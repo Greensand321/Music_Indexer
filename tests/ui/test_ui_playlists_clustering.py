@@ -242,7 +242,7 @@ def test_results_do_not_promise_cluster_playlists(make_workspace, tmp_path, qtbo
     texts = _results_text(ws)
     assert not any("View Playlists" in t for t in texts)
     assert any("Playlists are not created automatically" in t for t in texts)
-    assert any("Open Visual Graph" in t for t in texts)
+    assert any("Open the map" in t for t in texts)
 
 
 def test_reserved_folders_are_not_clustered(make_workspace, tmp_path, qtbot, monkeypatch):

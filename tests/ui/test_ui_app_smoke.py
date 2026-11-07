@@ -13,10 +13,13 @@ from PySide6 import QtCore, QtGui, QtWidgets
 
 from ui_harness import process_events
 
-from gui.main_window import _WORKSPACE_MAP
+from gui import navigation
+from gui.main_window import _NAV_ORDER, _WORKSPACE_MAP
 from gui.themes.tokens import THEMES
 
-WORKSPACE_KEYS = list(_WORKSPACE_MAP)
+WORKSPACE_KEYS = list(_WORKSPACE_MAP)           # panels
+PAGE_KEYS = [p.key for p in navigation.PAGES]   # sidebar pages
+SECTION_KEYS = [f"{p.key}/{s.key}" for p in navigation.PAGES for s in p.sections]
 
 
 def _paint(widget: QtWidgets.QWidget) -> QtGui.QPixmap:
@@ -30,17 +33,64 @@ def test_window_builds_every_workspace(main_window):
     assert set(main_window._workspaces) == set(WORKSPACE_KEYS)
     for key, ws in main_window._workspaces.items():
         assert isinstance(ws, _WORKSPACE_MAP[key])
-    # The first page shown is the Indexer.
-    assert main_window._stack.currentWidget() is main_window._workspaces["indexer"]
+    # Every panel is used by a page, and every page is built.
+    assert set(navigation.panel_keys()) == set(WORKSPACE_KEYS)
+    assert list(main_window._pages) == PAGE_KEYS
+    # The first page shown is Home.
+    assert main_window._stack.currentWidget() is main_window._pages["home"]
+    assert main_window.current_panel() is main_window._workspaces["home"]
 
 
 def test_navigate_to_and_paint_every_workspace(main_window):
+    """Every old panel key still works: it shows the page and section that
+    hold that panel."""
     for key in WORKSPACE_KEYS:
         main_window._on_nav_changed(key)
         process_events(10)
         ws = main_window._workspaces[key]
-        assert main_window._stack.currentWidget() is ws, key
+        assert main_window.current_panel() is ws, key
+        assert main_window._stack.currentWidget() is main_window.current_page(), key
         assert ws.isVisible(), key
+        _paint(main_window)
+
+
+# Pages and sections the information architecture added (the rest were
+# workspaces before, and the theme tests already cover them).
+NEW_SECTION_KEYS = [
+    "home/home", "file_cleanup/file_cleanup", "exports/exports", "activity/activity",
+    "duplicates/pair_review", "duplicates/fuzzy_finder", "duplicates/scan_engine",
+    "duplicates/bucketing", "metadata/fill_genres", "metadata/normalize_genres",
+    "sound_map/analyse", "sound_map/map", "mirror/verify",
+    "settings/services", "settings/general", "settings/appearance",
+]
+
+
+def test_new_section_keys_exist():
+    assert set(NEW_SECTION_KEYS) <= set(SECTION_KEYS)
+
+
+@pytest.mark.parametrize("theme", ["midnight", "pearl"])
+def test_every_page_and_section_builds_and_paints(main_window, theme):
+    _paint_sections(main_window, theme, SECTION_KEYS)
+
+
+@pytest.mark.parametrize("theme", [t for t in THEMES if t not in ("midnight", "pearl")])
+def test_new_pages_paint_in_every_theme(main_window, theme):
+    _paint_sections(main_window, theme, NEW_SECTION_KEYS)
+
+
+def _paint_sections(main_window, theme, keys):
+    from gui.themes.manager import get_manager
+
+    get_manager().apply(theme)
+    for key in keys:
+        main_window._on_nav_changed(key)
+        process_events(5)
+        page_key, section_key = key.split("/")
+        page = main_window._pages[page_key]
+        assert main_window.current_page() is page, key
+        assert page.current_section() == section_key, key
+        assert page.current_panel().isVisible(), key
         _paint(main_window)
 
 
@@ -51,11 +101,12 @@ def test_unknown_navigation_key_is_ignored(main_window):
 
 
 def test_ctrl_number_shortcuts_follow_workspace_order(main_window, qtbot):
-    for index, key in enumerate(WORKSPACE_KEYS[:9], start=1):
+    assert _NAV_ORDER == PAGE_KEYS
+    for index, key in enumerate(PAGE_KEYS[:9], start=1):
         qtbot.keyClick(main_window, QtCore.Qt.Key(QtCore.Qt.Key.Key_0.value + index),
                        QtCore.Qt.KeyboardModifier.ControlModifier)
         process_events(5)
-        assert main_window._stack.currentWidget() is main_window._workspaces[key], key
+        assert main_window._stack.currentWidget() is main_window._pages[key], key
 
 
 def test_library_change_reaches_every_workspace(main_window, library, threads):

@@ -1,4 +1,4 @@
-"""Render every AlphaDEX workspace in chosen themes to PNG + an HTML contact sheet.
+"""Render every AlphaDEX page and section in chosen themes to PNG + an HTML contact sheet.
 
 The visual baseline for the GUI redesign: run it before and after a change
 and compare the sheets side by side. Runs headless (Qt "offscreen"), in a
@@ -8,9 +8,13 @@ tagged library by default.
     python scripts/gui_snapshots.py                       # midnight + pearl
     python scripts/gui_snapshots.py --themes all --out /tmp/shots
     python scripts/gui_snapshots.py --library "D:/Music" --themes midnight
-    python scripts/gui_snapshots.py --workspaces indexer,player --size 1600x1000
+    python scripts/gui_snapshots.py --pages indexer,duplicates/compare --size 1600x1000
 
-Output: <out>/<theme>/<NN>_<workspace>.png and <out>/index.html.
+Pages come from gui/navigation.py in sidebar order; a page with section tabs
+gets one shot per section. ``--pages`` takes page keys (every section of the
+page) or ``page/section`` keys (``--workspaces`` is an old alias).
+
+Output: <out>/<theme>/<NN>_<page>[_<section>].png and <out>/index.html.
 
 Notes: fonts render with the bundled Inter/JetBrains Mono, so offscreen shots
 are close to (not pixel-identical with) a real desktop. Album art and other
@@ -36,7 +40,8 @@ def _parse_args(argv=None):
                    help="output directory (default: ./snapshots, git-ignored)")
     p.add_argument("--themes", default="midnight,pearl",
                    help="comma-separated theme keys, or 'all'")
-    p.add_argument("--workspaces", default="all", help="comma-separated workspace keys, or 'all'")
+    p.add_argument("--pages", "--workspaces", dest="pages", default="all",
+                   help="comma-separated page or page/section keys, or 'all'")
     p.add_argument("--size", default="1300x860", help="window size WxH")
     p.add_argument("--library", default="", help="library folder (default: a synthetic library)")
     p.add_argument("--scale", type=float, default=1.0, help="device pixel ratio for captures")
@@ -74,7 +79,8 @@ def main(argv=None) -> int:
         from library_factory import build_standard_library
         library = str(build_standard_library(home / "Music").root)
 
-    from gui.main_window import AlphaDEXWindow, _WORKSPACE_MAP
+    from gui.main_window import AlphaDEXWindow
+    from gui.navigation import PAGE_BY_KEY, PAGES
     from gui.themes.manager import get_manager
     from gui.themes.tokens import THEMES
     from gui.workers import job_registry
@@ -84,8 +90,12 @@ def main(argv=None) -> int:
     if unknown:
         print(f"Unknown theme(s): {unknown}. Available: {', '.join(THEMES)}", file=sys.stderr)
         return 2
-    keys = list(_WORKSPACE_MAP) if args.workspaces == "all" else [
-        k.strip() for k in args.workspaces.split(",")]
+    try:
+        keys = _shot_keys(args.pages, PAGES, PAGE_BY_KEY)
+    except KeyError as exc:
+        print(f"Unknown page/section: {exc.args[0]}. Pages: "
+              f"{', '.join(p.key for p in PAGES)}", file=sys.stderr)
+        return 2
     w, h = (int(v) for v in args.size.lower().split("x"))
 
     window = AlphaDEXWindow()
@@ -107,10 +117,10 @@ def main(argv=None) -> int:
             window._on_nav_changed(key)
             job_registry().wait_all(30_000)
             _settle(window, args.settle_ms, process_events)
-            path = tdir / f"{i:02d}_{key}.png"
+            path = tdir / f"{i:02d}_{key.replace('/', '_')}.png"
             window.grab().save(str(path))
             shots.setdefault(theme, []).append((key, path))
-            print(f"  {theme:<10} {key:<13} → {path.relative_to(out)}")
+            print(f"  {theme:<10} {key:<28} → {path.relative_to(out)}")
 
     _write_index(out, shots, library)
     print(f"Captured {sum(len(v) for v in shots.values())} screenshots in "
@@ -123,6 +133,31 @@ def main(argv=None) -> int:
     window.close()
     mp.undo()
     return 0
+
+
+def _shot_keys(spec: str, pages, page_by_key) -> list[str]:
+    """Navigation keys to capture: one per page, or ``page/section`` for each
+    section of a page with section tabs."""
+    def expand(page_key: str) -> list[str]:
+        page = page_by_key[page_key]
+        if not page.has_sections:
+            return [page.key]
+        return [f"{page.key}/{s.key}" for s in page.sections]
+
+    if spec == "all":
+        return [k for page in pages for k in expand(page.key)]
+    keys: list[str] = []
+    for raw in (k.strip() for k in spec.split(",") if k.strip()):
+        if "/" in raw:
+            page_key, _, section_key = raw.partition("/")
+            if page_key not in page_by_key or page_by_key[page_key].section(section_key) is None:
+                raise KeyError(raw)
+            keys.append(raw)
+        elif raw in page_by_key:
+            keys.extend(expand(raw))
+        else:
+            raise KeyError(raw)
+    return keys
 
 
 def _settle(window, settle_ms: int, process_events, timeout_ms: int = 5000) -> None:
@@ -160,7 +195,7 @@ def _write_index(out: Path, shots: dict, library: str) -> None:
         ".grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:16px}"
         "img{width:100%;border:1px solid #333;border-radius:6px}figure{margin:0}"
         "figcaption{padding:4px 0;color:#aaa}</style>"
-        f"<h1>AlphaDEX workspace snapshots</h1><p>Library: {html.escape(library)}</p>"
+        f"<h1>AlphaDEX page snapshots</h1><p>Library: {html.escape(library)}</p>"
         + "".join(rows),
         encoding="utf-8",
     )

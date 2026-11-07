@@ -1,4 +1,4 @@
-"""Visual Music Graph — in-app 2-D cluster map, plus the 3-D browser view.
+"""Sound Map → Map: the in-app 2-D cluster map, plus the 3-D browser view.
 
 The scatter plot, legend and details panel are display-only widgets; loading
 and validating ``Docs/cluster_info.json`` and turning a selection into CSV/M3U
@@ -49,12 +49,12 @@ class GraphWorkspace(WorkspaceBase):
     def _build_ui(self) -> None:
         cl = self.content_layout
 
-        cl.addWidget(self._make_section_title("Visual Music Graph"))
+        cl.addWidget(self._make_section_title("Explore the map"))
         cl.addWidget(self._make_subtitle(
             "Your clustered library as a map. Each dot is a track and each colour "
             "a cluster, so tracks that sound alike sit together. Hover to identify "
             "one, drag a rectangle or lasso to grab a region, then play or export "
-            "the selection. Run Clustered Playlists first to produce the data."
+            "the selection. Run an analysis first (the Analyse tab) to produce the data."
         ))
 
         # ── Toolbar ────────────────────────────────────────────────────────
@@ -241,7 +241,7 @@ class GraphWorkspace(WorkspaceBase):
             summary += " · using the 3D embedding's first two axes"
         self._status.setText(summary)
         self._set_controls_enabled(True)
-        self._log(f"Music Graph loaded: {summary}", "ok")
+        self._log(f"Sound Map loaded: {summary}", "ok")
 
     def _set_empty(self, message: str) -> None:
         self._xy, self._labels, self._tracks, self._metadata = [], [], [], []
@@ -334,7 +334,7 @@ class GraphWorkspace(WorkspaceBase):
     def _on_play_selection(self) -> None:
         paths = self._selection_paths()
         if paths:
-            self.play_tracks_requested.emit(paths, "Music Graph selection")
+            self.play_tracks_requested.emit(paths, "Sound Map selection")
 
     @Slot(str)
     def _on_play_one(self, path: str) -> None:
@@ -408,7 +408,7 @@ class GraphWorkspace(WorkspaceBase):
             else:
                 self._status.setText("Could not generate the 3D graph.")
         except FileNotFoundError:
-            self._status.setText("No cluster data found. Run Clustered Playlists first.")
+            self._status.setText("No cluster data found. Run an analysis first (the Analyse tab).")
         except Exception as exc:  # noqa: BLE001
             self._status.setText(f"Could not open the 3D graph: {exc}")
             self._log(f"3D graph failed: {exc}", "error")

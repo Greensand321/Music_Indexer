@@ -1,4 +1,17 @@
-"""Tools workspace — export utilities, diagnostics, and debug tools."""
+"""Exports and File Cleanup panels, and the tool tiles they are built from.
+
+These were one "Utilities" page; the information architecture split it up:
+
+* ``ExportsWorkspace``  — Exports page (Take away): Artist/Title export and
+  Codec list export.
+* ``FileCleanupWorkspace`` — File Cleanup page (Organize): plan → preview →
+  confirm → rename → log, with "Undo Last Cleanup".
+
+The rest of Utilities moved too: the library Validator is Home's "Library
+health" card, the duplicate prototypes are sections of the Duplicates page
+(``gui/workspaces/launchers.py``), the M4A/Opus testers are Mirror → Verify
+the mirror, and the crash log is on the Activity page.
+"""
 from __future__ import annotations
 
 import os
@@ -1066,28 +1079,79 @@ class _PillToggle(QtWidgets.QAbstractButton):
         p.end()
 
 
-# ── ToolsWorkspace ─────────────────────────────────────────────────────────────
+# ── Shared base for the tool pages ────────────────────────────────────────────
 
-class ToolsWorkspace(WorkspaceBase):
-    """All export, diagnostic, and utility tools in one place."""
+class _ToolPanel(WorkspaceBase):
+    """Helpers shared by the Exports and File Cleanup panels."""
+
+    def _flash_label(self, label: QtWidgets.QLabel, from_tone: str, duration: int = 1600) -> None:
+        """Fade ``label`` from a theme tone back to the secondary text colour.
+
+        One reused animation per label, palette only — it used to restyle the
+        label every frame, and overlapping flashes fought each other (DS-20).
+        """
+        flash_tone(label, from_tone, "secondary", duration)
+
+    # ── Theme refresh ──────────────────────────────────────────────────────
+
+    def _on_theme_changed_base(self, tokens: object) -> None:
+        super()._on_theme_changed_base(tokens)
+        refresh_tones(self, tokens)
+
+    def _require_library(self) -> bool:
+        if not self._library_path:
+            QtWidgets.QMessageBox.warning(self, "No Library", "Select a library folder first.")
+            return False
+        return True
+
+    # ── Utility ───────────────────────────────────────────────────────────
+
+    def _open_file(self, path: str | None) -> None:
+        import subprocess
+        import sys
+        if not path:
+            return
+        if sys.platform == "win32":
+            import os as _os
+            _os.startfile(path)
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", path])
+        else:
+            subprocess.Popen(["xdg-open", path])
+
+    def _open_folder(self, path: str | None) -> None:
+        """Open the folder containing *path* in the system file manager."""
+        import subprocess
+        import sys
+        if not path:
+            return
+        folder = str(Path(path).parent)
+        if sys.platform == "win32":
+            # /select highlights the file inside the folder
+            subprocess.Popen(["explorer", f"/select,{path}"])
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", "-R", path])
+        else:
+            subprocess.Popen(["xdg-open", folder])
+
+
+# ── Exports ────────────────────────────────────────────────────────────────────
+
+class ExportsWorkspace(_ToolPanel):
+    """Artist/Title export and Codec list export (Exports page)."""
 
     def __init__(
         self, library_path: str = "", parent: QtWidgets.QWidget | None = None
     ) -> None:
         super().__init__(library_path, parent)
-        self._cleanup_worker: FileCleanupWorker | None = None
-        self._cleanup_plan_worker: FileCleanupPlanWorker | None = None
         self._at_worker: ArtistTitleWorker | None = None
         self._codec_worker: CodecExportWorker | None = None
         # Last output files (the Open buttons read these; no re-connecting lambdas)
         self._at_out_path: str | None = None
         self._codec_out_path: str | None = None
-        # One live dialog per diagnostic tool (see _open_diag_dialog)
-        self._diag_dialogs: dict[str, QtWidgets.QDialog] = {}
         # Tile references (assigned by _build_*_tile helpers)
         self._at_tile: ToolTile | None = None
         self._codec_tile: ToolTile | None = None
-        self._cleanup_tile: ToolTile | None = None
         # Codec chip checkboxes for theme-refresh
         self._codec_chips: dict[str, QtWidgets.QCheckBox] = {}
         self._build_ui()
@@ -1096,22 +1160,18 @@ class ToolsWorkspace(WorkspaceBase):
 
     def _build_ui(self) -> None:
         cl = self.content_layout
-        cl.addWidget(self._make_section_title("Export & Utilities"))
+        cl.addWidget(self._make_section_title("Exports"))
         cl.addWidget(self._make_subtitle(
-            "Export reports, run diagnostics, and validate your library layout. "
-            "All export files land in Docs/ inside your library folder."
+            "Lists of what is in your library, for use elsewhere. Reserved folders "
+            "(Quarantine/, Trash/, Docs/, …) are skipped, and every export file lands "
+            "in Docs/ inside your library folder. Nothing in the library is changed."
         ))
 
         grid = TileGrid()
         grid.add_tile(self._build_at_tile())
         grid.add_tile(self._build_codec_tile())
-        grid.add_tile(self._build_cleanup_tile())
-        grid.add_tile(self._build_diag_tile(), full_width=True)
-        grid.add_tile(self._build_validator_tile())
         cl.addWidget(grid, 1)
         cl.addStretch(1)
-
-    # ── Tile builders ──────────────────────────────────────────────────────
 
     def _build_at_tile(self) -> ToolTile:
         tile = ToolTile(
@@ -1186,155 +1246,6 @@ class ToolsWorkspace(WorkspaceBase):
         tile.finish_footer()
         return tile
 
-    def _build_cleanup_tile(self) -> ToolTile:
-        tile = ToolTile(
-            "\u2736", "File Cleanup",
-            "Remove trailing \u2018 (1)\u2019, \u2018 - Copy\u2019, \u2018 copy\u2019 suffixes "
-            "left by browsers, Windows Explorer and macOS Finder. You review every "
-            "rename before anything changes; reserved folders are skipped, a log "
-            "is written to Docs/, and playlists are updated. \u2018Undo Last "
-            "Cleanup\u2019 previews, then restores, the original names (and "
-            "playlist entries).",
-        )
-        self._cleanup_tile = tile
-
-        tile.status_label.setVisible(True)
-        self._cleanup_status = tile.status_label
-        self._cleanup_log    = tile.log_box
-
-        self._cleanup_run_btn = tile.set_run_button("Preview Cleanup\u2026", self._on_file_cleanup)
-        self._cleanup_cancel_btn = tile.add_secondary_button("Cancel")
-        self._cleanup_cancel_btn.setObjectName("cleanupCancelBtn")
-        self._cleanup_cancel_btn.setEnabled(False)
-        self._cleanup_cancel_btn.clicked.connect(self._on_cancel_cleanup)
-        self._cleanup_undo_btn = tile.add_secondary_button("Undo Last Cleanup\u2026")
-        self._cleanup_undo_btn.setObjectName("cleanupUndoBtn")
-        self._cleanup_undo_btn.setToolTip(
-            "Preview and restore the original names from the newest cleanup log in Docs/"
-        )
-        self._cleanup_undo_btn.clicked.connect(self._on_undo_cleanup)
-        tile.finish_footer()
-        return tile
-
-    @staticmethod
-    def _make_diag_button(
-        label: str,
-        icon_sp: "QtWidgets.QStyle.StandardPixmap",
-        slot,
-    ) -> QtWidgets.QPushButton:
-        """Return a square diagnostic button: label on top, Qt standard icon below."""
-        from gui.themes.animations import AnimatedButton
-
-        SP = QtWidgets.QStyle.StandardPixmap
-        btn = AnimatedButton("", None)
-        # The visible text is a child QLabel; give the button a findable name
-        # and an accessible name.
-        btn.setObjectName("diag_" + "".join(ch for ch in label.lower() if ch.isalnum()))
-        btn.setAccessibleName(label.rstrip("…"))
-        btn.setFixedHeight(72)
-        btn.setMinimumWidth(80)
-        btn.setSizePolicy(
-            QtWidgets.QSizePolicy.Policy.Expanding,
-            QtWidgets.QSizePolicy.Policy.Fixed,
-        )
-        btn.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
-        btn.clicked.connect(slot)
-
-        # Inner layout: text label on top, icon label on bottom
-        inner = QtWidgets.QVBoxLayout(btn)
-        inner.setContentsMargins(4, 8, 4, 8)
-        inner.setSpacing(4)
-
-        text_lbl = QtWidgets.QLabel(label)
-        text_lbl.setAlignment(
-            QtCore.Qt.AlignmentFlag.AlignHCenter | QtCore.Qt.AlignmentFlag.AlignTop
-        )
-        text_lbl.setWordWrap(True)
-        text_lbl.setStyleSheet("font-size: 10px; background: transparent;")
-        text_lbl.setAttribute(QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-
-        icon_lbl = QtWidgets.QLabel()
-        icon_lbl.setAlignment(
-            QtCore.Qt.AlignmentFlag.AlignHCenter | QtCore.Qt.AlignmentFlag.AlignVCenter
-        )
-        icon_lbl.setAttribute(QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        icon_lbl.setStyleSheet("background: transparent;")
-        px = QtWidgets.QApplication.style().standardIcon(icon_sp).pixmap(22, 22)
-        icon_lbl.setPixmap(px)
-
-        inner.addWidget(text_lbl, 1)
-        inner.addWidget(icon_lbl, 0)
-        return btn
-
-    def _build_diag_tile(self) -> ToolTile:
-        tile = ToolTile(
-            "\u2699", "Diagnostics",
-            "Media testing, duplicate analysis tools, and system utilities.",
-        )
-
-        SP = QtWidgets.QStyle.StandardPixmap
-        _entries = [
-            ("M4A Tester\u2026",     SP.SP_MediaPlay,              self._on_m4a_tester),
-            ("Opus Tester\u2026",    SP.SP_MediaVolume,            self._on_opus_tester),
-            ("Bucketing POC\u2026",  SP.SP_FileDialogContentsView, self._on_bucketing_poc),
-            ("Scan Engine\u2026",    SP.SP_BrowserReload,          self._on_scan_engine),
-            ("Fuzzy Finder\u2026",   SP.SP_FileDialogListView,     self._on_fuzzy_dupes),
-            ("Pair Review\u2026",    SP.SP_FileDialogDetailedView, self._on_pair_review),
-            ("View Crash Log\u2026", SP.SP_MessageBoxWarning,      self._on_crash_log),
-        ]
-
-        _COLS = 4
-        grid = QtWidgets.QGridLayout()
-        grid.setSpacing(8)
-        for col in range(_COLS):
-            grid.setColumnStretch(col, 1)
-
-        for idx, (label, icon_sp, slot) in enumerate(_entries):
-            row, col = divmod(idx, _COLS)
-            btn = self._make_diag_button(label, icon_sp, slot)
-            grid.addWidget(btn, row, col)
-
-        # Fill remaining cells in last row with spacers so buttons don't stretch oddly
-        last_count = len(_entries) % _COLS
-        if last_count:
-            last_row = len(_entries) // _COLS
-            for col in range(last_count, _COLS):
-                grid.addItem(
-                    QtWidgets.QSpacerItem(
-                        0, 0,
-                        QtWidgets.QSizePolicy.Policy.Expanding,
-                        QtWidgets.QSizePolicy.Policy.Minimum,
-                    ),
-                    last_row, col,
-                )
-
-        tile.add_option_layout(grid)
-        tile.hide_footer()
-        # A launcher has no single run status; a permanent "Ready." chip
-        # would misreport (TOOL-17).
-        tile.status_chip.setVisible(False)
-        return tile
-
-    def _build_validator_tile(self) -> ToolTile:
-        tile = ToolTile(
-            "\u2713", "Library Validator",
-            "Verify that your library folder layout matches AlphaDEX conventions.",
-        )
-
-        self._val_log = QtWidgets.QPlainTextEdit()
-        self._val_log.setReadOnly(True)
-        self._val_log.setFixedHeight(160)
-        self._val_log.setObjectName("logBox")
-        self._val_log.setStyleSheet(
-            "QPlainTextEdit { background: rgba(0,0,0,0.1); border-radius: 6px; }"
-        )
-        tile.add_option(self._val_log)
-
-        tile.set_run_button("Run Validator", self._on_validate)
-        tile.finish_footer()
-        self._val_tile = tile
-        return tile
-
     # ── Codec chip helpers ─────────────────────────────────────────────────
 
     def _make_chip(self, label: str) -> QtWidgets.QCheckBox:
@@ -1373,66 +1284,25 @@ class ToolsWorkspace(WorkspaceBase):
             )
         cb.setStyleSheet(style)
 
-    def _reveal_card(self, card: QtWidgets.QWidget) -> None:
-        if card.maximumHeight() > 0:
-            return
-        target = max(card.sizeHint().height(), 80)
-        anim = QtCore.QPropertyAnimation(card, b"maximumHeight", self)
-        anim.setDuration(220)
-        anim.setStartValue(0)
-        anim.setEndValue(target)
-        anim.setEasingCurve(QtCore.QEasingCurve.Type.OutCubic)
-        anim.finished.connect(lambda: card.setMaximumHeight(16777215))
-        anim.start(QtCore.QAbstractAnimation.DeletionPolicy.DeleteWhenStopped)
-
-    def _flash_label(self, label: QtWidgets.QLabel, from_tone: str, duration: int = 1600) -> None:
-        """Fade ``label`` from a theme tone back to the secondary text colour.
-
-        One reused animation per label, palette only — it used to restyle the
-        label every frame, and overlapping flashes fought each other (DS-20).
-        """
-        flash_tone(label, from_tone, "secondary", duration)
-
-    # ── Theme refresh ──────────────────────────────────────────────────────
-
     def _on_theme_changed_base(self, tokens: object) -> None:
         super()._on_theme_changed_base(tokens)
         for cb in self._codec_chips.values():
             self._refresh_chip(cb)
-        refresh_tones(self, tokens)
 
     # ── Library change ─────────────────────────────────────────────────────
 
     def _on_library_changed(self, path: str) -> None:
-        """A different library: stop the read-only jobs that belong to the old
-        one and drop results that point into it (Open File buttons, logs,
-        statuses).
-
-        A confirmed library write (File Cleanup renames, or its undo) is left
-        to finish, as the Indexer and Library Sync do: stopping it part-way
-        would leave the old library half renamed with its playlists not yet
-        updated. Its tile keeps reporting on it until it ends.
-        """
-        from gui.workers import LIBRARY_WRITES, job_registry
-        job_registry().cancel_all(
-            [j for j in self.running_jobs() if j.group != LIBRARY_WRITES]
-        )
+        """A different library: stop the exports that belong to the old one
+        (they are read-only) and drop results that point into it (Open File
+        buttons, logs, statuses)."""
+        from gui.workers import job_registry
+        job_registry().cancel_all(self.running_jobs())
         self._at_out_path = None
         self._codec_out_path = None
         for btn in (self._at_open, self._at_folder, self._codec_open, self._codec_folder):
             btn.setEnabled(False)
         self._at_log.clear()
-        self._val_log.clear()
-        tiles = [self._at_tile, self._codec_tile]
-        if self._cleanup_worker is None:
-            self._cleanup_log.clear()
-            tiles.append(self._cleanup_tile)
-        else:
-            self._cleanup_log.appendPlainText(
-                "Library changed \u2014 the confirmed renames in the previous library "
-                "keep running until they finish."
-            )
-        for tile in tiles:
+        for tile in (self._at_tile, self._codec_tile):
             if tile is not None:
                 tile.report("idle", "Ready.")
         self._codec_status.setText("Ready.")
@@ -1455,12 +1325,6 @@ class ToolsWorkspace(WorkspaceBase):
         if worker is None:  # called directly
             return current, False
         return worker, worker is not current
-
-    def _require_library(self) -> bool:
-        if not self._library_path:
-            QtWidgets.QMessageBox.warning(self, "No Library", "Select a library folder first.")
-            return False
-        return True
 
     @Slot()
     def _on_export_at(self) -> None:
@@ -1655,6 +1519,91 @@ class ToolsWorkspace(WorkspaceBase):
             self._codec_tile.status_chip.show_neutral("Cancelled")
         self._log("Codec list export cancelled.", "warn")
 
+
+# ── File Cleanup ───────────────────────────────────────────────────────────────
+
+class FileCleanupWorkspace(_ToolPanel):
+    """File Cleanup page: remove copy suffixes, previewed, logged, undoable."""
+
+    def __init__(
+        self, library_path: str = "", parent: QtWidgets.QWidget | None = None
+    ) -> None:
+        super().__init__(library_path, parent)
+        self._cleanup_worker: FileCleanupWorker | None = None
+        self._cleanup_plan_worker: FileCleanupPlanWorker | None = None
+        self._cleanup_tile: ToolTile | None = None
+        self._build_ui()
+
+    # ── Build ─────────────────────────────────────────────────────────────
+
+    def _build_ui(self) -> None:
+        cl = self.content_layout
+        cl.addWidget(self._make_section_title("File Cleanup"))
+        cl.addWidget(self._make_subtitle(
+            "Tidy file names that browsers, Windows Explorer and macOS Finder left "
+            "behind. Nothing is renamed until you have reviewed the plan, every rename "
+            "is logged to Docs/, and the last cleanup can be undone."
+        ))
+
+        grid = TileGrid()
+        grid.add_tile(self._build_cleanup_tile(), full_width=True)
+        cl.addWidget(grid, 1)
+        cl.addStretch(1)
+
+    def _build_cleanup_tile(self) -> ToolTile:
+        tile = ToolTile(
+            "\u2736", "File Cleanup",
+            "Remove trailing \u2018 (1)\u2019, \u2018 - Copy\u2019, \u2018 copy\u2019 suffixes "
+            "left by browsers, Windows Explorer and macOS Finder. You review every "
+            "rename before anything changes; reserved folders are skipped, a log "
+            "is written to Docs/, and playlists are updated. \u2018Undo Last "
+            "Cleanup\u2019 previews, then restores, the original names (and "
+            "playlist entries).",
+        )
+        self._cleanup_tile = tile
+
+        tile.status_label.setVisible(True)
+        self._cleanup_status = tile.status_label
+        self._cleanup_log    = tile.log_box
+
+        self._cleanup_run_btn = tile.set_run_button("Preview Cleanup\u2026", self._on_file_cleanup)
+        self._cleanup_cancel_btn = tile.add_secondary_button("Cancel")
+        self._cleanup_cancel_btn.setObjectName("cleanupCancelBtn")
+        self._cleanup_cancel_btn.setEnabled(False)
+        self._cleanup_cancel_btn.clicked.connect(self._on_cancel_cleanup)
+        self._cleanup_undo_btn = tile.add_secondary_button("Undo Last Cleanup\u2026")
+        self._cleanup_undo_btn.setObjectName("cleanupUndoBtn")
+        self._cleanup_undo_btn.setToolTip(
+            "Preview and restore the original names from the newest cleanup log in Docs/"
+        )
+        self._cleanup_undo_btn.clicked.connect(self._on_undo_cleanup)
+        tile.finish_footer()
+        return tile
+
+    # ── Library change ─────────────────────────────────────────────────────
+
+    def _on_library_changed(self, path: str) -> None:
+        """A different library: stop a preview that belongs to the old one.
+
+        A confirmed library write (File Cleanup renames, or its undo) is left
+        to finish, as the Indexer and Library Sync do: stopping it part-way
+        would leave the old library half renamed with its playlists not yet
+        updated. The tile keeps reporting on it until it ends.
+        """
+        from gui.workers import LIBRARY_WRITES, job_registry
+        job_registry().cancel_all(
+            [j for j in self.running_jobs() if j.group != LIBRARY_WRITES]
+        )
+        if self._cleanup_worker is None:
+            self._cleanup_log.clear()
+            if self._cleanup_tile is not None:
+                self._cleanup_tile.report("idle", "Ready.")
+        else:
+            self._cleanup_log.appendPlainText(
+                "Library changed \u2014 the confirmed renames in the previous library "
+                "keep running until they finish."
+            )
+
     # ── Slots: File Cleanup (plan → preview → confirm → execute → log) ────
 
     def _cleanup_set_running(self, running: bool) -> None:
@@ -1810,155 +1759,3 @@ class ToolsWorkspace(WorkspaceBase):
                 "ok" if success else "error", message, "success" if success else "danger"
             )
         self._log(message, "ok" if success else "error")
-
-    # ── Slots: Validator ───────────────────────────────────────────────────
-
-    @Slot()
-    def _on_validate(self) -> None:
-        if not self._library_path:
-            QtWidgets.QMessageBox.warning(self, "No Library", "Select a library folder first.")
-            return
-        try:
-            import validator
-            valid, errors = validator.validate_soundvault_structure(self._library_path)
-            if valid:
-                self._val_log.setPlainText("\u2713 Library structure is valid.")
-                self._val_tile.status_chip.show_success("\u2713  Valid")
-                self._log("Validation complete \u2014 structure OK.", "ok")
-            else:
-                self._val_log.setPlainText("\n".join(errors))
-                self._val_tile.status_chip.show_error("\u2717  Issues")
-                self._log("Validation found issues.", "error")
-        except Exception as exc:  # noqa: BLE001
-            self._val_log.setPlainText(str(exc))
-            self._val_tile.status_chip.show_error("\u2717  Error")
-            self._log(str(exc), "error")
-
-    # ── Slots: Diagnostics ─────────────────────────────────────────────────
-    #
-    # Each dialog used to be created parented to this workspace, exec()'d and
-    # never deleted: every open leaked a QDialog, and reopening Scan Engine /
-    # Bucketing / Fuzzy Finder while a closed dialog's worker was still
-    # running started a second, concurrent run (TOOL-21 / DUP-20). Now there
-    # is at most one live dialog per tool: it is deleted after exec() unless
-    # its worker is still running, in which case the next click re-opens that
-    # same dialog (showing the run in progress) instead of starting another.
-
-    @staticmethod
-    def _dialog_busy(dlg: QtWidgets.QDialog) -> bool:
-        try:
-            worker = getattr(dlg, "_worker", None)
-            if worker is not None and worker.isRunning():
-                return True
-        except RuntimeError:  # C++ object already gone
-            return False
-        from gui.workers import job_registry
-        return any(job.owner_name == type(dlg).__name__ for job in job_registry().jobs())
-
-    def _open_diag_dialog(self, key: str, factory) -> QtWidgets.QDialog | None:
-        dlg = self._diag_dialogs.pop(key, None)
-        if dlg is not None:
-            try:
-                busy = self._dialog_busy(dlg)
-            except RuntimeError:
-                busy = False
-            if not busy:
-                dlg.deleteLater()
-                dlg = None
-        if dlg is None:
-            dlg = factory()
-        self._diag_dialogs[key] = dlg
-        try:
-            dlg.exec()
-        finally:
-            if self._dialog_busy(dlg):
-                self._log(
-                    f"{dlg.windowTitle() or key}: still running in the background; "
-                    "reopen it to see progress.", "info",
-                )
-            else:
-                self._diag_dialogs.pop(key, None)
-                dlg.deleteLater()
-        return dlg
-
-    @Slot()
-    def _on_m4a_tester(self) -> None:
-        from gui.dialogs.media_tester_dialog import MediaTesterDialog
-        self._open_diag_dialog("m4a", lambda: MediaTesterDialog(self, codec="m4a"))
-
-    @Slot()
-    def _on_opus_tester(self) -> None:
-        from gui.dialogs.media_tester_dialog import MediaTesterDialog
-        self._open_diag_dialog("opus", lambda: MediaTesterDialog(self, codec="opus"))
-
-    @Slot()
-    def _on_bucketing_poc(self) -> None:
-        from gui.dialogs.bucketing_poc_dialog import BucketingPocDialog
-        self._open_diag_dialog("bucketing", lambda: BucketingPocDialog(self._library_path, self))
-
-    @Slot()
-    def _on_scan_engine(self) -> None:
-        from gui.dialogs.scan_engine_dialog import ScanEngineDialog
-        self._open_diag_dialog("scan_engine", lambda: ScanEngineDialog(self._library_path, self))
-
-    @Slot()
-    def _on_crash_log(self) -> None:
-        from gui.dialogs.crash_log_dialog import CrashLogDialog
-        self._open_diag_dialog("crash_log", lambda: CrashLogDialog(self))
-
-    @Slot()
-    def _on_fuzzy_dupes(self) -> None:
-        from gui.dialogs.fuzzy_dupe_dialog import FuzzyDupeDialog
-        self._open_diag_dialog("fuzzy", lambda: FuzzyDupeDialog(self._library_path, self))
-
-    @Slot()
-    def _on_pair_review(self) -> None:
-        if not self._require_library():
-            return
-        from gui.dialogs.pair_review_dialog import PairReviewDialog, load_pairs
-        if not load_pairs(self._library_path):
-            QtWidgets.QMessageBox.information(
-                self, "Duplicate Pair Review",
-                "No duplicate preview found.\n\n"
-                "Run Duplicate Finder first to generate paired results.",
-            )
-            return
-        self._open_diag_dialog("pair_review", lambda: PairReviewDialog(self._library_path, self))
-
-    def shutdown(self) -> None:
-        for dlg in list(self._diag_dialogs.values()):
-            try:
-                dlg.close()
-            except RuntimeError:
-                pass
-        super().shutdown()
-
-    # ── Utility ───────────────────────────────────────────────────────────
-
-    def _open_file(self, path: str | None) -> None:
-        import subprocess
-        import sys
-        if not path:
-            return
-        if sys.platform == "win32":
-            import os as _os
-            _os.startfile(path)
-        elif sys.platform == "darwin":
-            subprocess.Popen(["open", path])
-        else:
-            subprocess.Popen(["xdg-open", path])
-
-    def _open_folder(self, path: str | None) -> None:
-        """Open the folder containing *path* in the system file manager."""
-        import subprocess
-        import sys
-        if not path:
-            return
-        folder = str(Path(path).parent)
-        if sys.platform == "win32":
-            # /select highlights the file inside the folder
-            subprocess.Popen(["explorer", f"/select,{path}"])
-        elif sys.platform == "darwin":
-            subprocess.Popen(["open", "-R", path])
-        else:
-            subprocess.Popen(["xdg-open", folder])
