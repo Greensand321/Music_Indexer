@@ -74,3 +74,22 @@ def test_muted_stays_quieter_than_secondary(key):
     t = THEMES[key]
     assert contrast(t.text_muted, t.card_bg) <= contrast(t.text_secondary, t.card_bg) + 0.5
     assert contrast(t.text_secondary, t.card_bg) < contrast(t.text_primary, t.card_bg)
+
+
+# ── The "Experimental" pill (gui/widgets/pill.py) ────────────────────────────
+
+@pytest.mark.parametrize("key", sorted(THEMES))
+def test_experimental_pill_is_readable_and_distinct(key):
+    """The pill marks the Duplicates page's prototypes. Its label must meet AA
+    on its own fill, and the fill must stand out from the card it sits on."""
+    pytest.importorskip("PySide6")
+    from gui.widgets.pill import pill_colours
+
+    t = THEMES[key]
+    fill, border, text = pill_colours(t, "warning")
+    assert contrast(text, fill) >= AA, f"{key}: pill text {contrast(text, fill):.2f}:1"
+    assert fill.lower() != t.card_bg.lower()
+    # The amber border is the pill's shape: visible against the surfaces the
+    # pill is drawn on (cards, the page, inactive and active section tabs).
+    for surface in ("card_bg", "content_bg", "tab_bg", "tab_active_bg"):
+        assert contrast(border, getattr(t, surface)) >= 2.8, f"{key}: border on {surface}"

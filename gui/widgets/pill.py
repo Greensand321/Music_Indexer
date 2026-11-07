@@ -19,12 +19,13 @@ FILL_STRENGTH = 0.18
 
 
 def _blend(fg: str, bg: str, amount: float) -> str:
-    """``fg`` laid over ``bg`` at ``amount`` (0..1), as an opaque hex colour."""
-    a = QtGui.QColor(fg)
-    b = QtGui.QColor(bg)
-    mix = [round(cb + (ca - cb) * amount) for ca, cb in
-           ((a.red(), b.red()), (a.green(), b.green()), (a.blue(), b.blue()))]
-    return QtGui.QColor(*mix).name()
+    """``fg`` laid over ``bg`` at ``amount`` (0..1), as an opaque ``#rrggbb``."""
+    def rgb(value: str) -> list[int]:
+        h = value.lstrip("#")
+        return [int(h[i:i + 2], 16) for i in (0, 2, 4)]
+
+    mix = [round(cb + (ca - cb) * amount) for ca, cb in zip(rgb(fg), rgb(bg))]
+    return "#" + "".join(f"{c:02x}" for c in mix)
 
 
 def pill_colours(tokens, tone: str = "warning") -> tuple[str, str, str]:
