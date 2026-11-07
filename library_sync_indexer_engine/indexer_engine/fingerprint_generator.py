@@ -66,8 +66,11 @@ def compute_fingerprint_for_file(
     args: Tuple[str, str, dict],
 ) -> Tuple[str, int | None, str | None, str | None]:
     """Compute fingerprint for a single file. Returns (path, duration, fp, error)."""
-    path, _db_path, settings = args
-    path = ensure_long_path(path)
+    caller_path, _db_path, settings = args
+    # The long-path form is only for opening the file; the caller's path is
+    # returned, since it keys the cache and the caller's own lookups (on
+    # Windows a ``\\?\``-prefixed path matched none of them).
+    path = ensure_long_path(caller_path)
     tmp = None
     try:
         trim = bool(settings.get("trim_silence", False))
@@ -106,14 +109,14 @@ def compute_fingerprint_for_file(
             duration, fp_hash = acoustid.fingerprint_file(target)
         if tmp and tmp != path:
             os.remove(tmp)
-        return path, duration, _fp_text(fp_hash), None
+        return caller_path, duration, _fp_text(fp_hash), None
     except Exception as e:  # pragma: no cover - just to be safe
         if tmp and tmp != path:
             try:
                 os.remove(tmp)
             except Exception:
                 pass
-        return path, None, None, str(e)
+        return caller_path, None, None, str(e)
 
 
 def _load_cached_entries(

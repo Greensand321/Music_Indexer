@@ -36,9 +36,11 @@ def test_rename_inside_one_album_updates_library_playlists(tmp_path):
     count = pg.update_playlists({old: new})
 
     assert count == 1
+    # The rewritten entry keeps the playlist's "/" style (on Windows too), so
+    # the file doesn't end up with mixed separators.
     assert pl.read_text(encoding="utf-8").splitlines() == [
-        os.path.join("..", "Artist", "Album", "01 Song.mp3"),
-        os.path.join("..", "Artist", "Album", "02 Other.mp3"),
+        "../Artist/Album/01 Song.mp3",
+        "../Artist/Album/02 Other.mp3",
     ]
     assert os.path.exists(other)
     # No folder playlist is created as a side effect of the rename.
@@ -130,8 +132,10 @@ def test_repair_plan_fixes_user_selected_playlist_anywhere(tmp_path):
     plan = pg.plan_playlist_repair([str(pl)], str(lib))
     assert len(plan) == 1
     item = plan[0]
+    # The entry used "/" (after the library folder), so its replacement is
+    # written with "/" too; on POSIX that is just the native path.
     assert item.changes == [
-        (f"{lib}/Artist A/Old Album/01 a.mp3", str(lib / "Artist A/Album 1/01 a.mp3"))
+        (f"{lib}/Artist A/Old Album/01 a.mp3", str(lib / "Artist A/Album 1/01 a.mp3").replace(os.sep, "/"))
     ]
     assert item.unresolved == [f"{lib}/gone/zzz qqq.mp3"]
     assert item.lines[0] == "#EXTM3U"

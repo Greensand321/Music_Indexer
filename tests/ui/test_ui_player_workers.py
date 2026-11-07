@@ -5,6 +5,7 @@ Covers PLY-11, 12, 13, 14, 15, 22, 23 (docs/redesign/pages/07_player.md).
 from __future__ import annotations
 
 import gc
+import os
 import threading
 import time
 
@@ -110,7 +111,10 @@ def test_scan_skips_non_library_folders_but_keeps_manual_review(qtbot, threads, 
     ws, _ = make_player(qtbot, library_path=str(lib.root))
     ws._reload_library()
     wait_scan(ws, threads)
-    names = sorted(r["path"].replace(str(lib.root), "") for r in ws._all_rows)
+    # "/<relative path>" with "/" on every platform (on Windows the rows hold
+    # native "\\" paths, and a "/"-only check would pass vacuously).
+    names = sorted("/" + os.path.relpath(r["path"], lib.root).replace(os.sep, "/") for r in ws._all_rows)
+    assert len(names) == 3
     assert not any(n.startswith(("/Quarantine", "/Trash", "/Playlists")) for n in names)
     assert any(n.startswith("/Manual Review") for n in names)
     assert any(n.startswith("/Not Sorted") for n in names)

@@ -45,6 +45,7 @@ if sys.platform == "win32":
 import musicbrainzngs
 from utils.audio_metadata_reader import read_tags, read_genres
 from utils.tag_writer import SUPPORTED_TAG_EXTS, TagWriteError, write_fields
+from utils.path_helpers import safe_relpath
 
 try:
     from mutagen import File as MutagenFile  # noqa: F401 - kept for importers
@@ -176,7 +177,9 @@ def process_file(filepath, logfile):
     """
     from controllers.normalize_controller import FILL_SKIP_AT, add_genres
 
-    relative = os.path.relpath(filepath)
+    # Relative to the working directory for a short log line; another drive
+    # on Windows has no relative path, so the absolute path is logged then.
+    relative = safe_relpath(filepath)
     existing = extract_genre_list(filepath)
     if len(existing) >= FILL_SKIP_AT:
         log_line(logfile, f"{relative}  → skipped (already has genres {existing}).")

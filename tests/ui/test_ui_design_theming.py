@@ -197,13 +197,21 @@ def test_type_ramp_is_not_inverted(main_window):
     ws = main_window._workspaces["indexer"] if hasattr(main_window, "_workspaces") else None
     root = ws or main_window
 
+    def size(font):
+        # The *requested* size in px: QSS roles set pixel sizes (pointSize()
+        # is -1 then), TypeScale sets points (1pt = 4/3 px at 96 dpi). Not
+        # QFontInfo: it reports -1 when no installed font matches, which is
+        # the case on the Windows offscreen platform.
+        return font.pixelSize() if font.pixelSize() > 0 else font.pointSizeF() * 4 / 3
+
     def px(name):
         w = next(w for w in root.findChildren(QtWidgets.QLabel) if w.objectName() == name)
-        return QtGui.QFontInfo(w.font()).pixelSize()
+        return size(w.font())
 
-    body = QtGui.QFontInfo(QtWidgets.QApplication.font()).pixelSize()
+    body = size(QtWidgets.QApplication.font())
     section, card = px("sectionTitle"), px("cardTitle")
-    nav = QtGui.QFontInfo(main_window.findChild(QtWidgets.QPushButton, "navButton").font()).pixelSize()
+    nav = size(main_window.findChild(QtWidgets.QPushButton, "navButton").font())
+    assert min(section, card, body, nav) > 0, (section, card, body, nav)
     assert section > card >= body, (section, card, body)
     assert nav < section, (nav, section)
 

@@ -844,7 +844,7 @@ def _load_cache_with_validation(cache_file: str, tracks: list, log_callback=None
     # Validate cache entries against track modification times
     cache_metadata_file = cache_file.replace(".npy", "_metadata.json")
     try:
-        with open(cache_metadata_file) as f:
+        with open(cache_metadata_file, encoding="utf-8") as f:
             metadata = json_module.load(f)
         cache_time = float(metadata.get("created_time", 0))
     except (OSError, ValueError, TypeError, AttributeError):
@@ -867,7 +867,7 @@ def _load_cache_with_validation(cache_file: str, tracks: list, log_callback=None
 
 def _write_cache_metadata(cache_file: str, created_time: float, track_count: int) -> None:
     cache_metadata_file = cache_file.replace(".npy", "_metadata.json")
-    with open(cache_metadata_file, "w") as f:
+    with open(cache_metadata_file, "w", encoding="utf-8") as f:
         json_module.dump(
             {"created_time": created_time, "track_count": track_count}, f, indent=2
         )
@@ -1125,7 +1125,7 @@ def generate_clustered_playlists(
     cluster_info_file = os.path.join(docs, "cluster_info.json")
     try:
         tmp = cluster_info_file + ".tmp"
-        with open(tmp, "w") as f:
+        with open(tmp, "w", encoding="utf-8") as f:
             json_module.dump(cluster_data, f, indent=2)
         os.replace(tmp, cluster_info_file)
         log_callback(f"✓ Saved cluster data to {cluster_info_file}")

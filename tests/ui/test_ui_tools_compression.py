@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import os
 import shutil
-import stat
 import sys
 import time
 from pathlib import Path
@@ -17,34 +16,29 @@ from pathlib import Path
 import pytest
 from PySide6 import QtGui
 
+from _helpers.fake_ffmpeg import install_fake_ffmpeg, pid_alive
+
 needs_ffmpeg = pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="needs ffmpeg")
 
 
 def _install_hanging_ffmpeg(bin_dir: Path, monkeypatch) -> Path:
-    """A fake ffmpeg that writes partial output, records its pid and hangs."""
-    bin_dir.mkdir(parents=True, exist_ok=True)
+    """A fake ffmpeg that writes partial output, records its pid and hangs.
+
+    A Python script run through ``sys.executable`` (see
+    ``tests/_helpers/fake_ffmpeg.py``), so it is the one that runs on Windows
+    as well."""
     pid_file = bin_dir / "ffmpeg.pid"
-    script = bin_dir / "ffmpeg"
-    script.write_text(
-        f"#!{sys.executable}\n"
+    install_fake_ffmpeg(
+        bin_dir, monkeypatch,
         "import os, sys, time\n"
         "open(sys.argv[-1], 'wb').write(b'OggS-partial')\n"
         f"open({str(pid_file)!r}, 'a').write(str(os.getpid()) + chr(10))\n"
         "time.sleep(60)\n",
-        encoding="utf-8",
     )
-    script.chmod(script.stat().st_mode | stat.S_IEXEC)
-    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
     return pid_file
 
 
-def _pid_alive(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    status = Path(f"/proc/{pid}/status")
-    return not (status.exists() and "zombie" in status.read_text().lower())
+_pid_alive = pid_alive
 
 
 def _estimate(ws, qtbot):

@@ -16,6 +16,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from crash_watcher import record_event
 from crash_logger import watcher
+from utils.path_helpers import playlist_entry, safe_relpath
 
 # Default extensions for playlist generation
 DEFAULT_EXTS = {".mp3", ".flac", ".wav", ".aac", ".m4a", ".opus"}
@@ -223,7 +224,7 @@ def write_playlist(tracks, outfile):
     try:
         with open(outfile, "w", encoding="utf-8") as f:
             for p in tracks:
-                f.write(os.path.relpath(p, os.path.dirname(outfile)) + "\n")
+                f.write(safe_relpath(p, os.path.dirname(outfile)) + "\n")
     except Exception as e:
         raise RuntimeError(f"Failed to write playlist {outfile}: {e}")
 
@@ -380,10 +381,9 @@ def _rewrite_playlist_lines(text: str, playlist_dir: str, normalized_map: dict) 
             changed += 1
             block_start = None
             continue
-        try:
-            new_entry = os.path.abspath(new) if is_abs else os.path.relpath(new, playlist_dir)
-        except ValueError:  # different drive on Windows: only an absolute path works
-            new_entry = os.path.abspath(new)
+        # Absolute stays absolute, relative stays relative (absolute only on
+        # another Windows drive), and the entry's own separator style is kept.
+        new_entry = playlist_entry(new, playlist_dir, like=entry)
         if new_entry != entry:
             changed += 1
             lead = content[: len(content) - len(content.lstrip())]
@@ -542,7 +542,7 @@ class PlannedPlaylist:
 
 def _relative_lines(tracks, outfile) -> list:
     base = os.path.dirname(os.path.abspath(outfile))
-    return [os.path.relpath(p, base) for p in tracks]
+    return [safe_relpath(p, base) for p in tracks]
 
 
 def plan_playlist(tracks, outfile) -> PlannedPlaylist:
@@ -653,10 +653,7 @@ def plan_playlist_repair(playlist_paths, library_root, prefer_opus=False, log_ca
                 found = _pick_best_match(target, name_index, token_index)
 
             if found:
-                try:
-                    new_line = found if was_abs else os.path.relpath(found, pl_dir)
-                except ValueError:  # different drive on Windows
-                    new_line = found
+                new_line = playlist_entry(found, pl_dir, like=entry)
                 item.lines.append(new_line)
                 item.changes.append((entry, new_line))
             else:

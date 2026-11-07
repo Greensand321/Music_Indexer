@@ -1098,7 +1098,9 @@ class LibrarySyncWorkspace(WorkspaceBase):
         )
         if path:
             try:
-                Path(path).write_text(self._log_area.toPlainText())
+                # UTF-8, not the Windows locale codec: the log holds file
+                # names and symbols (✓, →) that cp1252 cannot encode.
+                Path(path).write_text(self._log_area.toPlainText(), encoding="utf-8")
                 self._log(f"Log exported to {path}", "ok")
             except Exception as exc:  # noqa: BLE001
                 self._log(str(exc), "error")

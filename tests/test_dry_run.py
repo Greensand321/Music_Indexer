@@ -13,8 +13,10 @@ class DryRunTest(unittest.TestCase):
             open(os.path.join(root, 'A', 'dup.mp3'), 'wb').close()
             open(os.path.join(root, 'B', 'dup.mp3'), 'wb').close()
 
+            # "/"-joined relative paths, so the expectations below hold on
+            # Windows too.
             before_files = {
-                os.path.relpath(os.path.join(dp, f), root)
+                os.path.relpath(os.path.join(dp, f), root).replace(os.sep, '/')
                 for dp, _, fs in os.walk(root)
                 for f in fs
             }
@@ -25,7 +27,7 @@ class DryRunTest(unittest.TestCase):
                 mods["music_indexer_api"].build_dry_run_html(root, html)
 
             after_files = {
-                os.path.relpath(os.path.join(dp, f), root)
+                os.path.relpath(os.path.join(dp, f), root).replace(os.sep, '/')
                 for dp, _, fs in os.walk(root)
                 for f in fs
             }
