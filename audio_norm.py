@@ -150,7 +150,22 @@ def normalize_for_fp(
     allow_mismatched_edits: bool = True,
     log_callback: Callable[[str], None] | None = None,
 ) -> io.BytesIO:
-    """Return normalized audio segment for fingerprinting as a BytesIO buffer."""
+    """Return the audio to fingerprint, as a WAV in a BytesIO buffer.
+
+    Resampled to 44.1 kHz stereo, optionally silence-trimmed, then cut to the
+    window ``[fingerprint_offset_ms, +fingerprint_duration_ms)``. Nothing is
+    written to disk and the file itself is never touched.
+
+    A track shorter than the window is **not** padded with silence any more.
+    Padding made every short track mostly silence, so the fingerprints of
+    *different* short tracks agreed on that silence: two unrelated 5-second
+    clips padded to 120 s measured a bit error rate of 0.011–0.014 (the
+    exact-duplicate threshold is 0.02), 20-second clips about 0.05 and
+    40-second clips about 0.1 — inside Library Sync's 0.2 match threshold,
+    so different interludes, intros and short songs of similar length were
+    reported as the same recording. The fingerprint distance compares the
+    overlapping part of two prints, so equal lengths were never needed.
+    """
     audio = AudioSegment.from_file(path)
     if audio is None:
         audio = _FallbackSegment.from_file(path)
@@ -192,15 +207,10 @@ def normalize_for_fp(
         if not allow_mismatched_edits:
             raise ValueError("Mismatched edit length")
 
-    start = fingerprint_offset_ms
-    segment = audio[start:start + fingerprint_duration_ms]
-    if len(segment) < fingerprint_duration_ms:
-        segment += _generate_silence(
-            duration_ms=fingerprint_duration_ms - len(segment),
-            frame_rate=segment.frame_rate,
-            channels=segment.channels,
-            sample_width=segment.sample_width,
-        )
+    # No silence padding: see the docstring (short tracks matched each other).
+    end = len(audio)
+    start = min(max(0, int(fingerprint_offset_ms)), end)
+    segment = audio[start:min(end, start + int(fingerprint_duration_ms))]
 
     buf = io.BytesIO()
     segment.export(buf, format="wav")
