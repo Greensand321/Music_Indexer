@@ -28,9 +28,25 @@ To compare sound rather than names, the Duplicate Finder reduces each file to a
 overview. Two fingerprints can be compared to produce a single **distance number**:
 
 - **0** means the two fingerprints are identical — the same audio.
-- **1** means they are completely different — nothing in common.
+- About **0.5** means they are unrelated: roughly half of the fingerprint's bits differ,
+  which is what two different recordings look like.
 - Values in between measure *how* different. A small number means "almost the same";
   a large number means "barely related."
+- **1** is reserved for "nothing to compare": a missing fingerprint, or the empty one
+  fpcalc returns for clips too short to fingerprint (about 3 seconds or less). Two
+  empty fingerprints never count as a match.
+
+Technically, the distance is the **bit error rate** between the two *decoded*
+Chromaprint fingerprints (the best of a few small time alignments, so a slightly
+different start does not matter). fpcalc and the cache store fingerprints in
+Chromaprint's compressed text form; the finder decodes them before comparing. (It
+used to compare the compressed text directly, which made a FLAC and its own MP3 look
+0.1–0.45 apart — so most cross-format duplicates were missed.)
+
+Measured on the app's own pipeline: the same recording in any codec or bitrate
+(MP3 64–320 kbps, AAC, Vorbis, Opus) lands at **0.000–0.008**; the same recording
+starting 0.3–0.6 s later lands at **0.03–0.08**; different recordings sit at **0.43+**.
+`tests/test_dupes_fingerprint_distance.py` pins these ranges.
 
 This is the engine's entire notion of similarity. Everything else — what counts as a
 duplicate, which copy wins — is built on top of this one distance number.
@@ -56,9 +72,9 @@ merely sound alike). The defaults are chosen to be confident without being reckl
 ### The mixed-codec allowance
 
 There is one subtle but important wrinkle. A lossless file and a lossy file of the
-*same* recording will **never** have a distance of zero, because the lossy version
+*same* recording rarely have a distance of exactly zero, because the lossy version
 literally threw away some of the sound when it was compressed. Comparing a FLAC to an
-MP3 of the same song always shows a little extra distance that has nothing to do with
+MP3 of the same song usually shows a little extra distance that has nothing to do with
 them being different songs — it's just the compression talking.
 
 To stop this from causing the finder to miss obvious duplicates, it grants a small
@@ -93,7 +109,11 @@ your main library but not destroyed. If the finder ever gets a call wrong, your 
 still right there to recover.
 
 Permanent deletion is possible, but it is an explicit, opt-in choice you have to make
-deliberately — never the default, and never silent. And whichever path you choose,
+deliberately — never the default, and never silent. In the Qt app you choose "Delete
+losers permanently" (or "Delete permanently" for one group in the group inspector);
+Execute then lists how many files will be deleted and asks you to **type DELETE** as a
+second confirmation before the executor's deletion gate is opened. Each group can also
+be set to "Keep loser in place (retain)". And whichever path you choose,
 every action is **logged**: the finder writes detailed records into the `Docs` folder
 describing exactly which files were grouped, which won, which lost, and where each one
 went. Nothing happens without a paper trail.
@@ -139,6 +159,16 @@ The ordering is not arbitrary: playlists are fixed and *checked* **before** any 
 is touched, specifically so a mid-run failure can never leave a playlist pointing at
 a file that's already gone. If a playlist rewrite still references a file about to be
 quarantined, the executor refuses to continue rather than risk a dangling reference.
+
+Groups the planner is unsure about carry **review flags** (missing or unreadable
+artwork, placeholder metadata, a near rather than exact match, …). The executor refuses
+a plan with review flags unless the caller explicitly overrides. The Qt Duplicates
+page shows which groups are flagged and why, and lets you either override ("execute
+all groups exactly as previewed") or stop with nothing moved; refusals are reported
+with their reason. A per-group accept/skip review stage is planned (see
+**ROADMAP.md**). If you change a disposition after scanning, the preview
+(`Docs/duplicate_preview.html`, plus `Docs/duplicate_preview.json` for Tools → Pair
+Review) is rewritten before you confirm, so what executes is what the preview shows.
 
 Deletion carries an extra, deliberate double gate — it only happens if the caller
 both allows deletion in general *and* explicitly confirms this specific run, and the
@@ -189,6 +219,13 @@ track's metadata bucket using a dictionary operation against what is actually a
 list, so it raised an error before producing anything. That's fixed; both the
 on-screen report and its HTML export work now.)*
 
+## Before the first scan: fpcalc and FFmpeg
+
+Fingerprints are computed by **fpcalc** (Chromaprint) after **FFmpeg** decodes the
+audio. If either is missing from `PATH`, the Duplicates page says so once, with
+install links, and offers to scan using only fingerprints already in the cache (files
+never fingerprinted are skipped and counted in one log line).
+
 ## Why the second scan is so much faster: the cache
 
 The first time you scan a large library, the Duplicate Finder has to compute a
@@ -219,6 +256,8 @@ run plan before you approve it.** Your own eyes are the final threshold.
 
 ---
 
-*Related: **Library Sync** (next) uses the same fingerprint-and-distance machinery,
-but for a different purpose — merging a new folder into your library rather than
-cleaning duplicates within it.*
+*Related: **Library Sync** (next) uses fingerprint-and-distance machinery for a
+different purpose — merging a new folder into your library rather than cleaning
+duplicates within it. Note that it uses the vendored engine copy under
+`library_sync_indexer_engine/`, which still compares compressed fingerprints; the
+decoding described above has not been ported there.*
