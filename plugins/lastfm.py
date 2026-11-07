@@ -5,7 +5,7 @@ import requests
 from utils.audio_metadata_reader import read_tags
 from utils.path_helpers import ensure_long_path
 
-from plugins.base import MetadataPlugin, SourceStatus
+from plugins.base import MetadataPlugin, SourceStatus, describe_lookup_error
 
 # Read at import for backward compatibility; ``_api_key()`` re-reads the
 # environment at scan time so setting it later (or in tests) takes effect.
@@ -57,11 +57,15 @@ class LastfmPlugin(MetadataPlugin):
             "track": title,
             "format": "json",
         }
-        # Network errors propagate so the scan can report them.
-        resp = requests.get(
-            "http://ws.audioscrobbler.com/2.0/", params=params, timeout=5
-        )
-        data = resp.json().get("track", {}) or {}
+        # Failures propagate (as a readable reason, without the key-bearing
+        # URL) so the scan can report them.
+        try:
+            resp = requests.get(
+                "http://ws.audioscrobbler.com/2.0/", params=params, timeout=5
+            )
+            data = resp.json().get("track", {}) or {}
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError(describe_lookup_error(exc)) from None
 
         tags = (data.get("toptags", {}) or {}).get("tag", []) or []
         genres: List[str] = []

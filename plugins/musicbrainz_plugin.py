@@ -9,7 +9,7 @@ source of album and genre proposals. AcoustID still runs when it can.
 """
 from __future__ import annotations
 
-from plugins.base import MetadataPlugin, SourceStatus
+from plugins.base import MetadataPlugin, SourceStatus, describe_lookup_error
 
 
 def _selected_service() -> str:
@@ -36,4 +36,7 @@ class MusicBrainzSearchPlugin(MetadataPlugin):
     def identify(self, file_path: str) -> dict:
         from metadata_service import query_musicbrainz
 
-        return query_musicbrainz("", file_path) or {}
+        try:
+            return query_musicbrainz("", file_path) or {}
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError(describe_lookup_error(exc)) from None

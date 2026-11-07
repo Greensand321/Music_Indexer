@@ -10,7 +10,7 @@ import shutil
 
 import musicbrainzngs
 
-from plugins.base import MetadataPlugin, SourceStatus
+from plugins.base import MetadataPlugin, SourceStatus, describe_lookup_error
 from plugins.api_service import ApiService
 from metadata_service import query_metadata, musicbrainz_useragent
 from config import load_config, CONFIG_PATH
@@ -32,22 +32,6 @@ def acoustid_api_key() -> tuple[str, str]:
     if key:
         return key, "key from Settings"
     return tag_fixer.ACOUSTID_API_KEY, "built-in key"
-
-
-def describe_lookup_error(exc: BaseException) -> str:
-    """A short, plain-words reason for a failed lookup."""
-    name = type(exc).__name__
-    text = str(exc).strip()
-    lowered = f"{name} {text}".lower()
-    if "nobackend" in lowered or "fpcalc" in lowered or "chromaprint" in lowered:
-        return "fingerprinting unavailable (fpcalc/Chromaprint not found)"
-    if "fingerprintgeneration" in lowered:
-        return "could not fingerprint the audio"
-    if "invalid api key" in lowered or "invalid client" in lowered or ("key" in lowered and "invalid" in lowered):
-        return "the AcoustID API key was rejected"
-    if any(word in lowered for word in ("connection", "timed out", "timeout", "resolve", "network", "unreachable")):
-        return "network error (offline?)"
-    return f"{name}: {text}" if text else name
 
 
 class AcoustIDService(MetadataPlugin, ApiService):

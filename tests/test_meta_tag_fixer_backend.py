@@ -205,6 +205,25 @@ def test_acoustid_identify_raises_a_readable_reason(monkeypatch):
         acoustid_plugin.AcoustIDService().identify("x.mp3")
 
 
+def test_lookup_errors_never_leak_the_api_key(monkeypatch, tmp_path):
+    """A requests error message embeds the URL — including ``api_key=…``."""
+    import plugins.lastfm as lastfm
+
+    monkeypatch.setenv("LASTFM_API_KEY", "SECRET123")
+    monkeypatch.setattr(lastfm, "read_tags", lambda _p: {"artist": "A", "title": "T"})
+
+    def fail(*_a, **_k):
+        raise ValueError(
+            "HTTPConnectionPool(host='ws.audioscrobbler.com'): bad url "
+            "/2.0/?method=track.getInfo&api_key=SECRET123&artist=A"
+        )
+
+    monkeypatch.setattr(lastfm.requests, "get", fail)
+    with pytest.raises(RuntimeError) as info:
+        lastfm.LastfmPlugin().identify(str(tmp_path / "x.mp3"))
+    assert "SECRET123" not in str(info.value)
+
+
 def test_settings_service_selection_is_read(monkeypatch):
     """META-19: Settings -> Service was saved but never read."""
     import config

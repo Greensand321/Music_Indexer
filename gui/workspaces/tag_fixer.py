@@ -12,6 +12,7 @@ with the reason, instead of appearing as blank proposals.
 """
 from __future__ import annotations
 
+import dataclasses
 import os
 import threading
 from pathlib import Path
@@ -542,8 +543,13 @@ class TagFixerWorkspace(WorkspaceBase):
         self._prog_status.setText("Applying…")
         self._emit_status("Applying tags…", "warning")
 
+        # The DB status pass rewrites ``status`` on the records it is given;
+        # hand it copies so the worker thread never mutates the objects this
+        # page displays (it turned "unmatched" into "skipped", emptying the
+        # No-match list after an apply).
+        status_copies = [dataclasses.replace(rec) for rec in self._records]
         worker = TagFixApplyWorker(
-            selections, list(self._records), self._db_path, self._scan_library
+            selections, status_copies, self._db_path, self._scan_library
         )
         worker.log_line.connect(self._on_log_line)
         worker.progress.connect(self._prog_bar.setValue)

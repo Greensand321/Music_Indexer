@@ -87,6 +87,9 @@ def test_apply_writes_exactly_the_ticked_rows(make_workspace, tmp_path, monkeypa
         ("a.flac", "Genre", "Rock; Pop", "Rock; Pop; Electronic", False),
         ("c.opus", "Album", "Album", "Found Album", False),
     ])
+    # ...and the unmatched file is still listed as such.
+    assert ws._nomatch_list.count() == 1
+    assert ws._nomatch_list.item(0).text().startswith("b.mp3")
     change_logs = list((tmp_path / "lib" / "Docs").glob("tag_changes_tagfixer_*.jsonl"))
     assert len(change_logs) == 1
     assert "Change log:" in ws._prog_status.text()
