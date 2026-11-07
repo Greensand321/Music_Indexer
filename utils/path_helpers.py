@@ -2,6 +2,10 @@ import os
 
 #: Windows extended-length ("long path") prefix.
 LONG_PATH_PREFIX = "\\\\?\\"
+#: Its form for a network share: ``\\server\share`` -> ``\\?\UNC\server\share``.
+_UNC_LONG_PREFIX = LONG_PATH_PREFIX + "UNC\\"
+#: Win32 device namespace (``\\.\``); such paths are left alone.
+_DEVICE_PREFIX = "\\\\.\\"
 
 
 def ensure_long_path(path: str) -> str:
@@ -16,16 +20,25 @@ def ensure_long_path(path: str) -> str:
     own path back.) A no-op off Windows.
     """
     if os.name == "nt":
-        path = os.path.abspath(path)
-        if not path.startswith(LONG_PATH_PREFIX):
-            path = LONG_PATH_PREFIX + os.path.normpath(path)
+        if path.startswith(LONG_PATH_PREFIX) or path.startswith(_DEVICE_PREFIX):
+            return path
+        path = os.path.normpath(os.path.abspath(path))
+        if path.startswith("\\\\"):
+            # A network share (\\server\share\...) takes the UNC form of the
+            # prefix: "\\?\" + "\\server\..." is not a path at all, so every
+            # open/stat of a library on a NAS share failed.
+            return _UNC_LONG_PREFIX + path[2:]
+        path = LONG_PATH_PREFIX + path
     return path
 
 
 def strip_ext_prefix(path: str) -> str:
     """Return ``path`` without a Windows extended-length prefix."""
-    if os.name == "nt" and path.startswith(LONG_PATH_PREFIX):
-        return path[len(LONG_PATH_PREFIX):]
+    if os.name == "nt":
+        if path[:len(_UNC_LONG_PREFIX)].upper() == _UNC_LONG_PREFIX:
+            return "\\\\" + path[len(_UNC_LONG_PREFIX):]
+        if path.startswith(LONG_PATH_PREFIX):
+            return path[len(LONG_PATH_PREFIX):]
     return path
 
 
