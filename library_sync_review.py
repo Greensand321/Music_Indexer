@@ -39,7 +39,7 @@ class ScanState(str, Enum):
 class ScanConfig:
     """Global and per-format fingerprint thresholds for a scan."""
 
-    global_threshold: float = DEFAULT_FP_THRESHOLDS.get("default", 0.3)
+    global_threshold: float = DEFAULT_FP_THRESHOLDS["default"]
     per_format_overrides: Dict[str, float] = field(default_factory=dict)
     preset_name: str | None = None
 
@@ -55,7 +55,7 @@ class ScanConfig:
         data = data or {}
         overrides = data.get("per_format_overrides") or {}
         return cls(
-            global_threshold=float(data.get("global_threshold", DEFAULT_FP_THRESHOLDS.get("default", 0.3))),
+            global_threshold=float(data.get("global_threshold", DEFAULT_FP_THRESHOLDS["default"])),
             per_format_overrides={str(k): float(v) for k, v in overrides.items()},
             preset_name=data.get("preset_name"),
         )
@@ -1036,7 +1036,7 @@ class LibrarySyncReviewPanel(ttk.Frame):
             global_thr = float(self.global_threshold_var.get())
         except Exception:
             overrides = self._parse_overrides() or {}
-            global_thr = DEFAULT_FP_THRESHOLDS.get("default", 0.3)
+            global_thr = DEFAULT_FP_THRESHOLDS["default"]
         thresholds = {"default": global_thr, **overrides}
         cfg = load_config()
         mixed_codec_boost = float(
