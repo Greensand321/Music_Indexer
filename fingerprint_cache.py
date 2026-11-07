@@ -278,7 +278,10 @@ class FingerprintWriter:
                     if pending:
                         self._flush_pending(conn, pending)
                         pending.clear()
-                        last_flush = time.monotonic()
+                    # Always restart the interval: without this an idle
+                    # writer called get(timeout=0) in a tight loop forever
+                    # (a 100% CPU thread that starved the GUI of the GIL).
+                    last_flush = time.monotonic()
         finally:
             if conn is not None:
                 conn.close()

@@ -4,6 +4,7 @@ import base64
 import html
 import os
 import re
+import threading
 import time
 from dataclasses import dataclass, field
 from itertools import combinations
@@ -99,9 +100,23 @@ def _is_excluded_path(path: str, root: str) -> bool:
     return bool(EXCLUDED_DIRS & parts)
 
 
-def _extract_track_info(paths: Iterable[str], log_callback: Callable[[str], None]) -> Dict[str, TrackInfo]:
+class BucketingCancelled(Exception):
+    """Raised when ``run_duplicate_bucketing_poc`` is cancelled."""
+
+
+def _check_cancel(cancel_event: threading.Event | None) -> None:
+    if cancel_event is not None and cancel_event.is_set():
+        raise BucketingCancelled()
+
+
+def _extract_track_info(
+    paths: Iterable[str],
+    log_callback: Callable[[str], None],
+    cancel_event: threading.Event | None = None,
+) -> Dict[str, TrackInfo]:
     info: Dict[str, TrackInfo] = {}
     for path in paths:
+        _check_cancel(cancel_event)
         tags, cover_payloads, error, _reader = read_metadata(path, include_cover=True)
         if error:
             log_callback(f"Metadata read failed for {path}: {error}")
@@ -274,6 +289,7 @@ def _compute_fingerprints(
     db_path: str,
     log_callback: Callable[[str], None],
     max_workers: int | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> Dict[str, str | None]:
     cfg = load_config()
     start_sec = float(cfg.get("fingerprint_offset_ms", FP_OFFSET_MS)) / 1000.0
@@ -284,6 +300,8 @@ def _compute_fingerprints(
     silence_min_len_ms = float(cfg.get("fingerprint_silence_min_len_ms", FP_SILENCE_MIN_LEN_MS))
 
     def compute(path: str) -> tuple[Optional[int], Optional[str]]:
+        if cancel_event is not None and cancel_event.is_set():
+            return None, None
         try:
             fp = chromaprint_utils.fingerprint_fpcalc(
                 ensure_long_path(path),
@@ -313,6 +331,7 @@ def _compute_fingerprints(
             except Exception as exc:  # pragma: no cover - defensive
                 log_callback(f"Fingerprint task failed for {path}: {exc}")
                 results[path] = None
+    _check_cancel(cancel_event)
     return results
 
 
@@ -397,7 +416,12 @@ def run_duplicate_bucketing_poc(
     root: str,
     *,
     log_callback: Callable[[str], None] | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> str:
+    """Write the bucketing report and return its path.
+
+    Raises ``BucketingCancelled`` if ``cancel_event`` is set mid-run.
+    """
     if log_callback is None:
         def log_callback(msg: str) -> None:
             print(msg)
@@ -405,7 +429,7 @@ def run_duplicate_bucketing_poc(
     start = time.time()
     log_callback(f"Duplicate Bucketing POC: scanning {root}")
     paths = [path for path in discover_files(root) if not _is_excluded_path(path, root)]
-    track_infos = _extract_track_info(paths, log_callback)
+    track_infos = _extract_track_info(paths, log_callback, cancel_event)
 
     buckets = _build_metadata_buckets(track_infos)
     buckets = _merge_buckets_by_artwork(buckets, track_infos, ARTWORK_SIMILARITY_THRESHOLD)
@@ -415,7 +439,13 @@ def run_duplicate_bucketing_poc(
     db_path = os.path.join(docs_dir, ".duplicate_bucketing_poc_fps.db")
 
     paths_for_fp = [p for bucket in buckets if len(bucket.tracks) > 1 for p in bucket.tracks]
-    fingerprints = _compute_fingerprints(paths_for_fp, db_path, log_callback)
+    fingerprints = _compute_fingerprints(paths_for_fp, db_path, log_callback, cancel_event=cancel_event)
+    missing_fps = sum(1 for p in paths_for_fp if not fingerprints.get(p))
+    if missing_fps:
+        log_callback(
+            f"{missing_fps} of {len(paths_for_fp)} candidate track(s) could not be fingerprinted; "
+            "their comparisons are reported as 'missing'."
+        )
 
     cfg = load_config()
     exact_threshold = float(cfg.get("exact_duplicate_threshold", EXACT_DUPLICATE_THRESHOLD))

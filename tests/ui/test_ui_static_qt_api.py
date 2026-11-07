@@ -72,11 +72,7 @@ ALLOWED_CHAINS = {"QtCore.pyqtSignal", "QtCore.pyqtSlot"}
 
 # Known-broken references, keyed "file:chain" → bug ID in docs/redesign/.
 # Fixing the bug means deleting its entry here; the test then guards it.
-KNOWN_BROKEN = {
-    # Fixing the import alone would expose DUP-08 (one-key permanent delete),
-    # so it must be fixed together with that.
-    "gui/dialogs/pair_review_dialog.py:QtWidgets.QShortcut": "DUP-06",
-}
+KNOWN_BROKEN: dict[str, str] = {}
 
 
 def _collect():

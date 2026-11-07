@@ -1,3 +1,4 @@
+import base64
 import subprocess
 import tempfile
 import os
@@ -32,6 +33,22 @@ def _tail_stderr(stderr_text: str, max_lines: int = 10) -> str:
     if len(lines) > max_lines:
         lines = lines[-max_lines:]
     return "\n".join(lines).strip()
+
+
+def _is_empty_compressed_fingerprint(fp: object) -> bool:
+    """True for a compressed Chromaprint fingerprint holding zero items."""
+    if not isinstance(fp, str) or not fp or not fp.replace("-", "").replace("_", "").isalnum():
+        return False
+    try:
+        data = base64.urlsafe_b64decode(fp + "=" * (-len(fp) % 4))
+    except (ValueError, TypeError):
+        return False
+    return len(data) == 4 and data[1:4] == b"\x00\x00\x00"
+
+
+def missing_tools(names: tuple[str, ...] = ("fpcalc", "ffmpeg")) -> list[str]:
+    """Names of the external tools ``fingerprint_fpcalc`` needs that are absent."""
+    return [name for name in names if shutil.which(name) is None]
 
 
 def ensure_tool(name: str) -> None:
@@ -227,6 +244,12 @@ def fingerprint_fpcalc(
         data = json.loads(proc.stdout)
         fp = data.get("fingerprint")
         if not fp:
+            return None
+        if _is_empty_compressed_fingerprint(fp):
+            # fpcalc's answer for clips too short to fingerprint (~3 s or
+            # less): a header with zero items. Report "no fingerprint"
+            # rather than a value every other short clip would equal.
+            _dlog("FP", "empty fingerprint (clip too short)")
             return None
         fp_str = " ".join(fp.split(","))
         _dlog("FP", f"prefix={fp_str[:16]} len={len(fp_str)}")

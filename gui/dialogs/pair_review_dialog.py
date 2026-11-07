@@ -1,20 +1,23 @@
 """Duplicate Pair Review dialog — Qt port of DuplicatePairReviewTool."""
 from __future__ import annotations
 
+import datetime
 import json
 import os
 import re
-from dataclasses import dataclass, field
-from pathlib import Path
+import shutil
+from dataclasses import dataclass
 from typing import Mapping
 
 from gui.compat import QtCore, QtGui, QtWidgets, Slot
+from utils.reserved_folders import walk_library
 
 # ── Audio extensions (same set as simple_duplicate_finder) ─────────────────
 _SUPPORTED_EXTS = {".flac", ".m4a", ".aac", ".mp3", ".wav", ".ogg", ".opus"}
 
 _SNAPSHOT_FILENAME = "duplicate_pair_review.json"
 _PREVIEW_FILENAME  = "duplicate_preview.json"
+_REVIEW_LOG_FILENAME = "duplicate_pair_review_log.txt"
 _COVER_SIZE        = 120
 
 
@@ -32,9 +35,15 @@ class _Pair:
 # ── Pair-building helpers (self-contained, no main_gui dependency) ──────────
 
 def _collect_filename_pairs(library_path: str) -> list[tuple[str, str]]:
+    """Same name (ignoring a trailing " (n)") *in the same folder*.
+
+    Pairing by name across the whole library paired different songs from
+    different albums (and files in Quarantine/ or Docs/) that merely shared a
+    file name, e.g. every "01 - Intro.mp3".
+    """
     pattern = re.compile(r"\s*\(\d+\)$")
-    candidates: dict[str, list[str]] = {}
-    for dirpath, _dirs, files in os.walk(library_path):
+    candidates: dict[tuple[str, str], list[str]] = {}
+    for dirpath, _dirs, files in walk_library(library_path):
         for filename in files:
             ext = os.path.splitext(filename)[1].lower()
             if ext not in _SUPPORTED_EXTS:
@@ -43,7 +52,7 @@ def _collect_filename_pairs(library_path: str) -> list[tuple[str, str]]:
             normalized = pattern.sub("", stem).strip()
             if not normalized:
                 continue
-            candidates.setdefault(normalized, []).append(
+            candidates.setdefault((dirpath, normalized), []).append(
                 os.path.join(dirpath, filename)
             )
     pairs: list[tuple[str, str]] = []
@@ -165,7 +174,6 @@ class _TrackPanel(QtWidgets.QFrame):
         self._cover_lbl = QtWidgets.QLabel()
         self._cover_lbl.setFixedSize(_COVER_SIZE, _COVER_SIZE)
         self._cover_lbl.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-        self._cover_lbl.setStyleSheet("background: #333; border-radius: 4px;")
         layout.addWidget(self._cover_lbl, 0, QtCore.Qt.AlignmentFlag.AlignHCenter)
 
         self._winner_lbl = QtWidgets.QLabel()
@@ -201,8 +209,7 @@ class _TrackPanel(QtWidgets.QFrame):
         cover_bytes: bytes | None,
     ) -> None:
         # Cover art
-        pm = QtGui.QPixmap(_COVER_SIZE, _COVER_SIZE)
-        pm.fill(QtGui.QColor("#333333"))
+        pm = self._placeholder_cover()
         if cover_bytes:
             raw = QtGui.QPixmap()
             if raw.loadFromData(cover_bytes):
@@ -214,16 +221,13 @@ class _TrackPanel(QtWidgets.QFrame):
                 pm = raw
         self._cover_lbl.setPixmap(pm)
 
-        # Winner badge
+        # Winner badge (theme colours come from the sectionSubtitle style)
         if not has_winner:
             self._winner_lbl.setText("Winner: not set")
-            self._winner_lbl.setStyleSheet("color: #888;")
         elif is_winner:
             self._winner_lbl.setText("\u2705 Winner (kept)")
-            self._winner_lbl.setStyleSheet("color: #22c55e;")
         else:
-            self._winner_lbl.setText("Not winner")
-            self._winner_lbl.setStyleSheet("color: #888;")
+            self._winner_lbl.setText("Not winner (would be quarantined)")
 
         # Title
         artist = tags.get("artist") or ""
@@ -247,10 +251,13 @@ class _TrackPanel(QtWidgets.QFrame):
         self._meta_lbl.setText("\n".join(str(l) for l in lines))
         self._path_lbl.setText(path)
 
-    def clear(self) -> None:
+    def _placeholder_cover(self) -> QtGui.QPixmap:
         pm = QtGui.QPixmap(_COVER_SIZE, _COVER_SIZE)
-        pm.fill(QtGui.QColor("#333333"))
-        self._cover_lbl.setPixmap(pm)
+        pm.fill(self.palette().color(QtGui.QPalette.ColorRole.Mid))
+        return pm
+
+    def clear(self) -> None:
+        self._cover_lbl.setPixmap(self._placeholder_cover())
         self._winner_lbl.setText("")
         self._title_lbl.setText("")
         self._meta_lbl.setText("")
@@ -269,6 +276,8 @@ class PairReviewDialog(QtWidgets.QDialog):
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Duplicate Pair Review")
+        # The Tools launcher creates one per click; don't keep each one alive.
+        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_DeleteOnClose)
         self.setMinimumSize(760, 580)
         self.resize(880, 640)
 
@@ -283,7 +292,9 @@ class PairReviewDialog(QtWidgets.QDialog):
         title_lbl = QtWidgets.QLabel("<b>Duplicate Pair Review</b>")
         root.addWidget(title_lbl)
         desc = QtWidgets.QLabel(
-            "Review paired duplicates. <b>Yes</b> deletes the inferior file (prefers FLAC). "
+            "Review paired duplicates. <b>Quarantine</b> moves the inferior file (the "
+            "non-winner; FLAC is preferred when no winner is set) to Quarantine/ after you "
+            "confirm, and logs it to Docs/duplicate_pair_review_log.txt. Nothing is deleted. "
             "<b>No</b> skips. <b>Tag</b> appends the pair to Docs/duplicate_pair_tags.txt."
         )
         desc.setWordWrap(True)
@@ -335,7 +346,7 @@ class PairReviewDialog(QtWidgets.QDialog):
 
         # Action row
         action_row = QtWidgets.QHBoxLayout()
-        self._yes_btn = QtWidgets.QPushButton("Yes — delete inferior")
+        self._yes_btn = QtWidgets.QPushButton("Quarantine inferior…")
         self._yes_btn.setObjectName("primaryBtn")
         self._no_btn  = QtWidgets.QPushButton("No — skip")
         self._tag_btn = QtWidgets.QPushButton("Tag")
@@ -351,11 +362,17 @@ class PairReviewDialog(QtWidgets.QDialog):
         action_row.addWidget(close_btn)
         root.addLayout(action_row)
 
-        # Keyboard shortcuts
-        QtWidgets.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key.Key_Return),    self, self._handle_yes)
-        QtWidgets.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key.Key_Backspace), self, self._handle_no)
-        QtWidgets.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key.Key_Left),      self, self._go_previous)
-        QtWidgets.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key.Key_Right),     self, self._go_next)
+        # No button may become the dialog's default: Enter in the "Jump to"
+        # field (or anywhere else) must never trigger an action on files.
+        for btn in self.findChildren(QtWidgets.QPushButton):
+            btn.setAutoDefault(False)
+            btn.setDefault(False)
+
+        # Keyboard shortcuts — navigation only. Return used to be bound to
+        # the destructive action dialog-wide (so Enter in "Jump to" deleted).
+        QtGui.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key.Key_Backspace), self, self._handle_no)
+        QtGui.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key.Key_Left),      self, self._go_previous)
+        QtGui.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key.Key_Right),     self, self._go_next)
 
         self._reload_pairs()
 
@@ -509,6 +526,7 @@ class PairReviewDialog(QtWidgets.QDialog):
 
     @Slot()
     def _handle_yes(self) -> None:
+        """Quarantine the inferior file of the current pair — after a confirm."""
         if not self._pairs or self._index >= len(self._pairs):
             return
         pair = self._pairs[self._index]
@@ -517,26 +535,56 @@ class PairReviewDialog(QtWidgets.QDialog):
             self._advance()
             return
         winner_path = pair.manual_winner or pair.winner_path
-        delete_path = self._pick_inferior(pair.left_path, pair.right_path, winner_path)
-        if not delete_path:
-            self._set_status("No FLAC in pair; nothing deleted.")
-            self._advance()
+        loser_path = self._pick_inferior(pair.left_path, pair.right_path, winner_path)
+        if not loser_path:
+            self._set_status("No winner set and no FLAC in pair; nothing moved. Use Switch to pick one.")
             return
-        kept_path = pair.right_path if delete_path == pair.left_path else pair.left_path
+        kept_path = pair.right_path if loser_path == pair.left_path else pair.left_path
+        reply = QtWidgets.QMessageBox.question(
+            self,
+            "Quarantine duplicate?",
+            f"Move this file to Quarantine/?\n\n  {loser_path}\n\n"
+            f"Keeping:\n\n  {kept_path}\n\n"
+            "Playlists that reference it are pointed at the kept file. "
+            "The move is logged to Docs/duplicate_pair_review_log.txt.",
+            QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
+            QtWidgets.QMessageBox.StandardButton.No,
+        )
+        if reply != QtWidgets.QMessageBox.StandardButton.Yes:
+            self._set_status("Not moved.")
+            return
         try:
-            from utils.path_helpers import ensure_long_path
-            long_del = ensure_long_path(delete_path)
-            if not os.path.exists(long_del):
-                self._set_status("Already removed.")
-                self._advance()
-                return
-            os.remove(long_del)
-            self._update_playlists(delete_path, kept_path)
-            self._set_status(f"Deleted {os.path.basename(delete_path)}")
+            dest = self._quarantine(loser_path)
         except OSError as exc:
-            QtWidgets.QMessageBox.critical(self, "Delete Failed", str(exc))
-            self._set_status("Delete failed")
+            QtWidgets.QMessageBox.critical(self, "Quarantine Failed", str(exc))
+            self._set_status("Quarantine failed")
+            return
+        rewritten = self._update_playlists(loser_path, kept_path)
+        self._write_log("quarantine", loser_path, dest, kept_path, rewritten)
+        self._set_status(f"Quarantined {os.path.basename(loser_path)}")
         self._advance()
+
+    def _quarantine(self, path: str) -> str:
+        from duplicate_consolidation_executor import _unique_destination
+        from utils.path_helpers import ensure_long_path
+
+        quarantine_dir = os.path.join(self._library_path, "Quarantine")
+        os.makedirs(quarantine_dir, exist_ok=True)
+        dest = _unique_destination(os.path.join(quarantine_dir, os.path.basename(path)), set())
+        shutil.move(ensure_long_path(path), ensure_long_path(dest))
+        if os.path.exists(path) or not os.path.exists(dest):
+            raise OSError(f"Move to Quarantine could not be verified: {path}")
+        return dest
+
+    def _write_log(self, action: str, source: str, dest: str, kept: str, playlists: list[str]) -> None:
+        docs_dir = os.path.join(self._library_path, "Docs")
+        os.makedirs(docs_dir, exist_ok=True)
+        stamp = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
+        line = f"{stamp}\t{action}\t{source}\t-> {dest}\tkept: {kept}"
+        if playlists:
+            line += f"\tplaylists updated: {', '.join(playlists)}"
+        with open(os.path.join(docs_dir, _REVIEW_LOG_FILENAME), "a", encoding="utf-8") as fh:
+            fh.write(line + "\n")
 
     @Slot()
     def _handle_no(self) -> None:
@@ -590,12 +638,13 @@ class PairReviewDialog(QtWidgets.QDialog):
             return left
         return None
 
-    def _update_playlists(self, deleted: str, kept: str) -> None:
+    def _update_playlists(self, moved: str, kept: str) -> list[str]:
+        """Point playlist entries for ``moved`` at ``kept``; returns the playlists changed."""
         playlists_dir = os.path.join(self._library_path, "Playlists")
         if not os.path.isdir(playlists_dir):
-            return
-        norm_del = os.path.normcase(os.path.normpath(deleted))
-        found = False
+            return []
+        target = os.path.normcase(os.path.normpath(moved))
+        changed: list[str] = []
         for dirpath, _dirs, files in os.walk(playlists_dir):
             for fname in files:
                 if not fname.lower().endswith((".m3u", ".m3u8")):
@@ -603,25 +652,25 @@ class PairReviewDialog(QtWidgets.QDialog):
                 pl_path = os.path.join(dirpath, fname)
                 try:
                     with open(pl_path, "r", encoding="utf-8") as fh:
-                        lines = [ln.rstrip("\n") for ln in fh]
-                except OSError:
+                        lines = fh.read().splitlines()
+                except (OSError, UnicodeDecodeError):
                     continue
+                out, hit = [], False
                 for line in lines:
-                    if os.path.normcase(os.path.normpath(
-                        os.path.join(dirpath, line)
-                    )) == norm_del:
-                        found = True
-                        break
-                if found:
-                    break
-            if found:
-                break
-        if found:
-            try:
-                from playlist_generator import update_playlists
-                update_playlists({deleted: kept})
-            except Exception:  # noqa: BLE001
-                pass
+                    entry = line.strip()
+                    if entry and not entry.startswith("#"):
+                        absolute = entry if os.path.isabs(entry) else os.path.join(dirpath, entry)
+                        if os.path.normcase(os.path.normpath(absolute)) == target:
+                            line = kept if os.path.isabs(entry) else os.path.relpath(kept, dirpath)
+                            hit = True
+                    out.append(line)
+                if hit:
+                    tmp = pl_path + ".tmp"
+                    with open(tmp, "w", encoding="utf-8") as fh:
+                        fh.write("\n".join(out) + "\n")
+                    os.replace(tmp, pl_path)
+                    changed.append(pl_path)
+        return changed
 
     @staticmethod
     def _display_name(path: str) -> str:

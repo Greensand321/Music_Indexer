@@ -1,32 +1,46 @@
 """Duplicate Scan Engine dialog — Qt port of DuplicateScanEngineTool."""
 from __future__ import annotations
 
+import importlib.util
 import os
+import threading
 
 from gui.compat import QtCore, QtWidgets, Signal, Slot
+from gui.workers import start_worker
+
+
+def _missing_engine_modules() -> list[str]:
+    """Optional modules ``duplicate_scan_engine`` imports at load time."""
+    return [name for name in ("numpy", "librosa") if importlib.util.find_spec(name) is None]
 
 
 class _ScanWorker(QtCore.QThread):
     log_line = Signal(str)
-    finished = Signal(object)   # DuplicateScanSummary
-    error    = Signal(str)
+    done = Signal(object)   # DuplicateScanSummary
+    error = Signal(str)
 
     def __init__(self, library_path: str, db_path: str, config) -> None:
         super().__init__()
         self.library_path = library_path
-        self.db_path      = db_path
-        self.config       = config
+        self.db_path = db_path
+        self.config = config
+        self._cancel_event = threading.Event()
+
+    def cancel(self) -> None:
+        self._cancel_event.set()
 
     def run(self) -> None:
         try:
             from duplicate_scan_engine import run_duplicate_scan
+            os.makedirs(os.path.dirname(self.db_path) or ".", exist_ok=True)
             summary = run_duplicate_scan(
                 self.library_path,
                 self.db_path,
                 self.config,
-                log_callback=lambda msg: self.log_line.emit(msg),
+                log_callback=self.log_line.emit,
+                cancel_event=self._cancel_event,
             )
-            self.finished.emit(summary)
+            self.done.emit(summary)
         except Exception as exc:  # noqa: BLE001
             self.error.emit(str(exc))
 
@@ -54,17 +68,21 @@ class ScanEngineDialog(QtWidgets.QDialog):
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Duplicate Scan Engine")
+        # The Tools launcher creates one per click; don't keep each one alive.
+        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_DeleteOnClose)
         self.setMinimumWidth(560)
         self.resize(600, 580)
         self._worker: _ScanWorker | None = None
+        self._closing = False
         self._field_edits: dict[str, QtWidgets.QLineEdit] = {}
 
         root = QtWidgets.QVBoxLayout(self)
         root.setSpacing(10)
 
         desc = QtWidgets.QLabel(
-            "Runs a staged duplicate scan (audio headers \u2192 fingerprint LSH \u2192 "
-            "verification) and writes results to a SQLite database."
+            "Runs a staged duplicate scan (audio headers → fingerprint LSH → "
+            "verification) and writes results to a SQLite database. Read-only on audio. "
+            "Nothing in AlphaDEX reads that database yet: the summary below is the only output."
         )
         desc.setWordWrap(True)
         root.addWidget(desc)
@@ -76,7 +94,7 @@ class ScanEngineDialog(QtWidgets.QDialog):
 
         lib_row = QtWidgets.QHBoxLayout()
         self._lib_edit = QtWidgets.QLineEdit(library_path)
-        lib_browse = QtWidgets.QPushButton("Browse\u2026")
+        lib_browse = QtWidgets.QPushButton("Browse…")
         lib_browse.clicked.connect(self._browse_library)
         lib_row.addWidget(self._lib_edit, 1)
         lib_row.addWidget(lib_browse)
@@ -84,7 +102,7 @@ class ScanEngineDialog(QtWidgets.QDialog):
 
         db_row = QtWidgets.QHBoxLayout()
         self._db_edit = QtWidgets.QLineEdit(self._default_db_path(library_path))
-        db_browse = QtWidgets.QPushButton("Browse\u2026")
+        db_browse = QtWidgets.QPushButton("Browse…")
         db_browse.clicked.connect(self._browse_db)
         db_row.addWidget(self._db_edit, 1)
         db_row.addWidget(db_browse)
@@ -128,15 +146,22 @@ class ScanEngineDialog(QtWidgets.QDialog):
         log_layout.addWidget(self._log_box)
         root.addWidget(log_group)
 
+        missing = _missing_engine_modules()
+        if missing:
+            names = ", ".join(missing)
+            self._run_btn.setEnabled(False)
+            self._run_btn.setToolTip(f"Needs {names}: pip install {' '.join(missing)}")
+            self._status_lbl.setText(f"Unavailable: needs {names}")
+
     # ── Path helpers ───────────────────────────────────────────────────────
 
     @staticmethod
     def _default_db_path(library_path: str) -> str:
+        # Only a suggestion: Docs/ is created when a scan actually runs, not
+        # merely by opening the dialog.
         if not library_path:
             return ""
-        docs_dir = os.path.join(library_path, "Docs")
-        os.makedirs(docs_dir, exist_ok=True)
-        return os.path.join(docs_dir, "duplicate_scan.db")
+        return os.path.join(library_path, "Docs", "duplicate_scan.db")
 
     @Slot()
     def _browse_library(self) -> None:
@@ -162,7 +187,7 @@ class ScanEngineDialog(QtWidgets.QDialog):
 
     @Slot()
     def _run_scan(self) -> None:
-        if self._worker and self._worker.isRunning():
+        if self._worker is not None:
             return
         library_path = self._lib_edit.text().strip()
         db_path      = self._db_edit.text().strip()
@@ -179,6 +204,16 @@ class ScanEngineDialog(QtWidgets.QDialog):
 
         try:
             from duplicate_scan_engine import DuplicateScanConfig
+        except Exception as exc:  # noqa: BLE001 - ImportError and friends from librosa
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Duplicate Scan Engine",
+                f"The scan engine could not be loaded:\n{exc}\n\n"
+                "It needs numpy and librosa (pip install numpy librosa).",
+            )
+            self._log_box.appendPlainText(f"Error: scan engine unavailable: {exc}")
+            return
+        try:
             config = DuplicateScanConfig(
                 sample_rate=int(self._field_edits["sample_rate"].text()),
                 max_analysis_sec=float(self._field_edits["max_analysis_sec"].text()),
@@ -202,14 +237,29 @@ class ScanEngineDialog(QtWidgets.QDialog):
         self._log_box.clear()
         self._set_running(True)
         self._worker = _ScanWorker(library_path, db_path, config)
-        self._worker.log_line.connect(self._log_box.appendPlainText)
-        self._worker.finished.connect(self._on_finished)
+        self._worker.log_line.connect(self._on_log_line)
+        self._worker.done.connect(self._on_finished)
         self._worker.error.connect(self._on_error)
-        self._worker.start()
+        start_worker(self._worker, owner=self, name="Duplicate scan engine")
+
+    def reject(self) -> None:  # noqa: D401 - Esc, Close and the title bar all end here
+        """Closing mid-run cancels the scan (it stops at the next track)."""
+        if self._worker is not None:
+            self._closing = True
+            self._worker.cancel()
+        super().reject()
+
+    @Slot(str)
+    def _on_log_line(self, line: str) -> None:
+        self._log_box.appendPlainText(line)
 
     @Slot(object)
     def _on_finished(self, summary) -> None:
+        self._worker = None
         self._set_running(False)
+        if getattr(summary, "cancelled", False):
+            self._status_lbl.setText("Cancelled")
+            return
         self._log_box.appendPlainText(
             f"Summary: {summary.tracks_total} tracks, "
             f"{summary.headers_updated} headers updated, "
@@ -217,14 +267,14 @@ class ScanEngineDialog(QtWidgets.QDialog):
             f"{summary.edges_written} edges, "
             f"{summary.groups_written} groups."
         )
-        self._worker = None
 
     @Slot(str)
     def _on_error(self, message: str) -> None:
-        self._set_running(False)
-        self._log_box.appendPlainText(f"Error: {message}")
         self._worker = None
+        self._set_running(False)
+        self._status_lbl.setText("Failed")
+        self._log_box.appendPlainText(f"Error: {message}")
 
     def _set_running(self, running: bool) -> None:
-        self._run_btn.setEnabled(not running)
-        self._status_lbl.setText("Running\u2026" if running else "Idle")
+        self._run_btn.setEnabled(not running and not _missing_engine_modules())
+        self._status_lbl.setText("Running…" if running else "Idle")

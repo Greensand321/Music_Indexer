@@ -4,6 +4,7 @@ import hashlib
 import logging
 import os
 import sqlite3
+import threading
 import time
 from dataclasses import dataclass
 from typing import Callable, Iterable, Sequence
@@ -44,6 +45,15 @@ class DuplicateScanSummary:
     fingerprints_updated: int
     edges_written: int
     groups_written: int
+    cancelled: bool = False
+
+
+def _until_cancelled(items: Iterable[str], cancel_event: threading.Event | None) -> Iterable[str]:
+    """Yield ``items`` until ``cancel_event`` is set (a cooperative stop point)."""
+    for item in items:
+        if cancel_event is not None and cancel_event.is_set():
+            return
+        yield item
 
 
 def _log(log_callback: LogCallback | None, message: str) -> None:
@@ -476,28 +486,59 @@ def run_duplicate_scan(
     db_path: str,
     config: DuplicateScanConfig | None = None,
     log_callback: LogCallback | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> DuplicateScanSummary:
+    """Run the staged scan. ``cancel_event`` stops it between tracks; the
+    summary then has ``cancelled=True`` and the stage-3 tables are untouched."""
     config = config or DuplicateScanConfig()
     paths = _list_audio_files(library_path)
     _log(log_callback, f"Found {len(paths)} audio files.")
+
+    def _cancelled() -> bool:
+        return cancel_event is not None and cancel_event.is_set()
 
     with _connect(db_path) as conn:
         ensure_schema(conn)
         _cleanup_missing(conn, set(paths))
         _log(log_callback, "Stage 1: updating audio headers...")
-        headers_updated = _update_headers(conn, paths, config, log_callback)
+        headers_updated = _update_headers(conn, _until_cancelled(paths, cancel_event), config, log_callback)
         _log(log_callback, f"Header updates: {headers_updated}")
 
-        _log(log_callback, "Stage 2: updating fingerprints + LSH...")
-        fingerprints_updated = _update_fingerprints(conn, paths, config, log_callback)
-        _log(log_callback, f"Fingerprints updated: {fingerprints_updated}")
+        fingerprints_updated = 0
+        if not _cancelled():
+            _log(log_callback, "Stage 2: updating fingerprints + LSH...")
+            fingerprints_updated = _update_fingerprints(
+                conn, _until_cancelled(paths, cancel_event), config, log_callback
+            )
+            _log(log_callback, f"Fingerprints updated: {fingerprints_updated}")
+
+        if _cancelled():
+            _log(log_callback, "Cancelled.")
+            return DuplicateScanSummary(
+                tracks_total=len(paths),
+                headers_updated=headers_updated,
+                fingerprints_updated=fingerprints_updated,
+                edges_written=0,
+                groups_written=0,
+                cancelled=True,
+            )
 
         _log(log_callback, "Stage 3: scanning candidates...")
-        conn.execute("DELETE FROM dup_edges")
         chroma_cache: dict[str, np.ndarray] = {}
         edges_written = 0
+        new_edges: list[tuple[str, str, float, str, float]] = []
 
         for idx, target_id in enumerate(paths):
+            if _cancelled():
+                _log(log_callback, "Cancelled.")
+                return DuplicateScanSummary(
+                    tracks_total=len(paths),
+                    headers_updated=headers_updated,
+                    fingerprints_updated=fingerprints_updated,
+                    edges_written=0,
+                    groups_written=0,
+                    cancelled=True,
+                )
             stage1 = _stage1_candidates(conn, target_id, config)
             if not stage1:
                 continue
@@ -543,17 +584,20 @@ def run_duplicate_scan(
                 else:
                     continue
 
-                conn.execute(
-                    """
-                    INSERT INTO dup_edges (track_id_a, track_id_b, score, method, verified_at)
-                    VALUES (?, ?, ?, ?, ?)
-                    """,
-                    (target_id, cand_id, score, verdict, time.time()),
-                )
+                new_edges.append((target_id, cand_id, score, verdict, time.time()))
                 edges_written += 1
             if (idx + 1) % 50 == 0:
                 _log(log_callback, f"Scanned {idx + 1}/{len(paths)} tracks...")
 
+        # Replace the previous run's edges only once this run completed.
+        conn.execute("DELETE FROM dup_edges")
+        conn.executemany(
+            """
+            INSERT INTO dup_edges (track_id_a, track_id_b, score, method, verified_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            new_edges,
+        )
         groups_written = _write_dup_groups(conn)
         _log(log_callback, f"Duplicate groups: {groups_written}")
 
