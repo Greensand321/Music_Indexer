@@ -23,12 +23,12 @@ def test_phase_c_section(tmp_path, indexer_api):
     html = tmp_path / "out.html"
 
     indexer_api.build_dry_run_html(str(tmp_path), str(html), enable_phase_c=False)
-    without_flag = html.read_text()
+    without_flag = html.read_text(encoding="utf-8")
     assert "Phase C" not in without_flag
     assert "song" in without_flag
 
     indexer_api.build_dry_run_html(str(tmp_path), str(html), enable_phase_c=True)
-    with_flag = html.read_text()
+    with_flag = html.read_text(encoding="utf-8")
     assert "Phase C" not in with_flag
     # The flag is a no-op: the report is identical either way.
     assert with_flag == without_flag
