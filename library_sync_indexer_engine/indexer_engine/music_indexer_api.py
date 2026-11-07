@@ -31,12 +31,15 @@ except Exception:  # pragma: no cover - optional dependency
         """Fallback error when Mutagen is unavailable."""
         pass
 from utils.audio_metadata_reader import read_tags
+from utils.reserved_folders import prune_reserved_dirs
 from .indexer_control import check_cancelled, cancel_event
 
 # ─── CONFIGURATION ─────────────────────────────────────────────────────
 COMMON_ARTIST_THRESHOLD = 10
 REMIX_FOLDER_THRESHOLD  = 3
-SUPPORTED_EXTS          = {".flac", ".m4a", ".aac", ".mp3", ".wav", ".ogg"}
+# ``.opus`` is part of the app's audio set (the root engine routes it); without
+# it a new Opus track never reached a Library Sync plan.
+SUPPORTED_EXTS          = {".flac", ".m4a", ".aac", ".mp3", ".wav", ".ogg", ".opus"}
 
 # ─── Helper: build primary_counts for the entire vault ─────────────────────
 def _select_canonical_primary(casing_counts: dict[str, dict[str, int]]) -> dict[str, str]:
@@ -52,7 +55,7 @@ def _select_canonical_primary(casing_counts: dict[str, dict[str, int]]) -> dict[
     return canonical
 
 
-def build_primary_counts(root_path, progress_callback=None, phase="A", log_callback=None):
+def build_primary_counts(root_path, progress_callback=None, phase="A", log_callback=None, files=None):
     """
     Walk the entire vault (By Artist, By Year, Incoming, etc.) and
     return a dict mapping each lowercase-normalized artist → total file count,
@@ -62,6 +65,9 @@ def build_primary_counts(root_path, progress_callback=None, phase="A", log_callb
     ``progress_callback`` will be invoked every 100 files with
     ``(count, 0, path)`` allowing callers to show progress without
     a separate pre-scan.
+
+    ``files`` (optional) counts exactly those audio paths instead of walking
+    ``root_path``, so the counts cover the same set that is being routed.
     """
     if progress_callback is None:
         def progress_callback(_c, _t, _m, _p):
@@ -73,11 +79,20 @@ def build_primary_counts(root_path, progress_callback=None, phase="A", log_callb
     counts = {}
     casing_counts = defaultdict(lambda: defaultdict(int))
     idx = 0
-    for dirpath, _, files in os.walk(root_path):
-        rel_dir = os.path.relpath(dirpath, root_path)
-        if {"not sorted", "playlists"} & {p.lower() for p in rel_dir.split(os.sep)}:
-            continue
-        for fname in files:
+
+    def _walk():
+        if files is not None:
+            for path in files:
+                yield os.path.dirname(path), [os.path.basename(path)]
+            return
+        for dirpath, _, names in os.walk(root_path):
+            rel_dir = os.path.relpath(dirpath, root_path)
+            if {"not sorted", "playlists"} & {p.lower() for p in rel_dir.split(os.sep)}:
+                continue
+            yield dirpath, names
+
+    for dirpath, names in _walk():
+        for fname in names:
             ext = os.path.splitext(fname)[1].lower()
             if ext not in SUPPORTED_EXTS:
                 continue
@@ -463,8 +478,26 @@ def derive_tags_from_path(filepath: str, music_root: str):
     as “inherited tags.” E.g. /…/By Artist/ArtistName/AlbumX/Track.mp3 → {"ArtistName", "AlbumX"}.
     """
     rel = os.path.relpath(os.path.dirname(filepath), music_root)
-    parts = [p for p in rel.split(os.sep) if p and p != "."]
+    parts = [p for p in rel.split(os.sep) if p and p not in (".", "..")]
     return set(parts)
+
+
+def _iter_incoming_audio(root_path: str) -> List[str]:
+    """Every audio file under ``root_path`` outside its reserved top-level
+    folders, in a deterministic order.
+
+    This is the set Library Sync's scan (``library_sync._scan_folder`` with
+    ``skip_reserved``) sees, so every scanned incoming track gets a route:
+    tracks beside ``incoming/Music`` used to be left out of the plan.
+    """
+    found: List[str] = []
+    for dirpath, dirnames, filenames in os.walk(root_path):
+        prune_reserved_dirs(dirpath, dirnames, root_path)
+        dirnames.sort()
+        for fname in sorted(filenames):
+            if os.path.splitext(fname)[1].lower() in SUPPORTED_EXTS:
+                found.append(os.path.join(dirpath, fname))
+    return found
 
 
 # ─── A. HELPER: COMPUTE MOVES & TAG INDEX ───────────────────────────────
@@ -478,6 +511,7 @@ def compute_moves_and_tag_index(
     flush_cache=False,
     max_workers=None,
     coord=None,
+    incoming_scope=True,
 ):
     """
     1) Determine MUSIC_ROOT: if root_path/Music exists, use that; otherwise root_path itself.
@@ -494,6 +528,19 @@ def compute_moves_and_tag_index(
       - decision_log: list of strings explaining each track’s decision
 
     ``coord`` can be provided to collect additional diagnostic data.
+
+    ``incoming_scope`` (the default: Library Sync is this engine's only user)
+    plans ``root_path`` as an *incoming* folder. Every audio file outside the
+    reserved top-level folders is routed (also ones beside ``Music/``), and a
+    file already at its routed place is still planned, because Library Sync
+    re-roots the route into another library. ``False`` keeps the indexer
+    behaviour (``Music/`` only, unchanged files skipped) for this module's own
+    indexer entry points.
+
+    Computing the plan writes nothing: no ``Docs/`` folder or cache is created
+    in ``root_path``. ``flush_cache`` is accepted for compatibility and ignored
+    (this step computes no fingerprints; flushing used to delete the incoming
+    folder's own ``Docs/.soundvault.db``).
     """
     _verify_dependencies()
     if log_callback is None:
@@ -510,14 +557,9 @@ def compute_moves_and_tag_index(
         if os.path.isdir(os.path.join(root_path, "Music")) \
         else root_path
 
-    SUPPORTED_EXTS = {".flac", ".m4a", ".aac", ".mp3", ".wav", ".ogg"}
-
-    docs_dir = os.path.join(root_path, "Docs")
-    os.makedirs(docs_dir, exist_ok=True)
-    db_path = os.path.join(docs_dir, ".soundvault.db")
-    if flush_cache:
-        from fingerprint_cache import flush_cache as _flush
-        _flush(db_path)
+    # Planned, not created: computing a plan must not touch ``root_path``.
+    review_root = os.path.join(root_path, "Manual Review")
+    plan_files = _iter_incoming_audio(root_path) if incoming_scope else None
 
     # --- Phase 0: Pre-scan entire vault (under MUSIC_ROOT) ---
     global_counts, canonical_primary_map = build_primary_counts(
@@ -525,6 +567,7 @@ def compute_moves_and_tag_index(
         progress_callback,
         phase="A",
         log_callback=log_callback,
+        files=plan_files,
     )
     log_callback(f"   → Pre-scan: found {len(global_counts)} unique artists")
     log_callback(f"   → DEBUG: MUSIC_ROOT = {MUSIC_ROOT}")
@@ -534,19 +577,25 @@ def compute_moves_and_tag_index(
     log_callback("1/6: Discovering audio files…")
     all_audio = []
     idx = 0
-    for dirpath, _, files in os.walk(MUSIC_ROOT):
-        rel_dir = os.path.relpath(dirpath, root_path)
-        if {"not sorted", "playlists"} & {p.lower() for p in rel_dir.split(os.sep)}:
-            continue
-        for fname in files:
-            ext = os.path.splitext(fname)[1].lower()
-            if ext in SUPPORTED_EXTS:
-                full = os.path.join(dirpath, fname)
-                if {"not sorted", "playlists"} & {p.lower() for p in os.path.relpath(full, root_path).split(os.sep)}:
-                    continue
-                all_audio.append(full)
-                idx += 1
-                progress_callback(idx, 0, f"Scanning {os.path.relpath(full, root_path)}", "A")
+    if plan_files is not None:
+        for full in plan_files:
+            all_audio.append(full)
+            idx += 1
+            progress_callback(idx, 0, f"Scanning {os.path.relpath(full, root_path)}", "A")
+    else:
+        for dirpath, _, files in os.walk(MUSIC_ROOT):
+            rel_dir = os.path.relpath(dirpath, root_path)
+            if {"not sorted", "playlists"} & {p.lower() for p in rel_dir.split(os.sep)}:
+                continue
+            for fname in files:
+                ext = os.path.splitext(fname)[1].lower()
+                if ext in SUPPORTED_EXTS:
+                    full = os.path.join(dirpath, fname)
+                    if {"not sorted", "playlists"} & {p.lower() for p in os.path.relpath(full, root_path).split(os.sep)}:
+                        continue
+                    all_audio.append(full)
+                    idx += 1
+                    progress_callback(idx, 0, f"Scanning {os.path.relpath(full, root_path)}", "A")
     total_audio = idx
     log_callback(f"   → Found {total_audio} audio files.")
 
@@ -625,7 +674,8 @@ def compute_moves_and_tag_index(
         except Exception:
             pass
 
-        folder_tags = derive_tags_from_path(fullpath, MUSIC_ROOT)
+        inside_music = os.path.relpath(fullpath, MUSIC_ROOT).split(os.sep)[0] != os.pardir
+        folder_tags = derive_tags_from_path(fullpath, MUSIC_ROOT if inside_music else root_path)
 
         songs[fullpath] = {
             "raw_artist": raw_artist,
@@ -658,6 +708,19 @@ def compute_moves_and_tag_index(
     multi_disc_albums = {
         key for key, disc_values in album_disc_values.items() if len(disc_values) >= 2
     }
+
+    def _claim_destination(old_path, new_path):
+        """Final destination for ``old_path``, or ``None`` to leave it out."""
+        if _is_same_path(old_path, new_path):
+            if not incoming_scope:
+                decision_log.append("  → Destination unchanged; skipping move/rename")
+                return None
+            # Already at its routed place inside the incoming folder; that
+            # route is still where it belongs in the library.
+            decision_log.append("  → Already at its routed place; planned as-is")
+            if new_path not in moves.values():
+                return new_path
+        return _ensure_unique_destination(new_path, moves, log_callback)
 
     for old_path, info in songs.items():
         index += 1
@@ -725,11 +788,9 @@ def compute_moves_and_tag_index(
                 new_filename = f"{filename_artist}_{track_str}_{title_str}{ext}"
                 decision_log.append(f"  Renaming to '{new_filename}' (using raw artist)")
 
-            new_path = os.path.join(base_folder, new_filename)
-            if _is_same_path(old_path, new_path):
-                decision_log.append("  → Destination unchanged; skipping move/rename")
+            new_path = _claim_destination(old_path, os.path.join(base_folder, new_filename))
+            if new_path is None:
                 continue
-            new_path = _ensure_unique_destination(new_path, moves, log_callback)
             moves[old_path] = new_path
             tag_index[new_path] = {
                 "leftover_tags": [],
@@ -783,11 +844,9 @@ def compute_moves_and_tag_index(
                     new_filename = f"{filename_artist}_{track_str}_{title_str}{ext}"
                     decision_log.append(f"  Renaming to '{new_filename}' (using raw artist)")
 
-                new_path = os.path.join(base_folder, new_filename)
-                if _is_same_path(old_path, new_path):
-                    decision_log.append("  → Destination unchanged; skipping move/rename")
+                new_path = _claim_destination(old_path, os.path.join(base_folder, new_filename))
+                if new_path is None:
                     continue
-                new_path = _ensure_unique_destination(new_path, moves, log_callback)
                 moves[old_path] = new_path
                 tag_index[new_path] = {
                     "leftover_tags": [],
@@ -869,11 +928,9 @@ def compute_moves_and_tag_index(
             new_filename = f"{filename_artist}_{track_str}_{title_str}{ext}"
             decision_log.append(f"  Renaming to '{new_filename}' (using raw artist)")
 
-        new_path = os.path.join(base_folder, new_filename)
-        if _is_same_path(old_path, new_path):
-            decision_log.append("  → Destination unchanged; skipping move/rename")
+        new_path = _claim_destination(old_path, os.path.join(base_folder, new_filename))
+        if new_path is None:
             continue
-        new_path = _ensure_unique_destination(new_path, moves, log_callback)
         moves[old_path] = new_path
         decision_log.append(
             f"  → Final: '{os.path.relpath(new_path, MUSIC_ROOT)}'"
@@ -1005,7 +1062,7 @@ def render_dry_run_html_from_plan(
             depth = rel.count(os.sep)
             indent = "    " * depth
             _, ext = os.path.splitext(node)
-            if os.path.isdir(node) or ext.lower() not in {".flac", ".m4a", ".aac", ".mp3", ".wav", ".ogg"}:
+            if os.path.isdir(node) or ext.lower() not in SUPPORTED_EXTS:
                 lines.append(f"{indent}<span class=\"folder\">{sanitize(os.path.basename(node))}/</span>")
             else:
                 fname = os.path.basename(node)
@@ -1073,6 +1130,7 @@ def build_dry_run_html(
         flush_cache=flush_cache,
         max_workers=max_workers,
         coord=coord,
+        incoming_scope=False,
     )
 
     log_callback("5/6: Writing dry-run HTML…")
@@ -1155,6 +1213,7 @@ def apply_indexer_moves(
         flush_cache=flush_cache,
         max_workers=max_workers,
         coord=None,
+        incoming_scope=False,
     )
     _cleanup_trailing_numeric_suffixes(moves, tag_index, log_callback)
 
@@ -1164,7 +1223,6 @@ def apply_indexer_moves(
     MUSIC_ROOT = os.path.join(root_path, "Music") \
         if os.path.isdir(os.path.join(root_path, "Music")) \
         else root_path
-    SUPPORTED_EXTS = {".flac", ".m4a", ".aac", ".mp3", ".wav", ".ogg"}
     IMAGE_EXTS     = {".jpg", ".jpeg", ".png", ".gif"}
 
     summary = {"moved": 0, "errors": []}
@@ -1348,6 +1406,7 @@ def run_full_indexer(
         flush_cache=flush_cache,
         max_workers=max_workers,
         coord=None,
+        incoming_scope=False,
     )
 
     # Write the detailed log file

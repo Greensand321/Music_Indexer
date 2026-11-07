@@ -19,7 +19,9 @@ import acoustid
 from .utils.path_helpers import ensure_long_path
 import audio_norm
 
-SUPPORTED_EXTS = {".flac", ".m4a", ".aac", ".mp3", ".wav", ".ogg"}
+# ``.opus`` included: Library Sync scans Opus tracks, and an unfingerprinted
+# track can never match (it was always reported NEW).
+SUPPORTED_EXTS = {".flac", ".m4a", ".aac", ".mp3", ".wav", ".ogg", ".opus"}
 
 
 def _trim_silence(path: str, *, silence_threshold_db: float, min_silence_len_ms: int) -> str:
