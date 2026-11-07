@@ -70,6 +70,48 @@ Status legend: **Done** (in the code now) · **Pending owner** (decision needed;
 - The reviewer proposed refusing the whole run when the library changed since Build Plan. Instead, each stale
   item is skipped and reported, and the rest proceed (Library Sync items are independent).
 
+### A10. Indexer "Max workers" is real now — **Done** (backend; the GUI control is wired with the new pages)
+- **Was**: `docs/ROADMAP.md` ("Controls that are still switched off") and `CLAUDE.md` say the engine ignores
+  Max workers. The control was disabled, with a default of 4.
+- **Is**: `build_indexer_plan(..., max_workers=N)` reads tags on a bounded thread pool. Results come back in
+  input order and cancellation is honoured. Each file's tags are now read **once** per scan, not twice.
+- **Measured** on 3,000 tagged files:
+  - local disk: 1 worker 0.69 s, 4 workers 2.34 s;
+  - with 5 ms latency per file: 1 worker 16.7 s, 4 workers 4.4 s.
+  So the default becomes **1**, and more workers are offered for network or slow drives. The old default of 4
+  would have made local scans about 3× slower.
+- **Undo**: `music_indexer_api._iter_tags` / `MAX_TAG_WORKERS`.
+
+### A11. Indexer "Flush fingerprint cache" stays switched off, and its premise was wrong — **Done**
+- The label promises a fingerprint cache, but the Indexer computes no fingerprints. The old flag deleted
+  `Docs/.soundvault.db`, which is now the Duplicate Finder's cache.
+- A tag cache that would give the flag a meaning was considered and **rejected**: taggers like Mp3tag can keep
+  the old mtime, and tag edits often keep the file size, so the Indexer could file tracks by stale tags. The
+  parameter is still accepted and ignored. The redesign should remove the control.
+
+### A12. Library Sync HTML report: the three fake buttons are removed, not wired — **Done**
+- **Was**: "Replace All" / "Replace with Better" rendered as buttons that did nothing (a ROADMAP known bug that
+  said "wire or remove").
+- **Is**: removed, and replaced by a note: "To replace, flag tracks in AlphaDEX → Library Sync and build a plan".
+  The dead backing code `build_review_replacement_plan`, `_select_replacement_sources` and `ReviewAction`
+  (no callers anywhere) was deleted. A static HTML file can't safely run file operations.
+
+### A13. Tag writes can be undone; `None` now means "remove this tag" — **Done** (backend; GUI coming)
+- **New**: `controllers/tag_revert.py` lists each Tag Fixer / Genre Normalizer apply from its `Docs/` change
+  log, and restores exactly what was there before. That covers every value of a multi-value field, and removes
+  a field that didn't exist before. Files edited since then are skipped as conflicts, and each revert is itself
+  logged so it can be reverted.
+- **Contradicts**: `utils/tag_change_log.py`'s "a future revert tool" note. `utils/tag_writer.py` now treats a
+  `None` value as "remove the field" (no existing caller passed `None`).
+
+### A14. Library Sync keeps decoded fingerprints on disk — **Done**
+- Build Plan's index of a 20k-track library went from 31 s on every run to 4.3 s after the first run (with
+  identical results). The cost is that Library Sync's cache file grows by about 80 MB per 20k tracks
+  (164 MB in total at 20k).
+- **Doc fix**: `docs/features/library_sync.md` and `docs/architecture.md` still said the vendored engine
+  "compares the compressed fingerprint text" and listed that as a known bug. The decoded metric was already
+  ported, so that text was stale and is corrected.
+
 ## B. Structure that changed (adopted IA) — **In progress**
 
 ### B1. New page structure replaces the 13-page sidebar

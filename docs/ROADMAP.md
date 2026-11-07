@@ -28,15 +28,6 @@ which change) live in `docs/redesign/`; this page lists only what is still open.
 
 Real defects in the current code, smallest first within each area.
 
-### Library Sync
-
-- **"Replace All" / "Replace with Better" in the exported HTML review report do
-  nothing** *(Bug: decorative buttons).* The report renders three action buttons
-  styled to look clickable. The `ReviewAction` enum and
-  `build_review_replacement_plan()` in `library_sync.py` look like they were built to
-  back them but have no caller. Either wire them (through the normal build-plan →
-  preview → execute flow) or remove both the buttons and the dead function.
-
 ### Legacy app only
 
 - **"Reset Log" in the legacy Tag Fixer also wipes Library Sync's cache.** Both
@@ -50,8 +41,11 @@ Real defects in the current code, smallest first within each area.
 These are honest now — each is disabled with a tooltip — but each is still a gap:
 either build what it promises or remove it in the redesign.
 
-- **Indexer: "Cross-album scan (Phase C)", "Flush fingerprint cache before scan",
-  "Max workers"** *(Disabled, no backend).* The indexer engine ignores all three.
+- **Indexer: "Cross-album scan (Phase C)" and "Flush fingerprint cache before scan"**
+  *(Disabled, no backend).* The engine has no Phase C and keeps no cache to flush (the
+  Indexer computes no fingerprints). "Max workers" now has a real backend: the tag phase
+  reads on a bounded thread pool. It only helps on slow or network storage; on a local
+  disk 1 worker is fastest, because tag parsing is CPU-bound.
 - **Library Sync: "Preset name"** *(Disabled, no backend).* Presets are not
   implemented.
 - **Clustering wizard: dimensionality reduction (PCA / t-SNE / UMAP), the

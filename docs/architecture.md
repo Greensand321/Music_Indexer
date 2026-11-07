@@ -355,16 +355,13 @@ this repository:
 `fingerprint_cache.py` at all. It imports its own vendored copy under
 `library_sync_indexer_engine/indexer_engine/`, loaded dynamically by
 `library_sync_indexer_engine/__init__.py`. The two copies started from the same
-source but have since **drifted apart**: the vendored `fingerprint_cache.py` is 122
+source but have since **drifted apart**: the vendored `fingerprint_cache.py` is about 230
 lines with no background writer thread, no WAL mode, and none of the extended
 metadata columns (bitrate, codec, embedded tags, artwork) that the root
-`fingerprint_cache.py` has grown to about 840 lines to support. The vendored
-`near_duplicate_detector.py` still uses an older, unindexed matching algorithm —
-and, since the root detector was fixed to **decode** Chromaprint fingerprints before
-comparing them, the vendored one is the only place left that still compares the
-*compressed* fingerprint text byte by byte. That older metric scores a FLAC and its
-own MP3 anywhere from 0.08 to 0.46, so Library Sync can miss transcodes the
-Duplicate Finder now catches (see ROADMAP.md, Known bugs). The
+`fingerprint_cache.py` has grown to about 840 lines to support; it does keep a
+`decoded` column so Library Sync decodes each fingerprint once, not on every run. The
+decoded-Chromaprint distance was **ported** to the vendored `near_duplicate_detector.py`,
+so both engines now score matches on the same scale. The
 vendored `music_indexer_api.py` is missing a few refinements (like richer
 collision-decision logging) that the root copy has picked up since.
 

@@ -206,12 +206,10 @@ maintained copy of the Indexer's scanning/fingerprinting logic, not the same mod
 the Indexer and Duplicate Finder use. See **architecture.md**'s "two indexer
 engines" note for what that means in practice — most importantly, that the
 fingerprint cache Library Sync uses has a different schema than the one the rest of
-the app uses, and the two can drift apart. One drift matters for matching today: the
-vendored copy still compares the *compressed* fingerprint text, while the Duplicate
-Finder now decodes fingerprints first. Under the old metric a FLAC and its own MP3 can
-score 0.08–0.46, so a transcode may come back as "new" or "low confidence" rather than
-as a match or an upgrade — another reason to read the review list before building the
-plan. This is listed under Known bugs in **ROADMAP.md**.)*
+the app uses, and the two can drift apart. Fingerprint *matching* no longer drifts: the vendored copy decodes
+Chromaprint fingerprints and compares raw sub-fingerprints, the same metric as the
+Duplicate Finder (same recording in any codec ≈ 0.01, different recordings ≥ 0.43), and
+Library Sync's cache keeps the decoded form so later runs skip the decode.)*
 
 ## Committing the changes, safely
 
