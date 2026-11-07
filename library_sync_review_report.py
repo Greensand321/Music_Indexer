@@ -274,6 +274,9 @@ def _flag_label(flags: ReviewStateStore, track_id: str) -> str:
     return "None"
 
 
+REPLACE_HINT = "To replace, flag tracks in AlphaDEX → Library Sync and build a plan"
+
+
 def export_review_report_html(
     output_html_path: str,
     results: Sequence[MatchResult],
@@ -316,19 +319,16 @@ def export_review_report_html(
         ".path{font-family:monospace; word-break:break-all;}",
         ".meta{color:#555; font-size:12px; margin-top:4px;}",
         ".muted{color:#666; font-size:12px;}",
-        ".actions{display:flex; gap:10px; flex-wrap:wrap; margin:12px 0;}",
-        ".action-btn{border:1px solid #ddd; background:#fff; padding:6px 12px; border-radius:6px; cursor:pointer;}",
-        ".action-btn.primary{background:#116329; color:#fff; border-color:#116329;}",
+        ".note{background:#f4f4f4; border-left:4px solid #116329; padding:8px 12px; margin:12px 0;}",
         "</style>",
         "</head>",
         "<body>",
         "<h1>Library Sync Review Report</h1>",
         f"<div class='muted'>Generated: {esc(ts.isoformat())}</div>",
-        "<div class='actions'>",
-        "<button class='action-btn primary' data-action='replace-all'>Replace All</button>",
-        "<button class='action-btn' data-action='replace-better'>Replace with Better</button>",
-        "<button class='action-btn' data-action='cancel'>Cancel</button>",
-        "</div>",
+        # A static file cannot safely drive file operations (the buttons that
+        # used to be here did nothing); replacing goes through the app's
+        # flag -> Build Plan -> preview -> execute flow.
+        f"<p class='note'>{esc(REPLACE_HINT)}</p>",
         "<h2>Summary</h2>",
         "<table>",
         f"<tr><th>Library Root</th><td class='path'>{esc(library_root)}</td></tr>",

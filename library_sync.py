@@ -163,14 +163,6 @@ class ExecutionDecision(str, Enum):
     REVIEW_REQUIRED = "REVIEW_REQUIRED"
 
 
-class ReviewAction(str, Enum):
-    """Review-first replacement actions for Library Sync."""
-
-    REPLACE_ALL = "replace_all"
-    REPLACE_WITH_BETTER = "replace_with_better"
-    CANCEL = "cancel"
-
-
 @dataclass
 class PerformanceProfile:
     """Capture lightweight performance metrics for profiling runs.
@@ -1763,94 +1755,6 @@ def compute_library_sync_plan(
         match_based=match_results is not None,
         snapshot=_plan_snapshot(plan_items, targets),
     )
-
-
-def _select_replacement_sources(
-    results: Iterable[MatchResult],
-    action: ReviewAction,
-) -> Dict[str, MatchResult]:
-    if action == ReviewAction.CANCEL:
-        return {}
-
-    selected: Dict[str, MatchResult] = {}
-    for res in results:
-        if res.existing is None:
-            continue
-        if action == ReviewAction.REPLACE_WITH_BETTER:
-            if res.existing_score is None:
-                continue
-            if res.incoming_score <= (res.existing_score or 0):
-                continue
-        selected[_normalize_path(res.incoming.path)] = res
-    return selected
-
-
-def build_review_replacement_plan(
-    library_root: str,
-    incoming_folder: str,
-    results: Iterable[MatchResult],
-    action: ReviewAction,
-    *,
-    log_callback: Callable[[str], None] | None = None,
-    progress_callback: Callable[[int, int, str, str], None] | None = None,
-    flush_cache: bool = False,
-    max_workers: int | None = None,
-    cancel_event: threading.Event | None = None,
-    transfer_mode: str = "copy",
-) -> LibrarySyncPlan:
-    """Build a Library Sync plan that replaces matched tracks per review action."""
-    if action == ReviewAction.CANCEL:
-        raise ValueError("Cannot build a replacement plan for a cancelled action.")
-
-    selected = _select_replacement_sources(results, action)
-    base_plan = compute_library_sync_plan(
-        library_root,
-        incoming_folder,
-        log_callback=log_callback,
-        progress_callback=progress_callback,
-        flush_cache=flush_cache,
-        max_workers=max_workers,
-        cancel_event=cancel_event,
-        transfer_mode=transfer_mode,
-    )
-    if not selected:
-        base_plan.moves = {}
-        base_plan.tag_index = {}
-        base_plan.allowed_replacements = set()
-        base_plan.replacement_targets = {}
-        base_plan.items = []
-        base_plan.snapshot = {}
-        base_plan.decision_log.append("No replacement candidates selected.")
-        return base_plan
-
-    filtered_moves = {
-        src: dst for src, dst in base_plan.moves.items() if _normalize_path(src) in selected
-    }
-    filtered_tag_index = {
-        dst: data for dst, data in base_plan.tag_index.items() if dst in filtered_moves.values()
-    }
-    replacement_targets = {
-        src: _abs_path(selected[_normalize_path(src)].existing.path)  # type: ignore[union-attr]
-        for src in filtered_moves
-        if selected[_normalize_path(src)].existing is not None
-    }
-    base_plan.moves = filtered_moves
-    base_plan.tag_index = filtered_tag_index
-    base_plan.allowed_replacements = set(filtered_moves.values())
-    base_plan.replacement_targets = replacement_targets
-    base_plan.items = _compute_plan_items(
-        base_plan.moves,
-        destination_root=base_plan.destination_root,
-        copy_only=base_plan.copy_only,
-        allow_all_replacements=False,
-        allowed_replacements=base_plan.allowed_replacements,
-        transfer_mode=base_plan.transfer_mode,
-    )
-    base_plan.snapshot = _plan_snapshot(base_plan.items, base_plan.replacement_targets)
-    base_plan.decision_log.append(
-        f"Review action {action.value} selected {len(filtered_moves)} replacement(s)."
-    )
-    return base_plan
 
 
 def build_library_sync_preview(

@@ -101,8 +101,10 @@ fingerprint, whatever its format or position in the library. When that finds no 
 it is also compared with every track of about the same length (±3 s or 2 %) after a
 quick check of the first ~16 seconds. Fingerprints too short or too uniform to identify
 a recording (under about 4 seconds, silence) never match anything. Building the index
-decodes each library fingerprint once — about 30 seconds for 20,000 tracks — and
-Recompute Matches reuses it. A threshold saved before this change that equals the old
+needs every library fingerprint decoded — about 30 seconds for 20,000 tracks. The
+decoded form is saved in Library Sync's fingerprint cache next to the fingerprint, so
+only the first scan (and files that changed since: a different mtime or size) pays
+that; later scans read it back. Recompute Matches reuses the index outright. A threshold saved before this change that equals the old
 default (0.3 / 0.35, which meant something else on the old scale) is replaced by 0.2
 once, with a line in the log; any other saved value is kept.
 
@@ -267,12 +269,11 @@ discipline: "The export routine deliberately avoids any move/replace logic and o
 writes the requested report file after the caller has previewed counts." Exporting a
 report can never itself move or replace a file — it's a read-only summary, full stop.
 
-*(One inert detail worth knowing if you ever open the HTML report format directly:
-it renders three action buttons — "Replace All," "Replace with Better," "Cancel" —
-styled to look clickable. They currently do nothing; no script wires them to
-anything, and the backend function they'd need to call exists but isn't connected to
-any live control in either app. Treat the HTML report as a read-only summary, not an
-in-report control surface.)*
+*(The HTML report used to render three "Replace All," "Replace with Better" and
+"Cancel" buttons that did nothing. They are gone: a static file cannot safely drive
+file operations. In their place the report says "To replace, flag tracks in AlphaDEX
+→ Library Sync and build a plan" — replacing always goes through the normal
+flag → Build Plan → preview → execute flow.)*
 
 ---
 
