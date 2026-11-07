@@ -46,6 +46,20 @@ def _trim_silence(path: str, *, silence_threshold_db: float, min_silence_len_ms:
         return path
 
 
+def _fp_text(fp: object) -> str | None:
+    """pyacoustid returns the compressed fingerprint as ``bytes``; store text.
+
+    ``bytes`` broke ``TrackRecord.signature()`` (``bytes.replace(",", " ")``)
+    and were written to SQLite as a BLOB.
+    """
+    if isinstance(fp, (bytes, bytearray, memoryview)):
+        try:
+            return bytes(fp).decode("ascii")
+        except UnicodeDecodeError:
+            return bytes(fp).decode("latin1")
+    return fp  # type: ignore[return-value]
+
+
 def compute_fingerprint_for_file(
     args: Tuple[str, str, dict],
 ) -> Tuple[str, int | None, str | None, str | None]:
@@ -90,7 +104,7 @@ def compute_fingerprint_for_file(
             duration, fp_hash = acoustid.fingerprint_file(target)
         if tmp and tmp != path:
             os.remove(tmp)
-        return path, duration, fp_hash, None
+        return path, duration, _fp_text(fp_hash), None
     except Exception as e:  # pragma: no cover - just to be safe
         if tmp and tmp != path:
             try:
@@ -100,13 +114,22 @@ def compute_fingerprint_for_file(
         return path, None, None, str(e)
 
 
-def _load_cached_entries(conn: sqlite3.Connection) -> dict[str, Tuple[float, int | None, str | None]]:
-    """Return a mapping of path -> (mtime, duration, fingerprint)."""
+def _load_cached_entries(
+    conn: sqlite3.Connection,
+) -> dict[str, Tuple[float, int | None, str | None, int | None]]:
+    """Return a mapping of path -> (mtime, duration, fingerprint, size)."""
 
     cursor = conn.execute(
-        "SELECT path, mtime, duration, fingerprint FROM fingerprints"
+        "SELECT path, mtime, duration, fingerprint, size FROM fingerprints"
     )
-    return {row[0]: (row[1], row[2], row[3]) for row in cursor.fetchall()}
+    return {row[0]: (row[1], row[2], _fp_text(row[3]), row[4]) for row in cursor.fetchall()}
+
+
+def _ensure_size_column(conn: sqlite3.Connection) -> None:
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(fingerprints)")}
+    if "size" not in cols:
+        conn.execute("ALTER TABLE fingerprints ADD COLUMN size INTEGER")
+        conn.commit()
 
 
 def _gather_audio_files(root_path: str | Iterable[str]) -> List[str]:
@@ -172,11 +195,13 @@ def compute_fingerprints_parallel(
         CREATE TABLE IF NOT EXISTS fingerprints (
           path TEXT PRIMARY KEY,
           mtime REAL,
+          size INTEGER,
           duration INT,
           fingerprint TEXT
         );
         """
     )
+    _ensure_size_column(conn)
 
     results: list[tuple[str, int | None, str | None]] = []
     audio_files = _gather_audio_files(root_path)
@@ -215,9 +240,18 @@ def compute_fingerprints_parallel(
         if cancel_event.is_set():
             log_callback("Cancellation requested before fingerprint scheduling")
             break
-        mtime = os.path.getmtime(ensure_long_path(path))
+        st = os.stat(ensure_long_path(path))
+        mtime, size = st.st_mtime, st.st_size
         cache_entry = cached.get(path)
-        if cache_entry and cache_entry[2] is not None and cache_entry[0] == mtime:
+        # Reuse only when both mtime and size still match: an edit that keeps
+        # the timestamp (some tag editors do) must not serve a stale print.
+        if (
+            cache_entry
+            and cache_entry[2] is not None
+            and cache_entry[0] == mtime
+            and cache_entry[3] is not None
+            and int(cache_entry[3]) == int(size)
+        ):
             duration, fp_hash = cache_entry[1], cache_entry[2]
             results.append((path, duration, fp_hash))
             completed += 1
@@ -247,10 +281,11 @@ def compute_fingerprints_parallel(
                     if cancel_event.is_set():
                         break
                     continue
-                mtime = os.path.getmtime(ensure_long_path(path))
+                fp_hash = _fp_text(fp_hash)
+                st = os.stat(ensure_long_path(path))
                 conn.execute(
-                    "INSERT OR REPLACE INTO fingerprints (path, mtime, duration, fingerprint) VALUES (?, ?, ?, ?)",
-                    (path, mtime, duration, fp_hash),
+                    "INSERT OR REPLACE INTO fingerprints (path, mtime, size, duration, fingerprint) VALUES (?, ?, ?, ?, ?)",
+                    (path, st.st_mtime, st.st_size, duration, fp_hash),
                 )
                 results.append((path, duration, fp_hash))
                 log_callback(f"Fingerprinted {path}")
