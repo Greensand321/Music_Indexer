@@ -1,13 +1,14 @@
 """AlphaDEX main window — Option A layout: Sidebar + Workspace + Log drawer."""
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
 from gui.compat import QtCore, QtGui, QtWidgets, Signal, Slot
 from gui.themes.manager import get_manager
 from gui.widgets.top_bar import TopBar
-from gui.widgets.sidebar import Sidebar
+from gui.widgets.sidebar import NAV_STRUCTURE, Sidebar
 from gui.widgets.log_drawer import LogDrawer
 from gui.widgets.now_playing_bar import NowPlayingBar
 
@@ -45,6 +46,36 @@ _WORKSPACE_MAP: dict[str, type[WorkspaceBase]] = {
     "help":         HelpWorkspace,
 }
 
+# Sidebar order and labels — the single source for Ctrl+1..9 and the status
+# bar, so shortcuts can never drift from what the sidebar shows.
+_NAV_ORDER: list[str] = [
+    item.key for section in NAV_STRUCTURE for item in section.items
+    if item.key in _WORKSPACE_MAP
+] + [key for key in _WORKSPACE_MAP if key not in {
+    item.key for section in NAV_STRUCTURE for item in section.items
+}]
+_NAV_LABELS: dict[str, str] = {
+    item.key: item.label for section in NAV_STRUCTURE for item in section.items
+}
+
+# Focus widgets that own the arrow keys: keyboard mode never steals them.
+_ARROW_KEY_OWNERS = (
+    QtWidgets.QLineEdit,
+    QtWidgets.QAbstractSpinBox,
+    QtWidgets.QComboBox,
+    QtWidgets.QTextEdit,
+    QtWidgets.QPlainTextEdit,
+    QtWidgets.QKeySequenceEdit,
+)
+_ARROW_KEYS = {
+    QtCore.Qt.Key.Key_Up, QtCore.Qt.Key.Key_Down,
+    QtCore.Qt.Key.Key_Left, QtCore.Qt.Key.Key_Right,
+}
+
+
+def _same_path(a: str, b: str) -> bool:
+    return os.path.normcase(os.path.normpath(a)) == os.path.normcase(os.path.normpath(b))
+
 
 class AlphaDEXWindow(QtWidgets.QMainWindow):
     """Main application window."""
@@ -59,15 +90,20 @@ class AlphaDEXWindow(QtWidgets.QMainWindow):
         self._workspaces: dict[str, WorkspaceBase] = {}
         self._theme_picker = None   # keep reference so dialog stays open
 
-        # Apply persisted theme before building UI
+        self._stats_worker = None
+        self._stats_generation = 0
+
+        # Apply persisted theme before building UI. (Card shadows follow theme
+        # changes through WorkspaceBase's own theme_changed listener.)
         get_manager().load_persisted()
-        get_manager().theme_changed.connect(self._on_theme_changed)
 
         self._keyboard_mode_active = False
+        self._keyboard_filter_installed = False
         self._build_ui()
         self._setup_shortcuts()
-        self._install_global_event_filter()
-        self._load_persisted_library()
+        self._report_config_backup()
+        # The library is NOT applied here: the startup sequence (landing →
+        # set_library) or the user chooses it, exactly once.
 
     # ── UI construction ───────────────────────────────────────────────────
 
@@ -158,22 +194,63 @@ class AlphaDEXWindow(QtWidgets.QMainWindow):
                 lambda: npb.set_volume(player_ws._vol_slider.value())
             )
 
-    # ── Global event filter for keyboard mode ─────────────────────────────
+    # ── Keyboard mode (Player arrow keys) ─────────────────────────────────
+    #
+    # The application-level filter is installed only while keyboard mode is
+    # on, and it only takes arrow keys when the Player page is showing (or
+    # the Now Playing bar has focus) in this window, no modal dialog or popup
+    # is open, and the focused widget is not one that uses arrows itself
+    # (text fields, spin boxes, combo boxes).
 
-    def _install_global_event_filter(self) -> None:
-        """Install an application-level event filter to intercept arrow keys
-        when keyboard mode is active, overriding default widget behavior."""
+    def _set_keyboard_filter(self, on: bool) -> None:
         app = QtWidgets.QApplication.instance()
-        if app:
+        if app is None or on == self._keyboard_filter_installed:
+            return
+        if on:
             app.installEventFilter(self)
+        else:
+            app.removeEventFilter(self)
+        self._keyboard_filter_installed = on
+
+    def _keyboard_mode_applies(self, obj) -> bool:
+        app = QtWidgets.QApplication.instance()
+        if app is None:
+            return False
+        if app.activeModalWidget() is not None or app.activePopupWidget() is not None:
+            return False
+        player_ws = self._workspaces.get("player")
+        if not isinstance(player_ws, PlayerWorkspace):
+            return False
+        # Key events reach the QWindow first and are then re-sent to the
+        # focus widget; decide on the widget delivery only.
+        if not isinstance(obj, QtWidgets.QWidget):
+            return False
+        target = obj
+        if target.window() is not self:
+            return False
+        if isinstance(target, _ARROW_KEY_OWNERS):
+            return False
+        if self._stack.currentWidget() is player_ws:
+            return True
+        bar = self._now_playing_bar
+        return target is bar or bar.isAncestorOf(target)
 
     def eventFilter(self, obj, event):  # noqa: N802
-        """Intercept arrow keys globally when keyboard mode is active.
+        """Route arrow keys to the Player while keyboard mode applies.
 
         Dispatches to library navigation or queue navigation based on which
         panel the user last clicked (tracked by PlayerWorkspace._kb_target).
         """
-        if self._keyboard_mode_active and event.type() == QtCore.QEvent.Type.KeyPress:
+        if (
+            self._keyboard_mode_active
+            and event.type() == QtCore.QEvent.Type.KeyPress
+            and event.key() in _ARROW_KEYS
+            and not (
+                event.modifiers()
+                & ~QtCore.Qt.KeyboardModifier.KeypadModifier
+            )
+            and self._keyboard_mode_applies(obj)
+        ):
             key = event.key()
             player_ws = self._workspaces.get("player")
             if isinstance(player_ws, PlayerWorkspace):
@@ -207,9 +284,9 @@ class AlphaDEXWindow(QtWidgets.QMainWindow):
         return super().eventFilter(obj, event)
 
     def set_keyboard_mode_global(self, active: bool) -> None:
-        """Toggle keyboard mode at the main-window level so arrow keys are
-        intercepted globally regardless of which widget has focus."""
-        self._keyboard_mode_active = active
+        """Toggle keyboard mode (from the Now Playing bar's ⌨ pill)."""
+        self._keyboard_mode_active = bool(active)
+        self._set_keyboard_filter(self._keyboard_mode_active)
         player_ws = self._workspaces.get("player")
         if isinstance(player_ws, PlayerWorkspace):
             player_ws.set_keyboard_mode(active)
@@ -238,8 +315,7 @@ class AlphaDEXWindow(QtWidgets.QMainWindow):
         ).activated.connect(self._log_drawer._on_clear)
 
         # Ctrl+1–9 → Switch workspaces by sidebar order
-        keys = list(_WORKSPACE_MAP.keys())
-        for i, key in enumerate(keys[:9], 1):
+        for i, key in enumerate(_NAV_ORDER[:9], 1):
             QtGui.QShortcut(
                 QtGui.QKeySequence(f"Ctrl+{i}"), self
             ).activated.connect(lambda k=key: self._on_nav_changed(k))
@@ -253,28 +329,75 @@ class AlphaDEXWindow(QtWidgets.QMainWindow):
         self._sidebar.activate(key)
         ws = self._workspaces[key]
         self._stack.setCurrentWidget(ws)
-        self.statusBar().showMessage(key.replace("_", " ").title())
+        self.statusBar().showMessage(_NAV_LABELS.get(key, key.replace("_", " ").title()))
+        # Optional hook: a page can refresh itself when it is shown (e.g. the
+        # Music Graph reloading a newer cluster payload).
+        hook = getattr(ws, "on_activated", None)
+        if callable(hook):
+            hook()
+
+    # ── Library selection: the one validated path ─────────────────────────
+    #
+    # Landing (via set_library), TopBar "Change Library" / Ctrl+O and
+    # Settings → Default library all end in _apply_library(), which rejects
+    # missing folders, ignores the library that is already active, and only
+    # then fans the path out to every page, refreshes the stats and saves it.
 
     @Slot(str)
     def _on_library_changed(self, path: str) -> None:
-        self._library_path = path
-        self._top_bar.set_library(path)
+        """TopBar ``library_changed`` slot."""
+        self._apply_library(path)
+
+    def _apply_library(self, path: str) -> bool:
+        """Make *path* the active library. True when it is (now) active."""
+        if not path:
+            return False
+        norm = os.path.normpath(os.path.abspath(os.path.expanduser(path)))
+        if self._library_path and _same_path(norm, self._library_path):
+            return True   # unchanged: don't reset every page again
+        if not os.path.isdir(norm):
+            self._on_log_message(f"Library folder not found: {path}", "warn")
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Library folder not found",
+                f"The folder\n{path}\ndoes not exist (or is not reachable).\n\n"
+                "The current library was kept.",
+            )
+            return False
+
+        self._library_path = norm
+        self._top_bar.set_library(norm)
         for ws in self._workspaces.values():
-            ws.set_library_path(path)
-        self._on_log_message(f"Library set to: {path}", "ok")
-        self.statusBar().showMessage(f"Library: {path}")
+            ws.set_library_path(norm)
+        self._on_log_message(f"Library set to: {norm}", "ok")
+        self.statusBar().showMessage(f"Library: {norm}")
 
         # Update stats in background
-        self._update_library_stats(path)
+        self._update_library_stats(norm)
+        self._persist_library(norm)
+        return True
 
-        # Persist
+    def _persist_library(self, path: str) -> None:
         try:
             from config import load_config, save_config
             cfg = load_config()
-            cfg["library_root"] = path
-            save_config(cfg)
+            if cfg.get("library_root") != path:
+                cfg["library_root"] = path
+                save_config(cfg)
+        except Exception as exc:  # noqa: BLE001 - never break the UI over this
+            self._on_log_message(f"Could not save the library choice: {exc}", "warn")
+
+    def _report_config_backup(self) -> None:
+        try:
+            import config
+            backup = config.last_backup_path()
         except Exception:
-            pass
+            return
+        if backup:
+            self._on_log_message(
+                f"Your settings file could not be read; a copy was saved to {backup}",
+                "warn",
+            )
 
     @Slot(str, str)
     def _on_log_message(self, message: str, level: str) -> None:
@@ -289,32 +412,38 @@ class AlphaDEXWindow(QtWidgets.QMainWindow):
     def _on_settings(self) -> None:
         from gui.dialogs.settings_drawer import SettingsDrawer
         dlg = SettingsDrawer(self)
-        dlg.settings_saved.connect(self._on_settings_saved)
-        dlg.exec()
+        dlg.settings_saved.connect(lambda: self._on_settings_saved(dlg))
+        try:
+            dlg.exec()
+        finally:
+            dlg.deleteLater()   # one dialog per open, not one leaked per open
 
-    @Slot()
-    def _on_settings_saved(self) -> None:
-        # Reload library if it changed in settings
+    def _on_settings_saved(self, dlg=None) -> None:
+        # Switch library only if the default library was changed in the dialog
+        if dlg is not None and not getattr(dlg, "library_changed", True):
+            return
         try:
             from config import load_config
-            cfg = load_config()
-            lib = cfg.get("library_root", "")
-            if lib and lib != self._library_path:
-                self._top_bar.set_library(lib)
-                self._on_library_changed(lib)
+            lib = load_config().get("library_root", "")
         except Exception:
-            pass
+            return
+        if lib:
+            self._apply_library(lib)
 
     @Slot()
     def _on_theme_requested(self) -> None:
+        picker = self._theme_picker
+        try:
+            if picker is not None and picker.isVisible():
+                picker.raise_()
+                picker.activateWindow()
+                return
+            if picker is not None:
+                picker.deleteLater()
+        except RuntimeError:  # already deleted
+            pass
         from gui.themes.picker import open_theme_picker
         self._theme_picker = open_theme_picker(self)
-
-    @Slot(object)
-    def _on_theme_changed(self, tokens) -> None:
-        """Refresh card shadows on all workspaces after a theme switch."""
-        for ws in self._workspaces.values():
-            ws.refresh_shadows()
 
     # ── Close / shutdown ──────────────────────────────────────────────────
     #
@@ -360,19 +489,17 @@ class AlphaDEXWindow(QtWidgets.QMainWindow):
                     ws.shutdown()
                 except Exception as exc:  # noqa: BLE001 - never block quitting
                     print(f"[shutdown] {type(ws).__name__}: {exc}", file=sys.stderr)
-            QtWidgets.QApplication.instance().removeEventFilter(self)
+            self._set_keyboard_filter(False)
         super().closeEvent(event)
 
     # ── Public API ────────────────────────────────────────────────────────
 
-    def set_library(self, path: str) -> None:
-        """Pre-load a library path (called from the landing page before the
-        window is shown).  Updates the top bar label and fires the full
-        library-changed chain (workspace updates, stats, persistence)."""
-        if not path:
-            return
-        self._top_bar.set_library(path)
-        self._on_library_changed(path)
+    def set_library(self, path: str) -> bool:
+        """Make *path* the active library (called once by the startup
+        sequence after the landing, and by scripts/tests). Validated: a
+        missing folder is rejected with a message, the already-active
+        library is a no-op. Returns True when *path* is the active library."""
+        return self._apply_library(path)
 
     def play_directory(self, dirpath: str) -> None:
         """Switch to the Player workspace and start playing all tracks in *dirpath*."""
@@ -409,50 +536,84 @@ class AlphaDEXWindow(QtWidgets.QMainWindow):
 
     # ── Helpers ───────────────────────────────────────────────────────────
 
-    def _load_persisted_library(self) -> None:
-        try:
-            from config import load_config
-            cfg = load_config()
-            lib = cfg.get("library_root", "")
-            if lib and Path(lib).is_dir():
-                self._top_bar.set_library(lib)
-                self._on_library_changed(lib)
-        except Exception:
-            pass
-
     def _update_library_stats(self, path: str) -> None:
-        """Scan library stats in a background thread and update the top bar."""
-        worker = _StatsWorker(path)
-        worker.finished.connect(self._on_stats_ready)
+        """Scan library stats in a background thread and update the top bar.
+
+        Each scan carries a generation number; results from an older scan
+        (the library changed again meanwhile) are ignored, and the older
+        scan is asked to stop."""
+        from gui.workers import cancel_thread, start_worker
+
+        old = self._stats_worker
+        if old is not None:
+            cancel_thread(old)
+        self._stats_generation += 1
+        worker = _StatsWorker(path, self._stats_generation)
+        worker.stats_ready.connect(self._on_stats_ready)
         self._stats_worker = worker
-        from gui.workers import start_worker
         start_worker(worker, owner=self, name="Library statistics")
 
-    @Slot(int, float, int)
-    def _on_stats_ready(self, tracks: int, size_gb: float, artists: int) -> None:
+    @Slot(int, int, float, int)
+    def _on_stats_ready(self, generation: int, tracks: int, size_gb: float, artists: int) -> None:
+        if generation != self._stats_generation:
+            return  # stale: a newer library's scan is (or was) running
+        self._stats_worker = None
         self._top_bar.set_stats(tracks, size_gb, artists)
 
 
-class _StatsWorker(QtCore.QThread):
-    finished = Signal(int, float, int)
+_AUDIO_EXTS = frozenset({".flac", ".m4a", ".aac", ".mp3", ".wav", ".ogg", ".opus"})
 
-    def __init__(self, library_path: str) -> None:
+
+def library_stats(library_path: str, should_stop=lambda: False) -> tuple[int, int, int] | None:
+    """(tracks, size_bytes, artists) for the top bar; None if stopped early.
+
+    Skips the reserved folders (Quarantine/, Trash/, Docs/, ...), never
+    follows directory symlinks, and skips files it cannot stat (broken
+    symlinks, permission errors) instead of failing the whole count.
+    "Artists" is the folder two levels above a track (``Artist/Album/track``),
+    or the folder above a track that sits one level deep (``Artist/track``);
+    tracks at the library root count no artist.
+    """
+    from utils.reserved_folders import walk_library
+
+    tracks = 0
+    size_bytes = 0
+    artists: set[str] = set()
+    for dirpath, _dirnames, filenames in walk_library(library_path):
+        if should_stop():
+            return None
+        rel = os.path.relpath(dirpath, library_path)
+        parts = () if rel in (".", "") else Path(rel).parts
+        artist = parts[-2] if len(parts) >= 2 else (parts[0] if parts else "")
+        for name in filenames:
+            if os.path.splitext(name)[1].lower() not in _AUDIO_EXTS:
+                continue
+            try:
+                size = os.stat(os.path.join(dirpath, name)).st_size
+            except OSError:
+                continue
+            tracks += 1
+            size_bytes += size
+            if artist:
+                artists.add(artist.casefold())
+    return tracks, size_bytes, len(artists)
+
+
+class _StatsWorker(QtCore.QThread):
+    # Not called ``finished``: that would shadow QThread.finished.
+    stats_ready = Signal(int, int, float, int)  # generation, tracks, GB, artists
+
+    def __init__(self, library_path: str, generation: int = 0) -> None:
         super().__init__()
         self.library_path = library_path
+        self.generation = generation
 
     def run(self) -> None:
         try:
-            tracks = 0
-            size_bytes = 0
-            artists: set[str] = set()
-            exts = {".flac", ".m4a", ".aac", ".mp3", ".wav", ".ogg", ".opus"}
-            for p in Path(self.library_path).rglob("*"):
-                if p.suffix.lower() in exts:
-                    tracks += 1
-                    size_bytes += p.stat().st_size
-                    parent = p.parent.parent.name
-                    if parent:
-                        artists.add(parent)
-            self.finished.emit(tracks, size_bytes / (1024 ** 3), len(artists))
-        except Exception:
-            self.finished.emit(0, 0.0, 0)
+            result = library_stats(self.library_path, self.isInterruptionRequested)
+        except Exception:  # noqa: BLE001 - stats are best-effort
+            result = (0, 0, 0)
+        if result is None:
+            return  # cancelled: a newer scan replaces this one
+        tracks, size_bytes, artists = result
+        self.stats_ready.emit(self.generation, tracks, size_bytes / (1024 ** 3), artists)

@@ -158,6 +158,8 @@ class TopBar(QtWidgets.QWidget):
             self._path_label.setText("No library selected")
             self._path_label.setToolTip("")
             self._folder_icon.setVisible(False)
+        # The path colour depends on whether a library is set.
+        self._apply_path_colour(get_manager().current)
         self._clear_stats()
 
     def set_stats(self, tracks: int, size_gb: float, artists: int) -> None:
@@ -178,18 +180,20 @@ class TopBar(QtWidgets.QWidget):
     # ── Internal ──────────────────────────────────────────────────────────────
 
     def _clear_stats(self) -> None:
-        for num_lbl, unit_lbl in self._stat_widgets:
+        for (num_lbl, unit_lbl), unit in zip(self._stat_widgets, (" tracks", " GB", " artists")):
             num_lbl.setText("–")
-            unit_lbl.setText(" tracks" if self._stat_widgets.index((num_lbl, unit_lbl)) == 0
-                             else " GB" if self._stat_widgets.index((num_lbl, unit_lbl)) == 1
-                             else " artists")
+            unit_lbl.setText(unit)
+
+    def _apply_path_colour(self, tokens) -> None:
+        t = tokens
+        path_color = t.text_primary if self._library_path else t.text_secondary
+        self._path_label.setStyleSheet(f"color: {path_color};")
 
     def _apply_theme(self, tokens) -> None:
         t = tokens
         self._sep.set_color(t.card_border)
 
-        path_color = t.text_primary if self._library_path else t.text_secondary
-        self._path_label.setStyleSheet(f"color: {path_color};")
+        self._apply_path_colour(t)
         self._folder_icon.setStyleSheet(f"color: {t.text_secondary};")
 
         for num_lbl, unit_lbl in self._stat_widgets:
