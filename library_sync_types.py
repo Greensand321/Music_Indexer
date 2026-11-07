@@ -13,8 +13,22 @@ from typing import Dict, List
 SIGNATURE_TOKEN_COUNT = 8
 
 
-def _fingerprint_signature(fp: str | None) -> str | None:
-    """Extract signature from fingerprint string."""
+def _fingerprint_text(fp: object) -> str | None:
+    """``fp`` as text: pyacoustid and older fingerprint caches hand back
+    ``bytes`` (a BLOB in SQLite) for the same ASCII fingerprint."""
+    if fp is None:
+        return None
+    if isinstance(fp, (bytes, bytearray, memoryview)):
+        try:
+            return bytes(fp).decode("ascii")
+        except UnicodeDecodeError:
+            return bytes(fp).decode("latin1")
+    return fp if isinstance(fp, str) else str(fp)
+
+
+def _fingerprint_signature(fp: str | bytes | None) -> str | None:
+    """Extract signature from a fingerprint (``str`` or ``bytes``)."""
+    fp = _fingerprint_text(fp)
     if not fp:
         return None
     tokens = fp.replace(",", " ").split()
@@ -46,6 +60,10 @@ class TrackRecord:
     fingerprint: str | None
     tags: Dict[str, object]
     duration: int | None = None
+    # Seconds of audio in the file (its stream info). ``duration`` is what
+    # the fingerprint covers, which is capped (fingerprint_duration_ms) and
+    # silence-trimmed, so it cannot tell a 3-minute track from a 9-minute one.
+    audio_length: float | None = None
 
     def signature(self) -> str | None:
         return _fingerprint_signature(self.fingerprint)
@@ -61,6 +79,7 @@ class TrackRecord:
             "mtime": self.mtime,
             "fingerprint": self.fingerprint,
             "duration": self.duration,
+            "audio_length": self.audio_length,
             "tags": dict(self.tags),
         }
 
