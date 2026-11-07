@@ -31,10 +31,15 @@ work of the previous one and hands the result down the line. Nothing is welded s
 until the very end.
 
 1. **Choose the two folders.** You point Library Sync at your existing library and at
-   the incoming folder, and set how strict the matching should be.
+   the incoming folder, and set how strict the matching should be. Both folders must
+   exist and must not be the same folder or inside one another — Library Sync refuses
+   rather than creating a mistyped path.
 2. **Scan and fingerprint.** Both collections are read and fingerprinted (reusing the
    cache wherever possible, so repeat runs are fast). Each track becomes a tidy record
-   carrying its fingerprint and its quality details.
+   carrying its fingerprint and its quality details. The reserved folders
+   (`Quarantine/`, `Trash/`, `Docs/` — including Library Sync's own backups —
+   `Manual Review/`, `Playlists/`, `Not Sorted/`) are not scanned, so a quarantined
+   duplicate loser is never mistaken for a track you own.
 3. **Match.** Every incoming track is compared against your library to find its closest
    counterpart, and each pairing is labeled — brand new, exact duplicate, likely
    duplicate, or borderline.
@@ -127,16 +132,34 @@ flagged "Copy" is guaranteed to be copied in, and a track you flagged "Replace" 
 guaranteed to replace its counterpart — overriding whatever the automatic quality
 comparison would have chosen. The algorithm advises; you decide.
 
+Concretely, the plan is built *from the reviewed match table*:
+
+| Match / flag | What the plan does |
+|---|---|
+| New track | Added to the library (copied or moved, per the Copy/Move toggle) |
+| Exact match or likely duplicate | Skipped — no duplicate is copied in |
+| "Potential Upgrade" (no flag) | Left for review: flag **Replace** to take it |
+| Low confidence (no flag) | Left for review: flag **Copy** or **Replace** to decide |
+| Flag **Copy** | Added regardless, always as a copy (the incoming original stays); a taken name gets a `(1)` suffix |
+| Flag **Replace** | Takes the matched track's place (same folder and name, the incoming file's extension); the old file is backed up first and moved into the backups area |
+
+The preview states the transfer mode, the counts, and the reason for every decision,
+and **Execute runs exactly that plan.** If you change the paths, the Copy/Move toggle or
+any flag after building it — or re-scan, or switch library — the plan is marked out of
+date and Execute is disabled until you build it again.
+
 A few practical notes:
 
 - **Flags are remembered only for the current session.** They live in memory while you
   work, not in a saved file. This is a deliberate simplicity choice (see below).
-- **Re-scanning clears your flags.** If you change the strictness and recompute the
-  matches, the whole landscape of matches can shift — a track you flagged for
-  "Replace" might now match something different, or nothing at all. Rather than carry
-  forward flags that may no longer make sense, the app clears them and lets you start
-  fresh against the new results, warning you where a previous flag could not be
-  carried over.
+- **Re-scanning keeps only the flags that still make sense.** If you change the
+  strictness and recompute the matches (the **Recompute Matches** button re-matches the
+  last scan without re-reading any file), the whole landscape of matches can shift — a
+  track you flagged for "Replace" might now match something different, or nothing at
+  all. Copy flags and notes are kept for tracks that are still there; a Replace flag is
+  kept only if the track still matches the *same* library track (it is never silently
+  re-pointed at a different file). Everything that could not be carried over is listed
+  in a notice and in the log.
 - **Flagging is currently one track at a time.** There is not yet a "select many and
   flag them all at once" shortcut; that bulk capability is on the roadmap.
 
@@ -176,8 +199,11 @@ rest of the app:
 
 - New tracks are **copied or moved** into the correct place in your library.
 - Any existing file that is being **replaced is backed up first** — the outgoing copy
-  is preserved in a backups area inside `Docs` before the new one takes its place — so
-  an "upgrade" can always be undone.
+  is preserved in a backups area inside `Docs` (`Docs/Backups/LibrarySync/<date_time>/`,
+  one folder per run, so an earlier backup is never overwritten) before the new one
+  takes its place — so an "upgrade" can always be undone.
+- No other existing file is ever overwritten: if a destination appeared after the plan
+  was built, that item is skipped and reported.
 - Every action is recorded in a detailed **audit log**, and a final **report** (a
   readable web page) summarizes what was added, what was replaced, what was skipped,
   and anything that failed.

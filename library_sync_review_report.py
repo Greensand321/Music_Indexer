@@ -266,6 +266,14 @@ def _mixed_codec_info(
     return 0.0, False
 
 
+def _flag_label(flags: ReviewStateStore, track_id: str) -> str:
+    if flags.replace_target(track_id):
+        return "Replace"
+    if flags.is_copy_flagged(track_id):
+        return "Copy"
+    return "None"
+
+
 def export_review_report_html(
     output_html_path: str,
     results: Sequence[MatchResult],
@@ -276,11 +284,18 @@ def export_review_report_html(
     mixed_codec_threshold_boost: float,
     format_priority: Mapping[str, int],
     generated_at: datetime | None = None,
+    flags: ReviewStateStore | None = None,
 ) -> str:
-    """Write an HTML report mirroring the duplicate finder report styling."""
+    """Write an HTML report mirroring the duplicate finder report styling.
+
+    ``flags`` is the review session's store: its Copy/Replace flags and notes
+    are included (the report used to be written from an empty store, so they
+    were silently missing from the HTML while JSON/CSV had them).
+    """
     esc = lambda value: html.escape(str(value))
     ts = generated_at or datetime.now(timezone.utc)
-    counts = summarize_match_results(results, ReviewStateStore())
+    flags = flags if flags is not None else ReviewStateStore()
+    counts = summarize_match_results(results, flags)
     html_lines = [
         "<!doctype html>",
         "<html lang='en'>",
@@ -321,6 +336,8 @@ def export_review_report_html(
         f"<tr><th>New</th><td>{esc(counts.get('new', 0))}</td></tr>",
         f"<tr><th>Collisions / Exact Matches</th><td>{esc(counts.get('collisions', 0))}</td></tr>",
         f"<tr><th>Low Confidence</th><td>{esc(counts.get('low_confidence', 0))}</td></tr>",
+        f"<tr><th>Flagged Copy</th><td>{esc(counts.get('flagged_copy', 0))}</td></tr>",
+        f"<tr><th>Flagged Replace</th><td>{esc(counts.get('flagged_replace', 0))}</td></tr>",
         "</table>",
         "<h2>Threshold Settings Snapshot</h2>",
         "<table>",
@@ -367,6 +384,8 @@ def export_review_report_html(
                 f"<tr><th>Threshold Used</th><td>{esc(f'{res.threshold_used:.4f}')}</td></tr>",
                 f"<tr><th>Mixed-codec Boost</th><td>{esc(f'{mixed_boost:.4f}')} (applied: {esc('Yes' if mixed_applied else 'No')})</td></tr>",
                 f"<tr><th>Format Priority Score</th><td>Incoming: {esc(res.incoming_score)} | Existing: {esc(res.existing_score) if res.existing_score is not None else 'n/a'}</td></tr>",
+                f"<tr><th>Your Flag</th><td>{esc(_flag_label(flags, res.incoming.track_id))}</td></tr>",
+                f"<tr><th>Note</th><td>{esc(flags.note_for(res.incoming.track_id) or '')}</td></tr>",
                 "</table>",
             ]
         )

@@ -35,7 +35,7 @@ it.
 
 ### 1. Walking the library
 The Indexer recursively explores your library folder, gathering every supported audio
-file (FLAC, M4A, AAC, MP3, WAV, OGG). As it walks, it **steps around the reserved
+file (FLAC, M4A, AAC, MP3, WAV, OGG, Opus). As it walks, it **steps around the reserved
 folders** — `Not Sorted`, `Playlists`, `Manual Review`, `Docs`, `Trash`, and
 `Quarantine` — because those are spaces you or the app have deliberately set aside,
 and reorganizing them would defeat their purpose.
@@ -123,12 +123,36 @@ performs the moves, sweeps leftover non-music files into `Docs` or `Trash`, remo
 the now-empty folders, updates your playlists to point at the new locations, and
 writes a final log of everything it did.
 
+A few guarantees hold that step together:
+
+- **What executes is what you previewed.** The plan is computed once, rendered as the
+  preview, and the Execute button applies *that* plan (it is only available while a
+  preview of the current library exists). If anything in the library changed since the
+  preview — a file added, removed or edited — Execute refuses and asks you to preview
+  again; nothing is moved.
+- **The preview shows everything Execute will do**, not just the new folder tree: the
+  non-audio files that will be swept (and where to), and the folders that will be
+  removed once empty.
+- **Leftovers are swept carefully.** Only non-music files in folders the plan empties
+  of music count as leftovers (a `cover.jpg` next to an album that stays put is left
+  alone). They keep their folder structure inside `Trash/` or `Docs/`
+  (`Trash/Artist/Album/cover.jpg`), and a name that is already taken gets a `(1)`
+  suffix — nothing is ever overwritten. Audio files are never swept.
+- **Nothing is overwritten during execution.** A destination that exists by the time a
+  move runs is skipped and reported.
+- **Every action is logged** to `Docs/indexer_executed_<date>_<time>.txt` (and a
+  matching `.json`), including when a run is cancelled part-way.
+- Running the Indexer again on an already-organised library changes nothing.
+
 ## The Manual Review desk
 
 Some files simply don't carry enough information to be filed responsibly — they're
 missing an artist or a title, and even the file name offers no clue. Rather than guess
 and risk burying a track under the wrong artist forever, the Indexer routes these to
 the **`Manual Review`** folder and leaves them untouched, with a note in the log.
+(The file-name fallback understands `Artist - Title.ext` and the Indexer's own
+`Artist_NN_Title.ext`; a name like `untitled_track.mp3` with no tags goes to Manual
+Review.)
 
 This is a deliberate philosophy: **it is better to set a file aside than to misfile
 it.** A track parked in Manual Review is easy to find and fix; a track silently filed
