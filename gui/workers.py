@@ -45,6 +45,7 @@ jobs — so the redesigned shell can show a global activity indicator.
 from __future__ import annotations
 
 import time
+import weakref
 from dataclasses import dataclass
 from typing import Iterable
 
@@ -110,7 +111,7 @@ class JobRegistry(QtCore.QObject):
         # The C++ finished() signal, connected by signature so a Python
         # subclass that shadows ``finished`` cannot hide it. The watcher lives
         # in the GUI thread, so delivery is queued there, after run() returns.
-        watcher = _FinishWatcher(self, key)
+        watcher = _FinishWatcher(self, key, thread)
         self._watchers[key] = watcher
         QtCore.QObject.connect(
             thread, QtCore.SIGNAL("finished()"), watcher, QtCore.SLOT("on_finished()")
@@ -129,13 +130,23 @@ class JobRegistry(QtCore.QObject):
     ) -> QtCore.QThread:
         self.adopt(thread, owner=owner, name=name, ask_before_quit=ask_before_quit,
                    group=group)
+        # A QThread parented to a widget is destroyed with that widget — even
+        # mid-run. The registry (plus the owner's attribute) keeps it alive
+        # instead, so detach it from any QObject parent.
+        if thread.parent() is not None:
+            thread.setParent(None)
         thread.start()
         self.jobs_changed.emit(self.running_count())
         return thread
 
-    def _release(self, key: int) -> None:
+    def _release(self, key: int, thread: QtCore.QThread | None = None) -> None:
         job = self._jobs.get(key)
         if job is None:
+            return
+        if thread is not None and job.thread is not thread:
+            # A late finished() from a thread that was already pruned, whose
+            # id() has since been reused by a new job: not ours to release
+            # (and waiting on the new, running thread would block the GUI).
             return
         try:
             # finished() is emitted just before the thread exits; make sure it
@@ -207,14 +218,18 @@ class JobRegistry(QtCore.QObject):
 class _FinishWatcher(QtCore.QObject):
     """Receives one thread's C++ ``finished()`` on the GUI thread."""
 
-    def __init__(self, registry: JobRegistry, key: int) -> None:
+    def __init__(self, registry: JobRegistry, key: int, thread: QtCore.QThread) -> None:
         super().__init__(registry)
         self._registry = registry
         self._key = key
+        self._thread_ref = weakref.ref(thread)
 
     @QtCore.Slot()
     def on_finished(self) -> None:
-        self._registry._release(self._key)
+        thread = self._thread_ref()
+        if thread is None:
+            return
+        self._registry._release(self._key, thread)
 
 
 def cancel_thread(thread: QtCore.QThread) -> None:

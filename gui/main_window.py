@@ -459,39 +459,44 @@ class AlphaDEXWindow(QtWidgets.QMainWindow):
     # way through moving files. Now: ask, cancel cooperatively, keep the
     # window alive until every job has stopped, then shut workspaces down.
 
+    # Seconds to wait for cancelled jobs before offering "Quit anyway".
+    CLOSE_PATIENCE_S = 20.0
+
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # noqa: N802
         from gui.workers import job_registry
 
         registry = job_registry()
         jobs = registry.jobs()
         if jobs:
-            # Read-only jobs (scans, previews, art loads) are cancelled without
-            # asking; only work that may be writing files needs the user's OK.
-            asking = [j for j in jobs if j.ask_before_quit]
-            if not asking and not getattr(self, "_closing", False):
-                self._closing = True
-                registry.cancel_all()
             if not getattr(self, "_closing", False):
-                names = ", ".join(sorted({j.name for j in asking}))
-                answer = QtWidgets.QMessageBox.question(
-                    self,
-                    "Background tasks running",
-                    f"{len(asking)} background task(s) are still running:\n{names}\n\n"
-                    "Stop them and quit? AlphaDEX will close as soon as they "
-                    "reach a safe stopping point.",
-                    QtWidgets.QMessageBox.StandardButton.Yes
-                    | QtWidgets.QMessageBox.StandardButton.No,
-                    QtWidgets.QMessageBox.StandardButton.No,
-                )
-                if answer != QtWidgets.QMessageBox.StandardButton.Yes:
-                    event.ignore()
-                    return
-                self._closing = True
-                registry.cancel_all()
+                # Read-only jobs (scans, previews, art loads) are cancelled
+                # without asking; only work that may be writing files needs OK.
+                asking = [j for j in jobs if j.ask_before_quit]
+                if asking:
+                    names = ", ".join(sorted({j.name for j in asking}))
+                    answer = QtWidgets.QMessageBox.question(
+                        self,
+                        "Background tasks running",
+                        f"{len(asking)} background task(s) are still running:\n{names}\n\n"
+                        "Stop them and quit? AlphaDEX will close as soon as they "
+                        "reach a safe stopping point.",
+                        QtWidgets.QMessageBox.StandardButton.Yes
+                        | QtWidgets.QMessageBox.StandardButton.No,
+                        QtWidgets.QMessageBox.StandardButton.No,
+                    )
+                    if answer != QtWidgets.QMessageBox.StandardButton.Yes:
+                        event.ignore()
+                        return
+                self._begin_closing()
+            # Cancel on every retry: also catches anything that started after
+            # closing began (nothing can be started from the UI now, but a
+            # job may chain another).
+            registry.cancel_all()
             self.statusBar().showMessage(
                 f"Stopping {len(jobs)} background task(s) before closing…"
             )
             event.ignore()
+            self._maybe_offer_force_quit(jobs)
             QtCore.QTimer.singleShot(100, self.close)
             return
 
@@ -505,6 +510,58 @@ class AlphaDEXWindow(QtWidgets.QMainWindow):
             self._set_keyboard_filter(False)
         super().closeEvent(event)
 
+    def _begin_closing(self) -> None:
+        """Enter the stopping state: no new work can be started from the UI."""
+        import time
+
+        self._closing = True
+        self._closing_since = time.monotonic()
+        central = self.centralWidget()
+        if central is not None:
+            central.setEnabled(False)
+
+    def _maybe_offer_force_quit(self, jobs) -> None:
+        """A job that ignores cancel (a hung network drive, a long native
+        clustering stage) must not trap the user in a window that never
+        closes. After CLOSE_PATIENCE_S, ask once whether to quit anyway."""
+        import time
+
+        since = getattr(self, "_closing_since", None)
+        if since is None or getattr(self, "_force_quit_asked", False):
+            return
+        if time.monotonic() - since < self.CLOSE_PATIENCE_S:
+            return
+        self._force_quit_asked = True
+        names = ", ".join(sorted({j.name for j in jobs}))
+        answer = QtWidgets.QMessageBox.question(
+            self,
+            "Tasks are not stopping",
+            f"Still waiting for: {names}\n\n"
+            "They have not reached a safe stopping point. Quit anyway? A file "
+            "that is being copied or rewritten right now may be left incomplete.",
+            QtWidgets.QMessageBox.StandardButton.Yes
+            | QtWidgets.QMessageBox.StandardButton.No,
+            QtWidgets.QMessageBox.StandardButton.No,
+        )
+        if answer == QtWidgets.QMessageBox.StandardButton.Yes:
+            self._force_quit(names)
+
+    @staticmethod
+    def _force_quit(names: str) -> None:
+        """Leave immediately. Interpreter shutdown would destroy the still
+        running QThreads (a qFatal abort), so skip it explicitly."""
+        try:
+            import crash_logger
+            log = getattr(crash_logger, "log_event", None)
+            if callable(log):
+                log(f"Forced quit while tasks were running: {names}")
+        except Exception:  # noqa: BLE001
+            pass
+        print(f"[AlphaDEX] Forced quit while tasks were running: {names}", file=sys.stderr)
+        sys.stderr.flush()
+        os._exit(3)
+
+    # ── Public API ────────────────────────────────────────────────────────
     # ── Public API ────────────────────────────────────────────────────────
 
     def set_library(self, path: str) -> bool:

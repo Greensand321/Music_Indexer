@@ -236,3 +236,77 @@ def test_tag_write_guard_also_blocks_file_moves(qtbot, dialogs):
         assert "Tag Fixer apply" in dialogs.calls_of("information")[-1].text
     finally:
         tag_write_guard.release("Tag Fixer apply")
+
+
+class StubbornWorker(SlowWorker):
+    """Ignores cancel() — like a job stuck on a hung network drive."""
+
+    def cancel(self) -> None:
+        self.cancel_called = True     # but don't stop
+
+
+def test_closing_locks_the_ui_and_cancels_jobs_started_later(main_window, qtbot):
+    ws = _install_job_workspace(main_window)
+    reader = SlowWorker(30.0)
+    ws._start_worker(reader, "Read-only scan", ask_before_quit=False)
+    main_window.close()
+    assert not main_window.centralWidget().isEnabled(), "no new work while stopping"
+    late = SlowWorker(30.0)          # e.g. a job chained by the cancelled one
+    ws._start_worker(late, "Late writer")
+    qtbot.waitUntil(lambda: late.cancel_called, timeout=3000)
+    qtbot.waitUntil(lambda: not main_window.isVisible(), timeout=5000)
+
+
+def test_force_quit_is_offered_when_a_job_ignores_cancel(main_window, dialogs, monkeypatch, qtbot):
+    ws = _install_job_workspace(main_window)
+    stubborn = StubbornWorker(30.0)
+    ws._start_worker(stubborn, "Stuck copy")
+    monkeypatch.setattr(type(main_window), "CLOSE_PATIENCE_S", 0.2)
+    forced = []
+    monkeypatch.setattr(type(main_window), "_force_quit", staticmethod(lambda names: forced.append(names)))
+    dialogs.answer_yes()          # "Stop them and quit?"
+    dialogs.answer_no()           # "Quit anyway?" → keep waiting
+    main_window.close()
+    qtbot.waitUntil(lambda: len(dialogs.calls_of("question")) == 2, timeout=3000)
+    assert forced == [] and main_window.isVisible()
+    assert "Stuck copy" in dialogs.calls_of("question")[1].text
+    process_events(400)
+    assert len(dialogs.calls_of("question")) == 2, "asked once, not on every retry"
+    stubborn._cancel.set()        # let the thread end so teardown is clean
+    qtbot.waitUntil(lambda: not main_window.isVisible(), timeout=5000)
+
+
+def test_force_quit_yes_exits_without_interpreter_teardown(main_window, dialogs, monkeypatch, qtbot):
+    ws = _install_job_workspace(main_window)
+    stubborn = StubbornWorker(30.0)
+    ws._start_worker(stubborn, "Stuck copy")
+    monkeypatch.setattr(type(main_window), "CLOSE_PATIENCE_S", 0.0)
+    forced = []
+    monkeypatch.setattr(type(main_window), "_force_quit", staticmethod(lambda names: forced.append(names)))
+    dialogs.answer_yes().answer_yes()
+    main_window.close()
+    qtbot.waitUntil(lambda: forced == ["Stuck copy"], timeout=3000)
+    stubborn._cancel.set()
+    qtbot.waitUntil(lambda: not main_window.isVisible(), timeout=5000)
+
+
+def test_registry_ignores_a_stale_finish_for_a_reused_key(qtbot):
+    registry = job_registry()
+    current = SlowWorker(30.0)
+    start_worker(current, name="current")
+    key = id(current)
+    stale = QtCore.QThread()      # a different thread claiming the same key
+    registry._release(key, stale)
+    assert [j.name for j in registry.jobs()] == ["current"], "stale release must be ignored"
+    current.cancel()
+    assert registry.wait_all(3000)
+
+
+def test_start_detaches_worker_from_a_widget_parent(qtbot):
+    host = QtWidgets.QWidget()
+    qtbot.addWidget(host)
+    worker = SlowWorker(0.05)
+    worker.setParent(host)
+    start_worker(worker, name="parented")
+    assert worker.parent() is None, "deleting the widget must not destroy a running thread"
+    assert job_registry().wait_all(3000)
