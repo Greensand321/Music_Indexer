@@ -2,35 +2,45 @@
 
 import os
 
+# The top-level folders the Indexer sorts tracks into (music_indexer_api):
+# most artists go to "By Artist/", artists with only a few tracks go to
+# "By Year/". A library indexed by AlphaDEX therefore has at least one of
+# them, but not necessarily both — a library with no "rare" artists never
+# gets a "By Year/" folder.
+INDEXED_LAYOUT_FOLDERS = ("By Artist", "By Year")
+
+
+def _has_layout(folder):
+    return any(os.path.isdir(os.path.join(folder, name)) for name in INDEXED_LAYOUT_FOLDERS)
+
+
 def validate_soundvault_structure(root_path):
     """
-    Check that the selected folder is already in SoundVault format, ignoring what
-    the folder itself is named. Return (True, []) if valid, or (False, [errors]) if not.
+    Check that the selected folder is already in SoundVault (AlphaDEX-indexed)
+    format, ignoring what the folder itself is named. Return (True, []) if
+    valid, or (False, [errors]) if not.
 
     Valid if either:
-      1) root_path/By Artist  AND  root_path/By Year
-      2) root_path/Music/By Artist  AND  root_path/Music/By Year
+      1) root_path contains 'By Artist/' or 'By Year/' (or both)
+      2) root_path/Music contains 'By Artist/' or 'By Year/' (or both)
 
     Otherwise, invalid.
     """
     errors = []
 
-    # Case A: Does root_path directly contain "By Artist" and "By Year"?
-    by_artist_direct = os.path.join(root_path, "By Artist")
-    by_year_direct   = os.path.join(root_path, "By Year")
-    if os.path.isdir(by_artist_direct) and os.path.isdir(by_year_direct):
+    # Case A: does root_path directly contain the indexed layout?
+    if _has_layout(root_path):
         return True, []
 
-    # Case B: Does root_path/Music contain "By Artist" and "By Year"?
+    # Case B: does root_path/Music contain it?
     music_sub = os.path.join(root_path, "Music")
-    by_artist_music = os.path.join(music_sub, "By Artist")
-    by_year_music   = os.path.join(music_sub, "By Year")
-    if os.path.isdir(music_sub) and os.path.isdir(by_artist_music) and os.path.isdir(by_year_music):
+    if os.path.isdir(music_sub) and _has_layout(music_sub):
         return True, []
 
     # Otherwise, it’s not a valid SoundVault
-    errors.append("Missing required subfolders for a SoundVault.")
-    errors.append("Either:")
-    errors.append("  • Select the folder that directly contains 'By Artist/' and 'By Year/',")
-    errors.append("  • Or select a parent folder whose 'Music/' child contains 'By Artist/' & 'By Year/'.")
+    errors.append("This folder has not been organised by the AlphaDEX Indexer yet.")
+    errors.append("An indexed library contains 'By Artist/' and/or 'By Year/'. Either:")
+    errors.append("  • Select the folder that directly contains them,")
+    errors.append("  • Or select a parent folder whose 'Music/' child contains them,")
+    errors.append("  • Or run the Indexer on this folder to create that layout.")
     return False, errors

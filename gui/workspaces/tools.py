@@ -1,14 +1,17 @@
 """Tools workspace — export utilities, diagnostics, and debug tools."""
 from __future__ import annotations
 
+import inspect
 import os
-import re
+import threading
 from collections import Counter
 from pathlib import Path
 
 from gui.compat import QtCore, QtGui, QtWidgets, Signal, Slot
 from gui.themes.manager import get_manager
 from gui.workspaces.base import WorkspaceBase
+from gui.workspaces.label_tone import flash_tone, refresh_tones, set_tone
+from utils.reserved_folders import NON_LIBRARY_FOLDERS, walk_library
 
 _SUPPORTED_EXTS = {".mp3", ".flac", ".m4a", ".aac", ".ogg", ".wav", ".opus"}
 
@@ -28,59 +31,113 @@ def _rgba(hex_color: str, alpha: float) -> str:
 
 # ── Background workers ─────────────────────────────────────────────────────────
 
-class FileCleanupWorker(QtCore.QThread):
-    log_line = Signal(str)
-    finished = Signal(bool, str)
+def _read_title(path: str) -> object:
+    """Title tag of ``path`` (or None) \u2014 lets File Cleanup keep real titles
+    such as "Love Song (2)" whose suffix is part of the tag."""
+    from utils.audio_metadata_reader import read_tags
+    return read_tags(path).get("title")
 
-    def __init__(self, library_path: str) -> None:
-        super().__init__()
+
+def _update_playlists(rename_map: dict[str, str], library_root: str) -> object:
+    """Call ``playlist_generator.update_playlists`` with the library root.
+
+    The root is passed explicitly (TOOL-03: deriving it from the renamed paths
+    found ``<album>/Playlists`` and silently did nothing). Older signatures
+    without ``library_root`` are still supported.
+    """
+    from playlist_generator import update_playlists
+    try:
+        params = inspect.signature(update_playlists).parameters
+    except (TypeError, ValueError):  # pragma: no cover - builtins / C functions
+        params = {}
+    if "library_root" in params:
+        return update_playlists(rename_map, library_root=library_root)
+    return update_playlists(rename_map)
+
+
+class FileCleanupPlanWorker(QtCore.QThread):
+    """Dry run: compute the File Cleanup rename plan. Touches nothing."""
+
+    plan_ready = Signal(object)   # file_cleanup.CleanupPlan
+    error = Signal(str)
+
+    def __init__(self, library_path: str, parent: QtCore.QObject | None = None) -> None:
+        super().__init__(parent)
         self.library_path = library_path
+        self._cancel = threading.Event()
+
+    def cancel(self) -> None:
+        self._cancel.set()
 
     def run(self) -> None:
-        numeric_suffix = re.compile(r"\s*\(\d+\)$")
-        copy_suffix = re.compile(r"\s*(?:-\s*)?copy(?:\s*\(\d+\))?$", re.IGNORECASE)
-        rename_map: dict[str, str] = {}
-        renamed = skipped = conflicts = errors = 0
+        try:
+            from file_cleanup import build_cleanup_plan
+            plan = build_cleanup_plan(
+                self.library_path, read_title=_read_title, cancel_event=self._cancel
+            )
+        except Exception as exc:  # noqa: BLE001
+            self.error.emit(str(exc))
+            return
+        self.plan_ready.emit(plan)
 
-        for root, _dirs, files in os.walk(self.library_path):
-            for filename in files:
-                ext = os.path.splitext(filename)[1].lower()
-                if ext not in _SUPPORTED_EXTS:
-                    continue
-                stem = os.path.splitext(filename)[0]
-                new_stem = copy_suffix.sub("", stem)
-                new_stem = numeric_suffix.sub("", new_stem)
-                if new_stem == stem:
-                    skipped += 1
-                    continue
-                new_name = f"{new_stem}{ext}"
-                src = os.path.join(root, filename)
-                dst = os.path.join(root, new_name)
-                if os.path.exists(dst):
-                    self.log_line.emit(f"! Conflict: {filename} \u2192 {new_name} already exists")
-                    conflicts += 1
-                    continue
-                try:
-                    os.rename(src, dst)
-                    self.log_line.emit(f"\u2192 {filename} \u2192 {new_name}")
-                    rename_map[src] = dst
-                    renamed += 1
-                except OSError as exc:
-                    self.log_line.emit(f"! Error renaming {filename}: {exc}")
-                    errors += 1
 
-        if rename_map:
+class FileCleanupWorker(QtCore.QThread):
+    """Execute exactly a previewed File Cleanup plan, then patch playlists."""
+
+    log_line = Signal(str)
+    finished = Signal(bool, str)   # (success, summary message)
+    result_ready = Signal(object)  # file_cleanup.CleanupResult
+
+    def __init__(self, plan, parent: QtCore.QObject | None = None) -> None:
+        super().__init__(parent)
+        self.plan = plan
+        self._cancel = threading.Event()
+
+    def cancel(self) -> None:
+        self._cancel.set()
+
+    def _on_item(self, item, outcome: str) -> None:
+        old, new = os.path.basename(item.src), os.path.basename(item.dst)
+        if outcome == "renamed":
+            self.log_line.emit(f"\u2192 {old} \u2192 {new}")
+        else:
+            self.log_line.emit(f"! {old}: {outcome}")
+
+    def run(self) -> None:
+        from file_cleanup import execute_cleanup_plan
+        try:
+            result = execute_cleanup_plan(
+                self.plan, cancel_event=self._cancel, on_item=self._on_item
+            )
+        except Exception as exc:  # noqa: BLE001
+            self.finished.emit(False, f"Cleanup failed: {exc}")
+            return
+
+        playlist_note = ""
+        if result.renamed:
             try:
-                from playlist_generator import update_playlists
-                update_playlists(rename_map)
-                self.log_line.emit("\u2713 Updated playlists")
+                changed = _update_playlists(result.renamed, self.plan.library_root)
             except Exception as exc:  # noqa: BLE001
+                playlist_note = f" Playlist update failed: {exc}."
                 self.log_line.emit(f"! Playlist update failed: {exc}")
+            else:
+                if isinstance(changed, int) and not isinstance(changed, bool):
+                    playlist_note = f" {changed} playlist(s) updated."
+                else:
+                    playlist_note = " Playlists checked."
+                self.log_line.emit(playlist_note.strip())
 
-        self.finished.emit(
-            True,
-            f"Done: {renamed} renamed, {skipped} unchanged, {conflicts} conflicts, {errors} errors."
-        )
+        parts = [f"{len(result.renamed)} renamed"]
+        if result.failed:
+            parts.append(f"{len(result.failed)} not renamed")
+        if result.skipped_collisions:
+            parts.append(f"{result.skipped_collisions} collisions skipped")
+        head = "Cancelled" if result.cancelled else "Done"
+        message = f"{head}: {', '.join(parts)}.{playlist_note}"
+        if result.log_path:
+            message += f" Undo log: {result.log_path}"
+        self.result_ready.emit(result)
+        self.finished.emit(not result.failed and not result.cancelled, message)
 
 
 class ArtistTitleWorker(QtCore.QThread):
@@ -90,6 +147,7 @@ class ArtistTitleWorker(QtCore.QThread):
     log_line = Signal(str)
     finished = Signal(str, int, int)  # (output_path, entry_count, error_count)
     error = Signal(str)
+    cancelled = Signal()
 
     def __init__(
         self,
@@ -102,6 +160,10 @@ class ArtistTitleWorker(QtCore.QThread):
         self.library_path = library_path
         self.exclude_flac = exclude_flac
         self.add_album_duplicates = add_album_duplicates
+        self._cancel = threading.Event()
+
+    def cancel(self) -> None:
+        self._cancel.set()
 
     @staticmethod
     def _clean(value: object) -> str | None:
@@ -134,7 +196,11 @@ class ArtistTitleWorker(QtCore.QThread):
         from utils.opus_metadata_reader import read_opus_metadata
 
         audio_files: list[str] = []
-        for dirpath, _, files in os.walk(self.library_path):
+        # Quarantined duplicate losers, Trash and Docs are not library tracks.
+        for dirpath, _, files in walk_library(self.library_path, NON_LIBRARY_FOLDERS):
+            if self._cancel.is_set():
+                self.cancelled.emit()
+                return
             for filename in files:
                 ext = os.path.splitext(filename)[1].lower()
                 if self.exclude_flac and ext == ".flac":
@@ -149,6 +215,9 @@ class ArtistTitleWorker(QtCore.QThread):
         error_count = 0
 
         for idx, full_path in enumerate(audio_files, start=1):
+            if self._cancel.is_set():
+                self.cancelled.emit()
+                return
             ext = os.path.splitext(full_path)[1].lower()
             filename = os.path.basename(full_path)
 
@@ -203,6 +272,57 @@ class ArtistTitleWorker(QtCore.QThread):
         out.write_text("\n".join(entries), encoding="utf-8")
 
         self.finished.emit(str(out), len(entries), error_count)
+
+
+class CodecExportWorker(QtCore.QThread):
+    """Background thread for the Codec List export (was a GUI-thread walk)."""
+
+    finished = Signal(str, int)   # (output_path, file_count)
+    error = Signal(str)
+    cancelled = Signal()
+
+    def __init__(
+        self,
+        library_path: str,
+        extensions: set[str],
+        omit_paths: bool,
+        parent: QtCore.QObject | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.library_path = library_path
+        self.extensions = set(extensions)
+        self.omit_paths = omit_paths
+        self._cancel = threading.Event()
+
+    def cancel(self) -> None:
+        self._cancel.set()
+
+    def run(self) -> None:
+        try:
+            by_ext: dict[str, list[str]] = {e: [] for e in sorted(self.extensions)}
+            total = 0
+            for dirpath, _, files in walk_library(self.library_path, NON_LIBRARY_FOLDERS):
+                if self._cancel.is_set():
+                    self.cancelled.emit()
+                    return
+                for f in files:
+                    ext = os.path.splitext(f)[1].lower()
+                    if ext in by_ext:
+                        by_ext[ext].append(f if self.omit_paths else os.path.join(dirpath, f))
+                        total += 1
+
+            out = Path(self.library_path) / "Docs" / "codec_file_list.txt"
+            out.parent.mkdir(parents=True, exist_ok=True)
+            lines: list[str] = []
+            for ext in sorted(by_ext):
+                lines.append(f"=== {ext} ({len(by_ext[ext])} files) ===")
+                lines.extend(sorted(by_ext[ext]))
+                lines.append("")
+            out.write_text("\n".join(lines), encoding="utf-8")
+        except Exception as exc:  # noqa: BLE001
+            self.error.emit(str(exc))
+            return
+        self.finished.emit(str(out), total)
 
 
 class _GlassBadge(QtWidgets.QWidget):
@@ -267,10 +387,11 @@ class _GlassResultChip(QtWidgets.QWidget):
     SUCCESS = 1
     ERROR   = 2
 
-    _COLOR = {
-        NEUTRAL: "#94a3b8",   
-        SUCCESS: "#22c55e",   
-        ERROR:   "#ef4444",   
+    # Theme token per state (read at paint time, so theme switches apply).
+    _TOKEN = {
+        NEUTRAL: "text_muted",
+        SUCCESS: "success",
+        ERROR:   "danger",
     }
 
     def __init__(self, parent=None):
@@ -278,7 +399,22 @@ class _GlassResultChip(QtWidgets.QWidget):
         self._text  = "\u29d6  Idle"
         self._state = self.NEUTRAL
         self._opacity = 1.0
-        self._anim: QtCore.QVariantAnimation | None = None
+        self._pending: tuple[str, int] | None = None
+        # Two long-lived, parented animations reused for every transition.
+        # (A stored reference to a DeleteWhenStopped animation dangled after
+        # the first transition, so the second one raised RuntimeError \u2014 DS-06.)
+        self._fade_out = QtCore.QVariantAnimation(self)
+        self._fade_out.setEndValue(0.0)
+        self._fade_out.setDuration(160)
+        self._fade_out.setEasingCurve(QtCore.QEasingCurve.Type.OutCubic)
+        self._fade_out.valueChanged.connect(self._on_opacity)
+        self._fade_out.finished.connect(self._swap)
+        self._fade_in = QtCore.QVariantAnimation(self)
+        self._fade_in.setStartValue(0.0)
+        self._fade_in.setEndValue(1.0)
+        self._fade_in.setDuration(260)
+        self._fade_in.setEasingCurve(QtCore.QEasingCurve.Type.OutCubic)
+        self._fade_in.valueChanged.connect(self._on_opacity)
         self.setFixedHeight(26)
         self._resize()
         from gui.themes.manager import get_manager
@@ -309,32 +445,40 @@ class _GlassResultChip(QtWidgets.QWidget):
     def show_error(self, text: str = "\u2717  Error"):
         self._transition(text, self.ERROR)
 
+    @property
+    def text(self) -> str:
+        """The text the chip shows (or is transitioning to)."""
+        return self._pending[0] if self._pending else self._text
+
+    @property
+    def state(self) -> int:
+        return self._pending[1] if self._pending else self._state
+
     def _transition(self, text: str, state: int):
-        if self._anim:
-            self._anim.stop()
-        a = QtCore.QVariantAnimation(self)
-        a.setStartValue(self._opacity)
-        a.setEndValue(0.0)
-        a.setDuration(160)
-        a.setEasingCurve(QtCore.QEasingCurve.Type.OutCubic)
-        a.valueChanged.connect(lambda v: self._set_op(float(v)))
+        self._pending = (text, state)
+        self._fade_in.stop()
+        if self._fade_out.state() == QtCore.QAbstractAnimation.State.Running:
+            return  # the running fade-out will swap in the newest text
+        if not self.isVisible():
+            self._swap()        # nothing to animate on a hidden chip
+            self._set_op(1.0)
+            return
+        self._fade_out.setStartValue(self._opacity)
+        self._fade_out.start()
 
-        def _swap():
-            self._text  = text
-            self._state = state
-            self._resize()
-            b = QtCore.QVariantAnimation(self)
-            b.setStartValue(0.0)
-            b.setEndValue(1.0)
-            b.setDuration(260)
-            b.setEasingCurve(QtCore.QEasingCurve.Type.OutCubic)
-            b.valueChanged.connect(lambda v: self._set_op(float(v)))
-            b.start(QtCore.QAbstractAnimation.DeletionPolicy.DeleteWhenStopped)
-            self._anim = b
+    def _swap(self) -> None:
+        if self._pending is None:
+            return
+        self._text, self._state = self._pending
+        self._pending = None
+        self._resize()
+        if self.isVisible():
+            self._fade_in.start()
+        else:
+            self._set_op(1.0)
 
-        a.finished.connect(_swap)
-        a.start(QtCore.QAbstractAnimation.DeletionPolicy.DeleteWhenStopped)
-        self._anim = a
+    def _on_opacity(self, v) -> None:
+        self._set_op(float(v))
 
     def _set_op(self, v: float):
         self._opacity = v
@@ -348,7 +492,7 @@ class _GlassResultChip(QtWidgets.QWidget):
         w, h = float(self.width()), float(self.height())
         r    = QtCore.QRectF(0, 0, w, h)
         rad  = h / 2.0
-        ac   = QtGui.QColor(self._COLOR[self._state])
+        ac   = QtGui.QColor(getattr(get_manager().current, self._TOKEN[self._state]))
 
         fill = QtGui.QColor(ac.red(), ac.green(), ac.blue(), 38)
         p.setBrush(fill); p.setPen(QtCore.Qt.PenStyle.NoPen)
@@ -412,10 +556,12 @@ class ToolTile(QtWidgets.QFrame):
         self._footer_buttons: list[QtWidgets.QPushButton] = []
         self._drawer_open = False
 
+        # Hover-glow animation timer. It only runs while the glow is actually
+        # moving (hover, mouse move, settling back after leave) and never while
+        # the tile is hidden — it used to tick at 60 Hz forever (DS-09/TOOL-18).
         self._timer = QtCore.QTimer(self)
         self._timer.setInterval(16)
         self._timer.timeout.connect(self._tick)
-        self._timer.start()
 
         outer = QtWidgets.QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -512,15 +658,37 @@ class ToolTile(QtWidgets.QFrame):
 
     def mouseMoveEvent(self, e):
         self._target_pos = e.position()
+        self._ensure_ticking()
         super().mouseMoveEvent(e)
 
     def enterEvent(self, e):
         self._is_hovered = True
+        self._ensure_ticking()
         super().enterEvent(e)
 
     def leaveEvent(self, e):
         self._is_hovered = False
+        self._ensure_ticking()
         super().leaveEvent(e)
+
+    def hideEvent(self, e):  # noqa: N802
+        self._timer.stop()
+        self._is_hovered = False
+        super().hideEvent(e)
+
+    def showEvent(self, e):  # noqa: N802
+        super().showEvent(e)
+        # Resume settling if the glow was left mid-way when the page was hidden.
+        if self._hover_t > 0.001:
+            self._ensure_ticking()
+
+    def _ensure_ticking(self) -> None:
+        if self.isVisible() and not self._timer.isActive():
+            self._timer.start()
+
+    @property
+    def glow_animating(self) -> bool:
+        return self._timer.isActive()
 
     def _tick(self):
         target_h = 1.0 if self._is_hovered else 0.0
@@ -535,9 +703,12 @@ class ToolTile(QtWidgets.QFrame):
         self._glow_pos.setX(self._glow_pos.x() + dx * 0.15)
         self._glow_pos.setY(self._glow_pos.y() + dy * 0.15)
 
-        # Skip repaint when nothing is animating
+        # Converged: snap to the target and stop the timer until the next
+        # enter / move / leave event.
         if abs(hover_delta) < 0.001 and abs(dx) < 0.5 and abs(dy) < 0.5:
-            return
+            self._hover_t = target_h
+            self._glow_pos = QtCore.QPointF(self._target_pos)
+            self._timer.stop()
         self.update()
 
     def paintEvent(self, e):  # noqa: N802
@@ -562,8 +733,9 @@ class ToolTile(QtWidgets.QFrame):
         p.drawRect(inner)
 
         t_alpha = 0.1 + ht * 0.05
-        is_dark = getattr(t, "is_dark", True)
-        if is_dark:
+        # ThemeTokens has ``variant`` ("dark"/"light"), not ``is_dark``: the old
+        # getattr fallback gave every light theme the dark tint (DS-08/TOOL-15).
+        if t.variant == "dark":
             tint_color = QtGui.QColor(0, 0, 0, int(t_alpha * 255))
         else:
             tint_color = QtGui.QColor(255, 255, 255, int(t_alpha * 255))
@@ -660,18 +832,33 @@ class ToolTile(QtWidgets.QFrame):
         for btn in self._footer_buttons:
             btn.setEnabled(not running)
 
-    def flash_status(self, from_hex: str, duration: int = 1600) -> None:
-        """Animate status_label colour from from_hex → theme text_secondary."""
-        t = get_manager().current
-        anim = QtCore.QVariantAnimation(self)
-        anim.setStartValue(QtGui.QColor(from_hex))
-        anim.setEndValue(QtGui.QColor(t.text_secondary))
-        anim.setDuration(duration)
-        anim.setEasingCurve(QtCore.QEasingCurve.Type.OutCubic)
-        anim.valueChanged.connect(
-            lambda c: self.status_label.setStyleSheet(f"color: {c.name()};")
-        )
-        anim.start(QtCore.QAbstractAnimation.DeletionPolicy.DeleteWhenStopped)
+    def flash_status(self, from_tone: str, duration: int = 1600) -> None:
+        """Fade status_label from a theme tone ("success", "danger", …) back to
+        the secondary text colour (one reused animation; palette only)."""
+        flash_tone(self.status_label, from_tone, "secondary", duration)
+
+    def report(self, state: str, text: str, tone: str | None = None) -> None:
+        """Show a run's outcome on the status chip and the status label.
+
+        ``state`` is "running", "ok", "error", "cancelled" or "idle".
+        (The chip used to say "Ready." forever — TOOL-17.)
+        """
+        chip = self.status_chip
+        if state == "ok":
+            chip.show_success("✓  Done")
+        elif state == "error":
+            chip.show_error("✗  Error")
+        elif state == "running":
+            chip.show_neutral("⧖  Running…")
+        elif state == "cancelled":
+            chip.show_neutral("Cancelled")
+        else:
+            chip.show_neutral("Ready.")
+        self.status_label.setText(text)
+        if tone:
+            self.flash_status(tone)
+        else:
+            set_tone(self.status_label, "secondary")
 
     # ── Text scale ────────────────────────────────────────────────────────
 
@@ -884,13 +1071,17 @@ class ToolsWorkspace(WorkspaceBase):
     ) -> None:
         super().__init__(library_path, parent)
         self._cleanup_worker: FileCleanupWorker | None = None
+        self._cleanup_plan_worker: FileCleanupPlanWorker | None = None
         self._at_worker: ArtistTitleWorker | None = None
-        self._at_open_connected: bool = False
-        self._at_folder_connected: bool = False
-        self._codec_open_connected: bool = False
-        self._codec_folder_connected: bool = False
+        self._codec_worker: CodecExportWorker | None = None
+        # Last output files (the Open buttons read these; no re-connecting lambdas)
+        self._at_out_path: str | None = None
+        self._codec_out_path: str | None = None
+        # One live dialog per diagnostic tool (see _open_diag_dialog)
+        self._diag_dialogs: dict[str, QtWidgets.QDialog] = {}
         # Tile references (assigned by _build_*_tile helpers)
         self._at_tile: ToolTile | None = None
+        self._codec_tile: ToolTile | None = None
         self._cleanup_tile: ToolTile | None = None
         # Codec chip checkboxes for theme-refresh
         self._codec_chips: dict[str, QtWidgets.QCheckBox] = {}
@@ -936,11 +1127,17 @@ class ToolsWorkspace(WorkspaceBase):
         self._at_log    = tile.log_box
         self._at_prog   = tile.progress_bar
 
-        tile.set_run_button("Export", self._on_export_at)
+        self._at_run_btn = tile.set_run_button("Export", self._on_export_at)
+        self._at_cancel_btn = tile.add_secondary_button("Cancel")
+        self._at_cancel_btn.setObjectName("atCancelBtn")
+        self._at_cancel_btn.setEnabled(False)
+        self._at_cancel_btn.clicked.connect(self._on_cancel_at)
         self._at_open = tile.add_secondary_button("Open File")
         self._at_open.setEnabled(False)
+        self._at_open.clicked.connect(lambda: self._open_file(self._at_out_path))
         self._at_folder = tile.add_icon_button("\U0001f4c1", "Open folder")
         self._at_folder.setEnabled(False)
+        self._at_folder.clicked.connect(lambda: self._open_folder(self._at_out_path))
         tile.finish_footer()
         return tile
 
@@ -949,6 +1146,7 @@ class ToolsWorkspace(WorkspaceBase):
             "\u2261", "Codec List Export",
             "Export a grouped list of all tracks by codec format.",
         )
+        self._codec_tile = tile
 
         chips_row = QtWidgets.QHBoxLayout()
         chips_row.setSpacing(6)
@@ -963,26 +1161,33 @@ class ToolsWorkspace(WorkspaceBase):
         self._omit_paths_cb = _PillToggle("Filenames only (no full paths)")
         tile.add_option(self._omit_paths_cb)
 
-        # Status label always visible in options area (export is synchronous)
+        # Status label always visible in the options area
         self._codec_status = QtWidgets.QLabel("Ready.")
         self._codec_status.setObjectName("statusLabel")
         tile.add_option(self._codec_status)
         self._codec_prog = tile.progress_bar   # available but drawer stays closed
 
-        tile.set_run_button("Export", self._on_export_codec)
+        self._codec_run_btn = tile.set_run_button("Export", self._on_export_codec)
+        self._codec_cancel_btn = tile.add_secondary_button("Cancel")
+        self._codec_cancel_btn.setObjectName("codecCancelBtn")
+        self._codec_cancel_btn.setEnabled(False)
+        self._codec_cancel_btn.clicked.connect(self._on_cancel_codec)
         self._codec_open = tile.add_secondary_button("Open File")
         self._codec_open.setEnabled(False)
+        self._codec_open.clicked.connect(lambda: self._open_file(self._codec_out_path))
         self._codec_folder = tile.add_icon_button("\U0001f4c1", "Open folder")
         self._codec_folder.setEnabled(False)
+        self._codec_folder.clicked.connect(lambda: self._open_folder(self._codec_out_path))
         tile.finish_footer()
         return tile
 
     def _build_cleanup_tile(self) -> ToolTile:
         tile = ToolTile(
             "\u2736", "File Cleanup",
-            "Remove trailing \u2018 (1)\u2019, \u2018 (2)\u2019, \u2018 copy\u2019 suffixes "
-            "from audio filenames left by macOS Finder and Windows Explorer. "
-            "Playlists referencing renamed files are updated automatically.",
+            "Remove trailing \u2018 (1)\u2019, \u2018 - Copy\u2019, \u2018 copy\u2019 suffixes "
+            "left by browsers, Windows Explorer and macOS Finder. You review every "
+            "rename before anything changes; reserved folders are skipped, a log "
+            "is written to Docs/, and playlists are updated.",
         )
         self._cleanup_tile = tile
 
@@ -990,7 +1195,11 @@ class ToolsWorkspace(WorkspaceBase):
         self._cleanup_status = tile.status_label
         self._cleanup_log    = tile.log_box
 
-        self._cleanup_run_btn = tile.set_run_button("Run Cleanup", self._on_file_cleanup)
+        self._cleanup_run_btn = tile.set_run_button("Preview Cleanup\u2026", self._on_file_cleanup)
+        self._cleanup_cancel_btn = tile.add_secondary_button("Cancel")
+        self._cleanup_cancel_btn.setObjectName("cleanupCancelBtn")
+        self._cleanup_cancel_btn.setEnabled(False)
+        self._cleanup_cancel_btn.clicked.connect(self._on_cancel_cleanup)
         tile.finish_footer()
         return tile
 
@@ -1005,6 +1214,10 @@ class ToolsWorkspace(WorkspaceBase):
 
         SP = QtWidgets.QStyle.StandardPixmap
         btn = AnimatedButton("", None)
+        # The visible text is a child QLabel; give the button a findable name
+        # and an accessible name.
+        btn.setObjectName("diag_" + "".join(ch for ch in label.lower() if ch.isalnum()))
+        btn.setAccessibleName(label.rstrip("…"))
         btn.setFixedHeight(72)
         btn.setMinimumWidth(80)
         btn.setSizePolicy(
@@ -1084,6 +1297,9 @@ class ToolsWorkspace(WorkspaceBase):
 
         tile.add_option_layout(grid)
         tile.hide_footer()
+        # A launcher has no single run status; a permanent "Ready." chip
+        # would misreport (TOOL-17).
+        tile.status_chip.setVisible(False)
         return tile
 
     def _build_validator_tile(self) -> ToolTile:
@@ -1103,6 +1319,7 @@ class ToolsWorkspace(WorkspaceBase):
 
         tile.set_run_button("Run Validator", self._on_validate)
         tile.finish_footer()
+        self._val_tile = tile
         return tile
 
     # ── Codec chip helpers ─────────────────────────────────────────────────
@@ -1155,17 +1372,13 @@ class ToolsWorkspace(WorkspaceBase):
         anim.finished.connect(lambda: card.setMaximumHeight(16777215))
         anim.start(QtCore.QAbstractAnimation.DeletionPolicy.DeleteWhenStopped)
 
-    def _flash_label(self, label: QtWidgets.QLabel, from_hex: str, duration: int = 1600) -> None:
-        t = get_manager().current
-        anim = QtCore.QVariantAnimation(self)
-        anim.setStartValue(QtGui.QColor(from_hex))
-        anim.setEndValue(QtGui.QColor(t.text_secondary))
-        anim.setDuration(duration)
-        anim.setEasingCurve(QtCore.QEasingCurve.Type.OutCubic)
-        anim.valueChanged.connect(
-            lambda c: label.setStyleSheet(f"color: {c.name()}; font-size: 12px;")
-        )
-        anim.start(QtCore.QAbstractAnimation.DeletionPolicy.DeleteWhenStopped)
+    def _flash_label(self, label: QtWidgets.QLabel, from_tone: str, duration: int = 1600) -> None:
+        """Fade ``label`` from a theme tone back to the secondary text colour.
+
+        One reused animation per label, palette only — it used to restyle the
+        label every frame, and overlapping flashes fought each other (DS-20).
+        """
+        flash_tone(label, from_tone, "secondary", duration)
 
     # ── Theme refresh ──────────────────────────────────────────────────────
 
@@ -1173,38 +1386,77 @@ class ToolsWorkspace(WorkspaceBase):
         super()._on_theme_changed_base(tokens)
         for cb in self._codec_chips.values():
             self._refresh_chip(cb)
+        refresh_tones(self, tokens)
+
+    # ── Library change ─────────────────────────────────────────────────────
+
+    def _on_library_changed(self, path: str) -> None:
+        """A different library: stop jobs that belong to the old one and drop
+        results that point into it (Open File buttons, logs, statuses)."""
+        self.cancel_jobs()
+        self._at_out_path = None
+        self._codec_out_path = None
+        for btn in (self._at_open, self._at_folder, self._codec_open, self._codec_folder):
+            btn.setEnabled(False)
+        for log in (self._at_log, self._cleanup_log):
+            log.clear()
+        self._val_log.clear()
+        for tile in (self._at_tile, self._codec_tile, self._cleanup_tile):
+            if tile is not None:
+                tile.report("idle", "Ready.")
+        self._codec_status.setText("Ready.")
+        set_tone(self._codec_status, "secondary")
 
     # ── Slots: Artist / Title ──────────────────────────────────────────────
 
-    @Slot()
-    def _on_export_at(self) -> None:
+    def _require_library(self) -> bool:
         if not self._library_path:
             QtWidgets.QMessageBox.warning(self, "No Library", "Select a library folder first.")
+            return False
+        return True
+
+    @Slot()
+    def _on_export_at(self) -> None:
+        if not self._require_library():
             return
-        if self._at_worker and self._at_worker.isRunning():
-            return
+        if self._at_worker is not None:
+            return  # already running (the button is disabled too)
 
         self._at_log.clear()
-        self._at_status.setText("Scanning\u2026")
-        self._at_status.setStyleSheet("color: inherit; font-size: 12px;")
         self._at_prog.setValue(0)
         self._at_open.setEnabled(False)
         self._at_folder.setEnabled(False)
+        self._at_run_btn.setEnabled(False)
+        self._at_cancel_btn.setEnabled(True)
         if self._at_tile is not None:
+            self._at_tile.report("running", "Scanning…")
             self._at_tile.open_drawer()
 
-        self._at_worker = ArtistTitleWorker(
+        worker = ArtistTitleWorker(
             self._library_path,
             self._exclude_flac_cb.isChecked(),
             self._dupe_tracks_cb.isChecked(),
             parent=self,
         )
-        self._at_worker.progress.connect(self._on_at_progress)
-        self._at_worker.log_line.connect(self._at_log.appendPlainText)
-        self._at_worker.finished.connect(self._on_at_finished)
-        self._at_worker.error.connect(self._on_at_error)
-        self._at_worker.start()
-        self._log("Starting artist/title export\u2026", "info")
+        worker.progress.connect(self._on_at_progress)
+        worker.log_line.connect(self._at_log.appendPlainText)
+        worker.finished.connect(self._on_at_finished)
+        worker.error.connect(self._on_at_error)
+        worker.cancelled.connect(self._on_at_cancelled)
+        self._at_worker = worker
+        self._start_worker(worker, "Artist/Title export")
+        self._log("Starting artist/title export…", "info")
+
+    @Slot()
+    def _on_cancel_at(self) -> None:
+        if self._at_worker is not None:
+            self._at_worker.cancel()
+            self._at_cancel_btn.setEnabled(False)
+
+    def _at_done(self) -> None:
+        self._at_worker = None
+        self._at_run_btn.setEnabled(True)
+        self._at_cancel_btn.setEnabled(False)
 
     @Slot(int, int)
     def _on_at_progress(self, done: int, total: int) -> None:
@@ -1214,147 +1466,206 @@ class ToolsWorkspace(WorkspaceBase):
 
     @Slot(str, int, int)
     def _on_at_finished(self, out_path: str, entry_count: int, error_count: int) -> None:
+        self._at_done()
         self._at_prog.setValue(self._at_prog.maximum())
         note = f"  ({error_count} files skipped)" if error_count else ""
-        self._at_status.setText(f"Done \u2014 {entry_count} entries written{note}")
         self._at_log.appendPlainText(f"Export complete: {out_path}")
         if error_count:
             self._at_log.appendPlainText(f"Skipped {error_count} files due to read errors.")
-        t = get_manager().current
-        self._flash_label(self._at_status, t.success)
-
-        if self._at_open_connected:
-            try:
-                self._at_open.clicked.disconnect()
-            except RuntimeError:
-                pass
-        self._at_open.clicked.connect(lambda: self._open_file(out_path))
-        self._at_open_connected = True
+        if self._at_tile is not None:
+            self._at_tile.report("ok", f"Done — {entry_count} entries written{note}", "success")
+        self._at_out_path = out_path
         self._at_open.setEnabled(True)
-
-        if self._at_folder_connected:
-            try:
-                self._at_folder.clicked.disconnect()
-            except RuntimeError:
-                pass
-        self._at_folder.clicked.connect(lambda: self._open_folder(out_path))
-        self._at_folder_connected = True
         self._at_folder.setEnabled(True)
-        self._log(f"Artist/title export complete: {entry_count} entries \u2192 {out_path}", "ok")
-        self._at_worker = None
+        self._log(f"Artist/title export complete: {entry_count} entries → {out_path}", "ok")
 
     @Slot(str)
     def _on_at_error(self, message: str) -> None:
-        t = get_manager().current
-        self._at_status.setText(f"Error: {message}")
-        self._flash_label(self._at_status, t.danger)
+        self._at_done()
+        if self._at_tile is not None:
+            self._at_tile.report("error", f"Error: {message}", "danger")
         self._at_log.appendPlainText(f"Export failed: {message}")
         self._log(f"Artist/title export failed: {message}", "error")
-        self._at_worker = None
+
+    @Slot()
+    def _on_at_cancelled(self) -> None:
+        self._at_done()
+        if self._at_tile is not None:
+            self._at_tile.report("cancelled", "Cancelled — nothing written.", "warning")
+        self._log("Artist/title export cancelled.", "warn")
 
     # ── Slots: Codec Export ────────────────────────────────────────────────
 
     @Slot()
     def _on_export_codec(self) -> None:
-        if not self._library_path:
-            QtWidgets.QMessageBox.warning(self, "No Library", "Select a library folder first.")
+        if not self._require_library():
+            return
+        if self._codec_worker is not None:
             return
         selected_exts = {ext for ext, cb in self._codec_ext_cbs.items() if cb.isChecked()}
         if not selected_exts:
             QtWidgets.QMessageBox.warning(self, "No Codecs", "Select at least one codec.")
             return
 
-        omit_paths = self._omit_paths_cb.isChecked()
         self._codec_prog.setValue(0)
-        self._codec_status.setText("Scanning\u2026")
-        self._log("Starting codec list export\u2026", "info")
+        self._codec_status.setText("Scanning…")
+        set_tone(self._codec_status, "secondary")
+        self._codec_open.setEnabled(False)
+        self._codec_folder.setEnabled(False)
+        self._codec_run_btn.setEnabled(False)
+        self._codec_cancel_btn.setEnabled(True)
+        if self._codec_tile is not None:
+            self._codec_tile.status_chip.show_neutral("⧖  Running…")
+        self._log("Starting codec list export…", "info")
 
-        try:
-            by_ext: dict[str, list[str]] = {e: [] for e in sorted(selected_exts)}
-            total = 0
-            for dirpath, _, files in os.walk(self._library_path):
-                for f in files:
-                    ext = os.path.splitext(f)[1].lower()
-                    if ext in by_ext:
-                        path = f if omit_paths else os.path.join(dirpath, f)
-                        by_ext[ext].append(path)
-                        total += 1
+        worker = CodecExportWorker(
+            self._library_path, selected_exts, self._omit_paths_cb.isChecked(), parent=self
+        )
+        worker.finished.connect(self._on_codec_finished)
+        worker.error.connect(self._on_codec_error)
+        worker.cancelled.connect(self._on_codec_cancelled)
+        self._codec_worker = worker
+        self._start_worker(worker, "Codec list export")
 
-            out = Path(self._library_path) / "Docs" / "codec_file_list.txt"
-            out.parent.mkdir(parents=True, exist_ok=True)
-            lines: list[str] = []
-            for ext in sorted(by_ext):
-                lines.append(f"=== {ext} ({len(by_ext[ext])} files) ===")
-                lines.extend(sorted(by_ext[ext]))
-                lines.append("")
-            out.write_text("\n".join(lines), encoding="utf-8")
+    @Slot()
+    def _on_cancel_codec(self) -> None:
+        if self._codec_worker is not None:
+            self._codec_worker.cancel()
+            self._codec_cancel_btn.setEnabled(False)
 
-            self._codec_prog.setValue(100)
-            self._codec_status.setText(f"Written: {out}  ({total} files)")
-            t = get_manager().current
-            self._flash_label(self._codec_status, t.success)
+    def _codec_done(self) -> None:
+        self._codec_worker = None
+        self._codec_run_btn.setEnabled(True)
+        self._codec_cancel_btn.setEnabled(False)
 
-            if self._codec_open_connected:
-                try:
-                    self._codec_open.clicked.disconnect()
-                except RuntimeError:
-                    pass
-            self._codec_open.clicked.connect(lambda: self._open_file(str(out)))
-            self._codec_open_connected = True
-            self._codec_open.setEnabled(True)
+    @Slot(str, int)
+    def _on_codec_finished(self, out_path: str, total: int) -> None:
+        self._codec_done()
+        self._codec_prog.setValue(100)
+        self._codec_status.setText(f"Written: {out_path}  ({total} files)")
+        self._flash_label(self._codec_status, "success")
+        if self._codec_tile is not None:
+            self._codec_tile.status_chip.show_success("✓  Done")
+        self._codec_out_path = out_path
+        self._codec_open.setEnabled(True)
+        self._codec_folder.setEnabled(True)
+        self._log(f"Codec list exported: {total} files → {out_path}", "ok")
 
-            if self._codec_folder_connected:
-                try:
-                    self._codec_folder.clicked.disconnect()
-                except RuntimeError:
-                    pass
-            self._codec_folder.clicked.connect(lambda: self._open_folder(str(out)))
-            self._codec_folder_connected = True
-            self._codec_folder.setEnabled(True)
-            self._log(f"Codec list exported: {total} files \u2192 {out}", "ok")
+    @Slot(str)
+    def _on_codec_error(self, message: str) -> None:
+        self._codec_done()
+        self._codec_status.setText(message)
+        self._flash_label(self._codec_status, "danger")
+        if self._codec_tile is not None:
+            self._codec_tile.status_chip.show_error("✗  Error")
+        self._log(message, "error")
 
-        except Exception as exc:  # noqa: BLE001
-            t = get_manager().current
-            self._codec_status.setText(str(exc))
-            self._flash_label(self._codec_status, t.danger)
-            self._log(str(exc), "error")
+    @Slot()
+    def _on_codec_cancelled(self) -> None:
+        self._codec_done()
+        self._codec_status.setText("Cancelled — nothing written.")
+        set_tone(self._codec_status, "secondary")
+        if self._codec_tile is not None:
+            self._codec_tile.status_chip.show_neutral("Cancelled")
+        self._log("Codec list export cancelled.", "warn")
 
-    # ── Slots: File Cleanup ────────────────────────────────────────────────
+    # ── Slots: File Cleanup (plan → preview → confirm → execute → log) ────
+
+    def _cleanup_set_running(self, running: bool) -> None:
+        self._cleanup_run_btn.setEnabled(not running)
+        self._cleanup_cancel_btn.setEnabled(running)
 
     @Slot()
     def _on_file_cleanup(self) -> None:
-        if not self._library_path:
-            QtWidgets.QMessageBox.warning(self, "No Library", "Select a library folder first.")
+        if not self._require_library():
             return
-        reply = QtWidgets.QMessageBox.question(
-            self, "Run File Cleanup",
-            "This will rename files by removing trailing copy/numeric suffixes.\n\nProceed?",
-            QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
-        )
-        if reply != QtWidgets.QMessageBox.StandardButton.Yes:
+        if self._cleanup_plan_worker is not None or self._cleanup_worker is not None:
             return
 
         self._cleanup_log.clear()
-        self._cleanup_status.setText("Running\u2026")
-        self._cleanup_status.setStyleSheet("color: inherit; font-size: 12px;")
-        self._cleanup_run_btn.setEnabled(False)
+        self._cleanup_set_running(True)
         if self._cleanup_tile is not None:
+            self._cleanup_tile.report("running", "Looking for copy suffixes… (nothing is renamed yet)")
             self._cleanup_tile.open_drawer()
-        self._log("Starting file cleanup\u2026", "info")
+        self._log("File cleanup: building a rename preview…", "info")
 
-        self._cleanup_worker = FileCleanupWorker(self._library_path)
-        self._cleanup_worker.log_line.connect(self._cleanup_log.appendPlainText)
-        self._cleanup_worker.finished.connect(self._on_cleanup_finished)
-        self._cleanup_worker.start()
+        worker = FileCleanupPlanWorker(self._library_path, parent=self)
+        worker.plan_ready.connect(self._on_cleanup_plan_ready)
+        worker.error.connect(self._on_cleanup_plan_error)
+        self._cleanup_plan_worker = worker
+        self._start_worker(worker, "File cleanup preview")
+
+    @Slot()
+    def _on_cancel_cleanup(self) -> None:
+        for worker in (self._cleanup_plan_worker, self._cleanup_worker):
+            if worker is not None:
+                worker.cancel()
+        self._cleanup_cancel_btn.setEnabled(False)
+
+    @Slot(str)
+    def _on_cleanup_plan_error(self, message: str) -> None:
+        self._cleanup_plan_worker = None
+        self._cleanup_set_running(False)
+        if self._cleanup_tile is not None:
+            self._cleanup_tile.report("error", f"Preview failed: {message}", "danger")
+        self._log(f"File cleanup preview failed: {message}", "error")
+
+    @Slot(object)
+    def _on_cleanup_plan_ready(self, plan) -> None:
+        self._cleanup_plan_worker = None
+        tile = self._cleanup_tile
+        if plan.cancelled:
+            self._cleanup_set_running(False)
+            if tile is not None:
+                tile.report("cancelled", "Cancelled — nothing was renamed.", "warning")
+            self._log("File cleanup cancelled before preview.", "warn")
+            return
+        if plan.library_root != os.path.abspath(self._library_path or ""):
+            # The library changed while the preview was being built.
+            self._cleanup_set_running(False)
+            if tile is not None:
+                tile.report("idle", "Ready.")
+            return
+        if not plan.items:
+            self._cleanup_set_running(False)
+            msg = f"Nothing to clean up — {plan.scanned} audio files checked."
+            if tile is not None:
+                tile.report("ok", msg, "success")
+            self._log(msg, "ok")
+            QtWidgets.QMessageBox.information(self, "File Cleanup", msg)
+            return
+
+        from gui.dialogs.file_cleanup_preview_dialog import FileCleanupPreviewDialog
+        dlg = FileCleanupPreviewDialog(plan, self)
+        try:
+            accepted = dlg.exec() == QtWidgets.QDialog.DialogCode.Accepted.value
+        finally:
+            dlg.deleteLater()
+        if not accepted or not plan.renames:
+            self._cleanup_set_running(False)
+            if tile is not None:
+                tile.report("idle", "Preview closed — nothing was renamed.")
+            self._log("File cleanup: preview closed, nothing renamed.", "info")
+            return
+
+        if tile is not None:
+            tile.report("running", f"Renaming {len(plan.renames)} file(s)…")
+        self._log(f"File cleanup: renaming {len(plan.renames)} file(s)…", "info")
+        worker = FileCleanupWorker(plan, parent=self)
+        worker.log_line.connect(self._cleanup_log.appendPlainText)
+        worker.finished.connect(self._on_cleanup_finished)
+        self._cleanup_worker = worker
+        self._start_worker(worker, "File cleanup")
 
     @Slot(bool, str)
     def _on_cleanup_finished(self, success: bool, message: str) -> None:
-        self._cleanup_status.setText(message)
-        t = get_manager().current
-        self._flash_label(self._cleanup_status, t.success if success else t.danger)
-        self._cleanup_run_btn.setEnabled(True)
-        self._log(message, "ok" if success else "error")
         self._cleanup_worker = None
+        self._cleanup_set_running(False)
+        if self._cleanup_tile is not None:
+            self._cleanup_tile.report(
+                "ok" if success else "error", message, "success" if success else "danger"
+            )
+        self._log(message, "ok" if success else "error")
 
     # ── Slots: Validator ───────────────────────────────────────────────────
 
@@ -1368,56 +1679,97 @@ class ToolsWorkspace(WorkspaceBase):
             valid, errors = validator.validate_soundvault_structure(self._library_path)
             if valid:
                 self._val_log.setPlainText("\u2713 Library structure is valid.")
+                self._val_tile.status_chip.show_success("\u2713  Valid")
                 self._log("Validation complete \u2014 structure OK.", "ok")
             else:
                 self._val_log.setPlainText("\n".join(errors))
+                self._val_tile.status_chip.show_error("\u2717  Issues")
                 self._log("Validation found issues.", "error")
         except Exception as exc:  # noqa: BLE001
             self._val_log.setPlainText(str(exc))
+            self._val_tile.status_chip.show_error("\u2717  Error")
             self._log(str(exc), "error")
 
     # ── Slots: Diagnostics ─────────────────────────────────────────────────
+    #
+    # Each dialog used to be created parented to this workspace, exec()'d and
+    # never deleted: every open leaked a QDialog, and reopening Scan Engine /
+    # Bucketing / Fuzzy Finder while a closed dialog's worker was still
+    # running started a second, concurrent run (TOOL-21 / DUP-20). Now there
+    # is at most one live dialog per tool: it is deleted after exec() unless
+    # its worker is still running, in which case the next click re-opens that
+    # same dialog (showing the run in progress) instead of starting another.
+
+    @staticmethod
+    def _dialog_busy(dlg: QtWidgets.QDialog) -> bool:
+        try:
+            worker = getattr(dlg, "_worker", None)
+            if worker is not None and worker.isRunning():
+                return True
+        except RuntimeError:  # C++ object already gone
+            return False
+        from gui.workers import job_registry
+        return any(job.owner_name == type(dlg).__name__ for job in job_registry().jobs())
+
+    def _open_diag_dialog(self, key: str, factory) -> QtWidgets.QDialog | None:
+        dlg = self._diag_dialogs.pop(key, None)
+        if dlg is not None:
+            try:
+                busy = self._dialog_busy(dlg)
+            except RuntimeError:
+                busy = False
+            if not busy:
+                dlg.deleteLater()
+                dlg = None
+        if dlg is None:
+            dlg = factory()
+        self._diag_dialogs[key] = dlg
+        try:
+            dlg.exec()
+        finally:
+            if self._dialog_busy(dlg):
+                self._log(
+                    f"{dlg.windowTitle() or key}: still running in the background; "
+                    "reopen it to see progress.", "info",
+                )
+            else:
+                self._diag_dialogs.pop(key, None)
+                dlg.deleteLater()
+        return dlg
 
     @Slot()
     def _on_m4a_tester(self) -> None:
         from gui.dialogs.media_tester_dialog import MediaTesterDialog
-        dlg = MediaTesterDialog(self, codec="m4a")
-        dlg.exec()
+        self._open_diag_dialog("m4a", lambda: MediaTesterDialog(self, codec="m4a"))
 
     @Slot()
     def _on_opus_tester(self) -> None:
         from gui.dialogs.media_tester_dialog import MediaTesterDialog
-        dlg = MediaTesterDialog(self, codec="opus")
-        dlg.exec()
+        self._open_diag_dialog("opus", lambda: MediaTesterDialog(self, codec="opus"))
 
     @Slot()
     def _on_bucketing_poc(self) -> None:
         from gui.dialogs.bucketing_poc_dialog import BucketingPocDialog
-        dlg = BucketingPocDialog(self._library_path, self)
-        dlg.exec()
+        self._open_diag_dialog("bucketing", lambda: BucketingPocDialog(self._library_path, self))
 
     @Slot()
     def _on_scan_engine(self) -> None:
         from gui.dialogs.scan_engine_dialog import ScanEngineDialog
-        dlg = ScanEngineDialog(self._library_path, self)
-        dlg.exec()
+        self._open_diag_dialog("scan_engine", lambda: ScanEngineDialog(self._library_path, self))
 
     @Slot()
     def _on_crash_log(self) -> None:
         from gui.dialogs.crash_log_dialog import CrashLogDialog
-        dlg = CrashLogDialog(self)
-        dlg.exec()
+        self._open_diag_dialog("crash_log", lambda: CrashLogDialog(self))
 
     @Slot()
     def _on_fuzzy_dupes(self) -> None:
         from gui.dialogs.fuzzy_dupe_dialog import FuzzyDupeDialog
-        dlg = FuzzyDupeDialog(self._library_path, self)
-        dlg.exec()
+        self._open_diag_dialog("fuzzy", lambda: FuzzyDupeDialog(self._library_path, self))
 
     @Slot()
     def _on_pair_review(self) -> None:
-        if not self._library_path:
-            QtWidgets.QMessageBox.warning(self, "No Library", "Select a library folder first.")
+        if not self._require_library():
             return
         from gui.dialogs.pair_review_dialog import PairReviewDialog, load_pairs
         if not load_pairs(self._library_path):
@@ -1427,14 +1779,23 @@ class ToolsWorkspace(WorkspaceBase):
                 "Run Duplicate Finder first to generate paired results.",
             )
             return
-        dlg = PairReviewDialog(self._library_path, self)
-        dlg.exec()
+        self._open_diag_dialog("pair_review", lambda: PairReviewDialog(self._library_path, self))
+
+    def shutdown(self) -> None:
+        for dlg in list(self._diag_dialogs.values()):
+            try:
+                dlg.close()
+            except RuntimeError:
+                pass
+        super().shutdown()
 
     # ── Utility ───────────────────────────────────────────────────────────
 
-    def _open_file(self, path: str) -> None:
+    def _open_file(self, path: str | None) -> None:
         import subprocess
         import sys
+        if not path:
+            return
         if sys.platform == "win32":
             import os as _os
             _os.startfile(path)
@@ -1443,10 +1804,12 @@ class ToolsWorkspace(WorkspaceBase):
         else:
             subprocess.Popen(["xdg-open", path])
 
-    def _open_folder(self, path: str) -> None:
+    def _open_folder(self, path: str | None) -> None:
         """Open the folder containing *path* in the system file manager."""
         import subprocess
         import sys
+        if not path:
+            return
         folder = str(Path(path).parent)
         if sys.platform == "win32":
             # /select highlights the file inside the folder
