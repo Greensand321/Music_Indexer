@@ -22,12 +22,26 @@ FORMAT_PRIORITY = {".flac": 3, ".wav": 2, ".mp3": 1}
 
 # Default fingerprint matching thresholds by file extension. The ``default`` key
 # is used when a specific extension is not provided.
+#
+# Calibrated for ``near_duplicate_detector.fingerprint_distance``, which is the
+# bit error rate of the *decoded* Chromaprint fingerprints (best of a few small
+# alignments). On real cross-codec pairs (tests/data/dupes_real_fingerprints.json):
+#   * same recording, any codec (MP3 64-320k, AAC, Vorbis, Opus): <= 0.008
+#   * same recording, start shifted 0.3-0.6 s:                    0.03-0.14
+#   * different recordings:                                        >= 0.43
+# Library Sync calls a pair a match at <= threshold (+ the mixed-codec boost)
+# and "low confidence" up to 25 % above that, so 0.2 keeps every same-recording
+# pair a match while unrelated tracks (>= 0.43) stay NEW instead of landing in
+# the review band. The old 0.3 / 0.35 values were tuned for the previous metric
+# (Hamming distance on the compressed bytes) and put two different MP3s 0.43
+# apart into "low confidence". The codec no longer needs its own value: lossy
+# encoding moves the decoded fingerprint by < 0.01.
 DEFAULT_FP_THRESHOLDS = {
-    "default": 0.3,
-    ".flac": 0.3,
-    ".mp3": 0.35,
-    ".m4a": 0.35,
-    ".aac": 0.35,
+    "default": 0.2,
+    ".flac": 0.2,
+    ".mp3": 0.2,
+    ".m4a": 0.2,
+    ".aac": 0.2,
 }
 
 # Default threshold for simple duplicate detection
