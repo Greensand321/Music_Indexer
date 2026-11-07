@@ -205,3 +205,14 @@ class ClusterLegendWidget(QtWidgets.QWidget):
 
     def visible_clusters(self) -> List[int]:
         return [cid for cid, vis in self._visible.items() if vis]
+
+    def reset_visibility(self) -> None:
+        """Forget hidden clusters (a new library starts with everything shown)."""
+        self._visible = {cid: True for cid in self._visible}
+        for row in self._rows.values():
+            row.set_visible_state(True)
+
+    def clear(self) -> None:
+        """Remove every row (no cluster data loaded)."""
+        self.set_clusters({}, [])
+        self._summary.setText("No clusters")
