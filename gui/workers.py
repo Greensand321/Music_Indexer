@@ -57,6 +57,9 @@ class Job:
     name: str
     owner_name: str
     started_at: float
+    # False for read-only work (scans, previews, art loads, statistics) that
+    # can be cancelled on quit without asking the user.
+    ask_before_quit: bool = True
 
     @property
     def running(self) -> bool:
@@ -91,13 +94,15 @@ class JobRegistry(QtCore.QObject):
         *,
         owner: QtCore.QObject | None = None,
         name: str = "",
+        ask_before_quit: bool = True,
     ) -> QtCore.QThread:
         """Keep ``thread`` alive until it has finished. Idempotent."""
         key = id(thread)
         if key in self._jobs:
             return thread
         owner_name = type(owner).__name__ if owner is not None else ""
-        self._jobs[key] = Job(thread, name or type(thread).__name__, owner_name, time.monotonic())
+        self._jobs[key] = Job(thread, name or type(thread).__name__, owner_name,
+                              time.monotonic(), ask_before_quit)
         # The C++ finished() signal, connected by signature so a Python
         # subclass that shadows ``finished`` cannot hide it. The watcher lives
         # in the GUI thread, so delivery is queued there, after run() returns.
@@ -115,8 +120,9 @@ class JobRegistry(QtCore.QObject):
         *,
         owner: QtCore.QObject | None = None,
         name: str = "",
+        ask_before_quit: bool = True,
     ) -> QtCore.QThread:
-        self.adopt(thread, owner=owner, name=name)
+        self.adopt(thread, owner=owner, name=name, ask_before_quit=ask_before_quit)
         thread.start()
         self.jobs_changed.emit(self.running_count())
         return thread
@@ -221,6 +227,13 @@ def start_worker(
     *,
     owner: QtCore.QObject | None = None,
     name: str = "",
+    ask_before_quit: bool = True,
 ) -> QtCore.QThread:
-    """Start ``thread`` under the registry's protection (see module docstring)."""
-    return job_registry().start(thread, owner=owner, name=name)
+    """Start ``thread`` under the registry's protection (see module docstring).
+
+    Pass ``ask_before_quit=False`` for read-only work (scans, previews, art
+    loads): quitting then cancels it silently instead of asking the user.
+    Anything that writes files keeps the default, so quitting mid-write asks.
+    """
+    return job_registry().start(thread, owner=owner, name=name,
+                                ask_before_quit=ask_before_quit)

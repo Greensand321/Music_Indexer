@@ -1585,7 +1585,7 @@ class ToolsWorkspace(WorkspaceBase):
         worker.plan_ready.connect(self._on_cleanup_plan_ready)
         worker.error.connect(self._on_cleanup_plan_error)
         self._cleanup_plan_worker = worker
-        self._start_worker(worker, "File cleanup preview")
+        self._start_worker(worker, "File cleanup preview", ask_before_quit=False)
 
     @Slot()
     def _on_cancel_cleanup(self) -> None:

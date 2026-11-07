@@ -1188,7 +1188,7 @@ class MosaicLanding(QtWidgets.QWidget):
         self._scanner = scanner
         # The JobRegistry keeps the thread alive until it really finishes, so
         # dropping our reference (or closing the landing) mid-scan is safe.
-        start_worker(scanner, owner=self, name="Album-art scan")
+        start_worker(scanner, owner=self, name="Album-art scan", ask_before_quit=False)
 
     def _stop_scanner(self) -> None:
         """Ask the scanner to stop and forget it: never block, never terminate."""

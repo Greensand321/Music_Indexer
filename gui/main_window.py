@@ -189,10 +189,9 @@ class AlphaDEXWindow(QtWidgets.QMainWindow):
             npb.volume_changed.connect(self._on_bar_volume)
             npb.keyboard_mode_toggled.connect(self.set_keyboard_mode_global)
             # Keep bar volume knob in sync with the workspace slider
-            player_ws._vol_slider.sliderMoved.connect(npb.set_volume)
-            player_ws._vol_slider.sliderReleased.connect(
-                lambda: npb.set_volume(player_ws._vol_slider.value())
-            )
+            # Any volume change on the page (drag, wheel, keys, groove click)
+            # updates the bar's knob; set_volume() there doesn't echo back.
+            player_ws.volume_changed.connect(npb.set_volume)
 
     # ── Keyboard mode (Player arrow keys) ─────────────────────────────────
     #
@@ -458,12 +457,18 @@ class AlphaDEXWindow(QtWidgets.QMainWindow):
         registry = job_registry()
         jobs = registry.jobs()
         if jobs:
+            # Read-only jobs (scans, previews, art loads) are cancelled without
+            # asking; only work that may be writing files needs the user's OK.
+            asking = [j for j in jobs if j.ask_before_quit]
+            if not asking and not getattr(self, "_closing", False):
+                self._closing = True
+                registry.cancel_all()
             if not getattr(self, "_closing", False):
-                names = ", ".join(sorted({j.name for j in jobs}))
+                names = ", ".join(sorted({j.name for j in asking}))
                 answer = QtWidgets.QMessageBox.question(
                     self,
                     "Background tasks running",
-                    f"{len(jobs)} background task(s) are still running:\n{names}\n\n"
+                    f"{len(asking)} background task(s) are still running:\n{names}\n\n"
                     "Stop them and quit? AlphaDEX will close as soon as they "
                     "reach a safe stopping point.",
                     QtWidgets.QMessageBox.StandardButton.Yes
@@ -551,7 +556,7 @@ class AlphaDEXWindow(QtWidgets.QMainWindow):
         worker = _StatsWorker(path, self._stats_generation)
         worker.stats_ready.connect(self._on_stats_ready)
         self._stats_worker = worker
-        start_worker(worker, owner=self, name="Library statistics")
+        start_worker(worker, owner=self, name="Library statistics", ask_before_quit=False)
 
     @Slot(int, int, float, int)
     def _on_stats_ready(self, generation: int, tracks: int, size_gb: float, artists: int) -> None:

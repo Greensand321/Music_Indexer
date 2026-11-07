@@ -1237,7 +1237,7 @@ class PlayerWorkspace(WorkspaceBase):
         scanner.scan_complete.connect(self._on_scan_complete)
         self._lib_scanner = scanner
         self._scanned_path = os.path.normcase(os.path.abspath(self._library_path))
-        self._start_worker(scanner, "Player library scan")
+        self._start_worker(scanner, "Player library scan", ask_before_quit=False)
         try:
             scanner.setPriority(QtCore.QThread.Priority.LowPriority)
         except RuntimeError:
@@ -1330,7 +1330,7 @@ class PlayerWorkspace(WorkspaceBase):
         if missing:
             loader = _TagLoader(missing)
             loader.rows_ready.connect(self._on_tags_loaded)
-            self._start_worker(loader, "Player tag read")
+            self._start_worker(loader, "Player tag read", ask_before_quit=False)
         return rows
 
     def _row_for(self, path: str) -> dict:
@@ -2104,7 +2104,7 @@ class PlayerWorkspace(WorkspaceBase):
     def _start_art_loader(self, path: str, size: int, token: int, slot) -> _ArtLoader:
         loader = _ArtLoader(path, size, token)
         loader.art_ready.connect(slot)
-        self._start_worker(loader, "Player cover art")
+        self._start_worker(loader, "Player cover art", ask_before_quit=False)
         return loader
 
     def _load_art(self, path: str) -> None:

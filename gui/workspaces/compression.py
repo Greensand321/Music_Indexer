@@ -381,7 +381,7 @@ class CompressionWorkspace(WorkspaceBase):
         worker.finished.connect(self._on_estimate_done)
         worker.cancelled.connect(self._on_estimate_cancelled)
         self._estimate_worker = worker
-        self._start_worker(worker, "Compression estimate")
+        self._start_worker(worker, "Compression estimate", ask_before_quit=False)
 
     @Slot()
     def _on_estimate_cancelled(self) -> None:

@@ -136,9 +136,14 @@ class WorkspaceBase(QtWidgets.QWidget):
     # ``self._worker`` in a "finished" slot (or starting a second run) can no
     # longer destroy a running QThread and abort the process. See gui/workers.py.
 
-    def _start_worker(self, worker: QtCore.QThread, name: str = "") -> QtCore.QThread:
+    def _start_worker(
+        self, worker: QtCore.QThread, name: str = "", *, ask_before_quit: bool = True,
+    ) -> QtCore.QThread:
+        """Start ``worker`` under the JobRegistry. Pass ``ask_before_quit=False``
+        for read-only jobs (scans, previews) so quitting cancels them silently."""
         from gui.workers import start_worker
-        return start_worker(worker, owner=self, name=name or type(worker).__name__)
+        return start_worker(worker, owner=self, name=name or type(worker).__name__,
+                            ask_before_quit=ask_before_quit)
 
     def running_jobs(self) -> list:
         """Jobs this workspace started that are still running."""

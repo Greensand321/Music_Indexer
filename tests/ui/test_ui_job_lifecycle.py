@@ -144,3 +144,29 @@ def test_close_with_running_job_cancels_waits_then_closes(main_window, dialogs, 
     assert ws.shutdown_calls == 1
     # The confirmation is asked once, not on every retry of close().
     assert len(dialogs.calls_of("question")) == 1
+
+
+def test_read_only_jobs_are_cancelled_on_quit_without_asking(main_window, dialogs, qtbot):
+    ws = _install_job_workspace(main_window)
+    worker = SlowWorker(30.0)
+    ws._start_worker(worker, "Read-only scan", ask_before_quit=False)
+    main_window.close()          # no answer queued: asking would fail the test
+    assert worker.cancel_called
+    qtbot.waitUntil(lambda: not main_window.isVisible(), timeout=5000)
+    assert dialogs.calls_of("question") == []
+
+
+def test_quit_asks_only_about_jobs_that_may_write(main_window, dialogs, qtbot):
+    ws = _install_job_workspace(main_window)
+    reader = SlowWorker(30.0)
+    ws._start_worker(reader, "Read-only scan", ask_before_quit=False)
+    writer = ws.run_job(30.0)    # default: ask before quit
+    dialogs.answer_no()
+    main_window.close()
+    process_events(20)
+    assert main_window.isVisible()
+    text = dialogs.calls_of("question")[0].text
+    assert "Test job" in text and "Read-only scan" not in text
+    ws.cancel_jobs()
+    assert job_registry().wait_all(3000)
+    assert writer.cancel_called and reader.cancel_called
