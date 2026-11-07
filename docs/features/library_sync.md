@@ -197,16 +197,34 @@ the app uses, and the two can drift apart.)*
 When you approve the plan, Library Sync carries it out with the same caution as the
 rest of the app:
 
-- New tracks are **copied or moved** into the correct place in your library.
+- New tracks are **copied or moved** into the correct place in your library. A new
+  track whose routed name is already taken by a *different* song is added as
+  `name (1).ext` (the preview says so); only a byte-identical file there counts as
+  "already in the library". Folder and file names keep their letter case on Windows,
+  and an incoming `Music/` folder is not nested as `Music/Music/`.
+- Every transfer is **reversible**. A file is written under a temporary name next to
+  its destination and renamed into place only once complete, so a full disk or a
+  crash never leaves a half-copied track under a real name. A move to another drive
+  copies first and deletes the original only after everything else worked. If any
+  step fails — for example a Replace while the library file is open in a player on
+  Windows — the step is undone (the incoming file goes back where it was, the library
+  file is untouched) and the audit says exactly what happened, including any file
+  that could not be cleaned up.
 - Any existing file that is being **replaced is backed up first** — the outgoing copy
   is preserved in a backups area inside `Docs` (`Docs/Backups/LibrarySync/<date_time>/`,
   one folder per run, so an earlier backup is never overwritten) before the new one
-  takes its place — so an "upgrade" can always be undone.
-- No other existing file is ever overwritten: if a destination appeared after the plan
-  was built, that item is skipped and reported.
-- Every action is recorded in a detailed **audit log**, and a final **report** (a
-  readable web page) summarizes what was added, what was replaced, what was skipped,
-  and anything that failed.
+  takes its place — so an "upgrade" can always be undone. "Replaced" is only counted
+  when a file really was displaced.
+- **If the library changed after Build Plan**, the items it affects are not done: a
+  Replace whose library file was moved, edited or deleted, or a track whose incoming
+  file changed, is skipped and reported ("scan again"), never turned into a plain
+  copy. No other existing file is ever overwritten: if a destination appeared after
+  the plan was built, that item is skipped and reported.
+- Every run is recorded in its own **audit log** (`Docs/LibrarySyncAudit_<date_time>.json`,
+  naming its backup folder) and **report** (`Docs/LibrarySyncExecuted_<date_time>.html`,
+  a readable web page of what was added, replaced, skipped and what failed).
+  `Docs/LibrarySyncAudit.json` and `Docs/LibrarySyncExecuted.html` are always a copy
+  of the latest run.
 - Until you give that approval, the execution code does not run; the preview is purely
   a description of intent.
 
