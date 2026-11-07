@@ -74,15 +74,21 @@ class FileCleanupPlanWorker(QtCore.QThread):
 
 
 class FileCleanupWorker(QtCore.QThread):
-    """Execute exactly a previewed File Cleanup plan, then patch playlists."""
+    """Execute exactly a previewed File Cleanup plan, then patch playlists.
+
+    With ``undo=True`` the plan is a ``file_cleanup.UndoPlan``: the files get
+    their original names back and the playlists that cleanup re-pointed are
+    pointed back at them.
+    """
 
     log_line = Signal(str)
     finished = Signal(bool, str)   # (success, summary message)
     result_ready = Signal(object)  # file_cleanup.CleanupResult
 
-    def __init__(self, plan, parent: QtCore.QObject | None = None) -> None:
+    def __init__(self, plan, parent: QtCore.QObject | None = None, *, undo: bool = False) -> None:
         super().__init__(parent)
         self.plan = plan
+        self.undo = undo
         self._cancel = threading.Event()
 
     def cancel(self) -> None:
@@ -96,13 +102,12 @@ class FileCleanupWorker(QtCore.QThread):
             self.log_line.emit(f"! {old}: {outcome}")
 
     def run(self) -> None:
-        from file_cleanup import execute_cleanup_plan
+        from file_cleanup import execute_cleanup_plan, execute_undo
+        execute = execute_undo if self.undo else execute_cleanup_plan
         try:
-            result = execute_cleanup_plan(
-                self.plan, cancel_event=self._cancel, on_item=self._on_item
-            )
+            result = execute(self.plan, cancel_event=self._cancel, on_item=self._on_item)
         except Exception as exc:  # noqa: BLE001
-            self.finished.emit(False, f"Cleanup failed: {exc}")
+            self.finished.emit(False, f"{'Undo' if self.undo else 'Cleanup'} failed: {exc}")
             return
 
         playlist_note = ""
@@ -119,15 +124,23 @@ class FileCleanupWorker(QtCore.QThread):
                     playlist_note = " Playlists checked."
                 self.log_line.emit(playlist_note.strip())
 
-        parts = [f"{len(result.renamed)} renamed"]
-        if result.failed:
-            parts.append(f"{len(result.failed)} not renamed")
-        if result.skipped_collisions:
-            parts.append(f"{result.skipped_collisions} collisions skipped")
-        head = "Cancelled" if result.cancelled else "Done"
+        if self.undo:
+            parts = [f"{len(result.renamed)} original name(s) restored"]
+            if result.failed:
+                parts.append(f"{len(result.failed)} not restored")
+            if result.skipped_collisions:
+                parts.append(f"{result.skipped_collisions} skipped")
+            head = "Undo cancelled" if result.cancelled else "Undone"
+        else:
+            parts = [f"{len(result.renamed)} renamed"]
+            if result.failed:
+                parts.append(f"{len(result.failed)} not renamed")
+            if result.skipped_collisions:
+                parts.append(f"{result.skipped_collisions} collisions skipped")
+            head = "Cancelled" if result.cancelled else "Done"
         message = f"{head}: {', '.join(parts)}.{playlist_note}"
         if result.log_path:
-            message += f" Undo log: {result.log_path}"
+            message += f" {'Log' if self.undo else 'Undo log'}: {result.log_path}"
         self.result_ready.emit(result)
         self.finished.emit(not result.failed and not result.cancelled, message)
 
@@ -1179,7 +1192,9 @@ class ToolsWorkspace(WorkspaceBase):
             "Remove trailing \u2018 (1)\u2019, \u2018 - Copy\u2019, \u2018 copy\u2019 suffixes "
             "left by browsers, Windows Explorer and macOS Finder. You review every "
             "rename before anything changes; reserved folders are skipped, a log "
-            "is written to Docs/, and playlists are updated.",
+            "is written to Docs/, and playlists are updated. \u2018Undo Last "
+            "Cleanup\u2019 previews, then restores, the original names (and "
+            "playlist entries).",
         )
         self._cleanup_tile = tile
 
@@ -1192,6 +1207,12 @@ class ToolsWorkspace(WorkspaceBase):
         self._cleanup_cancel_btn.setObjectName("cleanupCancelBtn")
         self._cleanup_cancel_btn.setEnabled(False)
         self._cleanup_cancel_btn.clicked.connect(self._on_cancel_cleanup)
+        self._cleanup_undo_btn = tile.add_secondary_button("Undo Last Cleanup\u2026")
+        self._cleanup_undo_btn.setObjectName("cleanupUndoBtn")
+        self._cleanup_undo_btn.setToolTip(
+            "Preview and restore the original names from the newest cleanup log in Docs/"
+        )
+        self._cleanup_undo_btn.clicked.connect(self._on_undo_cleanup)
         tile.finish_footer()
         return tile
 
@@ -1383,23 +1404,57 @@ class ToolsWorkspace(WorkspaceBase):
     # ── Library change ─────────────────────────────────────────────────────
 
     def _on_library_changed(self, path: str) -> None:
-        """A different library: stop jobs that belong to the old one and drop
-        results that point into it (Open File buttons, logs, statuses)."""
-        self.cancel_jobs()
+        """A different library: stop the read-only jobs that belong to the old
+        one and drop results that point into it (Open File buttons, logs,
+        statuses).
+
+        A confirmed library write (File Cleanup renames, or its undo) is left
+        to finish, as the Indexer and Library Sync do: stopping it part-way
+        would leave the old library half renamed with its playlists not yet
+        updated. Its tile keeps reporting on it until it ends.
+        """
+        from gui.workers import LIBRARY_WRITES, job_registry
+        job_registry().cancel_all(
+            [j for j in self.running_jobs() if j.group != LIBRARY_WRITES]
+        )
         self._at_out_path = None
         self._codec_out_path = None
         for btn in (self._at_open, self._at_folder, self._codec_open, self._codec_folder):
             btn.setEnabled(False)
-        for log in (self._at_log, self._cleanup_log):
-            log.clear()
+        self._at_log.clear()
         self._val_log.clear()
-        for tile in (self._at_tile, self._codec_tile, self._cleanup_tile):
+        tiles = [self._at_tile, self._codec_tile]
+        if self._cleanup_worker is None:
+            self._cleanup_log.clear()
+            tiles.append(self._cleanup_tile)
+        else:
+            self._cleanup_log.appendPlainText(
+                "Library changed \u2014 the confirmed renames in the previous library "
+                "keep running until they finish."
+            )
+        for tile in tiles:
             if tile is not None:
                 tile.report("idle", "Ready.")
         self._codec_status.setText("Ready.")
         set_tone(self._codec_status, "secondary")
 
     # ── Slots: Artist / Title ──────────────────────────────────────────────
+
+    def _is_stale_export(self, worker: object) -> bool:
+        """True when ``worker``'s result belongs to a library that is no longer
+        selected (it finished after a library change)."""
+        lib = getattr(worker, "library_path", None)
+        if lib is None:
+            return False
+        return os.path.abspath(lib) != os.path.abspath(self._library_path or "")
+
+    def _export_sender(self, current: object) -> tuple[object, bool]:
+        """``(worker, ignore)`` for an export slot: ``ignore`` when the signal
+        comes from a job we no longer track."""
+        worker = self.sender()
+        if worker is None:  # called directly
+            return current, False
+        return worker, worker is not current
 
     def _require_library(self) -> bool:
         if not self._library_path:
@@ -1452,13 +1507,24 @@ class ToolsWorkspace(WorkspaceBase):
 
     @Slot(int, int)
     def _on_at_progress(self, done: int, total: int) -> None:
+        worker, ignore = self._export_sender(self._at_worker)
+        if ignore or self._is_stale_export(worker):
+            return
         self._at_prog.setMaximum(max(total, 1))
         self._at_prog.setValue(done)
         self._at_status.setText(f"{done} / {total} processed")
 
     @Slot(str, int, int)
     def _on_at_finished(self, out_path: str, entry_count: int, error_count: int) -> None:
+        worker, ignore = self._export_sender(self._at_worker)
+        if ignore:
+            return
         self._at_done()
+        if self._is_stale_export(worker):
+            # Finished after a library change: its file is in the old library,
+            # so the Open buttons must not point at it.
+            self._log(f"Artist/title export for the previous library finished: {out_path}", "info")
+            return
         self._at_prog.setValue(self._at_prog.maximum())
         note = f"  ({error_count} files skipped)" if error_count else ""
         self._at_log.appendPlainText(f"Export complete: {out_path}")
@@ -1473,7 +1539,13 @@ class ToolsWorkspace(WorkspaceBase):
 
     @Slot(str)
     def _on_at_error(self, message: str) -> None:
+        worker, ignore = self._export_sender(self._at_worker)
+        if ignore:
+            return
         self._at_done()
+        if self._is_stale_export(worker):
+            self._log(f"Artist/title export for the previous library failed: {message}", "warn")
+            return
         if self._at_tile is not None:
             self._at_tile.report("error", f"Error: {message}", "danger")
         self._at_log.appendPlainText(f"Export failed: {message}")
@@ -1481,7 +1553,12 @@ class ToolsWorkspace(WorkspaceBase):
 
     @Slot()
     def _on_at_cancelled(self) -> None:
+        worker, ignore = self._export_sender(self._at_worker)
+        if ignore:
+            return
         self._at_done()
+        if self._is_stale_export(worker):
+            return
         if self._at_tile is not None:
             self._at_tile.report("cancelled", "Cancelled — nothing written.", "warning")
         self._log("Artist/title export cancelled.", "warn")
@@ -1532,7 +1609,13 @@ class ToolsWorkspace(WorkspaceBase):
 
     @Slot(str, int)
     def _on_codec_finished(self, out_path: str, total: int) -> None:
+        worker, ignore = self._export_sender(self._codec_worker)
+        if ignore:
+            return
         self._codec_done()
+        if self._is_stale_export(worker):
+            self._log(f"Codec list export for the previous library finished: {out_path}", "info")
+            return
         self._codec_prog.setValue(100)
         self._codec_status.setText(f"Written: {out_path}  ({total} files)")
         self._flash_label(self._codec_status, "success")
@@ -1545,7 +1628,13 @@ class ToolsWorkspace(WorkspaceBase):
 
     @Slot(str)
     def _on_codec_error(self, message: str) -> None:
+        worker, ignore = self._export_sender(self._codec_worker)
+        if ignore:
+            return
         self._codec_done()
+        if self._is_stale_export(worker):
+            self._log(f"Codec list export for the previous library failed: {message}", "warn")
+            return
         self._codec_status.setText(message)
         self._flash_label(self._codec_status, "danger")
         if self._codec_tile is not None:
@@ -1554,7 +1643,12 @@ class ToolsWorkspace(WorkspaceBase):
 
     @Slot()
     def _on_codec_cancelled(self) -> None:
+        worker, ignore = self._export_sender(self._codec_worker)
+        if ignore:
+            return
         self._codec_done()
+        if self._is_stale_export(worker):
+            return
         self._codec_status.setText("Cancelled — nothing written.")
         set_tone(self._codec_status, "secondary")
         if self._codec_tile is not None:
@@ -1565,6 +1659,7 @@ class ToolsWorkspace(WorkspaceBase):
 
     def _cleanup_set_running(self, running: bool) -> None:
         self._cleanup_run_btn.setEnabled(not running)
+        self._cleanup_undo_btn.setEnabled(not running)
         self._cleanup_cancel_btn.setEnabled(running)
 
     @Slot()
@@ -1653,6 +1748,58 @@ class ToolsWorkspace(WorkspaceBase):
         worker.finished.connect(self._on_cleanup_finished)
         self._cleanup_worker = worker
         self._start_worker(worker, "File cleanup", library_write=True)
+
+    @Slot()
+    def _on_undo_cleanup(self) -> None:
+        """Preview, confirm, then restore the names from the newest cleanup log
+        that still has renames to undo (and point playlists back)."""
+        if not self._require_library():
+            return
+        if self._cleanup_plan_worker is not None or self._cleanup_worker is not None:
+            return
+        from file_cleanup import latest_undoable_log, plan_undo
+
+        tile = self._cleanup_tile
+        log_path = latest_undoable_log(self._library_path)
+        if not log_path:
+            QtWidgets.QMessageBox.information(
+                self, "Undo File Cleanup",
+                "There is no file cleanup to undo in this library "
+                "(no Docs/file_cleanup_*.jsonl log with renames left to restore).",
+            )
+            return
+        try:
+            plan = plan_undo(log_path)
+        except (OSError, ValueError, KeyError) as exc:
+            QtWidgets.QMessageBox.warning(
+                self, "Undo File Cleanup", f"The cleanup log could not be read:\n{exc}"
+            )
+            return
+        if self._library_writes_blocked("Undo file cleanup"):
+            return
+        from gui.dialogs.file_cleanup_preview_dialog import FileCleanupPreviewDialog
+        dlg = FileCleanupPreviewDialog(plan, self, undo=True)
+        try:
+            accepted = dlg.exec() == QtWidgets.QDialog.DialogCode.Accepted.value
+        finally:
+            dlg.deleteLater()
+        if not accepted or not plan.renames:
+            if tile is not None:
+                tile.report("idle", "Undo preview closed \u2014 nothing was renamed.")
+            self._log("File cleanup undo: preview closed, nothing renamed.", "info")
+            return
+
+        self._cleanup_log.clear()
+        self._cleanup_set_running(True)
+        if tile is not None:
+            tile.report("running", f"Restoring {len(plan.renames)} original name(s)\u2026")
+            tile.open_drawer()
+        self._log(f"File cleanup undo: restoring {len(plan.renames)} name(s)\u2026", "info")
+        worker = FileCleanupWorker(plan, parent=self, undo=True)
+        worker.log_line.connect(self._cleanup_log.appendPlainText)
+        worker.finished.connect(self._on_cleanup_finished)
+        self._cleanup_worker = worker
+        self._start_worker(worker, "Undo file cleanup", library_write=True)
 
     @Slot(bool, str)
     def _on_cleanup_finished(self, success: bool, message: str) -> None:
