@@ -543,6 +543,23 @@ def _close_mutagen_audio(audio: object | None) -> None:
                 pass
 
 
+def _unique_destination(dest: str, taken: set[str]) -> str:
+    """Return ``dest``, or ``name (n).ext`` if that file exists or is ``taken``.
+
+    The chosen path is added to ``taken`` so concurrent cleanup tasks in one
+    run never pick the same destination. (Moving onto an existing path made
+    ``shutil.move`` silently replace an earlier quarantined loser.)
+    """
+    stem, ext = os.path.splitext(dest)
+    candidate = dest
+    counter = 1
+    while candidate in taken or os.path.lexists(ensure_long_path(candidate)):
+        candidate = f"{stem} ({counter}){ext}"
+        counter += 1
+    taken.add(candidate)
+    return candidate
+
+
 def _quarantine_path(path: str, quarantine_root: str, library_root: str, *, flatten: bool) -> str:
     if flatten:
         os.makedirs(quarantine_root, exist_ok=True)
@@ -1166,6 +1183,9 @@ def execute_consolidation_plan(
                 verified, verification_detail = _verify_metadata_write(target, tags, skipped_keys)
             return target, ok, detail, verified, verification_detail, skipped_keys
 
+        quarantine_lock = threading.Lock()
+        quarantine_taken: set[str] = set()
+
         def _cleanup_loser_task(
             loser: str,
             disposition: str,
@@ -1183,6 +1203,8 @@ def execute_consolidation_plan(
                 config.library_root,
                 flatten=config.quarantine_flatten,
             )
+            with quarantine_lock:
+                dest = _unique_destination(dest, quarantine_taken)
             shutil.move(loser, dest)
             verified = os.path.exists(dest) and not os.path.exists(loser)
             verification_detail = (
