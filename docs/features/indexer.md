@@ -47,6 +47,14 @@ of the file name as a fallback — but if it still can't determine at least an a
 and a title, the file is destined for the "return to sender" desk (see *Manual
 Review* below).
 
+Each file's tags are read once per scan. Reading tags is most of a preview's time; on
+slow storage (a network share, a cold spinning disk) the engine can read them on
+several threads at once (`max_workers`), which gives exactly the same plan. On a fast
+local disk extra threads are *slower* (the parsing is CPU-bound and Python runs it on
+one core at a time), so the default stays one thread. There is no cache: every
+preview reads the tags from the files themselves, which is why `flush_cache` has
+nothing to clear.
+
 ### 3. Taking a census of artists
 Before deciding where anything goes, the Indexer does something clever: it takes a
 **census** of your whole collection to count how many tracks each artist has. This
