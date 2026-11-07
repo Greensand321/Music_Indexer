@@ -7,7 +7,9 @@ raise it. When you lower one, lower its ceiling here too so it stays locked.
 
 Zero-tolerance rules (ceiling 0) guard bugs that have already been fixed.
 
-Measured 2026-11-07 (see docs/redesign/README.md "Harness").
+Introduced 2026-11-07 at hex 237 / inline sheets 168 / font-size 81 /
+direct QThread starts 28 / unparented animations 7; lowered the same day
+after the phase-2 bug fixes (see docs/redesign/README.md "Harness").
 """
 from __future__ import annotations
 
@@ -29,17 +31,19 @@ _ANIMATIONS = {
 
 CEILINGS = {
     # Colours belong in gui/themes/tokens.py; pages should use tokens/roles.
-    "hex_colours_outside_tokens": 237,
+    "hex_colours_outside_tokens": 116,
     # Inline stylesheets outside gui/themes bypass the design system and are
     # re-parsed on every theme switch.
-    "inline_setStyleSheet_calls": 168,
+    "inline_setStyleSheet_calls": 94,
     # Type sizes belong in the type ramp (gui/fonts/loader.py TypeScale).
-    "font_size_literals_outside_themes": 81,
-    # Start QThreads via WorkspaceBase._start_worker / gui.workers.start_worker
-    # so the JobRegistry keeps them alive and stops them on quit.
-    "direct_qthread_starts": 28,
+    "font_size_literals_outside_themes": 38,
+    # Zero tolerance since every page moved onto the JobRegistry: start QThreads
+    # via WorkspaceBase._start_worker / gui.workers.start_worker so they are
+    # kept alive until finished and stopped on quit.
+    "direct_qthread_starts": 0,
     # Animations without a QObject parent can be garbage-collected mid-flight.
-    "unparented_animations": 7,
+    # (The remaining 2 are in gui/qt_launcher.py, used only by the legacy Tk app.)
+    "unparented_animations": 2,
     # Zero tolerance: lambdas connected to the ThemeManager singleton outlive
     # their widget and raise "Internal C++ object already deleted".
     "theme_changed_lambda_connections": 0,
