@@ -2,24 +2,30 @@ import os
 import sqlite3
 import time
 import types
-import sys
 
-# Stub heavy dependencies before importing the module under test
-acoustid_stub = types.ModuleType("acoustid")
-acoustid_stub.fingerprint_file = lambda path: (0, "stub-fp")
-sys.modules["acoustid"] = acoustid_stub
+import pytest
 
-silence_stub = types.ModuleType("pydub.silence")
-silence_stub.detect_nonsilent = lambda *args, **kwargs: []
+from _helpers.module_isolation import isolated_modules
 
-AudioSegment = type("AudioSegment", (), {"from_file": staticmethod(lambda path: None)})
-pydub_stub = types.ModuleType("pydub")
-pydub_stub.AudioSegment = AudioSegment
-pydub_stub.silence = silence_stub
-sys.modules["pydub"] = pydub_stub
-sys.modules["pydub.silence"] = silence_stub
 
-import fingerprint_generator
+@pytest.fixture
+def fingerprint_generator():
+    """The real root ``fingerprint_generator``, imported against stub
+    acoustid/pydub so no audio tooling is needed. The stubs (and this
+    stub-bound copy) are removed again afterwards."""
+    acoustid_stub = types.ModuleType("acoustid")
+    acoustid_stub.fingerprint_file = lambda path: (0, "stub-fp")
+
+    silence_stub = types.ModuleType("pydub.silence")
+    silence_stub.detect_nonsilent = lambda *args, **kwargs: []
+    AudioSegment = type("AudioSegment", (), {"from_file": staticmethod(lambda path: None)})
+    pydub_stub = types.ModuleType("pydub")
+    pydub_stub.AudioSegment = AudioSegment
+    pydub_stub.silence = silence_stub
+
+    stubs = {"acoustid": acoustid_stub, "pydub": pydub_stub, "pydub.silence": silence_stub}
+    with isolated_modules(stubs, fresh=["fingerprint_generator"]) as mods:
+        yield mods["fingerprint_generator"]
 
 
 SCHEMA = """
@@ -39,7 +45,7 @@ def _init_db(db_path: str) -> sqlite3.Connection:
     return conn
 
 
-def test_cached_fingerprints_reused(tmp_path):
+def test_cached_fingerprints_reused(tmp_path, fingerprint_generator):
     audio = tmp_path / "song.mp3"
     audio.write_text("data")
     db = tmp_path / "fp.db"
@@ -104,7 +110,7 @@ class DummyExecutor:
         return _Future(fn, arg)
 
 
-def test_mtime_change_triggers_recompute(monkeypatch, tmp_path):
+def test_mtime_change_triggers_recompute(monkeypatch, tmp_path, fingerprint_generator):
     audio = tmp_path / "song.mp3"
     audio.write_text("old")
     db = tmp_path / "fp.db"

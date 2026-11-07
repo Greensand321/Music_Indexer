@@ -1,25 +1,22 @@
-import os
 import types
 import sys
 
-# Provide simple stubs for mutagen so the module imports
-mutagen_stub = types.ModuleType('mutagen')
-class DummyAudio:
-    def __init__(self):
-        self.tags = None
-        self.pictures = []
-def File(*a, **k):
-    return DummyAudio()
-mutagen_stub.File = File
-id3_stub = types.ModuleType('id3')
-id3_stub.ID3NoHeaderError = Exception
-mutagen_stub.id3 = id3_stub
-sys.modules['mutagen'] = mutagen_stub
-sys.modules['mutagen.id3'] = id3_stub
+import pytest
 
-from music_indexer_api import apply_indexer_moves
+from _helpers.module_isolation import isolated_modules, make_mutagen_stub
 
-def test_cleanup_removes_empty_dirs(tmp_path, monkeypatch):
+
+@pytest.fixture
+def apply_indexer_moves():
+    # Stub mutagen so the indexer imports without the real library; the stub
+    # and the stub-bound music_indexer_api are removed again after the test.
+    with isolated_modules(make_mutagen_stub(), fresh=["music_indexer_api"]):
+        import music_indexer_api
+
+        yield music_indexer_api.apply_indexer_moves
+
+
+def test_cleanup_removes_empty_dirs(tmp_path, monkeypatch, apply_indexer_moves):
     src = tmp_path / "Old"
     src.mkdir(parents=True)
     (src / "song.mp3").write_text("x")
@@ -40,7 +37,7 @@ def test_cleanup_removes_empty_dirs(tmp_path, monkeypatch):
     assert not src.exists()
 
 
-def test_cleanup_removes_nested_empty_dirs(tmp_path, monkeypatch):
+def test_cleanup_removes_nested_empty_dirs(tmp_path, monkeypatch, apply_indexer_moves):
     src = tmp_path / "Old" / "A" / "B"
     src.mkdir(parents=True)
     (src / "song.mp3").write_text("x")

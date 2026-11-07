@@ -5,6 +5,7 @@ mutagen, musicbrainzngs, or audio files on disk.
 """
 import json
 import threading
+from pathlib import Path
 
 import pytest
 
@@ -194,7 +195,7 @@ def test_save_and_load_mapping_round_trip_preserves_nulls(tmp_path):
     loaded, loaded_path = nc.load_mapping(str(tmp_path))
     assert loaded == mapping
     assert loaded_path == path
-    assert json.loads(open(path, encoding="utf-8").read())["90s"] is None
+    assert json.loads(Path(path).read_text(encoding="utf-8"))["90s"] is None
 
 
 def test_load_mapping_missing_or_corrupt_is_empty(tmp_path):

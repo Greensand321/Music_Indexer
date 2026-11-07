@@ -4,6 +4,7 @@ import queue
 import sqlite3
 import threading
 import time
+from collections import OrderedDict
 from typing import Callable, Dict, Optional
 from utils.path_helpers import ensure_long_path
 
@@ -24,6 +25,48 @@ def _dlog(label: str, msg: str, cb: Optional[Callable[[str], None]] = None) -> N
 _writer_lock = threading.Lock()
 _writer: "FingerprintWriter | None" = None
 _writer_db_path: str | None = None
+
+# In-process memo of fingerprints this process has computed, stored or read,
+# keyed by (db_path, path) and validated against the file's mtime/size on every
+# lookup.  Writes to SQLite go through the batching ``FingerprintWriter`` and
+# may not be on disk yet, so without this a second ``get_fingerprint`` call for
+# the same file moments later would miss the cache and recompute the (expensive)
+# fingerprint.  It also lets repeat lookups skip opening SQLite altogether.
+_MEMO_MAXSIZE = 4096
+_memo_lock = threading.Lock()
+_memo: "OrderedDict[tuple[str, str], tuple[float, int, str]]" = OrderedDict()
+
+
+def _memo_get(db_path: str, path: str, mtime: float, size: int) -> str | None:
+    key = (db_path, path)
+    with _memo_lock:
+        entry = _memo.get(key)
+        if entry is None:
+            return None
+        cached_mtime, cached_size, fp = entry
+        if abs(cached_mtime - mtime) >= 1e-6 or int(cached_size) != int(size):
+            del _memo[key]
+            return None
+        _memo.move_to_end(key)
+        return fp
+
+
+def _memo_put(db_path: str, path: str, mtime: float, size: int, fp: str) -> None:
+    key = (db_path, path)
+    with _memo_lock:
+        _memo[key] = (mtime, int(size), fp)
+        _memo.move_to_end(key)
+        while len(_memo) > _MEMO_MAXSIZE:
+            _memo.popitem(last=False)
+
+
+def _memo_clear(db_path: str | None = None) -> None:
+    with _memo_lock:
+        if db_path is None:
+            _memo.clear()
+            return
+        for key in [k for k in _memo if k[0] == db_path]:
+            del _memo[key]
 
 
 def _initialize_db(conn: sqlite3.Connection) -> None:
@@ -101,6 +144,18 @@ class FingerprintWriter:
         self._batch_size = batch_size
         self._flush_interval = flush_interval
         self._queue: "queue.Queue[tuple[str, object]]" = queue.Queue()
+        # Open the connection and create the schema synchronously, so that once
+        # a writer exists the table exists too.  Doing this inside the worker
+        # thread left a window where the DB file existed without a
+        # ``fingerprints`` table, and readers failed with "no such table".
+        # It also surfaces an unopenable DB to the caller instead of silently
+        # killing the worker thread (which made ``flush()`` wait forever).
+        self._conn = sqlite3.connect(db_path, check_same_thread=False)
+        try:
+            _initialize_db(self._conn)
+        except Exception:
+            self._conn.close()
+            raise
         self._thread = threading.Thread(
             target=self._run,
             name="FingerprintCacheWriter",
@@ -166,10 +221,8 @@ class FingerprintWriter:
         event.wait(timeout=1.0)
 
     def _run(self) -> None:
-        conn: sqlite3.Connection | None = None
+        conn: sqlite3.Connection | None = self._conn
         try:
-            conn = sqlite3.connect(self._db_path, check_same_thread=False)
-            _initialize_db(conn)
             pending: list[
                 tuple[
                     str,
@@ -332,17 +385,39 @@ def _get_writer(db_path: str) -> FingerprintWriter:
         if _writer is None or _writer_db_path != db_path:
             if _writer is not None:
                 _writer.shutdown()
+                _writer = None
+                _writer_db_path = None
             os.makedirs(os.path.dirname(db_path), exist_ok=True)
-            _writer_db_path = db_path
+            # Only record the writer once it was created successfully, so a
+            # failed open is retried next time rather than leaving a shut-down
+            # writer registered for this path.
             _writer = FingerprintWriter(db_path)
+            _writer_db_path = db_path
         return _writer
 
 
 def _open_readonly_connection(db_path: str) -> sqlite3.Connection | None:
+    """Open ``db_path`` for reading, or return ``None`` if there is no cache yet.
+
+    A DB file can exist without the ``fingerprints`` table (an empty file, or
+    one created by ``sqlite3.connect`` elsewhere before the schema was
+    written).  Querying it would raise ``no such table``; it is simply an
+    empty cache, so it is reported the same way as a missing file.
+    """
     if not os.path.exists(db_path):
         return None
     conn = sqlite3.connect(db_path)
-    conn.execute("PRAGMA query_only = ON")
+    try:
+        conn.execute("PRAGMA query_only = ON")
+        has_table = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='fingerprints'"
+        ).fetchone()
+    except Exception:
+        conn.close()
+        raise
+    if not has_table:
+        conn.close()
+        return None
     return conn
 
 
@@ -389,7 +464,6 @@ def get_fingerprint(
 
     path = ensure_long_path(path)
     os.makedirs(os.path.dirname(db_path), exist_ok=True)
-    conn = _open_readonly_connection(db_path)
     try:
         mtime = os.path.getmtime(path)
         size = os.path.getsize(path)
@@ -397,23 +471,42 @@ def get_fingerprint(
         log_callback(f"! Could not stat {path}: {e}")
         trace["source"] = "stat_error"
         trace["error"] = str(e)
+        return None
+
+    fp = _memo_get(db_path, path, mtime, size)
+    if fp is not None:
+        _dlog("FP", f"cache hit (memory) {path}", log_callback)
+        trace["source"] = "cache"
+        trace["error"] = ""
+        return fp
+
+    row = None
+    conn: sqlite3.Connection | None = None
+    try:
+        conn = _open_readonly_connection(db_path)
+        if conn is not None:
+            row = conn.execute(
+                "SELECT mtime, size, fingerprint FROM fingerprints WHERE path=?",
+                (path,),
+            ).fetchone()
+    except sqlite3.Error as e:
+        # An unreadable cache is a cache miss, not a reason to fail the lookup.
+        log_callback(f"! Fingerprint cache read failed: {e}")
+        row = None
+    finally:
         if conn is not None:
             conn.close()
-        return None
-    row = None
-    if conn is not None:
-        row = conn.execute(
-            "SELECT mtime, size, fingerprint FROM fingerprints WHERE path=?",
-            (path,),
-        ).fetchone()
+
     cached_mtime = row[0] if row else None
     cached_size = row[1] if row else None
-    if row and abs(cached_mtime - mtime) < 1e-6 and int(cached_size or 0) == int(size):
-        fp = row[2]
+    if (
+        row
+        and cached_mtime is not None
+        and abs(cached_mtime - mtime) < 1e-6
+        and int(cached_size or 0) == int(size)
+    ):
         _dlog("FP", f"cache hit {path}", log_callback)
-        if conn is not None:
-            conn.close()
-        fp = _decode_fingerprint(fp)
+        fp = _decode_fingerprint(row[2])
         if fp is None:
             trace["source"] = "missing"
             trace["error"] = "fingerprint unavailable"
@@ -423,6 +516,7 @@ def get_fingerprint(
             f"fingerprint_prefix={fp[:16]} len={len(fp)}",
             log_callback,
         )
+        _memo_put(db_path, path, mtime, size, fp)
         trace["source"] = "cache"
         trace["error"] = ""
         return fp
@@ -441,9 +535,11 @@ def get_fingerprint(
             f"computed fingerprint prefix={fp_hash[:16]} len={len(fp_hash)}",
             log_callback,
         )
-        _get_writer(db_path).enqueue(path, mtime, size, duration, fp_hash)
-    if conn is not None:
-        conn.close()
+        _memo_put(db_path, path, mtime, size, fp_hash)
+        try:
+            _get_writer(db_path).enqueue(path, mtime, size, duration, fp_hash)
+        except (sqlite3.Error, OSError) as e:
+            log_callback(f"! Fingerprint cache write failed: {e}")
     if fp_hash:
         trace["source"] = "computed"
         trace["error"] = ""
@@ -693,6 +789,7 @@ def store_fingerprint(
                 normalized_title=normalized_title,
                 normalized_album=normalized_album,
             )
+            _memo_put(db_path, path, mtime, size, fingerprint)
             if flush:
                 flush_fingerprint_writes(db_path)
             return True
@@ -706,9 +803,13 @@ def store_fingerprint(
 
 def flush_fingerprint_writes(db_path: str, timeout: float | None = None) -> None:
     """Force a flush of queued fingerprint writes for immediate persistence."""
-    if not os.path.exists(db_path):
+    with _writer_lock:
+        writer = _writer if _writer_db_path == db_path else None
+    if writer is None:
+        # Writes are only ever queued on the current writer; a different (or
+        # no) writer means nothing is pending for this DB.
         return
-    _get_writer(db_path).flush(timeout=timeout)
+    writer.flush(timeout=timeout)
 
 
 def shutdown_fingerprint_writer() -> None:
@@ -723,9 +824,10 @@ def shutdown_fingerprint_writer() -> None:
 
 
 def flush_cache(db_path: str) -> None:
+    _memo_clear(db_path)
+    shutdown_fingerprint_writer()
     if not os.path.exists(db_path):
         return
-    shutdown_fingerprint_writer()
     try:
         os.remove(db_path)
     except Exception:

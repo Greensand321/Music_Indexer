@@ -1,38 +1,13 @@
 import json
 import os
-import sys
-import types
 from pathlib import Path
 
-# Provide simple stubs for mutagen so the module imports
-mutagen_stub = types.ModuleType("mutagen")
+from _helpers.module_isolation import make_acoustid_stub, make_mutagen_stub, stub_if_unavailable
 
-
-class DummyAudio:
-    def __init__(self):
-        self.tags = None
-        self.pictures = []
-
-
-def File(*_a, **_k):
-    return DummyAudio()
-
-
-mutagen_stub.File = File
-
-id3_stub = types.ModuleType("id3")
-
-
-class DummyID3Error(Exception):
-    pass
-
-
-id3_stub.ID3NoHeaderError = DummyID3Error
-mutagen_stub.id3 = id3_stub
-sys.modules.setdefault("mutagen", mutagen_stub)
-sys.modules.setdefault("mutagen.id3", id3_stub)
-acoustid_stub = types.SimpleNamespace(fingerprint_file=lambda *_a, **_k: (None, None))
-sys.modules.setdefault("acoustid", acoustid_stub)
+# library_sync's vendored engine imports mutagen and acoustid at module level.
+# Stub them only when they aren't installed, so a stub never shadows the real
+# package for the rest of the test session.
+stub_if_unavailable({**make_mutagen_stub(), "acoustid": make_acoustid_stub()})
 
 from library_sync import LibrarySyncPlan, execute_plan
 

@@ -179,8 +179,53 @@ def test_metadata_normalization_prefers_album_source(tmp_path) -> None:
     assert group.tag_source == album_path
     assert group.planned_winner_tags["album"] == "Album C"
     assert group.planned_winner_tags["albumartist"] == "Artist C"
-    assert group.planned_winner_tags["year"] == 2020
+    # Years are normalized to four-digit strings (utils.year_normalizer).
+    assert group.planned_winner_tags["year"] == "2020"
     assert "album" in group.metadata_changes
+
+
+def test_missing_year_on_metadata_source_does_not_clobber_winner_year(tmp_path) -> None:
+    """The "Unknown" year placeholder must never be planned over a real year."""
+    single_path = os.path.join(tmp_path, "Singles", "Song E.flac")
+    album_path = os.path.join(tmp_path, "Album", "Song E.mp3")
+    tracks = [
+        {
+            "path": single_path,
+            "fingerprint": "fp-year-keep",
+            "ext": ".flac",
+            "bitrate": 900,
+            "sample_rate": 48000,
+            "bit_depth": 24,
+            "channels": 2,
+            "tags": {"title": "Song E", "artist": "Artist E", "album_type": "single", "year": 2019},
+        },
+        {
+            "path": album_path,
+            "fingerprint": "fp-year-keep",
+            "ext": ".mp3",
+            "bitrate": 320,
+            "sample_rate": 44100,
+            "bit_depth": 16,
+            "channels": 2,
+            "tags": {
+                "title": "Song E",
+                "artist": "Artist E",
+                "album": "Album E",
+                "albumartist": "Artist E",
+                "track": 1,
+                "album_type": "album",
+            },
+        },
+    ]
+
+    plan = build_consolidation_plan(tracks)
+    group = plan.groups[0]
+
+    assert group.winner_path == single_path
+    assert group.tag_source == album_path
+    assert group.planned_winner_tags["album"] == "Album E"
+    assert group.planned_winner_tags["year"] == "2019"
+    assert "year" not in group.metadata_changes
 
 
 def test_preview_html_compresses_artwork_payloads(tmp_path) -> None:

@@ -226,7 +226,12 @@ speed-up never comes at the cost of using a wrong, outdated fingerprint. To keep
 cache from becoming a bottleneck itself, writes are batched and queued by a
 dedicated background `FingerprintWriter` thread rather than performed one
 painstaking entry at a time, and reads happen over a separate `PRAGMA query_only`
-connection so a slow write never blocks a fast read.
+connection so a slow write never blocks a fast read. Because a queued write may not
+have reached disk yet, the cache also keeps a small in-process memo of fingerprints
+it has just computed, stored or read (checked against the same size/mtime), so
+asking again a moment later doesn't recompute; anything that needs the rows on disk
+(the background cache pre-warmer does this before it finishes) calls
+`flush_fingerprint_writes()`.
 
 ### A documented architectural quirk: two indexer engines
 

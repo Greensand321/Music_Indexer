@@ -28,7 +28,7 @@ from collections import defaultdict
 
 from config import PREVIEW_ARTWORK_MAX_DIM, PREVIEW_ARTWORK_QUALITY, load_config
 from utils.path_helpers import ensure_long_path
-from utils.year_normalizer import normalize_year
+from utils.year_normalizer import UNKNOWN_YEAR, normalize_year
 from utils.audio_metadata_reader import read_metadata, read_sidecar_artwork_bytes
 try:
     _MUTAGEN_AVAILABLE = importlib.util.find_spec("mutagen") is not None
@@ -116,6 +116,19 @@ def _default_progress(_current: int, _total: int, _msg: str) -> None:
 
 def _blank_tags() -> Dict[str, object]:
     return {key: None for key in TAG_KEYS}
+
+
+def _tag_value_missing(key: str, value: object) -> bool:
+    """Return True when ``value`` carries no real information for ``key``.
+
+    ``normalize_year`` turns an absent year into the ``UNKNOWN_YEAR`` sentinel
+    ("Unknown").  That is a display placeholder, not a value: it must not block
+    a real year from another source during merging, and it must never be
+    planned as a replacement for a winner's real year.
+    """
+    if value in (None, "", []):
+        return True
+    return key == "year" and value == UNKNOWN_YEAR
 
 
 def _first_value(value: object) -> object:
@@ -1006,7 +1019,9 @@ def _read_tags_and_artwork(
     base = _merge_tags(_blank_tags(), file_tags)
     fallback = provided_tags or {}
     for key, val in (fallback or {}).items():
-        if key in base and base[key] not in (None, "", []):
+        if key in base and not _tag_value_missing(key, base[key]):
+            continue
+        if key in base and base[key] == UNKNOWN_YEAR and _tag_value_missing(key, val):
             continue
         base[key] = val
     if read_error and error is None:
@@ -2235,7 +2250,10 @@ def _merge_tags(existing: MutableMapping[str, object], source: Mapping[str, obje
     for key, value in existing.items():
         merged[key] = value
     for key, value in source.items():
-        if key in merged and merged[key]:
+        if key in merged and not _tag_value_missing(key, merged[key]):
+            continue
+        if key in merged and merged[key] == UNKNOWN_YEAR and _tag_value_missing(key, value):
+            # Keep the year placeholder rather than replacing it with a blank.
             continue
         merged[key] = value
     return merged
@@ -2269,7 +2287,7 @@ def _build_planned_tags(
             "year",
         ]
         for key in normalized_keys:
-            if src_tags.get(key) in (None, "", []):
+            if _tag_value_missing(key, src_tags.get(key)):
                 continue
             planned_tags[key] = src_tags.get(key)
         if src_context == "album":

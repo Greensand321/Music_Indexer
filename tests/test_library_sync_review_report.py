@@ -1,24 +1,12 @@
 import csv
 import json
-import sys
-import types
 from datetime import datetime, timezone
 
-# Stub heavy dependencies before importing modules under test
-acoustid_stub = types.ModuleType("acoustid")
-acoustid_stub.fingerprint_file = lambda path: (0, "stub-fp")
-sys.modules.setdefault("acoustid", acoustid_stub)
+from _helpers.module_isolation import make_acoustid_stub, stub_if_unavailable
 
-silence_stub = types.ModuleType("pydub.silence")
-silence_stub.detect_nonsilent = lambda *args, **kwargs: []
-
-audio_segment = type("AudioSegment", (), {"from_file": staticmethod(lambda path: None)})
-pydub_stub = types.ModuleType("pydub")
-pydub_stub.AudioSegment = audio_segment
-pydub_stub.silence = silence_stub
-
-sys.modules.setdefault("pydub", pydub_stub)
-sys.modules.setdefault("pydub.silence", silence_stub)
+# library_sync_review_report imports library_sync, whose vendored engine
+# imports ``acoustid`` at module level. Stub it only if it isn't installed.
+stub_if_unavailable({"acoustid": make_acoustid_stub()})
 
 from library_sync_types import MatchResult, MatchStatus, TrackRecord
 from library_sync_review_report import (

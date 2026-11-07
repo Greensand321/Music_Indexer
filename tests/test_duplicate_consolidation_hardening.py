@@ -361,3 +361,38 @@ def test_metadata_gate_uses_normalized_titles(tmp_path):
     assert len(plan.groups) == 1
     group_paths = {plan.groups[0].winner_path, *plan.groups[0].losers}
     assert group_paths == {str(base_a), str(base_b)}
+
+
+def test_apply_metadata_never_writes_unknown_year_placeholder(tmp_path, monkeypatch):
+    import duplicate_consolidation_executor as executor
+
+    target = tmp_path / "Song.flac"
+    target.write_text("x")
+
+    class FakeAudio(dict):
+        def __init__(self):
+            super().__init__()
+            self.tags = {}
+            self.saved = False
+
+        def __setitem__(self, key, value):
+            super().__setitem__(key, value)
+            self.tags[key] = value
+
+        def save(self):
+            self.saved = True
+
+    audio = FakeAudio()
+    monkeypatch.setattr(executor, "MutagenFile", lambda *_a, **_k: audio)
+
+    ok, _msg, _skipped = executor._apply_metadata(
+        str(target), {"album": "Album", "year": "Unknown"}
+    )
+
+    assert ok
+    assert audio.tags == {"album": ["Album"]}
+    assert audio.saved
+    verified, detail = executor._verify_metadata_write(
+        str(target), {"album": "Album", "year": "Unknown"}, []
+    )
+    assert verified, detail

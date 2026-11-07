@@ -40,6 +40,7 @@ from duplicate_consolidation import (
 from indexer_control import IndexCancelled, cancel_event as global_cancel_event
 from utils.audio_metadata_reader import _extract_cover_payloads, read_sidecar_artwork_bytes
 from utils.path_helpers import ensure_long_path
+from utils.year_normalizer import UNKNOWN_YEAR
 
 try:
     _MUTAGEN_AVAILABLE = importlib.util.find_spec("mutagen") is not None
@@ -150,6 +151,11 @@ class ExecutionResult:
 
 EXECUTION_REPORT_FILENAME = "execution_report.html"
 INTERNAL_TAG_KEYS = {"album_type"}
+
+
+def _is_placeholder_tag(key: str, value: object) -> bool:
+    """The normalized "Unknown" year means *no* year; never write it to a file."""
+    return key == "year" and value == UNKNOWN_YEAR
 _NUMERIC_SUFFIX_RE = re.compile(r"\s*\((\d+)\)$")
 
 
@@ -465,7 +471,7 @@ def _apply_metadata(target: str, planned_tags: Mapping[str, object]) -> tuple[bo
         changed = False
         skipped: List[str] = []
         for key, value in planned_tags.items():
-            if value is None:
+            if value is None or _is_placeholder_tag(key, value):
                 continue
             if key in INTERNAL_TAG_KEYS:
                 skipped.append(key)
@@ -504,6 +510,8 @@ def _verify_metadata_write(target: str, planned_tags: Mapping[str, object], skip
         mismatched: List[str] = []
         for key, value in planned_tags.items():
             if value is None or key in INTERNAL_TAG_KEYS or key in skipped:
+                continue
+            if _is_placeholder_tag(key, value):
                 continue
             normalized = [str(value)] if not isinstance(value, list) else [str(v) for v in value]
             current = audio.tags.get(key)

@@ -1,22 +1,3 @@
-import sys
-import types
-
-# Stub heavy dependencies before importing modules under test
-acoustid_stub = types.ModuleType("acoustid")
-acoustid_stub.fingerprint_file = lambda path: (0, "stub-fp")
-sys.modules.setdefault("acoustid", acoustid_stub)
-
-silence_stub = types.ModuleType("pydub.silence")
-silence_stub.detect_nonsilent = lambda *args, **kwargs: []
-
-audio_segment = type("AudioSegment", (), {"from_file": staticmethod(lambda path: None)})
-pydub_stub = types.ModuleType("pydub")
-pydub_stub.AudioSegment = audio_segment
-pydub_stub.silence = silence_stub
-
-sys.modules.setdefault("pydub", pydub_stub)
-sys.modules.setdefault("pydub.silence", silence_stub)
-
 from library_sync_types import MatchResult, MatchStatus, TrackRecord
 from library_sync_review_state import (
     ReviewStateStore,

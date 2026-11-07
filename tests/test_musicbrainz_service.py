@@ -1,6 +1,6 @@
-import sys
 import types
-import importlib
+
+from _helpers.module_isolation import isolated_modules
 
 
 def test_musicbrainz_service_success(monkeypatch):
@@ -8,11 +8,10 @@ def test_musicbrainz_service_success(monkeypatch):
     mb.set_useragent = lambda *a, **k: None
     mb.search_artists = lambda **kw: {'artist-list': [1]}
     mb.MusicBrainzError = Exception
-    monkeypatch.setitem(sys.modules, 'musicbrainzngs', mb)
-    import plugins.acoustid_plugin as ap
-    importlib.reload(ap)
-    svc = ap.MusicBrainzService()
-    ok, msg = svc.test_connection()
+    # Fresh plugin module bound to the stub; both are removed afterwards.
+    with isolated_modules({'musicbrainzngs': mb}, fresh=['plugins.acoustid_plugin']) as mods:
+        svc = mods['plugins.acoustid_plugin'].MusicBrainzService()
+        ok, msg = svc.test_connection()
     assert ok is True
     assert 'artist' in msg
 
@@ -26,10 +25,9 @@ def test_musicbrainz_service_error(monkeypatch):
         raise Err('fail')
     mb.search_artists = fail
     mb.MusicBrainzError = Err
-    monkeypatch.setitem(sys.modules, 'musicbrainzngs', mb)
-    import plugins.acoustid_plugin as ap
-    importlib.reload(ap)
-    svc = ap.MusicBrainzService()
-    ok, msg = svc.test_connection()
+    # Fresh plugin module bound to the stub; both are removed afterwards.
+    with isolated_modules({'musicbrainzngs': mb}, fresh=['plugins.acoustid_plugin']) as mods:
+        svc = mods['plugins.acoustid_plugin'].MusicBrainzService()
+        ok, msg = svc.test_connection()
     assert ok is False
     assert 'fail' in msg

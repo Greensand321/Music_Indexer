@@ -370,3 +370,15 @@ def read_tags(path: str) -> Dict[str, object]:
     """Return just the tag dictionary for ``path``."""
     tags, _covers, _error, _reader = read_metadata(path, include_cover=False)
     return _normalize_text_tags(tags)
+
+
+def read_tags_checked(path: str) -> Tuple[Dict[str, object], Optional[str]]:
+    """Return ``(tags, error)`` for ``path``.
+
+    Like :func:`read_tags`, but also reports why tags could not be read, so a
+    caller can tell an untagged file (blank tags, ``error`` is ``None``) from
+    a corrupt/unreadable one (blank tags, ``error`` starts with
+    ``"read failed"``).
+    """
+    tags, _covers, error, _reader = read_metadata(path, include_cover=False)
+    return _normalize_text_tags(tags), error

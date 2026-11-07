@@ -1,34 +1,34 @@
-import os
-import sys
 import types
-import tempfile
 
-mutagen_stub = types.ModuleType('mutagen')
-class DummyAudio:
-    def __init__(self):
-        self.tags = None
-        self.pictures = []
-def File(*a, **k):
-    return DummyAudio()
-mutagen_stub.File = File
-id3_stub = types.ModuleType('id3')
-id3_stub.ID3NoHeaderError = Exception
-mutagen_stub.id3 = id3_stub
-sys.modules['mutagen'] = mutagen_stub
-sys.modules['mutagen.id3'] = id3_stub
-chroma_stub = types.ModuleType('chromaprint_utils')
-chroma_stub.fingerprint_fpcalc = lambda p, **kw: 'hash'
-sys.modules['chromaprint_utils'] = chroma_stub
+import pytest
 
-from music_indexer_api import build_dry_run_html
+from _helpers.module_isolation import isolated_modules, make_mutagen_stub
 
-def test_phase_c_section(tmp_path):
-    (tmp_path / 'song.mp3').write_text('x')
-    html = tmp_path / 'out.html'
-    build_dry_run_html(str(tmp_path), str(html), enable_phase_c=False)
-    text = html.read_text()
-    assert 'Phase C' not in text
-    build_dry_run_html(str(tmp_path), str(html), enable_phase_c=True)
-    text = html.read_text()
-    assert 'Phase C' in text
 
+@pytest.fixture
+def indexer_api():
+    chroma_stub = types.ModuleType("chromaprint_utils")
+    chroma_stub.fingerprint_fpcalc = lambda p, **kw: "hash"
+    stubs = {**make_mutagen_stub(), "chromaprint_utils": chroma_stub}
+    with isolated_modules(stubs, fresh=["music_indexer_api"]) as mods:
+        yield mods["music_indexer_api"]
+
+
+def test_phase_c_section(tmp_path, indexer_api):
+    # The indexer was refocused on routing only (duplicate detection lives in
+    # the Duplicate Finder; see docs/features/indexer.md). ``enable_phase_c``
+    # is still accepted for backward compatibility but is ignored, so the
+    # dry-run report never contains a Phase C (cross-album duplicates) section.
+    (tmp_path / "song.mp3").write_text("x")
+    html = tmp_path / "out.html"
+
+    indexer_api.build_dry_run_html(str(tmp_path), str(html), enable_phase_c=False)
+    without_flag = html.read_text()
+    assert "Phase C" not in without_flag
+    assert "song" in without_flag
+
+    indexer_api.build_dry_run_html(str(tmp_path), str(html), enable_phase_c=True)
+    with_flag = html.read_text()
+    assert "Phase C" not in with_flag
+    # The flag is a no-op: the report is identical either way.
+    assert with_flag == without_flag

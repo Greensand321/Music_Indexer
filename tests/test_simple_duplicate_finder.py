@@ -1,7 +1,5 @@
 import os
-import sys
 import types
-import importlib
 
 import simple_duplicate_finder as sdf
 from fingerprint_cache import flush_cache, _ensure_db
@@ -18,8 +16,11 @@ def load_module(monkeypatch, fp_map=None):
             'e.mp3': '2 1',
         }
     chroma_stub.fingerprint_fpcalc = lambda p, **kw: fp_map[os.path.basename(p)]
-    monkeypatch.setitem(sys.modules, 'chromaprint_utils', chroma_stub)
-    importlib.reload(sdf)
+    chroma_stub.FingerprintError = sdf.chromaprint_utils.FingerprintError
+    # Swap only the binding simple_duplicate_finder uses; monkeypatch restores
+    # it afterwards. (Reloading the module against a stub in sys.modules left
+    # the stub-bound module behind for every later test.)
+    monkeypatch.setattr(sdf, 'chromaprint_utils', chroma_stub)
     return sdf
 
 
@@ -70,7 +71,7 @@ def test_duplicate_detection(tmp_path, monkeypatch):
     (tmp_path / 'b.flac').write_text('x')
     (tmp_path / 'c.mp3').write_text('x')
     db = tmp_path / 'fp.db'
-    _ensure_db(str(db))
+    _ensure_db(str(db)).close()
     dups, missing = sdf_mod.find_duplicates(str(tmp_path), db_path=str(db), max_workers=1)
     pair = (str(tmp_path / 'b.flac'), str(tmp_path / 'a.mp3'))
     assert pair in dups or (pair[1], pair[0]) in dups
@@ -83,7 +84,7 @@ def test_cross_prefix_detection(tmp_path, monkeypatch):
     (tmp_path / 'd.mp3').write_text('x')
     (tmp_path / 'e.mp3').write_text('x')
     db = tmp_path / 'fp.db'
-    _ensure_db(str(db))
+    _ensure_db(str(db)).close()
     # Fuzzy prefix grouping should still compare them
     pair = (str(tmp_path / 'd.mp3'), str(tmp_path / 'e.mp3'))
     dups, _ = sdf_mod.find_duplicates(
@@ -102,7 +103,7 @@ def test_fuzzy_prefix_grouping(tmp_path, monkeypatch):
     (tmp_path / 'f1.mp3').write_text('x')
     (tmp_path / 'f2.flac').write_text('x')
     db = tmp_path / 'fp.db'
-    _ensure_db(str(db))
+    _ensure_db(str(db)).close()
     pair = (str(tmp_path / 'f2.flac'), str(tmp_path / 'f1.mp3'))
     dups, _ = sdf_mod.find_duplicates(str(tmp_path), db_path=str(db), max_workers=1)
     assert pair in dups or (pair[1], pair[0]) in dups
@@ -120,7 +121,7 @@ def test_coarse_gating_regression(tmp_path, monkeypatch):
     for name in fp_map:
         (tmp_path / name).write_text('x')
     db = tmp_path / 'fp.db'
-    _ensure_db(str(db))
+    _ensure_db(str(db)).close()
     ordered_paths = [str(tmp_path / name) for name in sorted(fp_map)]
     monkeypatch.setattr(sdf_mod, '_walk_audio_files', lambda *_args, **_kw: iter(ordered_paths))
 

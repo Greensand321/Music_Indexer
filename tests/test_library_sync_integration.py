@@ -1,21 +1,16 @@
 import csv
 import os
-import sys
 import threading
 import types
 
 import pytest
 
-# library_sync loads the vendored engine as a package, so its
-# fingerprint_generator must be stubbed under the dotted name *before*
-# library_sync is imported; otherwise the real vendored module loads and
-# imports ``acoustid`` at module level. Registering it here (rather than in a
-# fixture) is what makes the import on the next line succeed.
-_FP_VENDORED = "library_sync_indexer_engine.indexer_engine.fingerprint_generator"
-if _FP_VENDORED not in sys.modules:
-    sys.modules[_FP_VENDORED] = types.ModuleType("fingerprint_generator")
-if "fingerprint_generator" not in sys.modules:
-    sys.modules["fingerprint_generator"] = sys.modules[_FP_VENDORED]
+from _helpers.module_isolation import make_acoustid_stub, stub_if_unavailable
+
+# library_sync's vendored engine imports ``acoustid`` at module level; stub it
+# only if it isn't installed. Fingerprinting itself is replaced per test on
+# the module object library_sync actually bound (see _ensure_fp_module).
+stub_if_unavailable({"acoustid": make_acoustid_stub()})
 
 import library_sync
 from fingerprint_cache import flush_cache
@@ -70,6 +65,8 @@ def _setup_media_stubs(monkeypatch, fp_map, corrupt=None, missing=None, cancel_a
         return types.SimpleNamespace(info=DummyInfo())
 
     monkeypatch.setattr(music_indexer_api, "MutagenFile", fake_mutagen)
+    # As with get_tags: library_sync reads bitrate via the vendored engine.
+    monkeypatch.setattr(library_sync.idx, "MutagenFile", fake_mutagen)
 
 
 def test_partial_scan_and_cancellation_preserves_results(tmp_path, monkeypatch):

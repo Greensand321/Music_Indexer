@@ -1,13 +1,18 @@
-import importlib
 import subprocess
-import sys
+
+import pytest
+
+from _helpers.module_isolation import isolated_modules
 
 
-sys.modules.pop("chromaprint_utils", None)
-cu = importlib.import_module("chromaprint_utils")
+@pytest.fixture
+def cu():
+    # Always exercise the real module, even if something stubbed it.
+    with isolated_modules(fresh=["chromaprint_utils"]) as mods:
+        yield mods["chromaprint_utils"]
 
 
-def test_fpcalc_timeout(monkeypatch, tmp_path):
+def test_fpcalc_timeout(cu, monkeypatch, tmp_path):
     monkeypatch.setattr(cu, "ensure_tool", lambda name: None)
     monkeypatch.setattr(cu, "load_config", lambda: {"fingerprint_subprocess_timeout_sec": 1})
 

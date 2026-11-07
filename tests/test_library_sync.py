@@ -1,23 +1,18 @@
-import types
-import sys
 import os
+import types
+
 import pytest
 
-# Stub mutagen and fingerprint generator
-mutagen_stub = types.ModuleType('mutagen')
-class DummyAudio:
-    def __init__(self, bitrate=128000):
-        self.tags = {'artist': ['A'], 'title': ['T'], 'album': ['AL']}
-        self.info = types.SimpleNamespace(bitrate=bitrate)
+from _helpers.module_isolation import make_acoustid_stub, stub_if_unavailable
 
-def File(path, easy=False):
-    return DummyAudio()
-mutagen_stub.File = File
-id3_stub = types.ModuleType('id3')
-id3_stub.ID3NoHeaderError = Exception
-mutagen_stub.id3 = id3_stub
-sys.modules['mutagen'] = mutagen_stub
-sys.modules['mutagen.id3'] = id3_stub
+# library_sync's vendored engine imports ``acoustid`` at module level; stub it
+# only if it isn't installed.
+stub_if_unavailable({"acoustid": make_acoustid_stub()})
+
+import library_sync
+from library_sync import compare_libraries, compute_quality_score
+from library_sync_types import MatchStatus
+from fingerprint_cache import flush_cache
 
 fp_map = {
     'a.flac': '1 2',
@@ -26,29 +21,41 @@ fp_map = {
     'new.mp3': '9 9',
 }
 
-fingerprint_stub = types.ModuleType('fingerprint_generator')
+
+class DummyAudio:
+    def __init__(self, bitrate=128000):
+        self.tags = {'artist': ['A'], 'title': ['T'], 'album': ['AL']}
+        self.info = types.SimpleNamespace(bitrate=bitrate)
+
+
+def File(path, easy=False):
+    return DummyAudio()
+
 
 def fake_compute(paths, db_path, log_callback=None, progress_callback=None, cancel_event=None, **_kwargs):
     for p in paths:
         yield p, 0, fp_map.get(os.path.basename(p), 'x')
 
-fingerprint_stub.compute_fingerprints_parallel = fake_compute
-sys.modules['fingerprint_generator'] = fingerprint_stub
-# library_sync imports the vendored engine as a package
-# (``from .indexer_engine import fingerprint_generator``), so the stub must
-# also sit under that dotted name or the real vendored module is loaded — and
-# it imports ``acoustid`` at module level, which test environments may lack.
-# The bare-name entry above still covers the root engine.
-sys.modules['library_sync_indexer_engine.indexer_engine.fingerprint_generator'] = fingerprint_stub
 
-import importlib
-import music_indexer_api
-importlib.reload(music_indexer_api)
-import library_sync
-importlib.reload(library_sync)
-from library_sync import compare_libraries, compute_quality_score
-from library_sync_types import MatchStatus
-from fingerprint_cache import flush_cache
+def _patch_fingerprints(monkeypatch, compute):
+    # Patch the module object library_sync actually bound (its vendored
+    # engine's fingerprint_generator), not whatever sits in sys.modules.
+    monkeypatch.setattr(library_sync.fingerprint_generator, "compute_fingerprints_parallel", compute)
+
+
+@pytest.fixture(autouse=True)
+def _media_stubs(monkeypatch):
+    """Every file reads as tagged A/T/AL at 128 kbps; fingerprints come from fp_map.
+
+    Library Sync reads tags through the vendored engine's ``get_tags`` (which
+    goes through the shared reader in ``utils.audio_metadata_reader``) and
+    bitrate through the vendored ``MutagenFile``; patch both bindings.
+    """
+    import utils.audio_metadata_reader as reader
+
+    monkeypatch.setattr(reader, "MutagenFile", File)
+    monkeypatch.setattr(library_sync.idx, "MutagenFile", File)
+    _patch_fingerprints(monkeypatch, fake_compute)
 
 
 def test_quality_score_simple():
@@ -119,11 +126,7 @@ def test_compare_libraries_thresholds(tmp_path, monkeypatch):
             fp = fake_fp(p)
             yield p, 0, fp
 
-    monkeypatch.setattr(
-        sys.modules["fingerprint_generator"],
-        "compute_fingerprints_parallel",
-        fake_compute,
-    )
+    _patch_fingerprints(monkeypatch, fake_compute)
 
     db = tmp_path / 'fp.db'
     res = compare_libraries(
@@ -175,11 +178,7 @@ def test_format_threshold_match(tmp_path, monkeypatch):
             fp = fake_fp(p)
             yield p, 0, fp
 
-    monkeypatch.setattr(
-        sys.modules["fingerprint_generator"],
-        "compute_fingerprints_parallel",
-        fake_compute,
-    )
+    _patch_fingerprints(monkeypatch, fake_compute)
 
     db = tmp_path / "fp.db"
     res = compare_libraries(
@@ -223,11 +222,7 @@ def test_compare_libraries_relaxed_threshold(tmp_path, monkeypatch):
             fp = fake_fp(p)
             yield p, 0, fp
 
-    monkeypatch.setattr(
-        sys.modules["fingerprint_generator"],
-        "compute_fingerprints_parallel",
-        fake_compute,
-    )
+    _patch_fingerprints(monkeypatch, fake_compute)
 
     db = tmp_path / "fp.db"
     res = compare_libraries(

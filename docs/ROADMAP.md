@@ -102,6 +102,22 @@ the body below:
   orbit / hover / select / CSV+M3U export. Cluster membership is now bucketed in a
   single pass instead of rescanning the full label array once per cluster, which
   had made legend and centroid construction O(clusters x points).
+- **Duplicate Finder no longer plans "Unknown" over a real year.** The shared
+  metadata reader turns a missing year into the placeholder `"Unknown"`, which the
+  consolidation planner treated as a real value: an album-context tag source with no
+  year produced a planned change like `year: 2019 → Unknown` on the winner, and the
+  placeholder also blocked a real provided year from filling in. The placeholder now
+  counts as "no value" when merging/planning, and the executor never writes it.
+- **The Tag Fixer skips unreadable files again.** Moving its tag reads onto the
+  shared reader (which swallows read errors) had silently dropped the "skip corrupt
+  files" behaviour, so corrupt files showed up as phantom "unmatched" rows and were
+  sent for metadata lookups. Read failures are now detected and skipped (and logged).
+- **Fingerprint-cache robustness.** A cache DB file that exists without its table
+  (e.g. created moments earlier by the background writer) is now an empty cache
+  rather than a `no such table` error; the writer creates the schema before it is
+  registered; and a fingerprint computed or stored moments ago is served from an
+  in-process memo (validated by mtime/size) instead of being recomputed because the
+  batched write hadn't reached disk yet.
 
 ---
 
@@ -277,8 +293,20 @@ editing and tuning layer on top of them.
   for PyInstaller), which stopped the Library Sync tests' bare-name
   `fingerprint_generator` stub from shadowing the vendored module; those tests now
   register the stub under the dotted vendored name too and patch the engine object
-  `library_sync` actually binds. What remains is the general pattern — per-file
-  `mutagen` stubs and the cache race.
+  `library_sync` actually binds.
+
+  *Update — the order dependence and the cache race are now fixed.* No test file
+  writes to `sys.modules` at module level any more: stubs are installed per test
+  through `tests/_helpers/module_isolation.py` (`isolated_modules()` installs the
+  stubs, re-imports the module under test against them, and afterwards restores
+  every touched `sys.modules` entry and parent-package attribute;
+  `stub_if_unavailable()` stubs an optional dependency only when it isn't
+  installed, so it can never shadow the real package). The suite gives the same
+  result in default, reversed and shuffled file order. The cache race was a real
+  bug in `cache_prewarmer.prewarm_cache()`: its thread finished while the
+  fingerprints were still queued on `fingerprint_cache`'s batching writer; it now
+  flushes before returning. (The per-file stubs still aren't *shared* — each file
+  builds its own, now leak-free — and `mutagen_stub/` remains unused.)
 
 - **Tidal-dl sync** *(Designed, not started).* An old idea to pull music from the Tidal
   service was referenced in early notes, but no interface or workflow for it exists.

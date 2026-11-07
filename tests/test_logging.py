@@ -1,16 +1,4 @@
 import logging
-import types
-import sys
-
-mutagen_stub = types.ModuleType('mutagen')
-def File(*a, **k):
-    return None
-mutagen_stub.File = File
-id3_stub = types.ModuleType('id3')
-id3_stub.ID3NoHeaderError = Exception
-mutagen_stub.id3 = id3_stub
-sys.modules['mutagen'] = mutagen_stub
-sys.modules['mutagen.id3'] = id3_stub
 
 from near_duplicate_detector import find_near_duplicates
 

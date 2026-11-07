@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from typing import Iterable, Callable, List, Optional
 import importlib
 from mutagen import File as MutagenFile
-from utils.audio_metadata_reader import read_tags
+from utils.audio_metadata_reader import read_tags, read_tags_checked
 from utils.path_helpers import ensure_long_path
 
 from plugins.base import MetadataPlugin
@@ -221,7 +221,14 @@ def build_file_records(
 
         log_callback(f"Processing {f}")
 
-        tags = read_tags(ensure_long_path(f))
+        tags, read_error = read_tags_checked(ensure_long_path(f))
+        if read_error and read_error.startswith("read failed"):
+            # Corrupt/unreadable file: skip it rather than proposing tags for
+            # (and running metadata lookups on) something we can't write to.
+            log_callback(f"Failed to read {f}: {read_error}")
+            if progress_callback:
+                progress_callback(idx)
+            continue
         old_artist = tags.get("artist")
         old_title = tags.get("title")
         old_album = tags.get("album")

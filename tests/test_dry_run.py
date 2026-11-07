@@ -1,28 +1,9 @@
 import os
-import sys
-import types
 import tempfile
 import unittest
 
-# Provide simple stubs for mutagen so the module imports
-mutagen_stub = types.ModuleType('mutagen')
-class DummyAudio:
-    def __init__(self):
-        self.tags = None
-        self.pictures = []
-def File(*a, **k):
-    return DummyAudio()
-mutagen_stub.File = File
+from _helpers.module_isolation import isolated_modules, make_mutagen_stub
 
-id3_stub = types.ModuleType('id3')
-class DummyID3Error(Exception):
-    pass
-id3_stub.ID3NoHeaderError = DummyID3Error
-mutagen_stub.id3 = id3_stub
-sys.modules['mutagen'] = mutagen_stub
-sys.modules['mutagen.id3'] = id3_stub
-
-from music_indexer_api import build_dry_run_html
 
 class DryRunTest(unittest.TestCase):
     def test_dry_run_does_not_modify_files(self):
@@ -39,7 +20,9 @@ class DryRunTest(unittest.TestCase):
             }
 
             html = os.path.join(root, 'index.html')
-            build_dry_run_html(root, html)
+            # Stub mutagen only for this call; nothing leaks into later tests.
+            with isolated_modules(make_mutagen_stub(), fresh=["music_indexer_api"]) as mods:
+                mods["music_indexer_api"].build_dry_run_html(root, html)
 
             after_files = {
                 os.path.relpath(os.path.join(dp, f), root)

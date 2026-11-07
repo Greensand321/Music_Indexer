@@ -1,5 +1,6 @@
 """Tests for cluster_graph_3d — Three.js HTML generator."""
 import json
+from pathlib import Path
 import os
 import tempfile
 
@@ -150,7 +151,7 @@ def test_generate_from_library_path(library_with_cluster_info):
     assert os.path.isfile(path)
     assert path.endswith("cluster_graph.html")
 
-    content = open(path, encoding="utf-8").read()
+    content = Path(path).read_text(encoding="utf-8")
     assert "<!DOCTYPE html>" in content
     assert "three.min.js" in content
 
@@ -169,7 +170,7 @@ def test_generate_from_data(cluster_data, tmp_path):
     path = generate_cluster_graph_html_from_data(cluster_data, out)
     assert os.path.isfile(path)
 
-    content = open(path, encoding="utf-8").read()
+    content = Path(path).read_text(encoding="utf-8")
     assert "track_0.mp3" in content
 
 

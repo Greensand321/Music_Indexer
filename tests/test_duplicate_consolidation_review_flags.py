@@ -5,6 +5,38 @@ from duplicate_consolidation import build_consolidation_plan
 
 
 def test_remix_keywords_trigger_review_flag(tmp_path):
+    # Two copies of the same remix share a metadata bucket (artist + normalized
+    # title), so they are grouped; the remix keyword must then flag the group.
+    tracks = [
+        {
+            "path": os.path.join(tmp_path, "Song (Remix).flac"),
+            "fingerprint": "fp-keyword-1",
+            "ext": ".flac",
+            "bitrate": 1000,
+            "sample_rate": 48000,
+            "bit_depth": 24,
+            "tags": {"title": "Song (Remix)"},
+        },
+        {
+            "path": os.path.join(tmp_path, "Song (Remix) copy.flac"),
+            "fingerprint": "fp-keyword-1",
+            "ext": ".flac",
+            "bitrate": 900,
+            "sample_rate": 44100,
+            "bit_depth": 16,
+            "tags": {"title": "Song (Remix)"},
+        },
+    ]
+
+    plan = build_consolidation_plan(tracks)
+    assert plan.groups
+    assert any("remix" in flag.lower() or "speed" in flag.lower() for flag in plan.groups[0].review_flags)
+
+
+def test_remix_and_original_are_not_grouped_as_duplicates(tmp_path):
+    # Since grouping is gated on metadata buckets (artist + normalized title),
+    # a remix and its original never land in the same bucket, so they are not
+    # consolidated even when their fingerprints match.
     tracks = [
         {
             "path": os.path.join(tmp_path, "Song (Remix).flac"),
@@ -27,8 +59,7 @@ def test_remix_keywords_trigger_review_flag(tmp_path):
     ]
 
     plan = build_consolidation_plan(tracks)
-    assert plan.groups
-    assert any("remix" in flag.lower() or "speed" in flag.lower() for flag in plan.groups[0].review_flags)
+    assert plan.groups == []
 
 
 def test_missing_artwork_sets_global_review_flag(tmp_path):
@@ -73,6 +104,8 @@ def test_cancellation_sets_review_flag(tmp_path):
 
 
 def test_multiple_singles_with_conflicting_artwork_require_review(tmp_path):
+    # Both copies carry the same title tag so they share a metadata bucket;
+    # without it the bucket key falls back to the differing file names.
     tracks = [
         {
             "path": os.path.join(tmp_path, "Singles", "Track A.flac"),
@@ -81,7 +114,7 @@ def test_multiple_singles_with_conflicting_artwork_require_review(tmp_path):
             "bitrate": 256,
             "sample_rate": 44100,
             "bit_depth": 16,
-            "tags": {"album_type": "single", "cover_hash": "cover-a"},
+            "tags": {"title": "Track A", "album_type": "single", "cover_hash": "cover-a"},
         },
         {
             "path": os.path.join(tmp_path, "Singles", "Track A copy.flac"),
@@ -90,7 +123,7 @@ def test_multiple_singles_with_conflicting_artwork_require_review(tmp_path):
             "bitrate": 256,
             "sample_rate": 44100,
             "bit_depth": 16,
-            "tags": {"album_type": "single", "cover_hash": "cover-b"},
+            "tags": {"title": "Track A", "album_type": "single", "cover_hash": "cover-b"},
         },
     ]
 
