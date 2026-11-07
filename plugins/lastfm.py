@@ -5,13 +5,44 @@ import requests
 from utils.audio_metadata_reader import read_tags
 from utils.path_helpers import ensure_long_path
 
-from plugins.base import MetadataPlugin
+from plugins.base import MetadataPlugin, SourceStatus, describe_lookup_error
 
+# Read at import for backward compatibility; ``_api_key()`` re-reads the
+# environment at scan time so setting it later (or in tests) takes effect.
 API_KEY = os.getenv("LASTFM_API_KEY")
 
+
+def _api_key() -> str:
+    return (os.getenv("LASTFM_API_KEY") or API_KEY or "").strip()
+
+
+def _selected_service() -> str:
+    try:
+        from config import load_config
+
+        return str(load_config().get("metadata_service") or "")
+    except Exception:  # noqa: BLE001
+        return ""
+
+
 class LastfmPlugin(MetadataPlugin):
+    name = "Last.fm"
+
+    def preflight(self) -> SourceStatus:
+        if _api_key():
+            return SourceStatus(self.name, True, "key from LASTFM_API_KEY")
+        problem = ""
+        if _selected_service() == "Last.fm":
+            # Settings has no Last.fm key field; say where the key goes.
+            problem = (
+                "Last.fm is selected in Settings, but no Last.fm API key is set "
+                "(set the LASTFM_API_KEY environment variable)"
+            )
+        return SourceStatus(self.name, False, "", problem)
+
     def identify(self, file_path: str) -> dict:
-        if not API_KEY:
+        api_key = _api_key()
+        if not api_key:
             return {}
         tags = read_tags(ensure_long_path(file_path))
         artist = tags.get("artist")
@@ -21,25 +52,30 @@ class LastfmPlugin(MetadataPlugin):
 
         params = {
             "method": "track.getInfo",
-            "api_key": API_KEY,
+            "api_key": api_key,
             "artist": artist,
             "track": title,
             "format": "json",
         }
+        # Failures propagate (as a readable reason, without the key-bearing
+        # URL) so the scan can report them.
         try:
             resp = requests.get(
                 "http://ws.audioscrobbler.com/2.0/", params=params, timeout=5
             )
-            data = resp.json().get("track", {})
-        except Exception:
-            return {}
+            data = resp.json().get("track", {}) or {}
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError(describe_lookup_error(exc)) from None
 
-        tags = data.get("toptags", {}).get("tag", [])
-        genres: List[str] = [
-            t.get("name", "").title()
-            for t in tags
-            if t.get("name") and int(t.get("count", 0)) > 10
-        ]
+        tags = (data.get("toptags", {}) or {}).get("tag", []) or []
+        genres: List[str] = []
+        for t in tags:
+            try:
+                count = int(t.get("count", 0))
+            except (TypeError, ValueError):
+                count = 0
+            if t.get("name") and count > 10:
+                genres.append(t.get("name", "").title())
         if genres:
             return {
                 "artist": artist,

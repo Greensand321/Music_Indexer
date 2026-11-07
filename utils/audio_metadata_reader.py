@@ -382,3 +382,94 @@ def read_tags_checked(path: str) -> Tuple[Dict[str, object], Optional[str]]:
     """
     tags, _covers, error, _reader = read_metadata(path, include_cover=False)
     return _normalize_text_tags(tags), error
+
+
+# ── Full multi-value genre list ────────────────────────────────────────────
+#
+# ``read_tags()["genre"]`` is, and stays, the *first* genre value only — many
+# callers (Player, Duplicates, Library Sync, the indexer…) display or compare a
+# single string. Tools that *rewrite* genres must see every value, otherwise
+# they silently delete the ones they never saw (a FLAC with GENRE=Rock and
+# GENRE=Pop "becomes" Rock). These functions are that full view. They are
+# separate functions rather than an extra key in the ``read_tags`` dict on
+# purpose: some callers persist that dict or write every key of it back to a
+# file (the duplicate executor does), so a new key would leak into tags.
+
+
+def _clean_genre_values(values: Iterable[object]) -> List[str]:
+    cleaned: List[str] = []
+    for value in values:
+        if hasattr(value, "text") and not isinstance(value, (str, bytes)):
+            inner = getattr(value, "text", None)
+            cleaned.extend(_clean_genre_values(inner if isinstance(inner, (list, tuple)) else [inner]))
+            continue
+        text = _normalize_text_value(value, "genre")
+        if text:
+            cleaned.append(text)
+    return cleaned
+
+
+def genres_from_mutagen(audio) -> List[str]:
+    """Every genre value carried by a loaded mutagen object, in file order.
+
+    Handles ID3 (MP3, and ID3-in-RIFF/AIFF such as tagged WAV files), Vorbis
+    comments (FLAC, Ogg Vorbis, Opus), MP4 atoms (M4A) and other mapping-like
+    tag containers. Values are stripped; empty values are dropped; nothing is
+    split, merged or de-duplicated — the list is what is on disk.
+    """
+    tags = getattr(audio, "tags", None) if audio is not None else None
+    if not tags:
+        return []
+    if hasattr(tags, "getall"):  # raw ID3 tags
+        values: List[object] = []
+        try:
+            frames = tags.getall("TCON")
+        except Exception:  # noqa: BLE001 - odd tag containers
+            frames = []
+        for frame in frames:
+            try:
+                # ``genres`` resolves ID3v1-style numeric references ("17",
+                # "(17)") exactly as EasyID3 — the writer — presents them.
+                values.extend(frame.genres)
+            except Exception:  # noqa: BLE001
+                values.extend(getattr(frame, "text", None) or [])
+        return _clean_genre_values(values)
+    try:
+        keys = list(tags.keys())
+    except Exception:  # noqa: BLE001
+        return []
+    for wanted in ("\xa9gen", "genre", "wm/genre"):
+        for key in keys:
+            if str(key).lower() != wanted:
+                continue
+            try:
+                raw = tags[key]
+            except Exception:  # noqa: BLE001
+                continue
+            if isinstance(raw, (list, tuple)):
+                return _clean_genre_values(raw)
+            return _clean_genre_values([raw])
+    return []
+
+
+def read_genres_checked(path: str) -> Tuple[List[str], Optional[str]]:
+    """Return ``(genres, error)``: every genre value in ``path``.
+
+    ``error`` is ``None`` for a readable file (even an untagged one) and a
+    string starting with ``"read failed"`` when the file could not be parsed.
+    """
+    if MutagenFile is None:
+        return [], "mutagen unavailable"
+    try:
+        audio = MutagenFile(ensure_long_path(path))
+    except Exception as exc:  # noqa: BLE001 - depends on local files
+        return [], f"read failed: {exc}"
+    if audio is None:
+        return [], None
+    return genres_from_mutagen(audio), None
+
+
+def read_genres(path: str) -> List[str]:
+    """Every genre value in ``path`` (``[]`` if none or unreadable)."""
+    genres, _error = read_genres_checked(path)
+    return genres

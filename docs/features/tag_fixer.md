@@ -18,21 +18,45 @@ propose the correction — never to just silently rewrite your files.
 
 ## How a scan works
 
-For every supported audio file under the folder you point it at, the Tag Fixer:
+Before looking anything up, the scan checks each lookup source once — is
+fpcalc (Chromaprint) installed, is api.acoustid.org reachable, is a key set — and
+prints a "Lookup sources: …" line. A source that can't run is **skipped, with the
+reason shown**, instead of every file silently coming back "unmatched".
 
-1. **Reads the file's current tags.** This becomes the "before" side of any proposed
-   change.
-2. **Asks every available lookup service to identify the track**, and keeps whichever
+Then, for every supported audio file under the library (the reserved top-level
+folders `Not Sorted/`, `Quarantine/`, `Trash/`, `Docs/` and `Playlists/` are never
+entered; `Manual Review/` *is* scanned, because its tracks are exactly the ones
+missing metadata), the Tag Fixer:
+
+1. **Reads the file's current tags** — every genre value, not just the first. This
+   becomes the "before" side of any proposed change.
+2. **Asks every available lookup source to identify the track**, and keeps whichever
    answer came back with the highest confidence score.
 3. **Only turns that answer into a proposal if the winning score clears a
    threshold** (0.75 out of 1.0 today). Below that, the track is left alone — the app
    would rather show you nothing than a guess it isn't confident about.
 4. **Compares the proposed values to what's already on the file** and shows you only
-   the fields that would actually change.
+   the fields that would actually change. A field the service didn't return is never
+   proposed as blank.
 
-The result is a table: one row per proposed field change, with a checkbox so you
-choose exactly which corrections to accept. Nothing is written until you explicitly
-apply your selection.
+The result is a table: one row per proposed *field* change, built from the same
+function the writer uses, so a row shows exactly what applying it writes. Each row's
+checkbox selects that field change — untick a file's Genre row and keep its Artist
+row, and only the artist is written. The "Fix fields" checkboxes hide or show a
+field's rows; hidden rows are never written. Files nothing could identify are not
+shown as blank proposals: they are listed under "No match found", each with its
+reason (a lookup error, "no lookup source available", a low-confidence match…).
+Cancel stops a scan before the next file.
+
+Nothing is written until you explicitly apply your selection and confirm. Apply
+writes exactly the ticked rows; a file whose tags changed on disk since the scan is
+skipped (never overwritten blind); one bad file (read-only, an odd format) is
+reported and the rest of the batch continues; only files whose write succeeded are
+marked "applied". Every write — and every failure or skip — is recorded with its
+before and after values in `Docs/tag_changes_tagfixer_<timestamp>.jsonl`. After
+applying, the written rows drop out of the table and the log is kept; there is no
+automatic re-scan. Only one tag-writing job runs at a time across the Tag Fixer and
+both Genre Normalizer tabs.
 
 ### An honest note on the "score tiers"
 
@@ -45,33 +69,33 @@ doesn't exist yet; every accepted change today goes through your review.
 
 ## Which online services actually answer
 
-The Tag Fixer can, in principle, ask five different services. In practice, one
-matters for the automatic scan, and the split is worth knowing:
+The Tag Fixer can, in principle, ask five different services. Which ones a scan
+uses depends on what is installed and on Settings → Metadata Services:
 
-- **AcoustID** is the one service that's wired into the automatic scan today. It
-  fingerprints the audio itself (not just the existing tags) and, when it finds a
-  MusicBrainz recording match, enriches the answer with that recording's album and
-  genre tags.
-- **MusicBrainz** and **Last.fm** are both fully functional services elsewhere in the
-  app (MusicBrainz search, and Last.fm's popularity-based genre tagging), but neither
-  is currently part of the Tag Fixer's automatic plugin scan — MusicBrainz's lookup
-  class isn't built on the same plugin base the scan discovers, so it never
-  contributes an independent identification; it only ever shows up *nested inside* an
-  AcoustID match's enrichment step.
+- **AcoustID** always runs when it can. It fingerprints the audio itself (not just
+  the existing tags) and, when it finds a MusicBrainz recording match, enriches the
+  answer with that recording's album and genre tags. It needs fpcalc (Chromaprint)
+  and the network; the key is the one in Settings, or the built-in key when that
+  field is empty. If the enrichment step fails, the scan says so.
+- **MusicBrainz search** joins the scan when Settings → Service is set to
+  "MusicBrainz": each track is also looked up by its existing artist and title,
+  which mostly contributes album and genre proposals. MusicBrainz requests always
+  use the app name / version / contact from Settings (blank fields fall back to
+  "AlphaDEX 1.0"), so enrichment no longer depends on which page you opened first.
+- **Last.fm** joins when a Last.fm API key is set in the `LASTFM_API_KEY`
+  environment variable (Settings has no Last.fm key field; picking "Last.fm" there
+  without the variable makes the scan say where the key goes).
 - **Spotify** and **Gracenote** are honestly labeled as unavailable — see
   **architecture.md**'s note on this. They contribute nothing today.
-
-This means a practical mental model of "what the Tag Fixer actually asks" is: *"does
-AcoustID recognize this recording, and if so, what does MusicBrainz say about it?"* —
-narrower than the presence of five services in the settings list might suggest.
 
 ## Genres are additive, never a replacement
 
 This is worth calling out specifically because it's easy to assume "fixing" a genre
-means replacing it. It doesn't. When the Tag Fixer writes a genre change, it
-**merges** the newly proposed genres into whatever the file already has — it unions
-the two lists, de-duplicates, and writes the combined set back. It never removes a
-genre that was already there, even a wrong one.
+means replacing it. It doesn't. When the Tag Fixer writes a genre change, it keeps
+**every** genre the file already has, in order, and adds each proposed genre it
+lacks (ignoring letter case) after them — written as a real multi-value tag, not a
+single "Rock; Pop" string. It never removes a genre that was already there, even a
+wrong one, and it doesn't touch the genre at all when the lookup found none.
 
 The practical effect: running the Tag Fixer repeatedly on the same file can only ever
 *grow* its genre list, never correct a bad entry that's already present. If a track
@@ -89,7 +113,8 @@ write tags have no dry-run mode of their own; there is no separate code path tha
 "pretends" to write. The checkbox doesn't need to be more than that, because the
 review table itself *is* the preview — nothing is looked up-and-applied in one step
 regardless of the checkbox's state; the write only happens when you explicitly click
-Apply with real fields selected and confirm a "this cannot be undone" prompt.
+Apply with ticked rows and confirm a prompt that says how many field changes will be
+written to how many files.
 
 ## CLI vs. GUI: a real behavioral difference
 
@@ -144,12 +169,15 @@ The sidebar has a workspace called **Genre Normalizer**. It holds two genuinely
 different tools, and they are two tabs because they answer two different questions:
 
 - **Fill from MusicBrainz** — *"some of my tracks have no genre at all."* For each
-  file with fewer than two existing genre tags, it looks the recording up on
-  MusicBrainz, takes the three most popular community tags, and writes them in.
-  Files that already carry two or more genres are left alone, so this fills gaps
-  rather than second-guessing choices you've already made. It has one control, a
-  dry-run checkbox. (An earlier version showed a source selector and an "overwrite"
-  checkbox that did nothing; both are gone.)
+  file with fewer than two existing genre values (every value is counted, not just
+  the first), it looks the recording up on MusicBrainz by artist and title and takes
+  the three most popular community tags. It is preview-first: **Look up genres**
+  only builds a table of proposed additions (current → after, and the MusicBrainz
+  match); nothing is written until you click Apply and confirm, and then exactly
+  that table is written. A genre the file already has is kept, with the new tags
+  added after it. Files that already carry two or more genres are skipped, so this
+  fills gaps rather than second-guessing choices you've already made. Opus files are
+  included, like everywhere else.
 
 - **Normalize with a mapping** — *"my genres are a mess of spellings."* This is the
   canonical-mapping workflow: collapse "Hip Hop," "hip-hop," "hiphoprap," and "Rap"
@@ -164,12 +192,23 @@ different tools, and they are two tabs because they answer two different questio
      isn't a genre; drop it." Unmapped genres pass through unchanged, so a partial
      mapping never makes things worse. Mappings can be saved to and reloaded from
      `Docs/.genre_mapping.json`, so you build it once and reuse it.
-  3. **Preview.** The app reads every file's tags and shows a table of exactly which
-     files would change and how (current genres → new genres), plus how many were
-     already canonical and how many had no genre to normalize. Nothing is written.
+  3. **Preview.** The app reads every genre value of every file and shows a table of
+     exactly which files would change and how (current genres → new genres), plus
+     how many were already canonical and how many had no genre to normalize. A
+     combined value such as "hip hop/rap" is mapped as a whole if the mapping has
+     it, otherwise part by part. Files that would change but can't be written
+     (read-only, a format that can't hold tags) are listed up front and left out.
+     Nothing is written.
   4. **Apply.** After a confirmation, it writes *exactly* what the preview showed —
      the plan, not a fresh decision. Editing the mapping after previewing disables
-     Apply until you preview again, the same rule Library Sync applies to its plan.
+     Apply until you preview again, the same rule Library Sync applies to its plan;
+     switching library throws the preview away. A file whose genres changed on disk
+     since the preview is skipped.
+
+  Both tabs log every write with its previous value to
+  `Docs/tag_changes_genre_fill_*.jsonl` / `Docs/tag_changes_genre_normalize_*.jsonl`.
+  An unsaved mapping in the editor is kept per library when you switch libraries,
+  and "Load saved mapping" asks before replacing unsaved edits.
 
   This workflow previously existed only in the legacy Tkinter app, where "Apply"
   read, decided and wrote in a single pass with no preview, and where the `["invalid"]`

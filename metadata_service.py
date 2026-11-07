@@ -1,8 +1,49 @@
 """Dispatch metadata queries to supported services."""
 
-from typing import Dict
+from typing import Dict, Tuple
 from utils.audio_metadata_reader import read_tags
 from utils.path_helpers import ensure_long_path
+
+#: Used when Settings -> Metadata Services -> MusicBrainz leaves a field blank.
+DEFAULT_MUSICBRAINZ_APP = "AlphaDEX"
+DEFAULT_MUSICBRAINZ_VERSION = "1.0"
+
+
+def musicbrainz_useragent() -> Tuple[str, str, str]:
+    """The ``(app, version, contact)`` MusicBrainz should see.
+
+    Read from the ``musicbrainz_useragent`` config entry the Settings dialog
+    saves; blank fields fall back to AlphaDEX defaults (MusicBrainz rejects an
+    empty app name or version).
+    """
+    try:
+        from config import load_config
+
+        ua = load_config().get("musicbrainz_useragent") or {}
+    except Exception:  # noqa: BLE001 - config must never break a lookup
+        ua = {}
+    if not isinstance(ua, dict):
+        ua = {}
+    app = str(ua.get("app") or "").strip() or DEFAULT_MUSICBRAINZ_APP
+    version = str(ua.get("version") or "").strip() or DEFAULT_MUSICBRAINZ_VERSION
+    contact = str(ua.get("contact") or "").strip()
+    return app, version, contact
+
+
+def ensure_musicbrainz_useragent(musicbrainzngs_module=None) -> Tuple[str, str, str]:
+    """Set the global MusicBrainz user agent from config before a request.
+
+    ``musicbrainzngs`` refuses every request until a user agent is set, and it
+    is process-global state. Previously only importing ``update_genres`` or
+    pressing Settings -> Test set it, so the Tag Fixer's MusicBrainz
+    enrichment silently failed (``UsageError``, swallowed) in a fresh session.
+    Every MusicBrainz call site now calls this first.
+    """
+    if musicbrainzngs_module is None:
+        import musicbrainzngs as musicbrainzngs_module  # type: ignore
+    app, version, contact = musicbrainz_useragent()
+    musicbrainzngs_module.set_useragent(app, version, contact or None)
+    return app, version, contact
 
 
 def query_acoustid(api_key: str, audio_file: str) -> Dict:
@@ -31,8 +72,10 @@ def query_acoustid(api_key: str, audio_file: str) -> Dict:
 
     album = None
     genres = []
+    enrichment_error = None
     if best_rid:
         try:
+            ensure_musicbrainz_useragent(musicbrainzngs)
             rec = musicbrainzngs.get_recording_by_id(
                 best_rid, includes=["releases", "tags"]
             )["recording"]
@@ -41,16 +84,21 @@ def query_acoustid(api_key: str, audio_file: str) -> Dict:
                 album = rels[0].get("title")
             mb_tags = rec.get("tag-list", [])
             genres = [t["name"] for t in mb_tags if "name" in t]
-        except Exception:
-            pass
+        except Exception as exc:  # noqa: BLE001 - enrichment is optional
+            # Still a usable AcoustID match; say why album/genres are missing
+            # instead of swallowing it.
+            enrichment_error = f"MusicBrainz enrichment failed: {exc}"
 
-    return {
+    result = {
         "artist": best_artist,
         "title": best_title,
         "album": album,
         "genres": genres,
         "score": best_score,
     }
+    if enrichment_error:
+        result["enrichment_error"] = enrichment_error
+    return result
 
 
 def query_lastfm(api_key: str, audio_file: str) -> Dict:
@@ -100,12 +148,9 @@ def query_musicbrainz(api_key: str, audio_file: str) -> Dict:
     function simply performs a trivial request to verify connectivity.
     """
     import musicbrainzngs
-    contact = api_key or ""
-    musicbrainzngs.set_useragent(
-        "SoundVaultTagFixer",
-        "1.0",
-        contact,
-    )
+    app, version, contact = musicbrainz_useragent()
+    contact = api_key or contact
+    musicbrainzngs.set_useragent(app, version, contact or None)
 
     # When called with no file we just issue a simple search request to check
     # that the API is reachable.
