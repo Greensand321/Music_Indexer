@@ -1,12 +1,17 @@
 # music_indexer_api.py
 
+import html as _html
+import json
 import os
 import re
 import shutil  # used for relocating special folders
 import unicodedata
 from collections import defaultdict
+from dataclasses import dataclass, field
+from datetime import datetime
 from typing import List
 from dry_run_coordinator import DryRunCoordinator
+from utils.reserved_folders import RESERVED_FOLDERS
 
 def _verify_dependencies() -> None:
     """Raise RuntimeError if the real mutagen library is missing."""
@@ -24,12 +29,86 @@ except Exception:  # pragma: no cover - optional dependency
     def MutagenFile(*_a, **_k):
         return None
 from utils.audio_metadata_reader import read_tags
-from indexer_control import check_cancelled, cancel_event
+from indexer_control import IndexCancelled, check_cancelled, cancel_event
 
 # ─── CONFIGURATION ─────────────────────────────────────────────────────
 COMMON_ARTIST_THRESHOLD = 10
 REMIX_FOLDER_THRESHOLD  = 3
-SUPPORTED_EXTS          = {".flac", ".m4a", ".aac", ".mp3", ".wav", ".ogg"}
+# Audio formats the indexer routes. ``.opus`` is part of the app's audio
+# contract (see CLAUDE.md); leaving it out used to get Opus tracks swept into
+# Trash/ as "non-audio leftovers".
+SUPPORTED_EXTS          = {".flac", ".m4a", ".aac", ".mp3", ".wav", ".ogg", ".opus"}
+# Audio-like files the non-audio leftover sweep must never touch, even when the
+# indexer cannot route them (they simply stay where they are).
+NEVER_SWEPT_EXTS = SUPPORTED_EXTS | {
+    ".wma", ".aif", ".aiff", ".aifc", ".ape", ".alac", ".wv", ".mpc", ".tta",
+    ".dsf", ".dff", ".mka", ".m4b", ".m4p", ".mp2", ".mp4", ".ac3", ".dts",
+    ".amr", ".oga", ".spx", ".caf", ".webm", ".mid", ".midi",
+}
+# Leftovers with these extensions go to Docs/, everything else to Trash/.
+DOC_EXTS = {".txt", ".html", ".db"}
+# Folder names skipped at *any* depth (historic indexer rule).
+_ANY_DEPTH_SKIP = {"not sorted", "playlists"}
+
+
+# ─── Scan helpers ──────────────────────────────────────────────────────
+
+def _path_key(path: str) -> str:
+    return os.path.normcase(os.path.abspath(path))
+
+
+def _same_path(a: str, b: str) -> bool:
+    return _path_key(a) == _path_key(b)
+
+
+def _music_root_for(root_path: str) -> str:
+    candidate = os.path.join(root_path, "Music")
+    return candidate if os.path.isdir(candidate) else root_path
+
+
+def _iter_scan_dirs(library_root: str, scan_root: str | None = None):
+    """``os.walk`` over ``scan_root`` that never enters the reserved folders.
+
+    The reserved top-level folders (``utils.reserved_folders.RESERVED_FOLDERS``:
+    Not Sorted, Playlists, Manual Review, Docs, Trash, Quarantine) are pruned
+    at the top of the library *and* at the top of ``scan_root`` (the
+    ``Music/`` sub-folder when the library has one). ``Not Sorted`` and
+    ``Playlists`` are additionally skipped at any depth, as before. Directory
+    and file names are sorted so plans are deterministic.
+    """
+    scan_root = scan_root or library_root
+    tops = {_path_key(library_root), _path_key(scan_root)}
+    reserved = {name.casefold() for name in RESERVED_FOLDERS}
+    for dirpath, dirnames, filenames in os.walk(scan_root):
+        rel_parts = {p.lower() for p in os.path.relpath(dirpath, library_root).split(os.sep)}
+        if _ANY_DEPTH_SKIP & rel_parts:
+            dirnames[:] = []
+            continue
+        if _path_key(dirpath) in tops:
+            dirnames[:] = [d for d in dirnames if d.casefold() not in reserved]
+        dirnames.sort()
+        filenames.sort()
+        yield dirpath, dirnames, filenames
+
+
+_INDEXER_FILENAME = re.compile(r"^(?P<artist>.+?)_(?P<track>\d{1,3})_(?P<title>.+)$")
+
+
+def _artist_title_from_filename(path: str) -> tuple[str, str]:
+    """Best-effort ``(artist, title)`` from a file name, or ``("", "")``.
+
+    Understands ``Artist - Title`` and the indexer's own ``Artist_NN_Title``.
+    A leading track number (``01 - Title``) is not an artist.
+    """
+    stem = os.path.splitext(os.path.basename(path))[0].strip()
+    match = _INDEXER_FILENAME.match(stem)
+    if match:
+        return match.group("artist").strip(), match.group("title").strip()
+    if " - " in stem:
+        artist, title = (part.strip() for part in stem.split(" - ", 1))
+        if artist and title and not artist.isdigit():
+            return artist, title
+    return "", ""
 
 # ─── Helper: build primary_counts for the entire vault ─────────────────────
 def _select_canonical_primary(casing_counts: dict[str, dict[str, int]]) -> dict[str, str]:
@@ -45,7 +124,8 @@ def _select_canonical_primary(casing_counts: dict[str, dict[str, int]]) -> dict[
     return canonical
 
 
-def build_primary_counts(root_path, progress_callback=None, phase="A", log_callback=None):
+def build_primary_counts(root_path, progress_callback=None, phase="A", log_callback=None,
+                         library_root=None):
     """
     Walk the entire vault (By Artist, By Year, Incoming, etc.) and
     return a dict mapping each lowercase-normalized artist → total file count,
@@ -55,6 +135,10 @@ def build_primary_counts(root_path, progress_callback=None, phase="A", log_callb
     ``progress_callback`` will be invoked every 100 files with
     ``(count, 0, path)`` allowing callers to show progress without
     a separate pre-scan.
+
+    The reserved folders (Quarantine/, Trash/, Docs/, …) are not counted;
+    ``library_root`` is the library top when ``root_path`` is its ``Music/``
+    sub-folder.
     """
     if progress_callback is None:
         def progress_callback(_c, _t, _m, _p):
@@ -66,10 +150,7 @@ def build_primary_counts(root_path, progress_callback=None, phase="A", log_callb
     counts = {}
     casing_counts = defaultdict(lambda: defaultdict(int))
     idx = 0
-    for dirpath, _, files in os.walk(root_path):
-        rel_dir = os.path.relpath(dirpath, root_path)
-        if {"not sorted", "playlists"} & {p.lower() for p in rel_dir.split(os.sep)}:
-            continue
+    for dirpath, _, files in _iter_scan_dirs(library_root or root_path, root_path):
         for fname in files:
             ext = os.path.splitext(fname)[1].lower()
             if ext not in SUPPORTED_EXTS:
@@ -172,6 +253,14 @@ def _ensure_unique_destination(
     """Resolve destination collisions deterministically by suffixing names."""
     if path not in moves.values() and not os.path.exists(path):
         return path
+    if (
+        source_path is not None
+        and _same_path(path, source_path)
+        and path not in moves.values()
+    ):
+        # The file already sits at its destination (re-running the indexer on
+        # an organised library): it is its own "collision", keep the name.
+        return path
     base, ext = os.path.splitext(path)
     counter = 1
     candidate = f"{base} ({counter}){ext}"
@@ -212,7 +301,9 @@ def _cleanup_trailing_numeric_suffixes(
         candidate_path = os.path.join(dir_name, candidate_filename)
         if candidate_path == new_path:
             continue
-        if candidate_path in occupied or os.path.exists(candidate_path):
+        if candidate_path in occupied or (
+            os.path.exists(candidate_path) and not _same_path(candidate_path, old_path)
+        ):
             continue
         occupied.remove(new_path)
         occupied.add(candidate_path)
@@ -245,7 +336,9 @@ def _preview_trailing_suffix_cleanup(
         candidate_path = os.path.join(dir_name, candidate_filename)
         if candidate_path == new_path:
             continue
-        if candidate_path in occupied or os.path.exists(candidate_path):
+        if candidate_path in occupied or (
+            os.path.exists(candidate_path) and not _same_path(candidate_path, old_path)
+        ):
             continue
         occupied.remove(new_path)
         occupied.add(candidate_path)
@@ -505,11 +598,7 @@ def compute_moves_and_tag_index(
     check_cancelled()
 
     # ─── 1) Determine MUSIC_ROOT ──────────────────────────────────────────────
-    MUSIC_ROOT = os.path.join(root_path, "Music") \
-        if os.path.isdir(os.path.join(root_path, "Music")) \
-        else root_path
-
-    SUPPORTED_EXTS = {".flac", ".m4a", ".aac", ".mp3", ".wav", ".ogg"}
+    MUSIC_ROOT = _music_root_for(root_path)
 
     # --- Phase 0: Pre-scan entire vault (under MUSIC_ROOT) ---
     global_counts, canonical_primary_map = build_primary_counts(
@@ -517,33 +606,31 @@ def compute_moves_and_tag_index(
         progress_callback,
         phase="A",
         log_callback=log_callback,
+        library_root=root_path,
     )
     log_callback(f"   → Pre-scan: found {len(global_counts)} unique artists")
-    log_callback(f"   → DEBUG: MUSIC_ROOT = {MUSIC_ROOT}")
-    log_callback(f"   → DEBUG: droeloe count = {global_counts.get('droeloe', 0)}")
+    log_callback(f"   → Music root: {MUSIC_ROOT}")
 
     # --- Phase 1: Scan for audio files ---
+    # The reserved folders (Quarantine/, Trash/, Manual Review/, Docs/, …) are
+    # never scanned: re-filing quarantined duplicate losers back into the
+    # library silently undid the Duplicate Finder.
     log_callback("1/4: Discovering audio files…")
     all_audio = []
     idx = 0
-    for dirpath, _, files in os.walk(MUSIC_ROOT):
-        rel_dir = os.path.relpath(dirpath, root_path)
-        if {"not sorted", "playlists"} & {p.lower() for p in rel_dir.split(os.sep)}:
-            continue
+    for dirpath, _, files in _iter_scan_dirs(root_path, MUSIC_ROOT):
         for fname in files:
             ext = os.path.splitext(fname)[1].lower()
             if ext in SUPPORTED_EXTS:
                 full = os.path.join(dirpath, fname)
-                if {"not sorted", "playlists"} & {p.lower() for p in os.path.relpath(full, root_path).split(os.sep)}:
-                    continue
                 all_audio.append(full)
                 idx += 1
                 progress_callback(idx, 0, f"Scanning {os.path.relpath(full, root_path)}", "A")
     total_audio = idx
     log_callback(f"   → Found {total_audio} audio files.")
 
+    # Planned, not created: computing a plan must not touch the library.
     review_root = os.path.join(root_path, "Manual Review")
-    os.makedirs(review_root, exist_ok=True)
 
     # ─── Phase 2: Read metadata & build counters ─────────────────────────────────
     log_callback("2/4: Reading metadata and building counters…")
@@ -560,13 +647,22 @@ def compute_moves_and_tag_index(
         progress_callback(idx, total_files, f"Metadata {os.path.relpath(fullpath, root_path)}", "B")
 
         data = get_tags(fullpath)
-        raw_artist = _normalize_tag_value(data.get("artist"), "artist", log_callback)
+        tag_artist = _normalize_tag_value(data.get("artist"), "artist", log_callback)
+        tag_title = _normalize_tag_value(data.get("title"), "title", log_callback)
+        name_artist, name_title = ("", "")
+        if not (tag_artist and tag_title):
+            name_artist, name_title = _artist_title_from_filename(fullpath)
+        raw_artist = tag_artist or name_artist
+        title = tag_title or name_title
+        # Decided *before* the bare-filename fallbacks below, which always
+        # succeed (that is why Manual Review routing never happened).
+        missing_core = not raw_artist or not title
+        stem = os.path.splitext(os.path.basename(fullpath))[0]
         if not raw_artist:
-            raw_artist = os.path.splitext(os.path.basename(fullpath))[0]
+            raw_artist = stem
         raw_artist = collapse_repeats(raw_artist)
-        title = _normalize_tag_value(data.get("title"), "title", log_callback)
         if not title:
-            title = os.path.splitext(os.path.basename(fullpath))[0]
+            title = stem
         album = _normalize_tag_value(data.get("album"), "album", log_callback)
         year = _normalize_tag_value(data.get("year"), "year", log_callback)
         genre = _normalize_tag_value(data.get("genre"), "genre", log_callback)
@@ -604,7 +700,7 @@ def compute_moves_and_tag_index(
             "track":      track,
             "disc_value": disc_value,
             "folder_tags": folder_tags,
-            "missing_core": not raw_artist or not title,
+            "missing_core": missing_core,
         }
 
     log_callback(f"   → Collected metadata for {total_files} files.")
@@ -973,7 +1069,7 @@ def render_dry_run_html_from_plan(
             depth = rel.count(os.sep)
             indent = "    " * depth
             _, ext = os.path.splitext(node)
-            if os.path.isdir(node) or ext.lower() not in {".flac", ".m4a", ".aac", ".mp3", ".wav", ".ogg"}:
+            if os.path.isdir(node) or ext.lower() not in SUPPORTED_EXTS:
                 lines.append(f"{indent}<span class=\"folder\">{sanitize(os.path.basename(node))}/</span>")
             else:
                 fname = os.path.basename(node)
@@ -1015,6 +1111,556 @@ def render_dry_run_html_from_plan(
     return output_html_path
 
 
+# ─── B2. THE INDEXER PLAN (compute once, preview it, execute *that*) ─────
+#
+# Preview and execute used to recompute the move plan independently (three
+# times per execute), so what ran was not what had been reviewed, and the
+# non-audio sweep / folder removals were never previewed at all. Now a single
+# ``IndexerPlan`` is computed, rendered as the preview, and executed verbatim;
+# execution refuses a plan whose library changed since it was computed.
+
+
+class StalePlanError(RuntimeError):
+    """The library changed since the plan was previewed; nothing was moved."""
+
+    def __init__(self, problems):
+        self.problems = list(problems)
+        sample = "; ".join(self.problems[:3])
+        more = f" (+{len(self.problems) - 3} more)" if len(self.problems) > 3 else ""
+        super().__init__(
+            f"The library changed since the preview ({len(self.problems)} difference(s): "
+            f"{sample}{more}). Nothing was moved — run the preview again."
+        )
+
+
+@dataclass
+class IndexerPlan:
+    """Everything an Indexer execute will do, computed once at preview time."""
+
+    root_path: str
+    music_root: str
+    moves: dict                     # audio source -> destination (may be equal)
+    tag_index: dict
+    decision_log: list
+    leftovers: dict = field(default_factory=dict)    # non-audio source -> Trash/ or Docs/ path
+    empty_dirs: list = field(default_factory=list)   # folders removed once emptied (deepest first)
+    snapshot: dict = field(default_factory=dict)     # source -> (size, mtime_ns) at plan time
+    created_at: str = ""
+
+    @property
+    def file_moves(self) -> dict:
+        """Moves that actually relocate or rename a file."""
+        return {s: d for s, d in self.moves.items() if not _same_path(s, d)}
+
+    @property
+    def manual_review(self) -> list:
+        review = _path_key(os.path.join(self.root_path, "Manual Review")) + os.sep
+        return [d for d in self.moves.values() if _path_key(d).startswith(review)]
+
+    def counts(self) -> dict:
+        docs = _path_key(os.path.join(self.root_path, "Docs")) + os.sep
+        to_docs = sum(1 for d in self.leftovers.values() if _path_key(d).startswith(docs))
+        return {
+            "audio_files": len(self.moves),
+            "moves": len(self.file_moves),
+            "unchanged": len(self.moves) - len(self.file_moves),
+            "manual_review": len(self.manual_review),
+            "leftovers": len(self.leftovers),
+            "leftovers_to_docs": to_docs,
+            "leftovers_to_trash": len(self.leftovers) - to_docs,
+            "empty_dirs": len(self.empty_dirs),
+        }
+
+    def to_dict(self) -> dict:
+        return {
+            "root_path": self.root_path,
+            "music_root": self.music_root,
+            "created_at": self.created_at,
+            "counts": self.counts(),
+            "moves": dict(self.moves),
+            "leftovers": dict(self.leftovers),
+            "empty_dirs": list(self.empty_dirs),
+        }
+
+
+def _cancel_requested(event=None) -> bool:
+    """True when the caller's event or the process-global indexer cancel flag
+    (``indexer_control.cancel_event``, still used by legacy callers) is set."""
+    return bool(event is not None and event.is_set()) or cancel_event.is_set()
+
+
+def _raise_if_cancelled(event=None) -> None:
+    if _cancel_requested(event):
+        raise IndexCancelled()
+
+
+def _unique_path(path: str, taken: set) -> str:
+    """``path``, or ``name (n).ext`` if it exists on disk or is already planned."""
+    if _path_key(path) not in taken and not os.path.lexists(path):
+        return path
+    base, ext = os.path.splitext(path)
+    n = 1
+    while True:
+        candidate = f"{base} ({n}){ext}"
+        if _path_key(candidate) not in taken and not os.path.lexists(candidate):
+            return candidate
+        n += 1
+
+
+def _plan_leftovers(root_path: str, music_root: str, moves: dict, exclude=()) -> dict:
+    """Non-audio files left behind in folders the plan empties of music.
+
+    Only folders that will hold no audio after the plan are swept (a cover.jpg
+    next to an album that stays put is not a leftover). Each file keeps its
+    folder structure under ``Trash/`` or ``Docs/`` and gets a ``(n)`` suffix
+    rather than replacing anything already there.
+    """
+    docs_dir = os.path.join(root_path, "Docs")
+    trash_dir = os.path.join(root_path, "Trash")
+    leaving = {_path_key(s) for s, d in moves.items() if not _same_path(s, d)}
+    audio_dirs_after = {_path_key(os.path.dirname(d)) for d in moves.values()}
+    excluded = {_path_key(p) for p in exclude if p}
+    taken: set = set()
+    leftovers: dict = {}
+    for dirpath, _dirnames, filenames in _iter_scan_dirs(root_path, music_root):
+        if _path_key(dirpath) in audio_dirs_after:
+            continue
+        keeps_audio = any(
+            os.path.splitext(name)[1].lower() in NEVER_SWEPT_EXTS
+            and _path_key(os.path.join(dirpath, name)) not in leaving
+            for name in filenames
+        )
+        if keeps_audio:
+            continue
+        for fname in filenames:
+            full = os.path.join(dirpath, fname)
+            ext = os.path.splitext(fname)[1].lower()
+            if ext in NEVER_SWEPT_EXTS or _path_key(full) in excluded:
+                continue
+            target_root = docs_dir if ext in DOC_EXTS else trash_dir
+            dest = _unique_path(os.path.join(target_root, os.path.relpath(full, music_root)), taken)
+            taken.add(_path_key(dest))
+            leftovers[full] = dest
+    return leftovers
+
+
+def _predict_empty_dirs(root_path: str, music_root: str, moves: dict, leftovers: dict) -> list:
+    """Folders that will be empty once the plan's files have left (deepest first)."""
+    leaving = {_path_key(s) for s, d in moves.items() if not _same_path(s, d)}
+    leaving |= {_path_key(s) for s in leftovers}
+    occupied: set = set()
+    stop = {_path_key(root_path), _path_key(music_root)}
+    for dest in list(moves.values()) + list(leftovers.values()):
+        parent = os.path.dirname(_path_key(dest))
+        while parent and parent not in occupied and parent not in stop:
+            occupied.add(parent)
+            nxt = os.path.dirname(parent)
+            if nxt == parent:
+                break
+            parent = nxt
+    entries = list(_iter_scan_dirs(root_path, music_root))
+    will_empty: dict = {}
+    ordered: list = []
+    for dirpath, dirnames, filenames in reversed(entries):
+        key = _path_key(dirpath)
+        if key in stop:
+            continue
+        empty = (
+            key not in occupied
+            and all(_path_key(os.path.join(dirpath, f)) in leaving for f in filenames)
+            and all(will_empty.get(_path_key(os.path.join(dirpath, d)), False) for d in dirnames)
+        )
+        will_empty[key] = empty
+        if empty:
+            ordered.append(dirpath)
+    ordered.sort(key=lambda p: p.count(os.sep), reverse=True)
+    return ordered
+
+
+def _snapshot(paths) -> dict:
+    snap = {}
+    for path in paths:
+        try:
+            st = os.stat(path)
+        except OSError:
+            continue
+        snap[path] = (st.st_size, st.st_mtime_ns)
+    return snap
+
+
+def build_indexer_plan(
+    root_path,
+    log_callback=None,
+    progress_callback=None,
+    cancel_event=None,
+    exclude=(),
+) -> IndexerPlan:
+    """Compute the complete Indexer plan (no file is touched).
+
+    ``cancel_event`` (a ``threading.Event``) is honoured at every progress/log
+    callback, as is the process-global ``indexer_control.cancel_event``.
+    ``exclude`` lists files that must never be swept (e.g. the report being
+    written).
+    """
+    if not os.path.isdir(root_path):
+        raise FileNotFoundError(f"Library folder not found: {root_path}")
+    if log_callback is None:
+        def log_callback(_msg):
+            pass
+
+    def _log(msg):
+        _raise_if_cancelled(cancel_event)
+        log_callback(msg)
+
+    def _progress(current, total, message, phase="A"):
+        _raise_if_cancelled(cancel_event)
+        if progress_callback is not None:
+            progress_callback(current, total, message, phase)
+
+    _raise_if_cancelled(cancel_event)
+    moves, tag_index, decision_log = compute_moves_and_tag_index(
+        root_path, _log, _progress, dry_run=True, coord=None,
+    )
+    _raise_if_cancelled(cancel_event)
+    moves, tag_index = _preview_trailing_suffix_cleanup(moves, tag_index)
+    music_root = _music_root_for(root_path)
+    leftovers = _plan_leftovers(root_path, music_root, moves, exclude=exclude)
+    empty_dirs = _predict_empty_dirs(root_path, music_root, moves, leftovers)
+    plan = IndexerPlan(
+        root_path=root_path,
+        music_root=music_root,
+        moves=moves,
+        tag_index=tag_index,
+        decision_log=list(decision_log),
+        leftovers=leftovers,
+        empty_dirs=empty_dirs,
+        snapshot=_snapshot(list(moves) + list(leftovers)),
+        created_at=datetime.now().isoformat(timespec="seconds"),
+    )
+    c = plan.counts()
+    log_callback(
+        f"   → Plan: {c['moves']} move/rename(s), {c['unchanged']} already in place, "
+        f"{c['manual_review']} to Manual Review, {c['leftovers']} non-audio leftover(s), "
+        f"{c['empty_dirs']} folder(s) to remove."
+    )
+    return plan
+
+
+def _rel(path: str, root: str) -> str:
+    try:
+        return os.path.relpath(path, root)
+    except ValueError:
+        return path
+
+
+def _render_plan_extras_html(plan: IndexerPlan) -> str:
+    """The parts of an execute the folder tree does not show."""
+    esc = _html.escape
+    root = plan.root_path
+    c = plan.counts()
+    lines = ["<h2>Other changes Execute will make</h2>", "<ul>"]
+    lines.append(
+        f"<li>{c['moves']} audio file(s) moved or renamed; {c['unchanged']} already in place; "
+        f"{c['manual_review']} sent to Manual Review/ (missing artist or title).</li>"
+    )
+    lines.append(
+        f"<li>{c['leftovers']} non-audio file(s) moved out of emptied folders "
+        f"({c['leftovers_to_trash']} to Trash/, {c['leftovers_to_docs']} to Docs/), "
+        "keeping their folder structure. Nothing is overwritten.</li>"
+    )
+    lines.append(f"<li>{c['empty_dirs']} folder(s) removed once empty.</li>")
+    lines.append(
+        "<li>Existing playlists in Playlists/ that reference moved tracks are updated; "
+        "with “Create playlists” on, one playlist per source folder is (re)written.</li>"
+    )
+    lines.append("<li>Reserved folders (" + ", ".join(f"{esc(n)}/" for n in RESERVED_FOLDERS)
+                 + ") are not touched.</li>")
+    lines.append("</ul>")
+    if plan.leftovers:
+        lines.append("<h3>Non-audio files</h3>")
+        lines.append("<pre>")
+        for src, dst in sorted(plan.leftovers.items()):
+            lines.append(f"{esc(_rel(src, root))}  →  {esc(_rel(dst, root))}")
+        lines.append("</pre>")
+    if plan.empty_dirs:
+        lines.append("<h3>Folders removed once empty</h3>")
+        lines.append("<pre>")
+        for path in plan.empty_dirs:
+            lines.append(f"{esc(_rel(path, root))}/")
+        lines.append("</pre>")
+    return "\n".join(lines)
+
+
+def write_indexer_preview(plan: IndexerPlan, output_html_path, log_callback=None, log_path=None):
+    """Write the preview of ``plan``: the HTML report and, optionally, the
+    decision log text file. Writes nothing else."""
+    if log_callback is None:
+        def log_callback(_msg):
+            pass
+    if log_path:
+        os.makedirs(os.path.dirname(log_path), exist_ok=True)
+        with open(log_path, "w", encoding="utf-8") as lf:
+            lf.write("Indexing Decision Log\n")
+            lf.write("======================\n")
+            lf.write(f"Library root: {plan.root_path}\n")
+            lf.write(f"Generated on: {datetime.now()}\n\n")
+            for line in plan.decision_log:
+                lf.write(line + "\n")
+            if plan.leftovers:
+                lf.write("\nNon-audio leftovers (moved on Execute)\n")
+                for src, dst in sorted(plan.leftovers.items()):
+                    lf.write(f"  {src} -> {dst}\n")
+            if plan.empty_dirs:
+                lf.write("\nFolders removed once empty (on Execute)\n")
+                for path in plan.empty_dirs:
+                    lf.write(f"  {path}\n")
+        log_callback(f"✓ Detailed log written to: {log_path}")
+
+    log_callback("4/4: Writing dry-run HTML…")
+    out_dir = os.path.dirname(output_html_path)
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
+    coord = DryRunCoordinator()
+    coord.set_html_section("B", _render_plan_extras_html(plan))
+    render_dry_run_html_from_plan(
+        plan.root_path,
+        output_html_path,
+        plan.moves,
+        plan.tag_index,
+        coord=coord,
+    )
+    log_callback(f"✓ Dry-run HTML written to: {output_html_path}")
+    return output_html_path
+
+
+def check_plan_freshness(plan: IndexerPlan) -> list:
+    """Differences between the library now and when ``plan`` was computed."""
+    problems = []
+    for path, sig in plan.snapshot.items():
+        try:
+            st = os.stat(path)
+        except OSError:
+            problems.append(f"missing: {_rel(path, plan.root_path)}")
+            continue
+        if (st.st_size, st.st_mtime_ns) != tuple(sig):
+            problems.append(f"modified: {_rel(path, plan.root_path)}")
+    known = {_path_key(p) for p in plan.moves}
+    if os.path.isdir(plan.music_root):
+        for dirpath, _dirs, files in _iter_scan_dirs(plan.root_path, plan.music_root):
+            for fname in files:
+                if os.path.splitext(fname)[1].lower() not in SUPPORTED_EXTS:
+                    continue
+                full = os.path.join(dirpath, fname)
+                if _path_key(full) not in known:
+                    problems.append(f"new: {_rel(full, plan.root_path)}")
+    else:
+        problems.append(f"missing: {plan.music_root}")
+    return problems
+
+
+def _safe_move(src: str, dst: str) -> str | None:
+    """Move ``src`` to ``dst`` without ever overwriting. Returns an error or None."""
+    if not os.path.lexists(src):
+        return "source missing"
+    if os.path.lexists(dst):
+        try:
+            case_only = os.path.samefile(src, dst)
+        except OSError:
+            case_only = False
+        if not case_only:
+            return "destination already exists; not overwritten"
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    try:
+        if os.path.lexists(dst):  # case-only rename on a case-insensitive disk
+            os.rename(src, dst)
+        else:
+            shutil.move(src, dst)
+    except Exception as exc:  # pragma: no cover - OS interaction
+        return str(exc)
+    return None
+
+
+def _write_execution_audit(plan: IndexerPlan, actions: list, summary: dict, started: datetime):
+    """Record every executed action under Docs/ (JSON + readable text)."""
+    docs_dir = os.path.join(plan.root_path, "Docs")
+    os.makedirs(docs_dir, exist_ok=True)
+    stamp = started.strftime("%Y%m%d_%H%M%S")
+    json_path = _unique_path(os.path.join(docs_dir, f"indexer_executed_{stamp}.json"), set())
+    txt_path = os.path.splitext(json_path)[0] + ".txt"
+    payload = {
+        "library_root": plan.root_path,
+        "plan_created_at": plan.created_at,
+        "started_at": started.isoformat(timespec="seconds"),
+        "finished_at": datetime.now().isoformat(timespec="seconds"),
+        "summary": {k: v for k, v in summary.items() if k not in ("audit_path", "log_path")},
+        "actions": actions,
+    }
+    with open(json_path, "w", encoding="utf-8") as fh:
+        json.dump(payload, fh, indent=2)
+    with open(txt_path, "w", encoding="utf-8") as fh:
+        fh.write("Indexer execution log\n=====================\n")
+        fh.write(f"Library root: {plan.root_path}\n")
+        fh.write(f"Started: {payload['started_at']}   Finished: {payload['finished_at']}\n")
+        fh.write(
+            f"Moved: {summary['moved']}   Leftovers moved: {summary['leftovers_moved']}   "
+            f"Folders removed: {len(summary['removed_dirs'])}   Errors: {len(summary['errors'])}"
+            f"{'   CANCELLED' if summary.get('cancelled') else ''}\n\n"
+        )
+        for act in actions:
+            status = act.get("status", "")
+            src = act.get("source", "")
+            dst = act.get("destination", "")
+            reason = f"  ({act['reason']})" if act.get("reason") else ""
+            arrow = f" -> {dst}" if dst else ""
+            fh.write(f"[{status}] {act.get('action', '')}: {src}{arrow}{reason}\n")
+    return json_path, txt_path
+
+
+def apply_indexer_plan(
+    plan: IndexerPlan,
+    log_callback=None,
+    progress_callback=None,
+    create_playlists: bool = True,
+    cancel_event=None,
+) -> dict:
+    """Execute exactly ``plan`` and log every action to Docs/.
+
+    Refuses (``StalePlanError``, nothing moved) when the library changed since
+    the plan was computed. Never overwrites a file. Cancellation stops at the
+    next file; what was done so far is still logged and playlists are updated
+    for it. Returns a summary dict (``moved``, ``errors``, ``leftovers_moved``,
+    ``removed_dirs``, ``cancelled``, ``audit_path``, ``log_path`` …).
+    """
+    if log_callback is None:
+        def log_callback(_msg):
+            pass
+    if progress_callback is None:
+        def progress_callback(_c, _t, _p, _ph):
+            pass
+
+    _raise_if_cancelled(cancel_event)
+    problems = check_plan_freshness(plan)
+    if problems:
+        raise StalePlanError(problems)
+
+    root_path = plan.root_path
+    os.makedirs(os.path.join(root_path, "Not Sorted"), exist_ok=True)
+    started = datetime.now()
+    summary = {
+        "moved": 0,
+        "unchanged": len(plan.moves) - len(plan.file_moves),
+        "leftovers_moved": 0,
+        "removed_dirs": [],
+        "errors": [],
+        "skipped": [],
+        "cancelled": False,
+    }
+    actions: list = []
+    executed_moves: dict = {}
+    file_moves = sorted(plan.file_moves.items())
+    total = len(file_moves) + len(plan.leftovers)
+    step = 0
+
+    def _record(kind, src, dst, error):
+        status = "failed" if error else "done"
+        actions.append({"action": kind, "source": src, "destination": dst,
+                        "status": status, "reason": error or ""})
+        if error:
+            msg = f"{kind} {src} → {dst}: {error}"
+            summary["errors"].append(msg)
+            summary["skipped"].append({"source": src, "destination": dst, "reason": error})
+            log_callback(f"   ! {msg}")
+
+    try:
+        log_callback(f"Executing previewed plan: {len(file_moves)} move(s)…")
+        for src, dst in file_moves:
+            if _cancel_requested(cancel_event):
+                summary["cancelled"] = True
+                break
+            step += 1
+            progress_callback(step, total, src, "C")
+            if step % 50 == 0 or step == len(file_moves):
+                log_callback(f"   • Moving file {step}/{len(file_moves)}")
+            error = _safe_move(src, dst)
+            _record("move", src, dst, error)
+            if error is None:
+                executed_moves[src] = dst
+                summary["moved"] += 1
+                canonical = plan.tag_index.get(dst, {}).get("canonical_primary")
+                _update_primary_artist_metadata(dst, canonical, log_callback)
+
+        if executed_moves:
+            try:
+                from playlist_generator import update_playlists
+                log_callback("   • Updating existing playlists for renamed tracks…")
+                update_playlists(executed_moves)
+            except ImportError:
+                log_callback("! playlist_generator.py missing; skipping playlist updates.")
+            except Exception as e:
+                log_callback(f"! Playlist update error: {e}")
+
+        if not summary["cancelled"]:
+            for src, dst in sorted(plan.leftovers.items()):
+                if _cancel_requested(cancel_event):
+                    summary["cancelled"] = True
+                    break
+                step += 1
+                progress_callback(step, total, src, "C")
+                error = _safe_move(src, dst)
+                _record("move_leftover", src, dst, error)
+                if error is None:
+                    summary["leftovers_moved"] += 1
+                    log_callback(f"Moved leftover: {_rel(src, root_path)} → {_rel(dst, root_path)}")
+
+        if not summary["cancelled"]:
+            for dirpath in plan.empty_dirs:
+                try:
+                    if os.path.isdir(dirpath) and not os.listdir(dirpath):
+                        os.rmdir(dirpath)
+                        summary["removed_dirs"].append(dirpath)
+                        actions.append({"action": "remove_empty_folder", "source": dirpath,
+                                        "destination": "", "status": "done", "reason": ""})
+                        log_callback(f"Removed empty folder: {dirpath}")
+                except OSError:
+                    pass
+
+        if create_playlists and not summary["cancelled"]:
+            # ─── Generate playlists for what actually moved ──────────────
+            try:
+                from playlist_generator import generate_playlists
+                log_callback("4/4: Generating playlists…")
+
+                def plog(msg):
+                    log_callback(msg)
+
+                generate_playlists(
+                    executed_moves,
+                    root_path,
+                    output_dir=None,        # default: root_path/Playlists
+                    valid_exts=None,        # default extensions
+                    overwrite=True,
+                    log_callback=plog,
+                )
+                log_callback("✓ Robust playlists created.")
+            except ImportError:
+                log_callback("! playlist_generator.py missing; skipping playlists.")
+            except Exception as e:
+                log_callback(f"! Playlist generation error: {e}")
+        elif not create_playlists:
+            log_callback("• Playlist creation disabled")
+        if summary["cancelled"]:
+            log_callback("✘ Execution cancelled; the actions done so far are logged in Docs/.")
+    finally:
+        try:
+            audit_path, log_path = _write_execution_audit(plan, actions, summary, started)
+            summary["audit_path"] = audit_path
+            summary["log_path"] = log_path
+            log_callback(f"✓ Execution log written to: {log_path}")
+        except Exception as exc:  # pragma: no cover - OS interaction
+            log_callback(f"! Failed to write the execution log: {exc}")
+    return summary
+
+
 def build_dry_run_html(
     root_path,
     output_html_path,
@@ -1022,39 +1668,17 @@ def build_dry_run_html(
     enable_phase_c=False,
     flush_cache=False,
     max_workers=None,
-): 
+):
     """
-    1) Call compute_moves_and_tag_index() to get (moves, tag_index, decision_log).
-    2) Write a dry-run HTML to output_html_path showing the proposed tree.
-    Does NOT move any files.
+    Compute the Indexer plan and write it as a dry-run HTML to
+    ``output_html_path``. Does NOT move any files.
+
+    ``enable_phase_c``, ``flush_cache`` and ``max_workers`` are accepted for
+    backward compatibility and ignored.
     """
-    if log_callback is None:
-        def log_callback(msg): pass
-
-    coord = DryRunCoordinator()
-    moves, tag_index, _ = compute_moves_and_tag_index(
-        root_path,
-        log_callback,
-        None,
-        dry_run=True,
-        enable_phase_c=enable_phase_c,
-        flush_cache=flush_cache,
-        max_workers=max_workers,
-        coord=coord,
-    )
-
-    log_callback("4/4: Writing dry-run HTML…")
-
-    preview_moves, preview_tag_index = _preview_trailing_suffix_cleanup(moves, tag_index)
-    render_dry_run_html_from_plan(
-        root_path,
-        output_html_path,
-        preview_moves,
-        preview_tag_index,
-        coord=coord,
-    )
-    log_callback(f"✓ Dry-run HTML written to: {output_html_path}")
-    return {"moved": 0, "html": output_html_path, "dry_run": True}
+    plan = build_indexer_plan(root_path, log_callback, None, exclude=[output_html_path])
+    write_indexer_preview(plan, output_html_path, log_callback)
+    return {"moved": 0, "html": output_html_path, "dry_run": True, "plan": plan}
 
 
 # ─── C. APPLY MOVES ─────────────────────────────────────────────────────
@@ -1067,198 +1691,22 @@ def apply_indexer_moves(
     enable_phase_c: bool = False,
     flush_cache: bool = False,
     max_workers: int | None = None,
+    cancel_event=None,
 ):
+    """Compute the plan and execute it immediately (legacy entry point).
+
+    Prefer ``build_indexer_plan`` → preview → ``apply_indexer_plan`` so the
+    executed plan is the reviewed one. Returns the ``apply_indexer_plan``
+    summary (``{"moved": <count>, "errors": [...], ...}``).
     """
-    1) Call compute_moves_and_tag_index() to get (moves, tag_index, decision_log).
-    2) Move/rename each file in `moves`.
-    3) Move any leftover non-audio files into Trash or Docs.
-    4) Remove empty directories in two passes: first those that held moved
-       files, then a library-wide sweep for any remaining empty folders.
-    Returns summary: {"moved": <count>, "errors": [<error strings>]}.
-    Set ``create_playlists`` to ``False`` to skip playlist generation at the end.
-    """
-    if log_callback is None:
-        def log_callback(msg):
-            pass
-    if progress_callback is None:
-        def progress_callback(current, total, path, phase):
-            pass
-
-    check_cancelled()
-
-    # Ensure Not Sorted directory exists for user exclusions
-    not_sorted_dir = os.path.join(root_path, "Not Sorted")
-    os.makedirs(not_sorted_dir, exist_ok=True)
-
-    # Determine where your actual music lives
-    music_root = os.path.join(root_path, "Music")
-    if not os.path.isdir(music_root):
-        music_root = root_path
-
-    moves, tag_index, _ = compute_moves_and_tag_index(
-        root_path,
+    plan = build_indexer_plan(root_path, log_callback, progress_callback, cancel_event)
+    return apply_indexer_plan(
+        plan,
         log_callback,
         progress_callback,
-        dry_run=False,
-        enable_phase_c=enable_phase_c,
-        flush_cache=flush_cache,
-        max_workers=max_workers,
-        coord=None,
+        create_playlists=create_playlists,
+        cancel_event=cancel_event,
     )
-
-    _cleanup_trailing_numeric_suffixes(moves, tag_index, log_callback)
-
-
-    total_moves = len(moves)
-    check_cancelled()
-
-    MUSIC_ROOT = os.path.join(root_path, "Music") \
-        if os.path.isdir(os.path.join(root_path, "Music")) \
-        else root_path
-    SUPPORTED_EXTS = {".flac", ".m4a", ".aac", ".mp3", ".wav", ".ogg"}
-    IMAGE_EXTS     = {".jpg", ".jpeg", ".png", ".gif"}
-
-    summary = {"moved": 0, "errors": []}
-
-    # Build a mapping: old_dir → set of target_dirs for audio files in that folder
-    olddir_to_newdirs = defaultdict(set)
-    for old_path, new_path in moves.items():
-        old_dir = os.path.dirname(old_path)
-        new_dir = os.path.dirname(new_path)
-        olddir_to_newdirs[old_dir].add(new_dir)
-
-    # Phase 5: Move audio files
-    for idx, (old_path, new_path) in enumerate(moves.items(), start=1):
-        check_cancelled()
-        if progress_callback:
-            progress_callback(idx, total_moves, old_path, "C")
-        if idx % 50 == 0 or idx == total_moves:
-            log_callback(f"   • Moving file {idx}/{total_moves}")
-        os.makedirs(os.path.dirname(new_path), exist_ok=True)
-        moved_ok = True
-        try:
-            if os.path.abspath(old_path) != os.path.abspath(new_path):
-                shutil.move(old_path, new_path)
-                summary["moved"] += 1
-        except Exception as e:
-            moved_ok = False
-            err = f"Failed to move {old_path} → {new_path}: {e}"
-            summary["errors"].append(err)
-            log_callback(f"   ! {err}")
-        if moved_ok:
-            canonical = tag_index.get(new_path, {}).get("canonical_primary")
-            _update_primary_artist_metadata(new_path, canonical, log_callback)
-
-    if moves:
-        try:
-            from playlist_generator import update_playlists
-            log_callback("   • Updating existing playlists for renamed tracks…")
-            update_playlists(moves)
-        except ImportError:
-            log_callback("! playlist_generator.py missing; skipping playlist updates.")
-        except Exception as e:
-            log_callback(f"! Playlist update error: {e}")
-
-    # Phase 6: Handle non-audio leftovers…
-    docs_dir = os.path.join(root_path, "Docs")
-    trash_dir = os.path.join(root_path, "Trash")
-    os.makedirs(docs_dir, exist_ok=True)
-    os.makedirs(trash_dir, exist_ok=True)
-
-    for dirpath, dirnames, filenames in os.walk(MUSIC_ROOT, topdown=False):
-        check_cancelled()
-        # 1) Don’t recurse back into Trash/, Docs/, Playlists, or Not Sorted/
-        dirnames[:] = [d for d in dirnames if d.lower() not in ("trash", "docs", "not sorted", "playlists")]
-        if {"not sorted", "playlists"} & {p.lower() for p in os.path.relpath(dirpath, root_path).split(os.sep)}:
-            continue
-
-        for fname in filenames:
-            check_cancelled()
-            full = os.path.join(dirpath, fname)
-            ext  = os.path.splitext(fname)[1].lower()
-
-            # 2) Skip files already moved or valid audio
-            if full in moves or ext in SUPPORTED_EXTS:
-                continue
-
-            target = docs_dir if ext in (".txt", ".html", ".db") else trash_dir
-            if target is docs_dir:
-                log_callback(f"Moving doc to Docs/: {full}")
-            else:
-                log_callback(f"Moving to Trash/: {full}")
-            try:
-                shutil.move(full, os.path.join(target, fname))
-            except Exception as e:
-                log_callback(f"   ! Failed to move leftover {full}: {e}")
-
-    # Phase 6b: Remove empty directories that held moved files
-    skip_names = {"trash", "docs", "not sorted", "playlists"}
-    touched_dirs = sorted(olddir_to_newdirs.keys(), key=lambda p: p.count(os.sep), reverse=True)
-    for base in touched_dirs:
-        check_cancelled()
-        if not os.path.isdir(base):
-            continue
-        for dirpath, dirnames, filenames in os.walk(base, topdown=False):
-            check_cancelled()
-            rel = os.path.relpath(dirpath, root_path)
-            first = rel.split(os.sep, 1)[0].lower() if rel != "." else ""
-            if first in skip_names:
-                continue
-            if os.path.normpath(dirpath) in (root_path, MUSIC_ROOT):
-                continue
-            if not os.listdir(dirpath):
-                try:
-                    os.rmdir(dirpath)
-                    log_callback(f"Removed empty folder: {dirpath}")
-                except OSError:
-                    pass
-
-    # Phase 6c: Second pass to remove any remaining empty directories
-    for dirpath, dirnames, filenames in os.walk(root_path, topdown=False):
-        check_cancelled()
-        dirnames[:] = [d for d in dirnames if d.lower() not in skip_names]
-        if os.path.normpath(dirpath) in (root_path, MUSIC_ROOT):
-            continue
-        rel = os.path.relpath(dirpath, root_path)
-        first = rel.split(os.sep, 1)[0].lower() if rel != "." else ""
-        if first in skip_names:
-            continue
-        if not os.listdir(dirpath):
-            try:
-                os.rmdir(dirpath)
-                log_callback(f"Removed empty folder: {dirpath}")
-            except OSError:
-                pass
-
-    if create_playlists:
-        # ─── Phase 7: Generate Playlists with edge-case handling ────────────
-        try:
-            from playlist_generator import generate_playlists
-            log_callback("4/4: Generating playlists…")
-
-            def plog(msg):
-                log_callback(msg)
-                if progress_callback and msg.startswith("→ Writing playlist:"):
-                    playlist_file = msg.split(":", 1)[1].strip()
-                    progress_callback(total_moves, total_moves, playlist_file, "C")
-
-            generate_playlists(
-                moves,
-                root_path,
-                output_dir=None,        # default: root_path/Playlists
-                valid_exts=None,        # default extensions
-                overwrite=True,
-                log_callback=plog,
-            )
-            log_callback("✓ Robust playlists created.")
-        except ImportError:
-            log_callback("! playlist_generator.py missing; skipping playlists.")
-        except Exception as e:
-            log_callback(f"! Playlist generation error: {e}")
-    else:
-        log_callback("• Playlist creation disabled")
-
-    return summary
 
 
 # ─── D. HIGH-LEVEL “RUN FULL INDEXER” ───────────────────────────────────
@@ -1273,73 +1721,52 @@ def run_full_indexer(
     flush_cache: bool = False,
     max_workers: int | None = None,
     create_playlists: bool = True,
+    cancel_event=None,
 ):
     """
-    1) Call compute_moves_and_tag_index() to get (moves, tag_index, decision_log).
-    2) Write a detailed log file `indexer_log.txt` under root_path.
-    3) Write dry-run HTML via build_dry_run_html().
-    4) If ``dry_run_only`` is False, call ``apply_indexer_moves()`` to move files.
-       Playlist generation can be skipped by passing ``create_playlists=False``.
-    Returns summary: {"moved": <count>, "html": <path>, "dry_run": <True/False>}.
+    1) Compute the Indexer plan once (``build_indexer_plan``).
+    2) Write ``Docs/indexer_log.txt`` and the dry-run HTML from that plan.
+    3) If ``dry_run_only`` is False, execute *that same plan*
+       (``apply_indexer_plan``). Playlist generation can be skipped by passing
+       ``create_playlists=False``.
+    Returns ``{"moved", "html", "dry_run", "plan"}`` plus, after an execute,
+    ``"summary"``, ``"errors"`` and ``"cancelled"``.
+
+    ``enable_phase_c``, ``flush_cache`` and ``max_workers`` are accepted for
+    backward compatibility and ignored.
     """
     if log_callback is None:
         def log_callback(msg): pass
 
-    # Ensure Not Sorted directory exists for user exclusions
-    not_sorted_dir = os.path.join(root_path, "Not Sorted")
-    os.makedirs(not_sorted_dir, exist_ok=True)
-
-    # Phase 1–4: Generate moves, tags, and collect decision log
-    moves, tag_index, decision_log = compute_moves_and_tag_index(
-        root_path,
-        log_callback,
-        progress_callback,
-        dry_run=dry_run_only,
-        enable_phase_c=enable_phase_c,
-        flush_cache=flush_cache,
-        max_workers=max_workers,
-        coord=None,
+    plan = build_indexer_plan(
+        root_path, log_callback, progress_callback, cancel_event, exclude=[output_html_path]
     )
-
-    # Write the detailed log file
-    docs_dir = os.path.join(root_path, "Docs")
-    os.makedirs(docs_dir, exist_ok=True)
-    log_path = os.path.join(docs_dir, "indexer_log.txt")
-    with open(log_path, "w", encoding="utf-8") as lf:
-        lf.write("Indexing Decision Log\n")
-        lf.write("======================\n")
-        lf.write(f"Library root: {root_path}\n")
-        lf.write(f"Generated on: {__import__('datetime').datetime.now()}\n\n")
-        for line in decision_log:
-            lf.write(line + "\n")
-    log_callback(f"✓ Detailed log written to: {log_path}")
-
-    # Build dry-run HTML
-    log_callback("4/4: Writing dry-run HTML…")
-    build_dry_run_html(
-        root_path,
+    write_indexer_preview(
+        plan,
         output_html_path,
         log_callback,
-        enable_phase_c=enable_phase_c,
-        flush_cache=flush_cache,
-        max_workers=max_workers,
+        log_path=os.path.join(root_path, "Docs", "indexer_log.txt"),
     )
 
-    if not dry_run_only:
-        # Phase 5–6: Actually move audio files
-        actual_summary = apply_indexer_moves(
-            root_path,
-            log_callback,
-            progress_callback,
-            create_playlists=create_playlists,
-            enable_phase_c=enable_phase_c,
-            flush_cache=flush_cache,
-            max_workers=max_workers,
-        )
-        summary = {"moved": actual_summary["moved"], "html": output_html_path, "dry_run": False}
-        return summary
-    else:
-        return {"moved": 0, "html": output_html_path, "dry_run": True}
+    if dry_run_only:
+        return {"moved": 0, "html": output_html_path, "dry_run": True, "plan": plan}
+
+    summary = apply_indexer_plan(
+        plan,
+        log_callback,
+        progress_callback,
+        create_playlists=create_playlists,
+        cancel_event=cancel_event,
+    )
+    return {
+        "moved": summary["moved"],
+        "html": output_html_path,
+        "dry_run": False,
+        "plan": plan,
+        "summary": summary,
+        "errors": summary["errors"],
+        "cancelled": summary["cancelled"],
+    }
 
 
 # ─── E. DUPLICATE DETECTION HELPER ─────────────────────────────────────
