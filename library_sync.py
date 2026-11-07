@@ -518,7 +518,10 @@ def _scan_folder(
 _NO_PRINT: Tuple[str, None, int, bytes, frozenset] = ("none", None, 0, b"", frozenset())
 
 
-def _print_info(fp: object) -> Tuple[str, str | None, int, bytes, frozenset | set]:
+def _print_info(
+    fp: object,
+    decoder: Callable[[str], Tuple[int, bytes] | None] | None = None,
+) -> Tuple[str, str | None, int, bytes, frozenset | set]:
     """Classify a fingerprint for the shortlist.
 
     Returns ``(kind, text, algorithm, packed_items, distinct_items)``. ``kind``:
@@ -530,13 +533,17 @@ def _print_info(fp: object) -> Tuple[str, str | None, int, bytes, frozenset | se
     * ``"none"`` — missing, fpcalc's empty ``AQAAAA``, or shorter than
       ``MIN_MATCH_ITEMS`` / fewer than ``MIN_DISTINCT_ITEMS`` distinct items
       (silence): never a candidate, never a match.
+
+    ``decoder(text)`` replaces the in-memory decode (``_decoded_packed``);
+    the candidate index passes :class:`_DecodedPrintStore`'s, which reads the
+    decoded items from Library Sync's fingerprint cache.
     """
     nd = idx_near_duplicate_detector
     text = nd._fp_text(fp)
     text = text.strip() if text else ""
     if not text or nd.is_empty_chromaprint(text):
         return _NO_PRINT
-    decoded = nd._decoded_packed(text)
+    decoded = (decoder or nd._decoded_packed)(text)
     if decoded is None:
         return ("plain", text, 0, b"", frozenset())
     algorithm, packed = decoded
@@ -552,6 +559,80 @@ def _print_info(fp: object) -> Tuple[str, str | None, int, bytes, frozenset | se
 def _sampled_items(distinct: Iterable[int]) -> List[int]:
     """The items of a print that go into (and are looked up in) the index."""
     return [item for item in distinct if not (item * _INDEX_HASH) & INDEX_SAMPLE_MASK]
+
+
+class _DecodedPrintStore:
+    """Decoded library prints persisted in Library Sync's fingerprint cache.
+
+    Decoding a compressed Chromaprint print is pure Python (~1.5 ms for a
+    2-minute print), and the candidate index needs every library print
+    decoded: ~30 s for 20k tracks on every Build Plan. The decoded items are
+    stored in the cache's ``decoded`` column (see the vendored
+    ``fingerprint_cache.pack_decoded``) and only reused for a file whose
+    path, mtime and size still match the cache row and whose compressed
+    print is the one they were decoded from. Anything else (old rows from
+    before the column existed, a changed file, a new print) is decoded here
+    and written back, so the next run reads it.
+
+    Use from one thread; :meth:`close` writes the pending rows.
+    """
+
+    _FLUSH_EVERY = 500
+
+    def __init__(self, db_path: str) -> None:
+        self._conn = _ensure_db(db_path)
+        self._pending: List[Tuple[bytes, str, float, int]] = []
+        self.hits = 0
+        self.decoded = 0
+
+    def decoder(self, rec: TrackRecord) -> Callable[[str], Tuple[int, bytes] | None]:
+        def decode(text: str) -> Tuple[int, bytes] | None:
+            return self._decoded(rec, text)
+
+        return decode
+
+    def _decoded(self, rec: TrackRecord, text: str) -> Tuple[int, bytes] | None:
+        fc = idx_fingerprint_cache
+        row = self._conn.execute(
+            "SELECT mtime, size, decoded FROM fingerprints WHERE path=?", (rec.path,)
+        ).fetchone()
+        row_valid = bool(
+            row
+            and row[0] is not None
+            and abs(float(row[0]) - float(rec.mtime)) < 1e-6
+            and int(row[1] or 0) == int(rec.size)
+        )
+        if row_valid:
+            stored = fc.unpack_decoded(text, row[2])
+            if fc.is_stored(stored):
+                self.hits += 1
+                return stored  # type: ignore[return-value]
+        decoded = idx_near_duplicate_detector._decoded_packed(text)
+        self.decoded += 1
+        if row_valid:
+            self._pending.append((fc.pack_decoded(text, decoded), rec.path, float(row[0]), int(row[1] or 0)))
+            if len(self._pending) >= self._FLUSH_EVERY:
+                self._flush()
+        return decoded
+
+    def _flush(self) -> None:
+        if not self._pending:
+            return
+        try:
+            self._conn.executemany(
+                "UPDATE fingerprints SET decoded=? WHERE path=? AND mtime=? AND size=?",
+                self._pending,
+            )
+            self._conn.commit()
+        except Exception as exc:  # a read-only or locked cache only costs speed
+            _logger.debug("library_sync: could not store decoded prints: %s", exc)
+        self._pending.clear()
+
+    def close(self) -> None:
+        try:
+            self._flush()
+        finally:
+            self._conn.close()
 
 
 class _LengthPool:
@@ -615,11 +696,18 @@ class _CandidateIndex:
 
     Built once per library scan (decoding every print is most of the cost:
     ~1.5 ms per 2-minute print); ``compare_libraries`` keeps it with its
-    result so Recompute Matches does not decode the library again. A set
-    ``cancel_event`` stops the build early (``complete`` is then False).
+    result so Recompute Matches does not decode the library again. With a
+    ``decoded_store`` the decoded prints come from (and new decodes go to)
+    Library Sync's fingerprint cache, so later Build Plans skip the decode.
+    A set ``cancel_event`` stops the build early (``complete`` is then False).
     """
 
-    def __init__(self, records: Iterable[TrackRecord], cancel_event: threading.Event | None = None) -> None:
+    def __init__(
+        self,
+        records: Iterable[TrackRecord],
+        cancel_event: threading.Event | None = None,
+        decoded_store: "_DecodedPrintStore | None" = None,
+    ) -> None:
         self.records: List[TrackRecord] = list(records)
         self.complete = True
         self._by_text: Dict[str, List[int]] = {}
@@ -630,7 +718,11 @@ class _CandidateIndex:
             if cancel_event is not None and not i % 256 and cancel_event.is_set():
                 self.complete = False
                 break
-            kind, text, algorithm, packed, distinct = _print_info(rec.fingerprint)
+            if decoded_store is None:
+                info = _print_info(rec.fingerprint)
+            else:
+                info = _print_info(rec.fingerprint, decoded_store.decoder(rec))
+            kind, text, algorithm, packed, distinct = info
             if kind == "none" or text is None:
                 continue
             self._by_text.setdefault(text, []).append(i)
@@ -946,10 +1038,23 @@ def compare_libraries(
             f"Matching {len(inc_records)} incoming track(s) against {len(lib_records)} library track(s)…"
         )
     start = time.perf_counter()
-    candidate_index = _CandidateIndex(lib_records, cancel_event=cancel_event)
+    decoded_store: _DecodedPrintStore | None = None
+    try:
+        decoded_store = _DecodedPrintStore(db_path) if lib_records else None
+    except Exception as exc:  # the cache is a speed-up only
+        _dlog(f"DEBUG: decoded-print cache unavailable: {exc}", log_callback)
+    try:
+        candidate_index = _CandidateIndex(lib_records, cancel_event=cancel_event, decoded_store=decoded_store)
+    finally:
+        if decoded_store is not None:
+            decoded_store.close()
     _dlog(
         f"DEBUG: candidate index for {len(lib_records)} library tracks built in "
-        f"{time.perf_counter() - start:.2f}s",
+        f"{time.perf_counter() - start:.2f}s"
+        + (
+            f" ({decoded_store.hits} decoded prints from the cache, {decoded_store.decoded} decoded now)"
+            if decoded_store is not None else ""
+        ),
         log_callback,
     )
     match_results = _match_tracks(
