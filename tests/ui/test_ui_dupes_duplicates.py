@@ -337,7 +337,36 @@ def test_delete_really_deletes_after_confirmation(dupes, dialogs, library, qtbot
     report = json.loads(Path(ws._last_report_path).with_suffix(".json").read_text(encoding="utf-8"))
     assert any(a["step"] == "loser_cleanup" and a["detail"] == "Loser deleted." for a in report["actions"])
     # The preview was re-written to show the disposition that executed.
-    assert "delete" in (library.root / "Docs" / "duplicate_preview.html").read_text(encoding="utf-8")
+    preview = (library.root / "Docs" / "duplicate_preview.html").read_text(encoding="utf-8")
+    assert f"{mp3} → delete" in preview and "→ quarantine" not in preview
+
+
+def test_preview_export_failure_changes_nothing_and_retry_reexports(dupes, dialogs, library, qtbot, monkeypatch):
+    import duplicate_consolidation
+
+    ws = dupes
+    run_scan(ws, qtbot)
+    flac, mp3 = _fault_line(library)
+    ws._delete_rb.setChecked(True)
+    real = duplicate_consolidation.export_consolidation_preview_html
+
+    def broken(*_a, **_k):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(duplicate_consolidation, "export_consolidation_preview_html", broken)
+    dialogs.answer_yes()                              # review override
+    run_execute(ws, qtbot)
+    assert "disk full" in dialogs.calls_of("warning")[-1].text
+    assert ws._plan.groups[0].loser_disposition == {str(mp3): "quarantine"}
+    assert mp3.exists()
+
+    monkeypatch.setattr(duplicate_consolidation, "export_consolidation_preview_html", real)
+    dialogs.answer_yes().answer_no()                  # override, then decline the confirm
+    run_execute(ws, qtbot)
+    assert ws._plan.groups[0].loser_disposition == {str(mp3): "delete"}
+    preview = (library.root / "Docs" / "duplicate_preview.html").read_text(encoding="utf-8")
+    assert f"{mp3} → delete" in preview
+    assert mp3.exists()
 
 
 def test_quarantine_is_still_the_default(dupes):

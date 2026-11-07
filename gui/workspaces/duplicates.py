@@ -754,14 +754,17 @@ class DuplicatesWorkspace(WorkspaceBase):
         The plan's signature is refreshed and the preview re-exported so the
         preview always shows exactly what Execute will do.
         """
+        previous = {g.group_id: dict(g.loser_disposition) for g in self._plan.groups}
         changed = False
         for group in self._plan.groups:
             wanted = {loser: effective.get(loser, "quarantine") for loser in group.losers}
             if dict(group.loser_disposition) != wanted:
                 group.loser_disposition = wanted
                 changed = True
-        if changed:
-            self._plan.refresh_plan_signature()
+        if not changed:
+            return False
+        self._plan.refresh_plan_signature()
+        try:
             from duplicate_consolidation import (
                 export_consolidation_preview,
                 export_consolidation_preview_html,
@@ -771,9 +774,15 @@ class DuplicatesWorkspace(WorkspaceBase):
             html_path = str(docs / "duplicate_preview.html")
             export_consolidation_preview_html(self._plan, html_path)
             export_consolidation_preview(self._plan, str(docs / "duplicate_preview.json"))
-            self._preview_html_path = html_path
-            self._log_line("Preview updated with your disposition choices.")
-        return changed
+        except Exception:
+            # Keep plan and preview in step: undo, so a retry re-exports.
+            for group in self._plan.groups:
+                group.loser_disposition = previous[group.group_id]
+            self._plan.refresh_plan_signature()
+            raise
+        self._preview_html_path = html_path
+        self._log_line("Preview updated with your disposition choices.")
+        return True
 
     def _group_detail_text(self, group) -> str:
         override = self._group_overrides.get(group.group_id)
