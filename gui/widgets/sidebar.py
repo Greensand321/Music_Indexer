@@ -64,27 +64,24 @@ class NavContainer(QtWidgets.QWidget):
         self._pill_h: float = 44.0
         self._pill_visible: bool = False
 
-        self._pill_anim = QtCore.QVariantAnimation(self)
-        self._pill_anim.setDuration(320)
-        self._pill_anim.setEasingCurve(QtCore.QEasingCurve.Type.OutBack)
-        self._pill_anim.valueChanged.connect(self._on_pill_value)
-
     def _on_pill_value(self, value: object) -> None:
         self._pill_y = float(value)  # type: ignore[arg-type]
         self.update()
 
+    @property
+    def _pill_anim(self):
+        """The pill's helper animation (None until the first slide)."""
+        from gui.themes import motion
+        return motion.animation_for(self, "pill")
+
     def move_pill(self, y: float, h: float, *, instant: bool = False) -> None:
+        from gui.themes import motion
         self._pill_h = h
         self._pill_visible = True
-        if instant:
-            self._pill_anim.stop()
-            self._pill_y = y
-            self.update()
-            return
-        self._pill_anim.stop()
-        self._pill_anim.setStartValue(float(self._pill_y))
-        self._pill_anim.setEndValue(float(y))
-        self._pill_anim.start()
+        motion.animate_value(
+            self, "pill", float(self._pill_y), float(y), self._on_pill_value,
+            duration="instant" if instant else "slow", easing="emphasis",
+        )
 
     def paintEvent(self, event: QtGui.QPaintEvent) -> None:
         if not self._pill_visible:
@@ -105,6 +102,24 @@ class NavContainer(QtWidgets.QWidget):
         path = QtGui.QPainterPath()
         path.addRoundedRect(pill, 8.0, 8.0)
         p.fillPath(path, QtGui.QBrush(QtGui.QColor(t.sidebar_active)))
+        p.end()
+
+
+class _Separator(QtWidgets.QWidget):
+    """1 px rule painted from the active theme's ``card_border`` token."""
+
+    def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("sidebarSeparator")
+        self.setFixedHeight(1)
+
+    def color(self) -> QtGui.QColor:
+        from gui.themes.manager import get_manager
+        return QtGui.QColor(get_manager().current.card_border)
+
+    def paintEvent(self, event: QtGui.QPaintEvent) -> None:  # noqa: N802
+        p = QtGui.QPainter(self)
+        p.fillRect(self.rect(), self.color())
         p.end()
 
 
@@ -134,13 +149,20 @@ class Sidebar(QtWidgets.QWidget):
         root_layout.setSpacing(0)
 
         # ── Logo area ─────────────────────────────────────────────────────
+        # No inline colour: the label paints with the palette's WindowText,
+        # i.e. the active theme's text_primary, so it stays legible on light
+        # themes too (DS-12 / SHELL-18; it used to be a fixed #f8fafc).
         logo_lbl = QtWidgets.QLabel("AlphaDEX")
+        logo_lbl.setObjectName("sidebarLogo")
         logo_lbl.setFixedHeight(44)
-        logo_lbl.setStyleSheet(
-            "color: #f8fafc; font-size: 22px; font-weight: 700; "
-            "padding: 0 8px; letter-spacing: -0.02em;"
-        )
+        logo_lbl.setContentsMargins(8, 0, 8, 0)
+        logo_font = QtGui.QFont(logo_lbl.font())
+        logo_font.setPixelSize(22)
+        logo_font.setWeight(QtGui.QFont.Weight.Bold)
+        logo_font.setLetterSpacing(QtGui.QFont.SpacingType.PercentageSpacing, 98.0)
+        logo_lbl.setFont(logo_font)
         root_layout.addWidget(logo_lbl)
+        self._logo = logo_lbl
 
         # ── Scrollable nav ────────────────────────────────────────────────
         scroll = QtWidgets.QScrollArea()
@@ -178,11 +200,9 @@ class Sidebar(QtWidgets.QWidget):
         root_layout.addWidget(scroll, stretch=1)
 
         # ── Separator ─────────────────────────────────────────────────────
-        sep = QtWidgets.QFrame()
-        sep.setFrameShape(QtWidgets.QFrame.Shape.HLine)
-        sep.setFixedHeight(1)
-        sep.setStyleSheet("background: rgba(255,255,255,0.08); border: none;")
+        sep = _Separator()
         root_layout.addWidget(sep)
+        self._separator = sep
 
         # ── Exit button (pinned at bottom) ─────────────────────────────────
         self._exit_btn = AnimatedNavButton("Exit", "exit", "⏻", is_exit=True)
@@ -233,9 +253,10 @@ class Sidebar(QtWidgets.QWidget):
         t = get_manager().current
         p = QtGui.QPainter(self)
         rect = self.rect()
+        gradient = _gradient_enabled()   # cached flag: no config I/O in paint
         try:
             # ── Step 1: window-spanning gradient (identical to workspace) ──
-            if _gradient_enabled() and rect.width() > 0 and rect.height() > 0:
+            if gradient and rect.width() > 0 and rect.height() > 0:
                 paint_window_gradient(
                     p, self, t,
                     radius_scale=1.05,
@@ -247,7 +268,7 @@ class Sidebar(QtWidgets.QWidget):
                 p.fillRect(rect, QtGui.QColor(t.sidebar_bg))
 
             # ── Step 2: barely-there sidebar tint (~11 % opacity) ──────────
-            if _gradient_enabled():
+            if gradient:
                 tint = QtGui.QColor(t.sidebar_bg)
                 tint.setAlpha(28 if t.variant == "dark" else 20)
                 p.fillRect(rect, tint)
