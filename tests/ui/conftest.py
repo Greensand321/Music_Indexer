@@ -47,6 +47,17 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 _THREAD_GRAVEYARD: list = []
 
 
+def pytest_unconfigure(config):
+    """Before the interpreter exits, give threads that outlived their test a
+    chance to finish: destroying a still-running QThread at exit is a qFatal
+    abort, which would hide the real (already reported) test failure."""
+    for thread in _THREAD_GRAVEYARD:
+        try:
+            thread.wait(60_000)
+        except RuntimeError:
+            pass
+
+
 def pytest_configure(config):
     config.addinivalue_line(
         "markers",

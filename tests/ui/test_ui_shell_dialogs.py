@@ -23,8 +23,9 @@ def test_every_control_persists_under_its_key(drawer, tmp_path):
 
     lib = tmp_path / "Lib"
     lib.mkdir()
-    drawer._service_combo.setCurrentText("MusicBrainz")
-    drawer._api_key_entry.setText("KEY123")
+    drawer._service_combo.setCurrentText("AcoustID")
+    drawer._api_key_entry.setText("KEY123")      # the AcoustID key...
+    drawer._service_combo.setCurrentText("MusicBrainz")   # ...survives switching away
     drawer._mb_app.setText("App")
     drawer._mb_ver.setText("9")
     drawer._mb_contact.setText("me@example.com")
@@ -157,3 +158,38 @@ def test_unchanged_missing_default_library_does_not_block_saving(qtbot, tmp_path
     assert dlg.library_changed is False
     cfg = config.load_config()
     assert cfg["metadata_api_key"] == "NEWKEY" and cfg["library_root"] == gone
+
+
+def test_acoustid_and_lastfm_keys_are_stored_separately(drawer):
+    """The key field used to save every service's key into metadata_api_key,
+    so a Last.fm key replaced the AcoustID key (and Last.fm never read it)."""
+    import config
+
+    drawer._service_combo.setCurrentText("AcoustID")
+    drawer._api_key_entry.setText("ACOUSTID-KEY")
+    drawer._service_combo.setCurrentText("Last.fm")
+    assert drawer._api_key_entry.text() == ""          # Last.fm has its own key
+    drawer._api_key_entry.setText("LASTFM-KEY")
+    drawer._service_combo.setCurrentText("AcoustID")
+    assert drawer._api_key_entry.text() == "ACOUSTID-KEY"
+    drawer._service_combo.setCurrentText("Last.fm")
+    drawer._on_save()
+
+    cfg = config.load_config()
+    assert cfg["metadata_api_key"] == "ACOUSTID-KEY"
+    assert cfg["lastfm_api_key"] == "LASTFM-KEY"
+    assert cfg["metadata_service"] == "Last.fm"
+
+
+def test_lastfm_source_reads_the_key_saved_in_settings(monkeypatch):
+    import config
+    from plugins import lastfm
+
+    monkeypatch.delenv("LASTFM_API_KEY", raising=False)
+    monkeypatch.setattr(lastfm, "API_KEY", None)
+    config.save_config({"metadata_service": "Last.fm", "lastfm_api_key": "FROM-SETTINGS"})
+    assert lastfm._api_key() == "FROM-SETTINGS"
+    status = lastfm.LastfmPlugin().preflight()
+    assert status.active and "Settings" in status.detail
+    monkeypatch.setenv("LASTFM_API_KEY", "FROM-ENV")
+    assert lastfm._api_key() == "FROM-ENV"           # the environment still wins

@@ -154,3 +154,12 @@ def test_untagged_but_readable_files_are_still_listed(tmp_path, monkeypatch, loa
         db.close()
     assert [r.path.name for r in records] == ["untagged.mp3"]
     assert records[0].status == "unmatched"
+
+
+def test_test_fixture_plugin_never_runs_in_real_scans():
+    """plugins/test_plugin.TestPlugin answers every dummy_* file with a
+    perfect-confidence fake genre; it used to be loaded into real scans."""
+    import tag_fixer
+
+    assert "test_plugin" not in tag_fixer._PLUGIN_MODULE_NAMES
+    assert not any(type(p).__name__ == "TestPlugin" for p in tag_fixer.PLUGINS)

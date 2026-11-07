@@ -79,3 +79,41 @@ def test_closing_mid_execute_asks_and_waits_for_the_file_moves(main_window, libr
     qtbot.waitUntil(lambda: not main_window.isVisible(), timeout=30_000)
     assert finished.is_set(), "the file moves ran to their safe stopping point"
     assert threads.wait_all(10_000) == []
+
+
+def test_library_change_lets_a_confirmed_duplicate_execution_finish(make_workspace, library, tmp_path,
+                                                                    dialogs, monkeypatch, qtbot, threads):
+    """Every page lets a confirmed library write finish when the library
+    changes; Duplicates used to cancel its execution part-way."""
+    import duplicate_consolidation_executor as executor
+
+    install_fake_fpcalc(monkeypatch)
+    record_browser(monkeypatch)
+    ws = make_workspace("duplicates", library_path=library.root)
+    run_scan(ws, qtbot)
+    _unflag(ws)
+    mp3 = library.root / "Basalt" / "Singles" / "Fault Line.mp3"
+
+    real = executor.execute_consolidation_plan
+    release = threading.Event()
+    moving = threading.Event()
+
+    def held_execute(plan, config, *args, **kwargs):
+        moving.set()
+        release.wait(10)
+        return real(plan, config, *args, **kwargs)
+
+    monkeypatch.setattr(executor, "execute_consolidation_plan", held_execute)
+    dialogs.answer_yes()
+    ws._execute_btn.click()
+    assert moving.wait(10)
+    worker = ws._exec_worker
+
+    other = tmp_path / "Other"
+    other.mkdir()
+    ws.set_library_path(str(other))
+    assert not worker._cancel_event.is_set(), "a confirmed write must not be cancelled"
+    release.set()
+    assert threads.wait_all(20_000) == []
+    assert (library.root / "Quarantine" / mp3.name).exists(), "the confirmed plan completed"
+    assert ws._plan is None and ws._groups == [], "the new library's page starts clean"

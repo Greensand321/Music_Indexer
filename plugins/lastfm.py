@@ -13,7 +13,16 @@ API_KEY = os.getenv("LASTFM_API_KEY")
 
 
 def _api_key() -> str:
-    return (os.getenv("LASTFM_API_KEY") or API_KEY or "").strip()
+    """The ``LASTFM_API_KEY`` environment variable, else the key saved in
+    Settings (``lastfm_api_key``)."""
+    env = (os.getenv("LASTFM_API_KEY") or API_KEY or "").strip()
+    if env:
+        return env
+    try:
+        from config import load_config
+        return str(load_config().get("lastfm_api_key") or "").strip()
+    except Exception:  # noqa: BLE001
+        return ""
 
 
 def _selected_service() -> str:
@@ -30,13 +39,13 @@ class LastfmPlugin(MetadataPlugin):
 
     def preflight(self) -> SourceStatus:
         if _api_key():
-            return SourceStatus(self.name, True, "key from LASTFM_API_KEY")
+            source = "LASTFM_API_KEY" if (os.getenv("LASTFM_API_KEY") or API_KEY) else "Settings"
+            return SourceStatus(self.name, True, f"key from {source}")
         problem = ""
         if _selected_service() == "Last.fm":
-            # Settings has no Last.fm key field; say where the key goes.
             problem = (
                 "Last.fm is selected in Settings, but no Last.fm API key is set "
-                "(set the LASTFM_API_KEY environment variable)"
+                "(enter it in Settings → Metadata Services, or set LASTFM_API_KEY)"
             )
         return SourceStatus(self.name, False, "", problem)
 

@@ -70,7 +70,9 @@ TAG_SCAN_SKIPPED_FOLDERS = tuple(f for f in RESERVED_FOLDERS if f != MANUAL_REVI
 # Explicit module list rather than pkgutil.iter_modules(['plugins']): a
 # filesystem scan relative to the working directory can't find the plugins
 # package once it's bundled into a frozen executable.
-_PLUGIN_MODULE_NAMES = ["acoustid_plugin", "api_service", "lastfm", "musicbrainz_plugin", "test_plugin"]
+# plugins/test_plugin.py is a test fixture (a perfect-score "TestGenre" match
+# for any file named dummy_*); it must never run in a real scan.
+_PLUGIN_MODULE_NAMES = ["acoustid_plugin", "api_service", "lastfm", "musicbrainz_plugin"]
 
 PLUGINS: List[MetadataPlugin] = []
 for name in _PLUGIN_MODULE_NAMES:

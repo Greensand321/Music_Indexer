@@ -7,7 +7,8 @@ these keys (other pages read them, so the names must not change):
 Control                            Config key
 =================================  ==============================================
 Service combo                      ``metadata_service`` ("AcoustID" | "MusicBrainz" | "Last.fm")
-API key (AcoustID / Last.fm)       ``metadata_api_key``
+AcoustID API key                   ``metadata_api_key`` (empty = built-in key)
+Last.fm API key                    ``lastfm_api_key`` (``LASTFM_API_KEY`` env wins)
 MusicBrainz app / version / mail   ``musicbrainz_useragent`` = {app, version, contact}
 Default library                    ``library_root``
 Near-duplicate threshold           ``near_duplicate_threshold``
@@ -21,8 +22,12 @@ import os
 
 from gui.compat import QtCore, QtGui, QtWidgets, Signal, Slot
 
-# Services whose API key is the shared ``metadata_api_key`` field.
-_KEYED_SERVICES = ("AcoustID", "Last.fm")
+# Services with an API key, and the config key each one is stored under. The
+# Settings dialog shows one key field for whichever service is selected; it
+# used to save every key into ``metadata_api_key``, so a Last.fm key replaced
+# the AcoustID key (and the Last.fm source never read it).
+_KEY_CONFIG = {"AcoustID": "metadata_api_key", "Last.fm": "lastfm_api_key"}
+_KEYED_SERVICES = tuple(_KEY_CONFIG)
 
 
 def check_service_connection(
@@ -167,7 +172,7 @@ class SettingsDrawer(QtWidgets.QDialog):
         self._service_combo.currentTextChanged.connect(self._on_service_changed)
         meta_l.addRow("Service:", self._service_combo)
 
-        # API-key section (AcoustID and Last.fm share ``metadata_api_key``)
+        # API-key section: one field showing the selected service's own key
         self._acoustid_frame = QtWidgets.QFrame()
         af_layout = QtWidgets.QFormLayout(self._acoustid_frame)
         af_layout.setContentsMargins(0, 0, 0, 0)
@@ -277,12 +282,13 @@ class SettingsDrawer(QtWidgets.QDialog):
             import tag_fixer
             cfg = load_config()
             svc = cfg.get("metadata_service", "AcoustID")
+            # Empty AcoustID key = the built-in key (plugins.acoustid_plugin);
+            # don't copy the built-in key into the user's config.
+            self._keys = {s: str(cfg.get(k) or "") for s, k in _KEY_CONFIG.items()}
+            self._key_service = None
             idx = self._service_combo.findText(svc)
             if idx >= 0:
                 self._service_combo.setCurrentIndex(idx)
-            self._api_key_entry.setText(
-                cfg.get("metadata_api_key", getattr(tag_fixer, "ACOUSTID_API_KEY", ""))
-            )
             ua = cfg.get("musicbrainz_useragent", {})
             self._mb_app.setText(ua.get("app", ""))
             self._mb_ver.setText(ua.get("version", ""))
@@ -314,7 +320,9 @@ class SettingsDrawer(QtWidgets.QDialog):
             from config import load_config, save_config
             cfg = load_config()
             cfg["metadata_service"] = self._service_combo.currentText()
-            cfg["metadata_api_key"] = self._api_key_entry.text()
+            self._stash_key()
+            for svc_name, cfg_key in _KEY_CONFIG.items():
+                cfg[cfg_key] = self._keys.get(svc_name, "").strip()
             cfg["musicbrainz_useragent"] = {
                 "app": self._mb_app.text(),
                 "version": self._mb_ver.text(),
@@ -364,11 +372,23 @@ class SettingsDrawer(QtWidgets.QDialog):
         colour = self._ok_colour if ok else self._err_colour
         self._test_status.setStyleSheet(f"color: {colour};")
 
+    def _stash_key(self) -> None:
+        """Remember what is typed in the key field for the service it belongs to."""
+        keys = self.__dict__.setdefault("_keys", {})
+        owner = self.__dict__.get("_key_service")
+        if owner in _KEY_CONFIG:
+            keys[owner] = self._api_key_entry.text()
+
     @Slot(str)
     def _on_service_changed(self, svc: str) -> None:
+        self._stash_key()
+        self._key_service = svc
         self._acoustid_frame.setVisible(svc in _KEYED_SERVICES)
+        if svc in _KEY_CONFIG:
+            self._api_key_entry.setText(self.__dict__.get("_keys", {}).get(svc, ""))
         self._api_key_entry.setPlaceholderText(
-            "Your Last.fm API key" if svc == "Last.fm" else "Your AcoustID API key"
+            "Your Last.fm API key" if svc == "Last.fm"
+            else "Your AcoustID API key (empty = built-in key)"
         )
         self._mb_frame.setVisible(svc == "MusicBrainz")
 

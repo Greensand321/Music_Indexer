@@ -1176,25 +1176,39 @@ class DuplicatesWorkspace(WorkspaceBase):
             text += f" — {flagged} flagged for review (⚑)"
         self._fp_status_lbl.setText(text)
 
-    def _abandon_running_jobs(self, reason: str) -> None:
-        """Ask running jobs to stop; their late results are ignored."""
+    def _abandon_running_jobs(self, reason: str, *, keep_confirmed_writes: bool = False) -> None:
+        """Detach running jobs from the page; their late results are ignored.
+
+        The scan is read-only and is always cancelled. A confirmed execution is
+        cancelled unless ``keep_confirmed_writes`` — on a library change it
+        finishes the plan the user confirmed (for the previous library), like
+        every other page's confirmed writes; the library-write lock keeps a new
+        execution from starting meanwhile.
+        """
         if self._scan_running and self._worker is not None:
             self._worker.cancel()
             self._log(f"{reason}: cancelled the running duplicate scan.", "warn")
         if self._exec_running and self._exec_worker is not None:
-            self._exec_worker.cancel()
-            self._log(
-                f"{reason}: asked the running duplicate execution to stop at the next safe "
-                "point. Its report is still written to the previous library's Docs/ folder.",
-                "warn",
-            )
+            if keep_confirmed_writes:
+                self._log(
+                    f"{reason}: the confirmed duplicate execution for the previous library "
+                    "keeps running to completion; its report goes to that library's Docs/ folder.",
+                    "warn",
+                )
+            else:
+                self._exec_worker.cancel()
+                self._log(
+                    f"{reason}: asked the running duplicate execution to stop at the next safe "
+                    "point. Its report is still written to the previous library's Docs/ folder.",
+                    "warn",
+                )
         self._worker = None
         self._exec_worker = None
         self._scan_running = False
         self._exec_running = False
 
     def _on_library_changed(self, path: str) -> None:
-        self._abandon_running_jobs("Library changed")
+        self._abandon_running_jobs("Library changed", keep_confirmed_writes=True)
         self._groups_table.clear()
         self._group_details.clear()
         self._log_area.clear()
