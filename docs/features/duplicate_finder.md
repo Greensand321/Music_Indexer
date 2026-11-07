@@ -118,6 +118,14 @@ every action is **logged**: the finder writes detailed records into the `Docs` f
 describing exactly which files were grouped, which won, which lost, and where each one
 went. Nothing happens without a paper trail.
 
+The one-pair-at-a-time tool, **Utilities → Pair Review**, follows the same rule. It
+used to delete the inferior file with a single click; its action is now
+"Quarantine inferior…", which names both files, asks, moves the loser into
+`Quarantine/` under a name that never overwrites anything, points playlist entries at
+the kept file, and logs the move to `Docs/duplicate_pair_review_log.txt`. It reviews
+the pairs from the Duplicate Finder's last scan (`Docs/duplicate_preview.json`), or
+else files with the same name in the same folder.
+
 ## Plan first, then act
 
 Like every major workflow in AlphaDEX, the Duplicate Finder is split into a **dry run**

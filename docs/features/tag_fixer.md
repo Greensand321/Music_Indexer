@@ -88,9 +88,15 @@ uses depends on what is installed and on Settings → Metadata Services:
   which mostly contributes album and genre proposals. MusicBrainz requests always
   use the app name / version / contact from Settings (blank fields fall back to
   "AlphaDEX 1.0"), so enrichment no longer depends on which page you opened first.
-- **Last.fm** joins when a Last.fm API key is set in the `LASTFM_API_KEY`
-  environment variable (Settings has no Last.fm key field; picking "Last.fm" there
-  without the variable makes the scan say where the key goes).
+- **Last.fm** joins only when a Last.fm API key is set in the `LASTFM_API_KEY`
+  environment variable. Settings does show an "API Key" field when you pick
+  "Last.fm", and "Test Connection" tests the key you type there, but the scan does
+  not read that field yet — and because it is the same saved field
+  (`metadata_api_key`) the AcoustID source reads, saving a Last.fm key there also
+  replaces your AcoustID key. Until this is fixed (see Known bugs in
+  **ROADMAP.md**), set the environment variable and leave the Settings field holding
+  your AcoustID key (or empty, for the built-in one). Picking "Last.fm" without the
+  variable makes the scan say where the key goes.
 - **Spotify** and **Gracenote** are honestly labeled as unavailable — see
   **architecture.md**'s note on this. They contribute nothing today.
 

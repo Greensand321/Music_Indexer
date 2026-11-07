@@ -152,6 +152,8 @@ A few practical notes:
 
 - **Flags are remembered only for the current session.** They live in memory while you
   work, not in a saved file. This is a deliberate simplicity choice (see below).
+  **Save Session** remembers the two folders and the threshold (restored the next time
+  you open the page), not the flags.
 - **Re-scanning keeps only the flags that still make sense.** If you change the
   strictness and recompute the matches (the **Recompute Matches** button re-matches the
   last scan without re-reading any file), the whole landscape of matches can shift — a
@@ -190,7 +192,12 @@ maintained copy of the Indexer's scanning/fingerprinting logic, not the same mod
 the Indexer and Duplicate Finder use. See **architecture.md**'s "two indexer
 engines" note for what that means in practice — most importantly, that the
 fingerprint cache Library Sync uses has a different schema than the one the rest of
-the app uses, and the two can drift apart.)*
+the app uses, and the two can drift apart. One drift matters for matching today: the
+vendored copy still compares the *compressed* fingerprint text, while the Duplicate
+Finder now decodes fingerprints first. Under the old metric a FLAC and its own MP3 can
+score 0.08–0.46, so a transcode may come back as "new" or "low confidence" rather than
+as a match or an upgrade — another reason to read the review list before building the
+plan. This is listed under Known bugs in **ROADMAP.md**.)*
 
 ## Committing the changes, safely
 

@@ -32,8 +32,9 @@ available dimensions are intuitive:
   / fast.
 - **Energy** — how loud and intense the track feels, bucketed into low / medium /
   high. (Energy here is measured from the loudness of the audio, not from any tag.)
-- **Folder, genre, and year** — straightforward groupings by where a track lives, what
-  it's labeled, or when it came out.
+- **Folder** — one playlist per album folder. (Genre playlists exist in the engine,
+  `playlist_engine.export_genre_playlists`, but the modern app doesn't offer them yet,
+  and there is no year grouping; see **ROADMAP.md**.)
 
 You can even combine dimensions — "slow but high-energy," for instance — to carve out
 specific moods. The tempo and energy *range* fields narrow this further: tracks
@@ -94,7 +95,8 @@ more than a listener's ear might expect.
 
 **Genre normalization** tidies the messy, inconsistent genre labels in your files so
 your library moves toward fewer stray spellings of "Hip-Hop" — which matters here
-because genre is one of the rule-based playlist dimensions. The Genre Normalizer
+because clean genres make every genre-based view of the library (and any future
+genre playlists) more useful. The Genre Normalizer
 workspace offers two tools: filling *missing* genres from MusicBrainz, and collapsing
 whatever vocabulary your library has accumulated into a canonical one via a mapping
 you build once, preview, and apply. See **features/tag_fixer.md** for both.
@@ -351,8 +353,9 @@ now keeps every choice and runs the algorithm you picked.)*
 In the spirit of an honest, up-to-date resource:
 
 **Working today:** rule-based playlists and Auto-DJ; MusicBrainz-based genre
-tag-filling (see the caveat above on what "normalization" means here); clustering by
-timbre and tempo with both K-Means and HDBSCAN; the five-step configuration wizard;
+tag-filling (see the caveat above on what "normalization" means here); clustering on any
+of the six sound features (timbre, tempo, harmony, brightness, energy, percussive
+density) with both K-Means and HDBSCAN; the five-step configuration wizard;
 the quality scores and the report dialog that displays them; exporting a cluster or
 any selection as a playlist from the Music Graph; the 3-D browser visualization; and the in-app 2-D map with
 pan/rectangle/lasso selection, hover and click inspection, legend-driven cluster

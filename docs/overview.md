@@ -48,9 +48,10 @@ the `features/` folder; this is the one-sentence version of each:
    refusing to create duplicates.
 4. **The Tag Fixer** — looks up the correct artist, album, and genre information for
    your tracks from online music databases and proposes corrections.
-5. **The Playlist Creator** — builds playlists for you, from simple rules (by tempo,
-   by energy, by year) all the way up to letting a machine-learning model group your
-   tracks by how they actually *sound*.
+5. **The Playlist Creator** — builds playlists for you, from simple rules (by album
+   folder, by tempo and energy, an "Auto-DJ" chain of similar-sounding tracks) all the
+   way up to letting a machine-learning model group your tracks by how they actually
+   *sound*.
 
 ## The single most important design principle: look before you leap
 
@@ -59,10 +60,13 @@ or deletes your files as a surprise.** Every major operation works in two distin
 phases:
 
 1. **The preview.** AlphaDEX figures out exactly what it *would* do and shows you a
-   complete, readable report — usually a web page you can open in your browser. No
-   file on disk has been touched at this point.
+   complete, readable report — a web page you can open in your browser, or a table
+   or list inside the app. No file on disk has been touched at this point.
 2. **The execution.** Only after you have looked at the preview and explicitly
-   approved it does AlphaDEX actually move, copy, or remove anything.
+   approved it does AlphaDEX actually move, copy, rename, retag, or remove anything —
+   and it carries out *exactly the plan you saw*, not a fresh guess. If the files
+   changed in the meantime, it refuses (or skips what changed) rather than act on a
+   plan that no longer matches the disk.
 
 This "look before you leap" contract runs through the entire application. It exists
 because the operations AlphaDEX performs are not easily undone — once a thousand
@@ -102,7 +106,7 @@ treats them as off-limits during scans. Each has a clear job:
 
 | Folder | What it's for |
 |---|---|
-| `Not Sorted` | A personal "leave this alone" zone. Anything you put here is never scanned or moved. |
+| `Not Sorted` | A personal "leave this alone" zone. Nothing here is ever reorganized, de-duplicated or moved. (The Player and the export tools still list its tracks.) |
 | `Playlists` | Where your generated playlist files live. |
 | `Manual Review` | A waiting room for tracks that are missing the information AlphaDEX needs to file them correctly. |
 | `Docs` | Where AlphaDEX writes its reports, logs, and the small cache. |
@@ -110,7 +114,10 @@ treats them as off-limits during scans. Each has a clear job:
 | `Quarantine` | The holding area for duplicate files that lost out to a better copy. |
 
 When you read elsewhere that "the Indexer skips the reserved folders," this is the
-list it means.
+list it means. Only these top-level folders count (an `Artist/Album/Docs` folder is
+ordinary content), and every workflow uses the same definition. One deliberate
+exception: the Tag Fixer *does* look inside `Manual Review`, because the tracks waiting
+there are exactly the ones missing information.
 
 ### The configuration file
 All of your settings — your library location, your matching sensitivity, your API

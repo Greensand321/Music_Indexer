@@ -5,7 +5,7 @@ explains the shape of the system and the reasoning behind it, with a handful of
 plain-text diagrams for the parts that are easier to see than to describe. If you
 have read **overview.md**, you already know the vocabulary used here.*
 
-*Last verified against the code: 2026-07-22.*
+*Last verified against the code: 2026-11-07.*
 
 ---
 
@@ -116,6 +116,70 @@ main/GUI thread. Creating `QPixmap` off the GUI thread is undefined behaviour in
 and silently produces null or broken pixmaps on Windows." (`gui/workspaces/player.py`)
 — exactly the kind of platform-specific trap this discipline exists to avoid.
 
+### The job registry: starting, cancelling and outliving a worker
+
+Background workers in the modern app are `QThread`s, and Qt is unforgiving about
+them: if the last reference to a thread disappears while it is still running, Qt
+aborts the whole process ("QThread: Destroyed while thread is still running") —
+possibly halfway through moving files. That used to happen on almost every page,
+because workers announced "I'm finished" from *inside* their own run, and the page
+dropped its reference before the thread had actually stopped.
+
+The fix is one process-wide **JobRegistry** (`gui/workers.py`). Think of it as a
+cloakroom: every worker is checked in when it starts and only handed back once the
+thread has *really* finished (Qt's own C++ `finished()` signal, which fires after the
+run returns and which no Python subclass can shadow). After that, a page can forget
+its worker at any moment without risk. The rules every page follows:
+
+- **Start every thread through the registry**: `WorkspaceBase._start_worker(worker,
+  "Name")`, or `gui.workers.start_worker(...)` outside a workspace. Never call
+  `QThread.start()` directly (a test ratchet counts these). The registry also detaches
+  a worker from any widget parent, because a widget would destroy its child thread
+  mid-run.
+- **`ask_before_quit`** marks whether a job may be writing files. Read-only work —
+  scans, previews, lookups, album-art and tag loads, statistics, estimates — passes
+  `False` and is cancelled silently when you quit. Anything that writes keeps the
+  default (`True`), so quitting mid-write asks first.
+- **`LIBRARY_WRITES`** is a mutual-exclusion group for jobs that move, rename, delete
+  or rewrite files inside the library: Indexer execute, Library Sync execute,
+  Duplicates execute, File Cleanup and its undo, Tag Fixer apply, both genre applies,
+  and playlist writes. A page starts such a job with `_start_worker(...,
+  library_write=True)`, and *before* showing its confirmation it calls
+  `_library_writes_blocked("What I'm about to do")`. That check looks at the group and
+  at the shared tag-write guard (`controllers/tag_write_guard.py`), and if anything is
+  already writing it tells you which job and refuses — so you are never asked to
+  confirm something that can't run. Membership ends when the thread finishes, so
+  there is no manual "release" to forget on an error path. (Pair Review's quarantine
+  checks the same group.)
+- **Cancellation is cooperative.** `cancel_thread()` calls the worker's own `cancel()`
+  (most set a `threading.Event` the backend polls) and `requestInterruption()`. Results
+  that arrive from a worker the page has since abandoned — after a library change, say
+  — are recognised (by sender or generation number) and ignored.
+
+**Closing the window** (`AlphaDEXWindow.closeEvent`) follows a fixed protocol:
+
+1. No jobs running: each workspace's `shutdown()` hook runs (stop timers, release the
+   playback backend), and the window closes.
+2. Jobs running: if any of them has `ask_before_quit`, a "Background tasks running"
+   question lists them; No keeps the window open. Otherwise (or on Yes) the window
+   enters a *stopping* state — its UI is disabled so nothing new can start — cancels
+   every job, and retries the close every 100 ms, cancelling again each time (which
+   also catches a job chained from another).
+3. A job that ignores cancellation (a hung network drive, a long native clustering
+   stage) must not trap you: after `CLOSE_PATIENCE_S` (20 s) you are asked once whether
+   to quit anyway. Yes exits immediately via `os._exit`, because normal interpreter
+   shutdown would destroy the still-running threads and abort.
+
+`main()` in `alpha_dex_gui.py` also cancels and waits for any stragglers (such as the
+landing's art scanner) after the event loop ends.
+
+Two smaller hooks complete the lifecycle. **`on_settings_saved()`** is called on every
+page after the Settings dialog saves; pages that cache settings (the Duplicates and
+Similarity thresholds) re-read them there, rather than reading the config file every
+time they are shown — the design system forbids config I/O on navigation or paint.
+And the registry's `jobs_changed(int)` signal is ready for a global activity
+indicator, though nothing displays it yet.
+
 ## The preview-first contract, structurally
 
 **overview.md** introduced "look before you leap" as a promise to the user. Here is
@@ -129,9 +193,12 @@ intentions.
    │  full plan;    │        │  an HTML      │        │  approved plan;│
    │  touch no file │        │  report       │        │  log every step│
    └───────────────┘        └──────────────┘        └───────────────┘
-     duplicate_consolidation.py   you, in a browser    duplicate_consolidation_executor.py
-     library_sync.compute_…       (Docs/*.html)         library_sync.execute_plan()
-     music_indexer_api.build_…                          music_indexer_api.apply_indexer_moves()
+     duplicate_consolidation       you, in a browser    duplicate_consolidation_executor
+       .build_consolidation_plan   (Docs/*.html) or       .execute_consolidation_plan()
+     library_sync                  a table in the app   library_sync.execute_plan()
+       .compute_library_sync_plan
+     music_indexer_api                                  music_indexer_api.apply_indexer_plan()
+       .build_indexer_plan
 ```
 
 Every major workflow is physically split into a **dry run** and an **execution**,
@@ -143,7 +210,15 @@ produce different things:
   (typically an HTML page). It is incapable of changing a single file, because the
   code that would touch the disk simply isn't run in this mode.
 - The **execution** takes that approved plan and carries it out, logging every action
-  as it goes.
+  as it goes. It runs **the plan object that was previewed**, not a recomputation:
+  the Indexer's `IndexerPlan`, Library Sync's plan (built from the matches and flags you
+  reviewed) and the Duplicate Finder's plan are each executed verbatim, and each
+  refuses a plan whose library changed since the preview, or skips the items whose
+  files changed. The same shape now holds for the smaller writers: the Tag Fixer and
+  both genre tools write exactly the previewed rows, File Cleanup and its undo rename
+  exactly the rows of their preview dialog, and the Playlist Generator writes exactly
+  the files its confirmation listed. In the GUI, an Execute or Apply button is only
+  enabled while a preview of the current inputs exists.
 
 Because these are genuinely different operations rather than one operation with a
 checkbox, there is no accidental path by which a preview could quietly start moving
@@ -189,6 +264,26 @@ double confirmation gate — deletion only happens if the caller both sets
 to execute at all if the plan being run no longer matches the plan that was
 previewed (a "plan signature" mismatch), or if the library has visibly changed on
 disk since the preview was captured.
+
+### What each run leaves behind in `Docs/`
+
+"Log every action" is concrete. These are the records the workflows write inside the
+library's `Docs/` folder (timestamps make each run's files unique):
+
+| Workflow | Preview | Record of what actually happened |
+|---|---|---|
+| Indexer | `MusicIndex.html`, `indexer_log.txt` | `indexer_executed_<date>_<time>.json` and `.txt` — every move, sweep and skip, also when cancelled |
+| Library Sync | `LibrarySyncPreview.html` | `LibrarySyncAudit_<run>.json` and `LibrarySyncExecuted_<run>.html` per run (`LibrarySyncAudit.json` / `LibrarySyncExecuted.html` are copies of the latest); replaced files are backed up under `Backups/LibrarySync/<run>/` |
+| Duplicate Finder | `duplicate_preview.html` and `.json` | `duplicate_execution_reports/` (playlist backups included) |
+| Pair Review | — | `duplicate_pair_review_log.txt` (quarantines), `duplicate_pair_tags.txt` |
+| Tag Fixer, Genre fill, Genre normalize | the on-screen table | `tag_changes_<tool>_<timestamp>.jsonl` — the before and after values of every write, failure and skip (`utils/tag_change_log.py`) |
+| File Cleanup | the preview dialog | `file_cleanup_<timestamp>.jsonl`; "Undo Last Cleanup" reads it back and appends each restore to it |
+| Playlist writes | the confirmation list | `playlist_writes.log`; the generator leaves a timestamped `.bak` beside a playlist it replaces, and `update_playlists` (run after renames and moves) backs each playlist up to `playlist_backups/` before editing only the changed entries |
+| Opus mirror | the estimate | `<destination>/Docs/opus_library_mirror_reports/` |
+
+Execution never overwrites an existing file: a destination that has appeared since
+the preview is skipped and reported, and plans snapshot what they will touch so that
+a file changed since the preview is skipped rather than acted on blind.
 
 **One thing the indexer deliberately does *not* do**, worth stating because it
 clarifies the boundary between the Indexer and the Duplicate Finder: the indexer's
@@ -263,8 +358,13 @@ this repository:
 source but have since **drifted apart**: the vendored `fingerprint_cache.py` is 122
 lines with no background writer thread, no WAL mode, and none of the extended
 metadata columns (bitrate, codec, embedded tags, artwork) that the root
-`fingerprint_cache.py` has grown to 735 lines to support. The vendored
-`near_duplicate_detector.py` still uses an older, unindexed matching algorithm. The
+`fingerprint_cache.py` has grown to about 840 lines to support. The vendored
+`near_duplicate_detector.py` still uses an older, unindexed matching algorithm —
+and, since the root detector was fixed to **decode** Chromaprint fingerprints before
+comparing them, the vendored one is the only place left that still compares the
+*compressed* fingerprint text byte by byte. That older metric scores a FLAC and its
+own MP3 anywhere from 0.08 to 0.46, so Library Sync can miss transcodes the
+Duplicate Finder now catches (see ROADMAP.md, Known bugs). The
 vendored `music_indexer_api.py` is missing a few refinements (like richer
 collision-decision logging) that the root copy has picked up since.
 
@@ -321,14 +421,15 @@ same place. The file is deliberately a plain, human-readable text file, which ma
 easy to inspect or hand-edit when something looks wrong, and avoids the fragility of a
 heavier database for what is really just a small bag of preferences.
 
-One accuracy note for anyone reading `config.py` directly: its `load_config()`
-docstring says it "returns an empty dict if the file does not exist or can't be
-read," but that's not what the code actually does — on any read failure it returns a
-specific ~25-key fallback dictionary of hard-coded defaults, kept as a hand-maintained
-duplicate of the normal-path defaults a few lines above it. The two default sets can
-drift out of sync with each other (some keys exist in one but not the other), so if a
-setting seems to have "the wrong default," check whether you're looking at the
-normal-load path or the exception-fallback path.
+Two safety properties protect that file. **Saves are atomic**: `save_config()` writes
+a temporary file and swaps it into place with `os.replace`, so a crash or a full disk
+can never leave a half-written settings file. And **an unreadable file is never
+silently lost**: `load_config()` falls back to the defaults (one set, applied the same
+way whether the file is missing or corrupt) and remembers the problem
+(`last_load_error()`); before anything overwrites it, `save_config()` copies the
+unreadable file to `<name>.corrupt-<timestamp>` (`last_backup_path()`), and the main
+window says so in the log. Before this, a truncated file was replaced by defaults on
+the next routine save, wiping the AcoustID key, theme and MusicBrainz user agent.
 
 ## Format priority: a single, auditable rule
 
@@ -354,8 +455,8 @@ self-contained "room" dedicated to one job. You move between them from the sideb
 and the currently selected room fills the main area. Behind a row of friendly names
 sits a consistent pattern: every workspace is built on a shared template
 (`gui/workspaces/base.py`) that gives it the same skeleton (a place for content, a
-way to report progress to the log drawer at the bottom, and a status indicator at the
-top).
+way to report progress to the log drawer at the bottom, a status indicator, and the
+background-job helpers described above).
 
 The current rooms are, in plain terms (sidebar label first, since a few of the
 group/room names differ from what you might expect from the feature name):
@@ -367,11 +468,11 @@ group/room names differ from what you might expect from the feature name):
 | **Duplicates** | Find and clear out duplicate copies of songs. |
 | **Similarity** | Compare two specific tracks and see *why* the app thinks they do or don't match — useful for understanding the duplicate detector. |
 | **Tag Fixer** | Look up and correct the artist/album/title/genre information on your tracks. |
-| **Genre Normalizer** | Batch-update genre labels (see the honest caveat in **features/tag_fixer.md** — this label means two different things depending on which app you're in). |
+| **Genre Normalizer** | Two tabs: fill missing genres from MusicBrainz, or collapse messy genre spellings with a mapping you build. Both preview first (see **features/tag_fixer.md**). |
 | **Playlists** | Build playlists by folder, tempo, energy, or automatic DJ flow. |
-| **Clustered** | Group tracks by sound (K-Means / HDBSCAN) via a step-by-step wizard, and turn the groups into playlists. |
-| **Music Graph** | Open a browser-based 3D visualization of your sonic clusters. |
-| **Player** | A full-featured, built-in audio player — library table, queue, recently-played, shuffle/repeat, a persistent now-playing bar at the bottom of the whole app window. |
+| **Clustered** | Group tracks by sound (K-Means / HDBSCAN), with a Quick Start or a step-by-step wizard. Analysis only: playlists are exported from the Music Graph. |
+| **Music Graph** | Explore the clusters on an in-app 2-D map (select, inspect, play, export a playlist), or open the browser-based 3-D view. |
+| **Player** | A built-in audio player — library table, queue, recently-played, shuffle/repeat, a persistent now-playing bar at the bottom of the whole app window. |
 | **Compression** | Mirror your library into a space-saving Opus copy (FLAC → Opus transcoding), estimating savings before you run it. |
 | **Utilities** | A tile grid of exports, diagnostics, and cleanup tools. |
 | **Help** | Documentation, shortcuts, and project links. |
@@ -383,15 +484,12 @@ transport controls that mirror the Player workspace's.
 
 Two things worth knowing if you go looking for them: an **older "Clustered"
 workspace** (`gui/workspaces/clustered.py`) still exists in the codebase but is
-**dead code** — nothing imports it any more, and `main_window.py` wires the sidebar's
-"Clustered" entry to the newer `clustered_enhanced.py` instead. And the four
-interactive-graph widgets built for an in-app 2D cluster map
-(`InteractiveScatterPlot`, `Interactive3DScatterPlot`, `ClusterLegendWidget`,
-`TrackDetailsPanel`) are **fully built but never wired into any workspace** — the
-"Music Graph" room you actually reach from the sidebar only launches a
-browser-based 3D view, not an in-app one. See **ROADMAP.md** for what this means for
-the feature's roadmap; see **features/playlists_and_clustering.md** for what
-currently, actually works.
+**dead code** — nothing imports it, its docstring says so, and `main_window.py` wires
+the sidebar's "Clustered" entry to `clustered_enhanced.py`. And of the four widgets
+built for the interactive cluster map, three (`InteractiveScatterPlot`,
+`ClusterLegendWidget`, `TrackDetailsPanel`) are live in the Music Graph; only
+`Interactive3DScatterPlot` is unused — the 3-D view users reach is the browser page.
+See **features/playlists_and_clustering.md** for what currently works.
 
 For the full screen-by-screen breakdown of every control in every workspace and
 dialog — including which controls are fully wired versus decorative — see
@@ -402,24 +500,30 @@ dialog — including which controls are fully wired versus decorative — see
 When you launch the modern app, it does not slam you straight into a busy work
 screen. It opens with a calm **landing moment**: the window fades in, an animated
 mosaic of album-art tiles builds itself from your library while you confirm which
-library you want to work on (or pick a new one), and then the landing gracefully
-cross-fades into the main window. A brief pause between the window's fade-in and the
-tiles beginning to animate is the intentional "logo moment" — a comment in the
-landing code notes this pause deliberately *replaces* an earlier, separate splash
-screen that used to run before it; that splash-screen code (`gui/widgets/splash.py`)
-still exists in the repository but is no longer invoked anywhere, having been
-superseded by the mosaic landing itself.
+library you want to work on (or pick a new one), and then the landing cross-fades
+into the main window. The brief pause between the fade-in and the tiles beginning to
+animate is the "logo moment"; it replaced an earlier splash screen whose code
+(`gui/widgets/splash.py`) is still in the repository but never shown.
 
-There is a deliberate choice hiding in this choreography. The genuinely expensive
-work — scanning and fingerprinting your library — is **postponed** until the opening
-animations have finished, so that the introduction stays smooth instead of stuttering
-behind a frozen progress bar. The app waits for whichever comes first: 30 seconds
-after the landing first appears, or 3 seconds after you press the landing's call to
-action ("Initialize" if you have a saved library, "Choose Library Folder" if you
-don't). Clicking directly on one of the mosaic's album-art tiles skips straight past
-that and opens the app already playing that album, in the Player workspace. The point
-of all of it is that first impressions feel effortless, and the heavy lifting begins
-only once you're settled in.
+The choreography is arranged so that nothing heavy happens while you are watching it:
+
+1. The landing appears first. The main window — a big build of every workspace — is
+   only constructed once the landing has **fully faded in**, during the logo pause, so
+   the first frames are never blocked (it is built on demand if you click very fast).
+2. You confirm the saved library ("Initialize"), choose another ("Choose Library
+   Folder"; a saved library that no longer exists is shown as "not found"), or click an
+   album-art tile, which also opens the Player already playing that album.
+3. The landing fades out while the main window fades in over the same duration.
+4. Only **after the cross-fade** is the chosen library applied — exactly once. That is
+   when every page learns the library, the Player scans it and the top-bar statistics
+   start, so that work never stutters the transition.
+
+The sequence is factored into `Startup` / `build_startup()` in `alpha_dex_gui.py`, so
+the test harness can drive it without running the event loop. If the main window
+cannot be built at all, the app shows an error, writes the traceback to the crash log,
+and exits with status 1 instead of hanging. `multiprocessing.freeze_support()` runs
+first thing, so a frozen (PyInstaller) build's clustering pool doesn't spawn extra
+copies of the app.
 
 ## A note on online help: what's real and what's a placeholder
 
@@ -428,11 +532,13 @@ your tracks. It is worth being honest about which of those connections actually 
 today:
 
 - **Fully working:** AcoustID (fingerprint-based identification), MusicBrainz (the
-  open music encyclopedia), and Last.fm (genre and tag data). These three power the
-  Tag Fixer and the Genres workspace — although, notably, AcoustID is the *only* one
-  of the three that the Tag Fixer's automatic scan actually calls today; see
-  **features/tag_fixer.md** for the detail on why MusicBrainz and Last.fm's real
-  integration paths aren't both live at once in that particular workflow.
+  open music encyclopedia), and Last.fm (genre and tag data). In the Tag Fixer's scan,
+  AcoustID runs whenever fpcalc and the network allow; a MusicBrainz text search joins
+  when MusicBrainz is the service chosen in Settings; and Last.fm joins only when the
+  `LASTFM_API_KEY` environment variable is set (the key field Settings shows for
+  Last.fm is not read by the scan yet — a known bug). Each scan begins by checking
+  every source and says which ones ran and why the others didn't. See
+  **features/tag_fixer.md**.
 - **Listed but not yet built:** Spotify and Gracenote appear in the settings as
   options, but their connections are empty placeholders — selecting them currently
   returns nothing. The Settings screen already marks this honestly: both appear
@@ -443,6 +549,117 @@ today:
 
 This distinction is carried through into **ROADMAP.md**, which tracks what is planned
 but not finished.
+
+## The reserved folders, in code
+
+**overview.md** lists the six reserved top-level folders (`Not Sorted/`, `Playlists/`,
+`Manual Review/`, `Docs/`, `Trash/`, `Quarantine/`). Until recently each workflow kept
+its own partial list of them — or none — so duplicate losers sitting in `Quarantine/`
+came back as library tracks, statistics counted `Docs/` backups, and so on. There is
+now **one definition**, `utils/reserved_folders.py`, and every scan that treats files
+as "the library" goes through it.
+
+- `RESERVED_FOLDERS` is all six. `NON_LIBRARY_FOLDERS` is the four whose contents are
+  not your music at all (`Playlists`, `Docs`, `Trash`, `Quarantine`); views that let
+  you browse or play everything — the Player, the Utilities exports — skip only
+  these, so tracks waiting in `Manual Review/` or `Not Sorted/` still show up there.
+- `walk_library()` and `iter_library_files()` are `os.walk` wrappers that never descend
+  into a reserved folder; `prune_reserved_dirs()` does the same inside a hand-written
+  walk; `is_reserved_path()` / `reserved_component()` answer "is this file inside one?".
+- Only **top-level** folders are reserved (`Artist/Album/Docs/` is ordinary content),
+  and matching ignores letter case, as Windows and macOS file systems do.
+
+Who uses which set: the Indexer, Duplicate Finder, Library Sync (both sides), File
+Cleanup, Pair Review, clustering, playlist generation and the top-bar statistics skip
+all six. The Tag Fixer skips all of them **except `Manual Review/`**, because those are
+exactly the tracks missing metadata. The Opus mirror leaves out `Quarantine/`,
+`Trash/` and `Docs/`.
+
+## Themes and motion
+
+The modern app has 14 themes and an Auto mode, and it animates a fair amount (nav
+hover, the sidebar's sliding pill, the log drawer, status chips, the landing). Three
+pieces keep this fast and well-behaved.
+
+**A theme switch is a palette swap, not a restyle** (`gui/themes/manager.py`). Any
+change to an application stylesheet makes Qt re-polish every widget in the window —
+about 0.7 s for the main window no matter what the rules say — which is why switching
+theme used to freeze the app for over a second. Now the stylesheet is **static**: it is
+installed once, and its colours are `palette(...)` references. A switch takes the fast
+path: the one `AlphaDEXStyle` instance swaps its tokens in place, the app palette is
+replaced, and a single top-down pass re-polishes only the widgets the stylesheet
+colours (plus any widget with its own inline stylesheet, and its descendants, whose
+palette Qt froze at polish time); every other widget is told to inherit the new
+palette. Then `theme_changed` is emitted so widgets that colour themselves refresh.
+A switch now costs roughly 60–80 ms. `tests/ui/test_ui_theme_switch_equivalence.py`
+builds a window, switches it live, builds a second window directly in the target
+theme, and checks that every widget's resolved palette matches.
+
+**Shadows are painted, not attached** (`gui/themes/effects.py`, `gui/widgets/gradient_bg.py`).
+Cards get their soft shadow painted by the `GradientWidget` surface beneath them, from
+a cached 9-slice pixmap per colour. A `QGraphicsDropShadowEffect` would re-render and
+blur the whole card every time anything inside it repainted (a hover frame, a progress
+tick, a blinking caret), and would occupy the card's only graphics-effect slot, which
+fades need. (The old effect also never showed: it was passed as a temporary and
+dropped.) The background-gradient setting is read once and cached, so no paint event
+reads the config file.
+
+**Every animation goes through the motion module** (`gui/themes/motion.py`). It defines
+the duration tokens (`micro` 120 ms, `fast` 150, `base` 220, `slow` 320, `page` 420,
+`ambient` 3500, `flash` 1600, plus a per-item `stagger`) and four easings (`standard`,
+`exit`, `emphasis`, `ambient`), and helpers that avoid the four bugs hand-rolled
+animations kept producing: `animate_value` / `animate_property` build animations
+**parented** to their owner (so they aren't garbage-collected mid-flight), keep **one
+animation per owner and key** (a new request replaces the old one instead of two
+fighting over a property), and refuse to animate geometry a layout owns (which
+re-laid out the whole window every frame); `fade()` always ends at full opacity or
+hidden, never half-transparent. **Reduced motion** (`ALPHADEX_REDUCED_MOTION=1`, or the
+config key `reduced_motion`; there is no Settings control yet) makes every token 0 ms
+and jumps straight to the end state, running the same callbacks, so the code paths are
+identical either way.
+
+## Playback: the backend seam
+
+The Player never talks to VLC directly. It talks to a `PlaybackBackend`
+(`gui/playback_backend.py`), a small, Qt-free interface — load, play, pause, stop,
+state, length, position, seek, volume, release — whose query methods never raise.
+`create_backend()` returns a `VlcBackend` when python-vlc *and* the libVLC library can
+be loaded, and otherwise a `NullBackend` that carries a human-readable reason.
+
+This seam exists because of a crash: python-vlc is in `requirements.txt`, so on a
+machine without the libVLC library `import vlc` raises `NotImplementedError` or
+`OSError` rather than `ImportError`, and the Player — and with it the whole main
+window — failed to build. Now the Player shows "Playback unavailable" with the reason,
+disables its transport controls, and never shows a fake "playing" state. Tests pass a
+fake backend to `PlayerWorkspace(backend=...)` or patch `create_backend`.
+
+## When something crashes: the crash log
+
+`main()` installs `crash_logger.install_for_qt()` before anything else. From then on,
+uncaught Python exceptions — on the GUI thread, inside Qt slots (PySide routes those
+through `sys.excepthook`) and on worker threads (`threading.excepthook`) — are appended
+to **`~/.alphadex/crash.log`** (rotating, about 1 MB), and native crashes (segfaults,
+aborts) are written by `faulthandler` to **`~/.alphadex/faults.log`**. The hooks chain
+to the previous ones, so tracebacks still reach the console. Utilities → View Crash
+Log reads exactly those two files and names them. (The viewer used to look for a file
+the Qt app never wrote, so it always said "No crash log found.")
+
+## Testing the GUI: the harness
+
+Besides the backend suite, the repository has a **headless GUI harness** under
+`tests/ui/` (pytest-qt, `QT_QPA_PLATFORM=offscreen`). Every page can be built and
+driven against a real synthetic library of tagged MP3 / FLAC / M4A / OGG / Opus files
+(`tests/library_factory.py`), and the failure modes that made the app feel unstable
+are test failures: an unplanned modal dialog fails instead of hanging, a test that
+leaves a `QThread` running fails, cross-thread and painting warnings fail, exceptions
+inside slots fail, and every test gets an isolated home folder so it can never touch
+your real `~/.soundvault_config.json`. Static "ratchets" count hex colours, inline
+stylesheets, font-size literals, direct `QThread.start()` calls and unparented
+animations, and only let those counts go down. `scripts/gui_snapshots.py` renders every
+page in every theme as a contact sheet.
+
+The full guide — fixtures, markers, and the rules for writing workers the harness can
+live with — is **[tests/ui/README.md](../tests/ui/README.md)**.
 
 ## What the LLM-related references in older docs actually mean
 

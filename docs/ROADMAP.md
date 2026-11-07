@@ -1,29 +1,160 @@
 # AlphaDEX — Roadmap (What's Planned but Not Yet Built)
 
-*This is the honest "what's left" document. Everything below is either partially built,
-designed but not wired up, or planned for the future — plus a short list of actual
-bugs found while re-verifying this document against the code. It is written in plain
-language so anyone can understand the state of the project at a glance. Items are
-grouped by area and, within each area, roughly ordered from "smallest / most ready" to
-"largest / most speculative."*
+*This is the honest "what's left" document: the known bugs, the features that are
+partially built or deliberately switched off, and what is planned. It is written in
+plain language so anyone can understand the state of the project at a glance. The
+**Known bugs** section below is the single source of truth for gaps; other documents
+link here rather than keeping their own lists.*
 
-*Last reviewed: 2026-09-03.*
+*Last reviewed: 2026-11-07, after the fix phase that closed about 200 bugs across
+every page of the Qt app. The per-area bug inventories (and which bug was fixed by
+which change) live in `docs/redesign/`; this page lists only what is still open.*
 
 ---
 
 ## Quick status legend
 
-- **Bug** — this used to work, or was believed to work, and currently doesn't. Fixing
-  it restores existing functionality rather than building something new.
-- **Backend ready, not connected** — the engine exists and works; only the visible
-  button or final wiring is missing. These are the cheapest wins.
+- **Bug** — this doesn't do what the app says it does. Fixing it restores existing
+  functionality rather than building something new.
+- **Disabled, no backend** — the control is visible but switched off, with a tooltip
+  saying so. Either build the backend or remove the control.
+- **Backend ready, not connected** — the engine exists; only the wiring is missing.
 - **Partially built** — some of it works; meaningful pieces remain.
 - **Designed, not started** — there's a clear vision but no working code yet.
 
+---
+
+## Known bugs
+
+Real defects in the current code, smallest first within each area.
+
+### Metadata (Tag Fixer & Settings)
+
+- **The Last.fm key in Settings is not used, and it overwrites the AcoustID key**
+  *(Bug).* Settings → Metadata Services shows an API key field for both AcoustID and
+  Last.fm, but it is one field, saved as `metadata_api_key`. The Last.fm lookup source
+  (`plugins/lastfm.py`) only reads the `LASTFM_API_KEY` environment variable, so a key
+  typed there for Last.fm does nothing in a scan — while the AcoustID source *does*
+  read `metadata_api_key`, so saving a Last.fm key there makes every AcoustID lookup
+  use the wrong key. ("Test Connection" does test the typed Last.fm key, which makes
+  this look like it works.) Fix: a separate config key for the Last.fm key, read by
+  the Last.fm source; the comment in `plugins/lastfm.py` that says "Settings has no
+  Last.fm key field" is out of date too.
+- **A test fixture runs in real scans** *(Bug, harmless in practice).*
+  `tag_fixer._PLUGIN_MODULE_NAMES` includes `test_plugin`, whose `TestPlugin` returns
+  a perfect-confidence "TestGenre" match for any file named `dummy_*`. It should be
+  excluded outside the test suite.
+
+### Library Sync
+
+- **Library Sync still compares compressed fingerprints** *(Bug, wrong result).* The
+  Duplicate Finder now decodes Chromaprint fingerprints before comparing them; Library
+  Sync uses the vendored engine (`library_sync_indexer_engine/`), whose
+  `fingerprint_distance` still compares the compressed text byte by byte. With that
+  metric a FLAC and its own MP3 score anywhere from 0.08 to 0.46, so with the 0.3
+  default some transcodes are treated as new tracks (copied in as duplicates) or as
+  low-confidence matches instead of upgrades. Per the settled decision below, this
+  needs a deliberate port of the decoded distance into the vendored copy.
+- **"Replace All" / "Replace with Better" in the exported HTML review report do
+  nothing** *(Bug: decorative buttons).* The report renders three action buttons
+  styled to look clickable. The `ReviewAction` enum and
+  `build_review_replacement_plan()` in `library_sync.py` look like they were built to
+  back them but have no caller. Either wire them (through the normal build-plan →
+  preview → execute flow) or remove both the buttons and the dead function.
+
+### Duplicates
+
+- **A library change stops a confirmed duplicate execution part-way** *(Bug:
+  inconsistent with every other page).* The Indexer, Library Sync, File Cleanup, the
+  tag tools and the Playlist Generator let a write you confirmed finish on its own
+  library when you switch library. The Duplicates page instead asks the running
+  execution to stop at the next safe point, leaving that plan partly applied (its
+  report still goes to the old library's `Docs/`). Nothing is lost — the executor only
+  stops between operations — but the plan is left half done.
+
+### Legacy app only
+
+- **"Reset Log" in the legacy Tag Fixer also wipes Library Sync's cache.** Both
+  features store state in the library's `Docs/.soundvault.db`, and the legacy reset
+  deletes the whole file without warning.
+
+---
+
+## Controls that are still switched off
+
+These are honest now — each is disabled with a tooltip — but each is still a gap:
+either build what it promises or remove it in the redesign.
+
+- **Indexer: "Cross-album scan (Phase C)", "Flush fingerprint cache before scan",
+  "Max workers"** *(Disabled, no backend).* The indexer engine ignores all three.
+- **Library Sync: "Preset name"** *(Disabled, no backend).* Presets are not
+  implemented.
+- **Clustering wizard: dimensionality reduction (PCA / t-SNE / UMAP), the
+  post-processing step (remove small clusters, merge into "Miscellaneous"), and the
+  output options (create playlists, generate report, open graph)** *(Disabled, no
+  backend).* Clusters are turned into playlists from the Music Graph instead.
+- **Fuzzy Finder (Utilities → Diagnostics): the metadata word-matching group,
+  "Include pairs without fingerprints", "Skip fingerprint check", "Include
+  non-matching FP pairs in review", "Send Matches to Duplicate Pair Review"**
+  *(Disabled, no backend).* The dialog is a proof of concept; whether to keep it at
+  all is an open decision (see below).
+- **Settings → Advanced tab** *(Empty).* There is also no Settings control for
+  reduced motion (config key `reduced_motion` or `ALPHADEX_REDUCED_MOTION=1`) or for
+  the mixed-codec threshold boost (editable only on the Duplicates page).
+
+---
+
+## Open decisions for the owner
+
+The redesign groundwork (`docs/redesign/README.md`, section 6) lists decisions that
+are not bugs but block some cleanup: the new page structure, whether to keep the
+"delete permanently" option in Duplicates, whether to keep the three prototype
+dialogs (Fuzzy Finder, Scan Engine, Bucketing POC), which dead files may be deleted,
+the visual direction, and whether startup should skip the landing when the saved
+library is valid.
+
+---
+
 ## Recently completed
 
-These items used to appear on this list and are done, so they've been removed from
-the body below:
+**The fix phase (2026-11-07).** About 200 bugs across every Qt page were fixed. The
+headlines, so they don't get re-raised:
+
+- **Quitting or re-running a job no longer crashes the app.** Every worker is held by
+  a process-wide JobRegistry until its thread has really finished; closing asks only
+  about jobs that may be writing, cancels cooperatively, and can't trap you behind a
+  hung job. Only one job may change library files at a time.
+- **Preview first, everywhere.** The Indexer, Library Sync, Duplicates, Tag Fixer,
+  both Genre Normalizer tabs, the Playlist Generator and File Cleanup each compute a
+  plan, show it, ask, and then execute *exactly that plan*; a plan whose inputs or
+  files changed since the preview is refused or its stale items skipped. Genre fill
+  used to write with no preview at all.
+- **Controls that did nothing are wired:** the Duplicates per-group disposition (and
+  a real permanent delete behind a typed DELETE), Library Sync's Recompute, Save
+  Session restore and Matched Existing Tracks table, the Playlist Generator's
+  tempo/energy ranges and "Prefer Opus", the Tag Fixer's per-field ticks, and every
+  Settings control. The rest are disabled with a tooltip (see above).
+- **No more silent data loss:** Pair Review quarantines with confirmation instead of
+  deleting; quarantining same-named losers no longer overwrites files; File Cleanup
+  has a preview and an undo; multi-value artist and genre tags are kept; playlist
+  updates edit entries in place, in the file's own encoding, with a backup; Library
+  Sync transfers are reversible, back up what they replace, and keep Windows letter
+  case; settings saves are atomic and an unreadable settings file is backed up.
+- **The Duplicate Finder compares decoded fingerprints**, so a FLAC and its MP3 now
+  score below 0.01 instead of 0.08–0.46 (Library Sync excepted; see Known bugs).
+- **Reserved folders** have one definition (`utils/reserved_folders.py`) used by
+  every scan.
+- **Themes switch in ~75 ms** instead of over a second, reach every widget, meet WCAG
+  AA contrast, and cards have their (painted) shadows back. Animations go through one
+  motion module with a reduced-motion switch.
+- **The Player survives a missing libVLC** (the playback backend seam) and says
+  "Playback unavailable" instead of pretending to play.
+- **The crash log exists** (`~/.alphadex/crash.log`, `~/.alphadex/faults.log`) and the
+  Crash Log viewer reads it. Help links point at the maintained docs.
+- **The test suite is green and order-independent**, and there is a headless GUI
+  harness (`tests/ui/`) with a synthetic music library.
+
+**Earlier:**
 
 - **Library Sync's Export Report button** is wired — a real "📤 Export Report" button
   in the Library Sync workspace saves HTML, JSON, or CSV reports.
@@ -132,21 +263,12 @@ the body below:
   the vendored copy is left alone unless we're specifically making changes to it.**
   Unifying them is explicitly *not* planned; the only thing to remember is that a fix
   to a root module doesn't reach Library Sync automatically, so port it across
-  deliberately if Library Sync specifically needs it. See **architecture.md** for the
-  full picture.
+  deliberately if Library Sync specifically needs it (the fingerprint-distance fix
+  above is exactly such a case). See **architecture.md** for the full picture.
 
 ---
 
 ## Library Sync
-
-- **Wire or remove the "Replace All" / "Replace with Better" report actions**
-  *(Backend ready, not connected — but only half-built).* The exported HTML review
-  report renders three action buttons styled to look clickable; none of them do
-  anything. The `ReviewAction` enum and `build_review_replacement_plan()` function
-  that look like they were built to back these buttons exist in `library_sync.py`
-  but have no caller anywhere in either app. Either wire the buttons to that
-  function, or remove both the buttons and the dead backend function so the report
-  doesn't imply a capability that isn't there.
 
 - **Decide the fate of the two Library Sync front-ends** *(Housekeeping).* A
   feature-flagged legacy Tkinter review panel (`library_sync_review.py`) and the
@@ -159,170 +281,139 @@ the body below:
   copy/replace one at a time. A natural enhancement is to select many tracks at once
   and flag them in a single action (for example, "accept all the quality upgrades").
 
-- **Persistent flag sessions** *(Designed, not started).* Review flags currently live
-  only in memory and are cleared when you re-scan or restart. A future option would let
-  you save a review session and reload it later. (Note: this must be done carefully, so
-  that saved flags don't end up pointing at matches that no longer exist — which is
-  exactly why flags are session-only today.)
+- **Persistent flag sessions** *(Designed, not started).* "Save Session" now remembers
+  the two folders and the threshold, and flags survive a re-scan where they still
+  apply, but the flags themselves still live only in memory and are gone after a
+  restart. Saving them must be done carefully, so that saved flags don't end up
+  pointing at matches that no longer exist (the re-scan carry-over logic is the model
+  to follow).
 
 - **Flag history and undo** *(Designed, not started).* The ability to step back through
   your flagging decisions.
 
 - **Row highlighting** *(Designed, not started).* Coloring flagged rows in the review
   list (one color for "copy," another for "replace") so the state is visible at a
-  glance, beyond the small text badges used now.
+  glance, beyond the text in the Flag column.
+
+## Duplicates
+
+- **A per-group accept/skip review stage** *(Designed, not started).* Today a plan
+  with review-flagged groups is either executed in full (an explicit override) or not
+  at all. Accepting or skipping flagged groups one by one is the planned middle way.
+
+- **Matching time-stretched or trimmed edits** *(Designed, not started).* Near-
+  duplicate gating doesn't normalize duration or tempo before comparing fingerprints
+  (the scan log says "duration/tempo normalization deferred"), so a sped-up radio edit
+  may not match its album version.
 
 ## Playlists, Clustering & the Visual Music Graph
 
-The foundation and the in-app map are now built; the remaining work is the richer
-editing and tuning layer on top of them.
+The foundation and the in-app map are built; the remaining work is the editing and
+tuning layer on top of them.
 
-- **Retire the dead `clustered.py` workspace** *(Housekeeping).* An older, simpler
-  clustering workspace still exists in the repository but is unreachable — the
-  sidebar wires to `clustered_enhanced.py` instead. Leaving the old file in place
-  risks a future contributor editing it and wondering why nothing changes.
+- **Retire the dead `clustered.py` workspace** *(Housekeeping).* It is unreachable and
+  now says so in its docstring; deleting it is one of the open decisions above.
+
+- **Playlists straight from a clustering run** *(Designed, not started).* Today a run
+  writes only the analysis, and you export a cluster as a playlist from the Music
+  Graph. A previewed "one playlist per cluster" export would let the wizard's disabled
+  "Create M3U playlists" option come back.
 
 - **A choice of "map flattening" methods in the interface** *(Partially built).* The
-  app already flattens many-dimensional sound data into a 2-D or 3-D picture using
-  established techniques. A planned enhancement lets you *choose and switch between*
-  different flattening methods from the interface to see your collection from different
-  angles, without re-running the whole clustering.
+  app already flattens many-dimensional sound data into a 2-D or 3-D picture. A planned
+  enhancement lets you *choose and switch between* methods (the wizard's disabled
+  PCA / t-SNE / UMAP choice) without re-running the whole clustering.
 
-- **Live parameter tuning** *(Designed, not started).* The ability to nudge a setting —
-  say, "make eight groups instead of six" — and watch the map re-form in near real time,
-  without recomputing every track's sound profile from scratch.
+- **Live parameter tuning** *(Designed, not started).* Nudge a setting — "eight groups
+  instead of six" — and watch the map re-form without recomputing every track's sound
+  profile.
 
-- **Advanced selection tools** *(Partially built).* Lasso and rectangle selection
-  now work in the in-app map, with Ctrl/Shift to add to a selection. Still to come:
-  select-by-distance-from-a-point and filtering the map by metadata (artist, genre).
+- **Advanced selection tools** *(Partially built).* Lasso and rectangle selection work
+  in the in-app map, with Ctrl/Shift to add. Still to come: select-by-distance-from-a-
+  point and filtering the map by metadata (artist, genre).
 
-- **In-map cluster editing** *(Designed, not started).* Hands-on refinement of the
-  groups after the fact: merging two clusters, moving a track from one cluster to
-  another, or splitting a selection into its own sub-cluster.
+- **In-map cluster editing** *(Designed, not started).* Merging two clusters, moving a
+  track between clusters, or splitting a selection into its own sub-cluster.
 
-- **Suggestion engine** *(Designed, not started).* Friendly, plain-language advice when
-  a grouping looks weak — for example, "these groups overlap a lot; try making fewer of
-  them."
+- **Suggestion engine** *(Designed, not started).* Plain-language advice when a
+  grouping looks weak — "these groups overlap a lot; try making fewer of them."
 
 - **One-click quality-report export** *(Designed, not started).* Saving the clustering
-  quality report as a shareable document (web page or PDF). Now unblocked — the
-  dialog it would export renders correctly again.
+  quality report as a web page or PDF.
+
+- **Genre and year playlists in the modern app** *(Backend ready, not connected).*
+  `playlist_engine.export_genre_playlists` exists, but the Qt Playlist Generator only
+  offers folder, tempo/energy, Auto-DJ and repair.
 
 - **A genuine chronological/"year-gap" playlist tool doesn't exist** *(Designed, not
-  started).* Earlier documentation described a "year-gap assistant" that helps build
-  playlists telling a chronological story. No such feature exists in either app. If
-  this is still wanted, it needs to be designed and built from scratch — it is not
-  hiding somewhere unwired. (Don't confuse it with the legacy app's "Year Assistant,"
-  which fills in *missing* year tags and has no relationship to playlist ordering.)
+  started).* Earlier documentation described a "year-gap assistant." No such feature
+  exists in either app; it would be new work. (Don't confuse it with the legacy app's
+  "Year Assistant," which fills in *missing* year tags.)
 
 ## Metadata lookups (Tag Fixer & Genres)
 
-- **Bring MusicBrainz into the Tag Fixer's automatic scan as an independent source**
-  *(Backend ready, not connected).* `MusicBrainzService` is a complete, working
-  lookup implementation, but it doesn't inherit from the same plugin base class the
-  Tag Fixer's automatic-discovery scan looks for, so it never contributes an
-  independent identification — today it only ever appears nested inside an AcoustID
-  match's enrichment step. Making it a first-class, independently-discoverable
-  plugin would let the Tag Fixer fall back to MusicBrainz when AcoustID doesn't
-  recognize a file.
+- **MusicBrainz as an automatic fallback in the Tag Fixer** *(Partially built).* A
+  MusicBrainz text search (`plugins/musicbrainz_plugin.py`) now joins the scan — but
+  only when "MusicBrainz" is the service chosen in Settings. It doesn't yet step in by
+  itself when AcoustID can't identify a file, and `MusicBrainzService` (the richer
+  lookup) still doesn't subclass `MetadataPlugin`.
 
-- **Spotify integration** *(Designed, not started).* Spotify appears as an option in
-  the settings (now honestly marked unavailable — see "Recently completed" above),
-  and the supporting library is already installed, but the connection is an empty
-  placeholder that returns nothing. Bringing it to life is future work — and
-  is more involved than the others because it requires authenticated, partnership-style
-  access rather than the open access the working providers enjoy.
+- **Spotify integration** *(Designed, not started).* Listed in Settings, honestly
+  marked unavailable; the connection is an empty placeholder that returns nothing.
+  It needs authenticated, partnership-style access, unlike the working providers.
 
-- **Gracenote integration** *(Designed, not started).* Same situation as Spotify: listed
-  as an option, now honestly marked unavailable, but currently an empty placeholder.
+- **Gracenote integration** *(Designed, not started).* Same situation as Spotify.
 
 - **Discogs integration** *(Designed, not started).* Mentioned as a desirable future
   source; no work started.
 
-> The providers that **do** work fully today are AcoustID, MusicBrainz, and Last.fm.
-> The Settings screen is now honest about which of the five listed services are
-> real — the remaining work here is building Spotify/Gracenote/Discogs themselves,
-> not disclosure.
+> The providers that **do** work today are AcoustID, MusicBrainz, and Last.fm (Last.fm
+> needs the `LASTFM_API_KEY` environment variable until the Settings bug above is
+> fixed).
 
 ## Other / housekeeping
 
 - **Root directory reorganization** *(Spec written, deliberately deferred).* ~60
   files sit loose in the repo root — crash logs, old diff dumps, one-off scripts,
   and ~35 real backend modules with no grouping. A two-phase plan (junk removal,
-  then a domain-grouped `alphadex/` package mirroring this roadmap's own
-  Indexer/Duplicate Finder/Library Sync/Tag Fixer/Playlists split) is written up
-  in **[reorganization_spec.md](reorganization_spec.md)**, including which files
-  are safe to delete, which are misfiled rather than junk, and two undocumented
-  `tkinter`-in-backend-module violations found while auditing it
-  (`cluster_graph_panel.py`, `update_genres.py` — on top of the two already
-  listed above under Known bugs). Deliberately not started: other agents are
-  active in this codebase, and a repo-wide import rewrite would conflict with
-  nearly anything else in flight. Do not execute without being explicitly asked.
+  then a domain-grouped `alphadex/` package) is written up in
+  **[reorganization_spec.md](reorganization_spec.md)**, including which files are safe
+  to delete and which are misfiled rather than junk. (Of the Tkinter-in-backend
+  modules it found, `cluster_graph_panel.py` is a legacy Tk widget that still imports
+  Tkinter at the top; `update_genres.py` now imports it only in its script `main()`.)
+  Do not execute without being explicitly asked.
 
-- **Fix known docstring/behavior mismatches** *(Housekeeping, low priority, low
-  risk).* A handful of functions' docstrings no longer match what the code actually
-  does — most notably `config.load_config()`, whose docstring claims it "returns an
-  empty dict" on failure when it actually returns a specific ~25-key fallback
-  dictionary that can drift out of sync with the normal-path defaults. Two separate
-  `ensure_tool()` helpers (`fingerprint_generator.py`, `chromaprint_utils.py`) both
-  claim in their docstring to raise `RuntimeError` but actually raise a custom
-  `FingerprintError` — and the two modules each define their *own*, unrelated
-  `FingerprintError` class with the same name, so `except FingerprintError` in code
-  written against one module silently won't catch an error raised by the other.
+- **Small docstring mismatch** *(Housekeeping, low risk).*
+  `chromaprint_utils.ensure_tool()` says it raises `RuntimeError` but raises
+  `FingerprintError`. (The `config.load_config()` docstring mismatch noted here before
+  is fixed: there is now one set of defaults, applied the same way on every path.)
 
-- **Make the test suite's shared-dependency stubbing real** *(Housekeeping).*
-  `CLAUDE.md` used to state that `tests/conftest.py` stubs `pydub`, `tkinter`, and
-  "other heavy dependencies." In fact it only stubs `pydub` — there is no `tkinter`
-  stub anywhere, and more than a dozen test files each build their own inline,
-  near-duplicate fake `mutagen` module rather than sharing the dedicated
-  (currently-unused) `mutagen_stub/` package. This also means the suite's pass/fail
-  result can depend on execution order, since the ad-hoc stubs mutate global
-  `sys.modules` state that bleeds between test files. `tests/test_cache.py` also has
-  a real, order-independent race condition in its background cache-warming test.
-  None of this blocks development, but a "the tests are green" claim currently
-  depends on which files ran first.
+- **Test-suite stubs** *(Mostly done).* The order dependence is fixed: stubs are scoped
+  through `tests/_helpers/module_isolation.py` — `isolated_modules()` installs them for
+  one test and restores every touched `sys.modules` entry afterwards, and
+  `stub_if_unavailable()` (the only module-level use) stubs an optional dependency only
+  when it isn't installed, so it can never shadow the real package. The suite gives the same result in
+  default, reversed and shuffled order, and the `tests/test_cache.py` race (a real
+  `cache_prewarmer` bug) is fixed. The fake `mutagen` is now **shared**:
+  `make_mutagen_stub()` in the same helper is the only inline mutagen stub left, and
+  the other tests that touch mutagen import the real package (it is in
+  `requirements.txt`). That
+  makes the old **`mutagen_stub/` package dead** — nothing uses it, and it can be
+  deleted. `tests/conftest.py` still stubs `pydub` when it isn't installed, and gives
+  every test an isolated home folder and config path.
 
-  *Two concrete instances of this are now fixed:* the `utils/` metadata readers
-  probed for mutagen with `importlib.util.find_spec("mutagen")`, which CPython
-  *raises* on (rather than returns `None` for) a module already in `sys.modules`
-  with `__spec__ = None` — exactly what the inline stubs are — so whether
-  `test_library_sync*` even collected depended on which file imported the readers
-  first. They now probe by attempting the real imports, matching the guard
-  `duplicate_consolidation` and `playlist_engine` already had. Separately, the
-  packaging work made the vendored engine a real package (relative imports, needed
-  for PyInstaller), which stopped the Library Sync tests' bare-name
-  `fingerprint_generator` stub from shadowing the vendored module; those tests now
-  register the stub under the dotted vendored name too and patch the engine object
-  `library_sync` actually binds.
+- **A global activity indicator** *(Backend ready, not connected).* The JobRegistry
+  emits `jobs_changed(count)` for exactly this; nothing displays it yet.
 
-  *Update — the order dependence and the cache race are now fixed.* No test file
-  writes to `sys.modules` at module level any more: stubs are installed per test
-  through `tests/_helpers/module_isolation.py` (`isolated_modules()` installs the
-  stubs, re-imports the module under test against them, and afterwards restores
-  every touched `sys.modules` entry and parent-package attribute;
-  `stub_if_unavailable()` stubs an optional dependency only when it isn't
-  installed, so it can never shadow the real package). The suite gives the same
-  result in default, reversed and shuffled file order. The cache race was a real
-  bug in `cache_prewarmer.prewarm_cache()`: its thread finished while the
-  fingerprints were still queued on `fingerprint_cache`'s batching writer; it now
-  flushes before returning. (The per-file stubs still aren't *shared* — each file
-  builds its own, now leak-free — and `mutagen_stub/` remains unused.)
+- **Tidal-dl sync** *(Designed, not started).* An old idea to pull music from Tidal;
+  no interface or workflow exists. Dormant unless revived.
 
-- **Tidal-dl sync** *(Designed, not started).* An old idea to pull music from the Tidal
-  service was referenced in early notes, but no interface or workflow for it exists.
-  Consider this dormant unless revived.
-
-- **Startup polish** *(Partially built).* A handful of low-priority refinements to make
-  the app's opening sequence even smoother on very large libraries were identified and
-  deferred. None of them block normal use; they are nice-to-haves.
-
-- **Small loose ends** *(Designed, not started).* Minor conveniences noted during
-  development, plus a few small dead ends worth cleaning up when someone's already in
-  the area: `Sidebar.set_badge()` is fully built but never called by anything; the
-  "View Playlists" folder-open button in the Clustered workspace only works on
-  Linux (no Windows/macOS branch); a Help-screen documentation link points at an
-  archived file that no longer exists at that path; automatically jumping to the
-  visual map right after a clustering run finishes is still just an idea.
+- **Small loose ends** *(Designed, not started).* `Sidebar.set_badge()` is fully built
+  but never called; dead modules (`gui/widgets/splash.py`,
+  `gui/widgets/interactive_3d_scatter.py`, `gui/workspaces/clustered.py`) await the
+  delete decision above; jumping to the map automatically after a clustering run is
+  still just an idea. (The Linux-only "View Playlists" button and the broken Help link
+  are gone.)
 
 ---
 
@@ -330,18 +421,14 @@ editing and tuning layer on top of them.
 
 If you've been away and want the shortest path back to momentum:
 
-1. **Library Sync bulk flagging and persistent sessions.** The review-first sync is
-   the app's strongest workflow and one-at-a-time flagging is its main friction;
-   persistence needs the stale-flag care already noted under Library Sync.
-2. **Treat the Visual Music Graph's deeper interactivity — live re-tuning, in-map
-   cluster editing, the suggestion engine — as the big, deliberate project it always
-   was.** The map itself now exists to build on, which makes these additions rather
-   than foundations.
-3. **Everything under "Other / housekeeping" is safe to ignore indefinitely** — none
-   of it blocks normal use of the app. Pick it up only when you're already touching
-   the relevant file for another reason.
-
-The bugs and gaps that used to head this list (Duplicate Pair Report, Cluster
-Quality Report, the Tkinter imports in `plugins/` and `controllers/`, the broken 3-D
-graph data injection, and the unreachable in-app map) are all fixed — see "Recently
-completed" above.
+1. **Fix the Known bugs first** — they are small and each one makes an existing
+   feature tell the truth (the Last.fm key and the Library Sync fingerprint metric
+   matter most).
+2. **Decide the open questions** in `docs/redesign/README.md` §6; several cleanups
+   (dead files, prototype dialogs, the disabled controls) wait on them.
+3. **Library Sync bulk flagging and persistent sessions** remain the main friction in
+   the app's strongest workflow.
+4. **Treat the Visual Music Graph's deeper interactivity** — live re-tuning, in-map
+   editing, the suggestion engine — as the big, deliberate project it always was.
+5. **Everything under "Other / housekeeping" is safe to ignore** until you're already
+   touching the relevant file.

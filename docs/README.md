@@ -7,12 +7,22 @@ below.
 ## Known Gaps — What Still Needs Work
 
 A quick-reference list of what's broken or not yet built, ordered by how urgent or
-close-to-done each item is. See **[ROADMAP.md](ROADMAP.md)** for the full list,
-including lower-priority housekeeping items.
+close-to-done each item is. The **Known bugs** section of **[ROADMAP.md](ROADMAP.md)**
+is the single source of truth; it also lists the controls that are still switched off
+and the lower-priority housekeeping items.
+
+- **The Last.fm key field in Settings isn't used** *(Bug).* The scan reads the Last.fm
+  key only from the `LASTFM_API_KEY` environment variable, and the Settings field is
+  shared with the AcoustID key, so saving a Last.fm key there breaks AcoustID lookups.
+
+- **Library Sync still uses the old fingerprint comparison** *(Bug).* The Duplicate
+  Finder now decodes fingerprints before comparing them; Library Sync's separate engine
+  copy does not, so it can miss that a FLAC and an MP3 are the same recording.
 
 - **Library Sync — bulk flagging & session persistence** *(Designed, not started).*
   Tracks can only be flagged one at a time; there is no multi-select batch flag. Review
-  flags also live in memory only and are cleared when you re-scan or restart.
+  flags survive a re-scan where they still apply, but not a restart ("Save Session"
+  remembers the folders and threshold, not the flags).
 
 - **Metadata providers — Spotify & Gracenote remain unbuilt** *(Designed, not
   started; the Settings UI is already honest about this).* Both are visibly listed
@@ -57,6 +67,17 @@ including lower-priority housekeeping items.
   the clustering and graph features.
 - **[library_sync_per_item_review_testing.md](library_sync_per_item_review_testing.md)**
   — Manual test scenarios for the Library Sync review flags.
+- **[../tests/ui/README.md](../tests/ui/README.md)** — The headless GUI test harness:
+  fixtures, the guards every GUI test gets, and the rules for writing background
+  workers. (architecture.md has the short version.)
+
+## Redesign groundwork
+
+- **[redesign/README.md](redesign/README.md)** — The groundwork for the coming GUI
+  redesign: the intent of every page, how the pages connect, the ~200-bug inventory
+  from the fix phase and its status, the proposed page structure, and the open
+  decisions for the owner. The per-area reports in `redesign/pages/` describe the app
+  *as it was before the fixes*; for how it behaves now, read the documents above.
 
 ## Historical material
 
