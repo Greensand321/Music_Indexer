@@ -238,6 +238,8 @@ class SettingsForm(QtCore.QObject):
         self._exact_dup_spin.setDecimals(4)
         self._exact_dup_spin.setValue(0.02)
         gen_l.addRow("Exact-duplicate threshold:", self._exact_dup_spin)
+        for spin in (self._near_dup_spin, self._exact_dup_spin):
+            spin.setMinimumWidth(120)   # the size hint clipped "0.0200"
         return gen_w
 
     def _build_appearance(self) -> QtWidgets.QWidget:

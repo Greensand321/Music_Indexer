@@ -26,6 +26,13 @@ from gui.widgets.track_details_panel import TrackDetailsPanel
 import cluster_graph_data as cgd
 
 
+def _page_wording(message: str) -> str:
+    """The data layer still names the old "Clustered Playlists" page; on the
+    Sound Map that step is the Analyse tab."""
+    return (message.replace("Re-run Clustered Playlists", "Run the analysis again (Analyse tab)")
+                   .replace("Run Clustered Playlists", "Run an analysis (Analyse tab)"))
+
+
 class GraphWorkspace(WorkspaceBase):
     """Explore a clustered library as an interactive map."""
 
@@ -198,7 +205,7 @@ class GraphWorkspace(WorkspaceBase):
             data = cgd.load_cluster_data(self._library_path)
             xy, labels, tracks = cgd.graph_points(data)
         except cgd.ClusterDataError as exc:
-            self._set_empty(str(exc))
+            self._set_empty(_page_wording(str(exc)))
             return
         except Exception as exc:  # noqa: BLE001
             self._set_empty(f"Could not load cluster data: {exc}")

@@ -969,8 +969,11 @@ class TileGrid(QtWidgets.QWidget):
                     col = 0
                     row += 1
 
-        for c in range(cols):
-            self._grid.setColumnStretch(c, 1)
+        # Columns beyond the current count keep no stretch: going from two
+        # columns to one used to leave an empty, stretching second column,
+        # so every tile (full-width ones too) took half the page.
+        for c in range(max(cols, self._grid.columnCount())):
+            self._grid.setColumnStretch(c, 1 if c < cols else 0)
 
 
 # ── _PillToggle ────────────────────────────────────────────────────────────────

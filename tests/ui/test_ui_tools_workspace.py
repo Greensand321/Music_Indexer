@@ -388,3 +388,21 @@ def test_status_tones_follow_theme_changes(make_workspace, qtbot, motion):
     expected = QtGui.QColor(get_manager().current.text_secondary)
     assert ws._codec_status.palette().color(QtGui.QPalette.ColorRole.WindowText) == expected
     assert tone_color("secondary") == expected
+
+
+def test_a_full_width_tile_spans_a_one_column_grid(make_workspace, qtbot):
+    """Going from two columns to one left the second column stretching, so a
+    lone (or full-width) tile took half the page."""
+    from gui.workspaces.tools import TileGrid, ToolTile
+
+    ws = make_workspace("file_cleanup")
+    ws.resize(1300, 760)
+    process = QtWidgets.QApplication.processEvents
+    process()
+    ws.resize(900, 760)          # < 2 × TileGrid._TILE_MIN_WIDTH: one column
+    for _ in range(5):
+        process()
+    grid = ws.findChild(TileGrid)
+    (tile,) = ws.findChildren(ToolTile)
+    assert grid._current_cols == 1
+    assert tile.width() >= grid.width() - 2

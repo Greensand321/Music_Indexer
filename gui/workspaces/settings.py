@@ -75,6 +75,23 @@ class SettingsWorkspace(WorkspaceBase):
             "everything else applies when you save."
         ))
 
+        # Save / Revert sit above the sections, so they are in reach on all
+        # three (the Appearance section is taller than the window).
+        bar = QtWidgets.QHBoxLayout()
+        bar.setSpacing(8)
+        self._save_state = QtWidgets.QLabel("")
+        self._save_state.setObjectName("statusHint")
+        bar.addWidget(self._save_state, 1)
+        self._revert_btn = QtWidgets.QPushButton("Revert")
+        self._revert_btn.setToolTip("Show the saved settings again (drops unsaved changes)")
+        self._revert_btn.clicked.connect(self._on_revert)
+        bar.addWidget(self._revert_btn)
+        self._save_btn = self._make_primary_button("Save settings")
+        self._save_btn.setObjectName("primaryBtn")
+        self._save_btn.clicked.connect(self._on_save)
+        bar.addWidget(self._save_btn)
+        cl.addLayout(bar)
+
         self._tabs = QtWidgets.QTabWidget()
         self._tabs.addTab(self._view(self._card(
             "Metadata services", self.form.services_widget,
@@ -92,24 +109,23 @@ class SettingsWorkspace(WorkspaceBase):
             self._card("Background", self.form.appearance_widget,
                        hint="Applies when you save."),
         ), "Appearance")
+        # A tab widget is as tall as its tallest page; size it to the one
+        # shown instead, so short sections don't scroll into empty space.
+        self._tabs.currentChanged.connect(self._fit_to_current)
+        self._fit_to_current(self._tabs.currentIndex())
         cl.addWidget(self._tabs)
-
-        footer = self._make_card()
-        foot = QtWidgets.QHBoxLayout(footer)
-        foot.setContentsMargins(16, 12, 16, 12)
-        self._save_state = QtWidgets.QLabel("")
-        self._save_state.setObjectName("statusHint")
-        foot.addWidget(self._save_state, 1)
-        self._revert_btn = QtWidgets.QPushButton("Revert")
-        self._revert_btn.setToolTip("Show the saved settings again (drops unsaved changes)")
-        self._revert_btn.clicked.connect(self._on_revert)
-        foot.addWidget(self._revert_btn)
-        self._save_btn = self._make_primary_button("Save settings")
-        self._save_btn.setObjectName("primaryBtn")
-        self._save_btn.clicked.connect(self._on_save)
-        foot.addWidget(self._save_btn)
-        cl.addWidget(footer)
         cl.addStretch(1)
+
+    def _fit_to_current(self, index: int) -> None:
+        policy = QtWidgets.QSizePolicy.Policy
+        for i in range(self._tabs.count()):
+            view = self._tabs.widget(i)
+            if i == index:
+                view.setSizePolicy(policy.Preferred, policy.Preferred)
+            else:
+                view.setSizePolicy(policy.Ignored, policy.Ignored)
+            view.updateGeometry()
+        self._tabs.updateGeometry()
 
     # ── Sections ──────────────────────────────────────────────────────────
 
