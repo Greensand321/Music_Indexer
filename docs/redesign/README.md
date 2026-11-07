@@ -301,6 +301,13 @@ GUI concurrency) turned up further real bugs. The serious ones:
   - Library Sync's matching missed nearly every duplicate: it compared compressed fingerprints and only
     shortlisted identical prints or the first 50 tracks of the same format. On a synthetic 20k-track library,
     169 of 170 duplicates were called "new"; after the fix, 0 of 370 tracks are misclassified.
+- **Windows-only** (found by the Windows CI job; the app's owner runs Windows):
+  - Fingerprints came back with the `\\?\` long-path prefix, so Library Sync silently dropped every
+    fingerprint it computed.
+  - `strip_ext_prefix` never stripped anything because of one backslash too many.
+  - Playlist rewrites switched `/` entries to `\`, and `os.path.relpath` crashed when a playlist or file was on
+    another drive.
+  - Library Sync's log export used the locale codec and couldn't encode its own symbols.
 - **Stability:**
   - The idle fingerprint-cache writer spun at 100 % CPU and starved the GUI (window build went from 0.4 s to 45 s).
   - A live theme switch left 71 widgets on the old palette (invisible sidebar headers on light themes).
@@ -323,5 +330,7 @@ GUI concurrency) turned up further real bugs. The serious ones:
 ### Tests
 
 185 tests at the start of this phase (9 failing; the result depended on file order). At the end of phase 2:
-**1119 passing**: 731 backend tests (green in default, reversed and shuffled file order) and 388 headless GUI tests (green across repeated and reversed-order runs, no flakes).
+**1138 passing** on Linux (CI: Python 3.12 and 3.13), including about 390 headless GUI tests. The backend
+tests pass in default, reversed and shuffled file order, and the GUI suite passed repeated and reversed-order runs
+with no flakes. The Windows CI job (informational) failed 21 tests before the Windows portability fixes; see the latest CI run for its current state.
 
