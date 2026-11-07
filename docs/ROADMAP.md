@@ -28,23 +28,6 @@ which change) live in `docs/redesign/`; this page lists only what is still open.
 
 Real defects in the current code, smallest first within each area.
 
-### Metadata (Tag Fixer & Settings)
-
-- **The Last.fm key in Settings is not used, and it overwrites the AcoustID key**
-  *(Bug).* Settings → Metadata Services shows an API key field for both AcoustID and
-  Last.fm, but it is one field, saved as `metadata_api_key`. The Last.fm lookup source
-  (`plugins/lastfm.py`) only reads the `LASTFM_API_KEY` environment variable, so a key
-  typed there for Last.fm does nothing in a scan — while the AcoustID source *does*
-  read `metadata_api_key`, so saving a Last.fm key there makes every AcoustID lookup
-  use the wrong key. ("Test Connection" does test the typed Last.fm key, which makes
-  this look like it works.) Fix: a separate config key for the Last.fm key, read by
-  the Last.fm source; the comment in `plugins/lastfm.py` that says "Settings has no
-  Last.fm key field" is out of date too.
-- **A test fixture runs in real scans** *(Bug, harmless in practice).*
-  `tag_fixer._PLUGIN_MODULE_NAMES` includes `test_plugin`, whose `TestPlugin` returns
-  a perfect-confidence "TestGenre" match for any file named `dummy_*`. It should be
-  excluded outside the test suite.
-
 ### Library Sync
 
 - **Library Sync still compares compressed fingerprints** *(Bug, wrong result).* The
@@ -61,16 +44,6 @@ Real defects in the current code, smallest first within each area.
   `build_review_replacement_plan()` in `library_sync.py` look like they were built to
   back them but have no caller. Either wire them (through the normal build-plan →
   preview → execute flow) or remove both the buttons and the dead function.
-
-### Duplicates
-
-- **A library change stops a confirmed duplicate execution part-way** *(Bug:
-  inconsistent with every other page).* The Indexer, Library Sync, File Cleanup, the
-  tag tools and the Playlist Generator let a write you confirmed finish on its own
-  library when you switch library. The Duplicates page instead asks the running
-  execution to stop at the next safe point, leaving that plan partly applied (its
-  report still goes to the old library's `Docs/`). Nothing is lost — the executor only
-  stops between operations — but the plan is left half done.
 
 ### Legacy app only
 
@@ -119,6 +92,15 @@ library is valid.
 
 **The fix phase (2026-11-07).** About 200 bugs across every Qt page were fixed. The
 headlines, so they don't get re-raised:
+
+- **Settings keeps the AcoustID and Last.fm keys apart.** The single key field used to
+  save every service's key as `metadata_api_key`, so a Last.fm key replaced the
+  AcoustID key and the Last.fm source never read it. The field now shows the selected
+  service's own key (`metadata_api_key` for AcoustID, `lastfm_api_key` for Last.fm,
+  with the `LASTFM_API_KEY` environment variable still taking precedence).
+- **Switching library lets a confirmed Duplicates execution finish**, like every other
+  page's confirmed writes, instead of stopping it part-way.
+- **The `test_plugin` fixture no longer runs in real Tag Fixer scans.**
 
 - **Quitting or re-running a job no longer crashes the app.** Every worker is held by
   a process-wide JobRegistry until its thread has really finished; closing asks only
