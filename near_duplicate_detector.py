@@ -172,8 +172,10 @@ def _b64decode_strict(text: str) -> bytes | None:
         return None
 
 
-@lru_cache(maxsize=8192)
-def _decode_cached(text: str) -> tuple[int, tuple[int, ...]] | None:
+# Decoded prints are cached as packed little-endian uint32 bytes (4 bytes per
+# item, ~4 KB for a 2-minute print), keyed by the compressed text.
+@lru_cache(maxsize=4096)
+def _decode_cached(text: str) -> tuple[int, bytes] | None:
     data = _b64decode_strict(text)
     if not data:
         return None
@@ -181,7 +183,11 @@ def _decode_cached(text: str) -> tuple[int, tuple[int, ...]] | None:
     if decoded is None:
         return None
     algorithm, items = decoded
-    return algorithm, tuple(items)
+    return algorithm, struct.pack(f"<{len(items)}I", *items)
+
+
+def _decoded_packed(text: str) -> tuple[int, bytes] | None:
+    return _decode_cached(text.strip())
 
 
 def is_empty_chromaprint(fp: object) -> bool:
@@ -193,7 +199,10 @@ def is_empty_chromaprint(fp: object) -> bool:
     text = _fp_text(fp)
     if not text:
         return False
-    data = _b64decode_strict(text.strip())
+    text = text.strip()
+    if len(text) > 8:  # 4 bytes of base64, optionally padded
+        return False
+    data = _b64decode_strict(text)
     return bool(data) and len(data) == 4 and data[1:4] == b"\x00\x00\x00"
 
 
@@ -206,10 +215,11 @@ def decode_chromaprint(fp: object) -> tuple[int, List[int]] | None:
     text = _fp_text(fp)
     if not text:
         return None
-    decoded = _decode_cached(text.strip())
+    decoded = _decoded_packed(text)
     if decoded is None:
         return None
-    return decoded[0], list(decoded[1])
+    algorithm, packed = decoded
+    return algorithm, list(struct.unpack(f"<{len(packed) // 4}I", packed))
 
 
 # Raw fingerprints are compared at small relative shifts so that a slightly
@@ -219,32 +229,23 @@ RAW_MAX_ALIGN_OFFSET = 8
 RAW_MIN_ALIGN_ITEMS = 32
 
 
-@lru_cache(maxsize=8192)
-def _packed_items(items: tuple[int, ...]) -> bytes:
-    return struct.pack(f"<{len(items)}I", *items)
+def _pack_items(items: Sequence[int]) -> bytes:
+    return struct.pack(f"<{len(items)}I", *(int(x) & 0xFFFFFFFF for x in items))
 
 
-def raw_fingerprint_distance(a: Sequence[int], b: Sequence[int]) -> float:
-    """Bit error rate between two raw Chromaprint fingerprints (0.0 – ~0.5).
-
-    Identical audio scores 0.0; transcodes of the same recording score a few
-    hundredths; unrelated recordings sit around 0.5 (random bits).
-    """
-    ta = tuple(int(x) & 0xFFFFFFFF for x in a)
-    tb = tuple(int(x) & 0xFFFFFFFF for x in b)
-    if not ta or not tb:
+def _packed_distance(pa: bytes, pb: bytes) -> float:
+    len_a, len_b = len(pa) // 4, len(pb) // 4
+    if not len_a or not len_b:
         return 1.0
-    pa = _packed_items(ta)
-    pb = _packed_items(tb)
-    shortest = min(len(ta), len(tb))
+    shortest = min(len_a, len_b)
     max_offset = RAW_MAX_ALIGN_OFFSET if shortest >= RAW_MIN_ALIGN_ITEMS else 0
-    min_overlap = max(1, shortest - max_offset) if max_offset else shortest
+    min_overlap = max(1, shortest - max_offset)
     best = 1.0
     for offset in range(-max_offset, max_offset + 1):
         sa = offset if offset > 0 else 0
         sb = -offset if offset < 0 else 0
-        n = min(len(ta) - sa, len(tb) - sb)
-        if n < min_overlap or n <= 0:
+        n = min(len_a - sa, len_b - sb)
+        if n < min_overlap:
             continue
         xa = int.from_bytes(pa[sa * 4:(sa + n) * 4], "little")
         xb = int.from_bytes(pb[sb * 4:(sb + n) * 4], "little")
@@ -254,6 +255,16 @@ def raw_fingerprint_distance(a: Sequence[int], b: Sequence[int]) -> float:
             if best == 0.0:
                 break
     return best
+
+
+def raw_fingerprint_distance(a: Sequence[int], b: Sequence[int]) -> float:
+    """Bit error rate between two raw Chromaprint fingerprints (0.0 – ~0.5).
+
+    Identical audio scores 0.0; transcodes of the same recording score a few
+    thousandths; unrelated recordings sit around 0.5 (random bits). The best
+    of the alignments within ``RAW_MAX_ALIGN_OFFSET`` items is used.
+    """
+    return _packed_distance(_pack_items(a), _pack_items(b))
 
 
 def _parse_fp(fp: str) -> tuple[str, List[int] | bytes] | None:
@@ -332,15 +343,17 @@ def fingerprint_distance(fp1: str | bytes | None, fp2: str | bytes | None) -> fl
         return 1.0  # "too short to fingerprint" is not evidence of a match
     if fp1 == fp2:
         return 0.0
-    raw1 = decode_chromaprint(fp1)
-    raw2 = decode_chromaprint(fp2)
+    raw1 = _decoded_packed(fp1)
+    raw2 = _decoded_packed(fp2)
     if raw1 is not None or raw2 is not None:
-        items1 = raw1[1] if raw1 is not None else _plain_ints(fp1)
-        items2 = raw2[1] if raw2 is not None else _plain_ints(fp2)
-        if items1 is not None and items2 is not None:
-            if raw1 is not None and raw2 is not None and raw1[0] != raw2[0]:
+        if raw1 is not None and raw2 is not None:
+            if raw1[0] != raw2[0]:
                 return 1.0  # different Chromaprint algorithms are not comparable
-            return raw_fingerprint_distance(items1, items2)
+            return _packed_distance(raw1[1], raw2[1])
+        ints = _plain_ints(fp2 if raw1 is not None else fp1)
+        if ints is not None:
+            packed = raw1[1] if raw1 is not None else raw2[1]
+            return _packed_distance(packed, _pack_items(ints))
     p1 = _parse_fp(fp1)
     p2 = _parse_fp(fp2)
     if not p1 or not p2 or p1[0] != p2[0]:
@@ -417,7 +430,7 @@ COARSE_RAW_ITEMS_PER_BUCKET = 64  # ~8 s of audio per length bucket
 
 def _coarse_fingerprint_keys(fp: str | bytes | None) -> List[str]:
     fp = _fp_text(fp)
-    decoded = decode_chromaprint(fp) if fp else None
+    decoded = _decoded_packed(fp) if fp else None
     if decoded is not None:
         # Real Chromaprint fingerprints: banding the *compressed* bytes split a
         # FLAC from its own low-bitrate MP3 (one flipped bit reshuffles every
@@ -425,8 +438,8 @@ def _coarse_fingerprint_keys(fp: str | bytes | None) -> List[str]:
         # Gate on fingerprint length instead: two keys per print, so prints
         # whose lengths fall in the same or adjacent ~8 s buckets always share
         # one. The real comparison is ``fingerprint_distance``.
-        algorithm, items = decoded
-        bucket = len(items) // COARSE_RAW_ITEMS_PER_BUCKET
+        algorithm, packed = decoded
+        bucket = (len(packed) // 4) // COARSE_RAW_ITEMS_PER_BUCKET
         return [f"cp{algorithm}:len{bucket}", f"cp{algorithm}:len{bucket + 1}"]
     parsed = _parse_fp(fp) if fp else None
     values: List[int] = []
