@@ -62,7 +62,6 @@ excludes = [
     "main_gui",
     "library_sync_review",
     "cluster_graph_panel",
-    "mutagen_stub",
     "ttkbootstrap",
     "ttkthemes",
     "sv_ttk",

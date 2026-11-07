@@ -83,10 +83,6 @@ plugins/                     # Metadata service integrations
 utils/                       # Metadata readers, path helpers
 tests/                       # pytest suite (42 modules)
 docs/                        # HTML docs, design notes, GUI inventory
-mutagen_stub/                # Minimal mutagen fallback for tests — currently
-                             #   unused; every test file that needs mutagen
-                             #   builds its own inline stub instead (see
-                             #   docs/ROADMAP.md housekeeping section)
 library_sync_indexer_engine/ # A SEPARATELY MAINTAINED, DRIFTED COPY of the
                              #   indexer/fingerprint-cache engine, used only
                              #   by library_sync.py. Not a thin re-export —
@@ -354,7 +350,7 @@ section kept separate from planned-but-unbuilt features. Summary:
 - **The in-app 2-D interactive graph is built and wired.** `gui/workspaces/graph.py`
   embeds `InteractiveScatterPlot` + `ClusterLegendWidget` + `TrackDetailsPanel`;
   data loading/validation/export lives in the Qt-free `cluster_graph_data.py` (tested
-  in `tests/test_cluster_graph_data.py`). `Interactive3DScatterPlot` remains unused —
+  in `tests/test_cluster_graph_data.py`). The unused `Interactive3DScatterPlot` widget was deleted —
   the 3-D view users reach is the browser page from `cluster_graph_3d.py`.
 - **Cluster payload arrays are index-aligned, and must stay that way.**
   `X_2d`/`X_3d`/`labels`/`tracks` in `Docs/cluster_info.json` are consumed

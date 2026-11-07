@@ -378,8 +378,7 @@ tuning layer on top of them.
   `make_mutagen_stub()` in the same helper is the only inline mutagen stub left, and
   the other tests that touch mutagen import the real package (it is in
   `requirements.txt`). That
-  makes the old **`mutagen_stub/` package dead** — nothing uses it, and it can be
-  deleted. `tests/conftest.py` still stubs `pydub` when it isn't installed, and gives
+  made the old **`mutagen_stub/` package dead**; it was deleted on 2026-11-07. `tests/conftest.py` still stubs `pydub` when it isn't installed, and gives
   every test an isolated home folder and config path.
 
 - **A global activity indicator** *(Backend ready, not connected).* The JobRegistry

@@ -285,9 +285,6 @@ plugins/
   lastfm.py              - Fetch genres from Last.fm
   test_plugin.py         - A test fixture, auto-loaded like any other plugin
 
-mutagen_stub/             - Minimal mutagen fallback; currently unused by the
-                             real test suite (each test file stubs mutagen
-                             inline instead) — see docs/ROADMAP.md
 docs/                     - Project documentation and design notes
 tests/                    - pytest suite (42 modules)
 ```

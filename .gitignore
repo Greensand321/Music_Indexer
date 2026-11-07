@@ -10,3 +10,8 @@ __pycache__/
 # Local test / harness output
 .pytest_cache/
 snapshots/
+
+# Runtime state written by the app (never commit)
+last_path.txt
+crash_report.txt
+soundvault_crash.log*
