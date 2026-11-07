@@ -8,12 +8,17 @@ import time
 from collections import deque
 from typing import Deque
 
-try:
-    import tkinter as tk
-    from tkinter import messagebox
-except Exception:  # pragma: no cover - tkinter may be unavailable in some envs
-    tk = None  # type: ignore
-    messagebox = None  # type: ignore
+
+
+def _tk_messagebox():
+    """(tk, messagebox) or (None, None). Imported lazily: this module is used
+    by backend code and the Qt app, which must not load Tkinter."""
+    try:
+        import tkinter as tk
+        from tkinter import messagebox
+    except Exception:  # pragma: no cover - tkinter may be unavailable
+        return None, None
+    return tk, messagebox
 
 
 class CrashWatcher(threading.Thread):
@@ -80,6 +85,7 @@ def _handle_exit() -> None:
     with open(report_path, "w", encoding="utf-8") as fh:
         fh.write(data)
 
+    tk, messagebox = _tk_messagebox()
     if tk and messagebox:
         try:
             root = tk.Tk()
