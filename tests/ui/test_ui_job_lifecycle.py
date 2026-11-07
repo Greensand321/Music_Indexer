@@ -170,3 +170,29 @@ def test_quit_asks_only_about_jobs_that_may_write(main_window, dialogs, qtbot):
     ws.cancel_jobs()
     assert job_registry().wait_all(3000)
     assert writer.cancel_called and reader.cancel_called
+
+
+def test_messages_logged_during_construction_reach_the_log(qtbot):
+    """SHELL-20: a page's construction-time warnings used to be dropped."""
+
+    class Noisy(WorkspaceBase):
+        def __init__(self):
+            super().__init__()
+            self._log("libVLC not found", "warn")
+
+    ws = Noisy()
+    qtbot.addWidget(ws)
+    got = []
+    ws.log_message.connect(lambda m, lvl: got.append((m, lvl)))
+    ws.flush_pending_logs()
+    assert got == [("libVLC not found", "warn")]
+    ws._log("later", "info")            # once connected, emitted directly
+    assert got[-1] == ("later", "info")
+    ws.flush_pending_logs()             # nothing replayed twice
+    assert len(got) == 2
+
+
+def test_main_window_shows_construction_time_page_messages(main_window):
+    # No libVLC in the test environment: the Player logs this while it is
+    # being constructed, before the window connects its log_message signal.
+    assert "Playback unavailable" in main_window._log_drawer._text.toPlainText()

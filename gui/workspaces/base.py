@@ -171,5 +171,17 @@ class WorkspaceBase(QtWidgets.QWidget):
     # ── Logging helpers ───────────────────────────────────────────────────
 
     def _log(self, message: str, level: str = "info") -> None:
-        self.log_message.emit(message, level)
+        # Messages logged while the page is being constructed (before the main
+        # window has connected log_message) used to vanish — e.g. the Player's
+        # "libVLC not found" warning. Buffer them until someone listens.
+        if self.receivers(QtCore.SIGNAL("log_message(QString,QString)")) > 0:
+            self.log_message.emit(message, level)
+        else:
+            self.__dict__.setdefault("_pending_logs", []).append((message, level))
+
+    def flush_pending_logs(self) -> None:
+        """Re-emit messages logged before ``log_message`` was connected."""
+        pending = self.__dict__.pop("_pending_logs", [])
+        for message, level in pending:
+            self.log_message.emit(message, level)
 

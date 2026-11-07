@@ -20,3 +20,26 @@ def test_bar_volume_reaches_the_page_without_echo(main_window):
     process_events(5)
     assert player._vol_slider.value() == 64
     assert bar._vol_slider.value() == 64
+
+
+def test_saving_settings_applies_cached_appearance_flags_immediately(main_window, monkeypatch):
+    """The gradient flag and reduced-motion flag are cached (DS-03); saving
+    Settings must refresh both instead of waiting for the next theme switch."""
+    import config
+    from gui.themes import motion
+    from gui.widgets import gradient_bg
+
+    cfg = config.load_config()
+    cfg["bg_gradient_enabled"] = not gradient_bg._gradient_enabled()
+    cfg["reduced_motion"] = True
+    config.save_config(cfg)
+    monkeypatch.delenv("ALPHADEX_REDUCED_MOTION", raising=False)
+
+    main_window._on_settings_saved()
+    assert gradient_bg._gradient_enabled() == cfg["bg_gradient_enabled"]
+    assert motion.reduced_motion() is True
+
+    cfg["reduced_motion"] = False
+    config.save_config(cfg)
+    main_window._on_settings_saved()
+    assert motion.reduced_motion() is False

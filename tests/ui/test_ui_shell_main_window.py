@@ -291,8 +291,10 @@ def test_top_bar_path_colour_follows_library_state(main_window, tmp_path, thread
     assert threads.wait_all(10_000) == []
 
 
-def test_theme_switch_refreshes_each_page_shadow_once(main_window, monkeypatch):
-    """SHELL-22: the window used to call refresh_shadows() a second time."""
+def test_theme_switch_never_refreshes_a_page_shadow_twice(main_window, monkeypatch):
+    """SHELL-22 / DS-21: shadows used to be rebuilt twice per switch (window +
+    base). Shadows are now painted from the live theme, so a switch needs at
+    most one cheap repaint per page — never a second rebuild."""
     from gui.themes.manager import get_manager
     from gui.workspaces.base import WorkspaceBase
 
@@ -302,4 +304,4 @@ def test_theme_switch_refreshes_each_page_shadow_once(main_window, monkeypatch):
                         lambda self: (calls.append(type(self).__name__), original(self)))
     get_manager().apply("pearl")
     per_page = {name: calls.count(name) for name in set(calls)}
-    assert per_page and all(n == 1 for n in per_page.values()), per_page
+    assert all(n <= 1 for n in per_page.values()), per_page

@@ -170,6 +170,7 @@ class AlphaDEXWindow(QtWidgets.QMainWindow):
             ws.status_changed.connect(self._on_status_changed)
             ws.navigate_requested.connect(self._on_nav_changed)
             ws.play_tracks_requested.connect(self.play_tracks)
+            ws.flush_pending_logs()   # anything logged during construction
             self._stack.addWidget(ws)
             self._workspaces[key] = ws
 
@@ -418,6 +419,13 @@ class AlphaDEXWindow(QtWidgets.QMainWindow):
             dlg.deleteLater()   # one dialog per open, not one leaked per open
 
     def _on_settings_saved(self, dlg=None) -> None:
+        # Cached appearance settings must pick up the new values now, not on
+        # the next theme switch.
+        from gui.themes.motion import refresh_reduced_motion
+        from gui.widgets.gradient_bg import refresh_gradient_setting
+        refresh_gradient_setting()   # also repaints every window
+        refresh_reduced_motion()
+
         # Switch library only if the default library was changed in the dialog
         if dlg is not None and not getattr(dlg, "library_changed", True):
             return
