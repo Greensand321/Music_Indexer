@@ -1,7 +1,6 @@
 """Tools workspace — export utilities, diagnostics, and debug tools."""
 from __future__ import annotations
 
-import inspect
 import os
 import threading
 from collections import Counter
@@ -38,21 +37,14 @@ def _read_title(path: str) -> object:
     return read_tags(path).get("title")
 
 
-def _update_playlists(rename_map: dict[str, str], library_root: str) -> object:
-    """Call ``playlist_generator.update_playlists`` with the library root.
+def _update_playlists(rename_map: dict[str, str], library_root: str) -> int:
+    """Rewrite playlists for renamed files; returns how many playlists changed.
 
     The root is passed explicitly (TOOL-03: deriving it from the renamed paths
-    found ``<album>/Playlists`` and silently did nothing). Older signatures
-    without ``library_root`` are still supported.
+    found ``<album>/Playlists`` and silently did nothing).
     """
     from playlist_generator import update_playlists
-    try:
-        params = inspect.signature(update_playlists).parameters
-    except (TypeError, ValueError):  # pragma: no cover - builtins / C functions
-        params = {}
-    if "library_root" in params:
-        return update_playlists(rename_map, library_root=library_root)
-    return update_playlists(rename_map)
+    return update_playlists(rename_map, library_root=library_root)
 
 
 class FileCleanupPlanWorker(QtCore.QThread):
