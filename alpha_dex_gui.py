@@ -162,7 +162,16 @@ def main() -> int:
     landing.library_selected.connect(_landing_to_main)
     landing.tile_clicked.connect(_on_tile_clicked)
 
-    return app.exec()
+    exit_code = app.exec()
+
+    # Never let interpreter shutdown destroy a still-running QThread (that is
+    # a qFatal abort). The main window already waits for its jobs on close;
+    # this catches anything else (e.g. the landing's art scanner).
+    from gui.workers import job_registry
+    registry = job_registry()
+    registry.cancel_all()
+    registry.wait_all(timeout_ms=10_000)
+    return exit_code
 
 
 if __name__ == "__main__":

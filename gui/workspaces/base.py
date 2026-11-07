@@ -129,6 +129,35 @@ class WorkspaceBase(QtWidgets.QWidget):
         self.refresh_shadows()
         # GradientWidget repaints itself via its own theme_changed connection.
 
+    # ── Background jobs ───────────────────────────────────────────────────
+    #
+    # Always start worker threads through ``_start_worker``: the JobRegistry
+    # keeps each thread alive until it has really finished, so dropping
+    # ``self._worker`` in a "finished" slot (or starting a second run) can no
+    # longer destroy a running QThread and abort the process. See gui/workers.py.
+
+    def _start_worker(self, worker: QtCore.QThread, name: str = "") -> QtCore.QThread:
+        from gui.workers import start_worker
+        return start_worker(worker, owner=self, name=name or type(worker).__name__)
+
+    def running_jobs(self) -> list:
+        """Jobs this workspace started that are still running."""
+        from gui.workers import job_registry
+        return job_registry().jobs(owner=self)
+
+    def has_running_jobs(self) -> bool:
+        return bool(self.running_jobs())
+
+    def cancel_jobs(self) -> None:
+        """Ask every running job of this workspace to stop (non-blocking)."""
+        from gui.workers import job_registry
+        job_registry().cancel_all(self.running_jobs())
+
+    def shutdown(self) -> None:
+        """Called once by the main window when the app is closing, after all
+        jobs have stopped. Override to stop timers / release resources;
+        call ``super().shutdown()``."""
+
     # ── Logging helpers ───────────────────────────────────────────────────
 
     def _log(self, message: str, level: str = "info") -> None:

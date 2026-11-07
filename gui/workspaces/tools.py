@@ -211,8 +211,13 @@ class _GlassBadge(QtWidgets.QWidget):
         self._icon = icon
         self.setFixedSize(size, size)
         from gui.themes.manager import get_manager
-        get_manager().theme_changed.connect(lambda _: self.update())
+        # Bound method (not a lambda) so the singleton drops the connection
+        # when this widget is destroyed.
+        get_manager().theme_changed.connect(self._repaint_on_theme)
 
+
+    def _repaint_on_theme(self, _tokens=None) -> None:
+        self.update()
     def set_size(self, size: int) -> None:
         self.setFixedSize(size, size)
         self.update()
@@ -277,8 +282,13 @@ class _GlassResultChip(QtWidgets.QWidget):
         self.setFixedHeight(26)
         self._resize()
         from gui.themes.manager import get_manager
-        get_manager().theme_changed.connect(lambda _: self.update())
+        # Bound method (not a lambda) so the singleton drops the connection
+        # when this widget is destroyed.
+        get_manager().theme_changed.connect(self._repaint_on_theme)
 
+
+    def _repaint_on_theme(self, _tokens=None) -> None:
+        self.update()
     def _resize(self):
         fm = QtGui.QFontMetrics(self.font())
         self.setFixedWidth(fm.horizontalAdvance(self._text) + 34)
@@ -783,10 +793,15 @@ class _PillToggle(QtWidgets.QAbstractButton):
         self._anim.valueChanged.connect(lambda v: self._set_knob(float(v)))
         self.toggled.connect(self._start_anim)
         self.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
-        get_manager().theme_changed.connect(lambda _: self.update())
+        # Bound method (not a lambda) so the singleton drops the connection
+        # when this widget is destroyed.
+        get_manager().theme_changed.connect(self._repaint_on_theme)
 
     # ── Animation ──────────────────────────────────────────────────────────
 
+
+    def _repaint_on_theme(self, _tokens=None) -> None:
+        self.update()
     def _start_anim(self, checked: bool) -> None:
         self._anim.stop()
         self._anim.setStartValue(self._knob_x)

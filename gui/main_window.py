@@ -316,6 +316,53 @@ class AlphaDEXWindow(QtWidgets.QMainWindow):
         for ws in self._workspaces.values():
             ws.refresh_shadows()
 
+    # ── Close / shutdown ──────────────────────────────────────────────────
+    #
+    # Closing while a worker thread runs used to abort the whole process
+    # ("QThread: Destroyed while thread is still running") — possibly half
+    # way through moving files. Now: ask, cancel cooperatively, keep the
+    # window alive until every job has stopped, then shut workspaces down.
+
+    def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # noqa: N802
+        from gui.workers import job_registry
+
+        registry = job_registry()
+        jobs = registry.jobs()
+        if jobs:
+            if not getattr(self, "_closing", False):
+                names = ", ".join(sorted({j.name for j in jobs}))
+                answer = QtWidgets.QMessageBox.question(
+                    self,
+                    "Background tasks running",
+                    f"{len(jobs)} background task(s) are still running:\n{names}\n\n"
+                    "Stop them and quit? AlphaDEX will close as soon as they "
+                    "reach a safe stopping point.",
+                    QtWidgets.QMessageBox.StandardButton.Yes
+                    | QtWidgets.QMessageBox.StandardButton.No,
+                    QtWidgets.QMessageBox.StandardButton.No,
+                )
+                if answer != QtWidgets.QMessageBox.StandardButton.Yes:
+                    event.ignore()
+                    return
+                self._closing = True
+                registry.cancel_all()
+            self.statusBar().showMessage(
+                f"Stopping {len(jobs)} background task(s) before closing…"
+            )
+            event.ignore()
+            QtCore.QTimer.singleShot(100, self.close)
+            return
+
+        if not getattr(self, "_shut_down", False):
+            self._shut_down = True
+            for ws in self._workspaces.values():
+                try:
+                    ws.shutdown()
+                except Exception as exc:  # noqa: BLE001 - never block quitting
+                    print(f"[shutdown] {type(ws).__name__}: {exc}", file=sys.stderr)
+            QtWidgets.QApplication.instance().removeEventFilter(self)
+        super().closeEvent(event)
+
     # ── Public API ────────────────────────────────────────────────────────
 
     def set_library(self, path: str) -> None:
@@ -377,10 +424,9 @@ class AlphaDEXWindow(QtWidgets.QMainWindow):
         """Scan library stats in a background thread and update the top bar."""
         worker = _StatsWorker(path)
         worker.finished.connect(self._on_stats_ready)
-        worker.setParent(self)
-        # Keep reference so it doesn't get GC'd
         self._stats_worker = worker
-        worker.start()
+        from gui.workers import start_worker
+        start_worker(worker, owner=self, name="Library statistics")
 
     @Slot(int, float, int)
     def _on_stats_ready(self, tracks: int, size_gb: float, artists: int) -> None:
