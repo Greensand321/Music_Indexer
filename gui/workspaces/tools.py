@@ -1627,6 +1627,11 @@ class ToolsWorkspace(WorkspaceBase):
             QtWidgets.QMessageBox.information(self, "File Cleanup", msg)
             return
 
+        if self._library_writes_blocked("File cleanup"):
+            self._cleanup_set_running(False)
+            if tile is not None:
+                tile.report("idle", "Library busy — nothing was renamed.")
+            return
         from gui.dialogs.file_cleanup_preview_dialog import FileCleanupPreviewDialog
         dlg = FileCleanupPreviewDialog(plan, self)
         try:
@@ -1647,7 +1652,7 @@ class ToolsWorkspace(WorkspaceBase):
         worker.log_line.connect(self._cleanup_log.appendPlainText)
         worker.finished.connect(self._on_cleanup_finished)
         self._cleanup_worker = worker
-        self._start_worker(worker, "File cleanup")
+        self._start_worker(worker, "File cleanup", library_write=True)
 
     @Slot(bool, str)
     def _on_cleanup_finished(self, success: bool, message: str) -> None:

@@ -142,13 +142,42 @@ class WorkspaceBase(QtWidgets.QWidget):
     # longer destroy a running QThread and abort the process. See gui/workers.py.
 
     def _start_worker(
-        self, worker: QtCore.QThread, name: str = "", *, ask_before_quit: bool = True,
+        self, worker: QtCore.QThread, name: str = "", *,
+        ask_before_quit: bool = True, library_write: bool = False,
     ) -> QtCore.QThread:
-        """Start ``worker`` under the JobRegistry. Pass ``ask_before_quit=False``
-        for read-only jobs (scans, previews) so quitting cancels them silently."""
-        from gui.workers import start_worker
+        """Start ``worker`` under the JobRegistry.
+
+        ``ask_before_quit=False`` for read-only jobs (scans, previews) so
+        quitting cancels them silently. ``library_write=True`` for jobs that
+        change files in the library; check ``_library_writes_blocked`` first.
+        """
+        from gui.workers import LIBRARY_WRITES, start_worker
         return start_worker(worker, owner=self, name=name or type(worker).__name__,
-                            ask_before_quit=ask_before_quit)
+                            ask_before_quit=ask_before_quit,
+                            group=LIBRARY_WRITES if library_write else None)
+
+    def _library_writes_blocked(self, action: str) -> bool:
+        """True (after telling the user) if another job is already changing
+        files in the library. Call before confirming a write; start the write
+        with ``_start_worker(..., library_write=True)``."""
+        from gui.workers import LIBRARY_WRITES, job_registry
+        busy = [j.name for j in job_registry().group_jobs(LIBRARY_WRITES)]
+        try:
+            from controllers import tag_write_guard
+            owner = tag_write_guard.current_owner()
+        except Exception:  # noqa: BLE001 - guard is optional
+            owner = None
+        if owner and owner not in busy:
+            busy.append(owner)
+        if not busy:
+            return False
+        QtWidgets.QMessageBox.information(
+            self, "Library Busy",
+            f"{', '.join(busy)} is changing files in your library right now.\n\n"
+            f"{action} can start when it has finished — running both at once "
+            "could leave the library in a state neither plan described.",
+        )
+        return True
 
     def running_jobs(self) -> list:
         """Jobs this workspace started that are still running."""

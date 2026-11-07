@@ -196,3 +196,43 @@ def test_main_window_shows_construction_time_page_messages(main_window):
     # No libVLC in the test environment: the Player logs this while it is
     # being constructed, before the window connects its log_message signal.
     assert "Playback unavailable" in main_window._log_drawer._text.toPlainText()
+
+
+def test_library_writes_are_mutually_exclusive_across_pages(qtbot, dialogs):
+    """Two pages must never change files in the library at the same time."""
+    writer_page = _JobWorkspace()
+    other_page = _JobWorkspace()
+    qtbot.addWidget(writer_page)
+    qtbot.addWidget(other_page)
+
+    assert other_page._library_writes_blocked("Indexer execute") is False
+
+    reader = SlowWorker(30.0)
+    writer_page._start_worker(reader, "Player library scan", ask_before_quit=False)
+    assert other_page._library_writes_blocked("Indexer execute") is False, \
+        "read-only jobs must not block writes"
+
+    writer = SlowWorker(30.0)
+    writer_page._start_worker(writer, "Library Sync execute", library_write=True)
+    assert other_page._library_writes_blocked("Indexer execute") is True
+    info = dialogs.calls_of("information")[-1]
+    assert "Library Sync execute" in info.text and "Indexer execute" in info.text
+
+    writer.cancel()
+    reader.cancel()
+    assert job_registry().wait_all(3000)
+    # The group frees itself when the thread really finishes — no manual release.
+    assert other_page._library_writes_blocked("Indexer execute") is False
+
+
+def test_tag_write_guard_also_blocks_file_moves(qtbot, dialogs):
+    from controllers import tag_write_guard
+
+    page = _JobWorkspace()
+    qtbot.addWidget(page)
+    assert tag_write_guard.acquire("Tag Fixer apply")
+    try:
+        assert page._library_writes_blocked("Duplicate execute") is True
+        assert "Tag Fixer apply" in dialogs.calls_of("information")[-1].text
+    finally:
+        tag_write_guard.release("Tag Fixer apply")

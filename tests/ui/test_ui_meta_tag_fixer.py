@@ -217,11 +217,13 @@ def test_apply_refused_while_another_tool_writes_tags(make_workspace, tmp_path, 
     assert tag_write_guard.acquire("Genre normalize apply")
     try:
         ws._dry_run_cb.setChecked(False)
-        dialogs.answer_yes()
         ws._apply_btn.click()
         assert ws._apply_worker is None
+        # Refused up front (no "are you sure?" for something that can't run),
+        # naming the job that is writing.
+        assert dialogs.calls_of("question") == []
         [busy] = dialogs.calls_of("information")
-        assert "Genre normalize apply is writing tags" in busy.text
+        assert "Genre normalize apply" in busy.text
     finally:
         tag_write_guard.release("Genre normalize apply")
     assert get_field(files["a.flac"], "artist") == ["Art"]

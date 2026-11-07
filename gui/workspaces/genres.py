@@ -666,6 +666,8 @@ class GenresWorkspace(WorkspaceBase):
             return
         from controllers import tag_write_guard
 
+        if self._library_writes_blocked("Adding genres"):
+            return
         n = len(plan.changes)
         reply = QtWidgets.QMessageBox.question(
             self,
@@ -692,7 +694,7 @@ class GenresWorkspace(WorkspaceBase):
         self._fill_apply_worker = worker
         self._update_fill_gate()
         self._update_preview_gate()
-        self._start_worker(worker, _FILL_OWNER)
+        self._start_worker(worker, _FILL_OWNER, library_write=True)
 
     @Slot(bool, object)
     def _on_fill_apply_finished(self, ok: bool, payload) -> None:
@@ -881,6 +883,8 @@ class GenresWorkspace(WorkspaceBase):
             return
         from controllers import tag_write_guard
 
+        if self._library_writes_blocked("Genre normalization"):
+            return
         n = len(self._plan.changes)
         reply = QtWidgets.QMessageBox.question(
             self,
@@ -919,7 +923,7 @@ class GenresWorkspace(WorkspaceBase):
         worker.finished.connect(self._on_apply_finished)
         self._apply_worker = worker
         self._update_fill_gate()
-        self._start_worker(worker, _NORMALIZE_OWNER)
+        self._start_worker(worker, _NORMALIZE_OWNER, library_write=True)
 
     @Slot(int, int)
     def _on_apply_progress(self, done: int, total: int) -> None:

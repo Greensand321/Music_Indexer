@@ -60,6 +60,9 @@ class Job:
     # False for read-only work (scans, previews, art loads, statistics) that
     # can be cancelled on quit without asking the user.
     ask_before_quit: bool = True
+    # Mutual-exclusion group, e.g. LIBRARY_WRITES: at most one running job per
+    # group is the rule callers enforce via ``group_jobs`` before starting.
+    group: str | None = None
 
     @property
     def running(self) -> bool:
@@ -95,6 +98,7 @@ class JobRegistry(QtCore.QObject):
         owner: QtCore.QObject | None = None,
         name: str = "",
         ask_before_quit: bool = True,
+        group: str | None = None,
     ) -> QtCore.QThread:
         """Keep ``thread`` alive until it has finished. Idempotent."""
         key = id(thread)
@@ -102,7 +106,7 @@ class JobRegistry(QtCore.QObject):
             return thread
         owner_name = type(owner).__name__ if owner is not None else ""
         self._jobs[key] = Job(thread, name or type(thread).__name__, owner_name,
-                              time.monotonic(), ask_before_quit)
+                              time.monotonic(), ask_before_quit, group)
         # The C++ finished() signal, connected by signature so a Python
         # subclass that shadows ``finished`` cannot hide it. The watcher lives
         # in the GUI thread, so delivery is queued there, after run() returns.
@@ -121,8 +125,10 @@ class JobRegistry(QtCore.QObject):
         owner: QtCore.QObject | None = None,
         name: str = "",
         ask_before_quit: bool = True,
+        group: str | None = None,
     ) -> QtCore.QThread:
-        self.adopt(thread, owner=owner, name=name, ask_before_quit=ask_before_quit)
+        self.adopt(thread, owner=owner, name=name, ask_before_quit=ask_before_quit,
+                   group=group)
         thread.start()
         self.jobs_changed.emit(self.running_count())
         return thread
@@ -152,6 +158,10 @@ class JobRegistry(QtCore.QObject):
             owner_name = type(owner).__name__
             jobs = [j for j in jobs if j.owner_name == owner_name]
         return jobs
+
+    def group_jobs(self, group: str) -> list[Job]:
+        """Running jobs in ``group`` (e.g. ``LIBRARY_WRITES``)."""
+        return [j for j in self.jobs() if j.group == group]
 
     def running_count(self) -> int:
         return sum(1 for j in self._jobs.values() if j.running)
@@ -222,12 +232,20 @@ def job_registry() -> JobRegistry:
     return JobRegistry.instance()
 
 
+# Jobs that move, rename, delete or rewrite files inside the library. Two of
+# them must never run at once (an Indexer execute moving files while a Tag
+# Fixer apply rewrites them, or Library Sync and Duplicates both moving files,
+# leaves the library in a state neither plan described).
+LIBRARY_WRITES = "library-writes"
+
+
 def start_worker(
     thread: QtCore.QThread,
     *,
     owner: QtCore.QObject | None = None,
     name: str = "",
     ask_before_quit: bool = True,
+    group: str | None = None,
 ) -> QtCore.QThread:
     """Start ``thread`` under the registry's protection (see module docstring).
 
@@ -236,4 +254,4 @@ def start_worker(
     Anything that writes files keeps the default, so quitting mid-write asks.
     """
     return job_registry().start(thread, owner=owner, name=name,
-                                ask_before_quit=ask_before_quit)
+                                ask_before_quit=ask_before_quit, group=group)

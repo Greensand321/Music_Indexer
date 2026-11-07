@@ -949,6 +949,8 @@ class LibrarySyncWorkspace(WorkspaceBase):
             )
             self._refresh_controls()
             return
+        if self._library_writes_blocked("Library Sync execute"):
+            return
         plan = self._plan
         c = plan.counts()
         mode_line = (
@@ -981,7 +983,7 @@ class LibrarySyncWorkspace(WorkspaceBase):
         worker.log_line.connect(self._on_log_line)
         worker.progress.connect(self._on_plan_progress)
         worker.finished.connect(self._on_execute_finished)
-        self._start_worker(worker, "Library Sync execute")
+        self._start_worker(worker, "Library Sync execute", library_write=True)
         self._refresh_controls()
 
     @Slot()

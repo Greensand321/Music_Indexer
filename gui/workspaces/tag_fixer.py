@@ -521,6 +521,8 @@ class TagFixerWorkspace(WorkspaceBase):
 
         from controllers import tag_write_guard
 
+        if self._library_writes_blocked("Tag Fixer apply"):
+            return
         n_fields = sum(len(fields) for _rec, fields in selections)
         reply = QtWidgets.QMessageBox.question(
             self, "Apply Tags",
@@ -557,7 +559,7 @@ class TagFixerWorkspace(WorkspaceBase):
         worker.finished.connect(self._on_apply_finished)
         self._apply_worker = worker
         self._update_buttons()
-        self._start_worker(worker, _WRITE_OWNER)
+        self._start_worker(worker, _WRITE_OWNER, library_write=True)
 
     @Slot()
     def _on_select_all(self) -> None:

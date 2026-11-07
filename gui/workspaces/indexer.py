@@ -450,6 +450,8 @@ class IndexerWorkspace(WorkspaceBase):
             )
             self._refresh_controls()
             return
+        if self._library_writes_blocked("Indexer execute"):
+            return
         c = plan.counts()
         create_playlists = self._playlists_cb.isChecked()
         reply = QtWidgets.QMessageBox.question(
@@ -490,7 +492,9 @@ class IndexerWorkspace(WorkspaceBase):
         worker.progress.connect(self._on_progress)
         worker.log_line.connect(self._on_log_line)
         worker.finished.connect(self._on_finished)
-        self._start_worker(worker, f"Indexer {verb}")
+        self._start_worker(worker, f"Indexer {verb}",
+                           ask_before_quit=verb == "execute",
+                           library_write=verb == "execute")
         self._refresh_controls()
 
     @Slot()
