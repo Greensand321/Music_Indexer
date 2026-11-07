@@ -31,6 +31,12 @@ class _SwatchCard(QtWidgets.QAbstractButton):
         self.setChecked(val)
         self.update()
 
+    def label_color(self) -> QtGui.QColor:
+        """The name sits on the swatch's own ``content_bg``, so it is drawn in
+        the swatch's own ``text_primary`` (DS-15: it used the *active*
+        theme's text colour, illegible on dark swatches under a light theme)."""
+        return QtGui.QColor(self._tokens.text_primary)
+
     def paintEvent(self, event: QtGui.QPaintEvent) -> None:
         p = QtGui.QPainter(self)
         p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
@@ -112,7 +118,7 @@ class _SwatchCard(QtWidgets.QAbstractButton):
 
         # ── Theme name label ──────────────────────────────────────────────
         label_rect = QtCore.QRect(card_r.left(), card_r.bottom() - 20, card_r.width(), 20)
-        p.setPen(QtGui.QColor(current.text_primary))
+        p.setPen(self.label_color())
         font = p.font()
         font.setPointSize(8)
         font.setBold(self._selected or self.isChecked())
@@ -363,9 +369,9 @@ class ThemePickerDialog(QtWidgets.QDialog):
         desc_lbl.setObjectName("mutedLabel")
 
         mgr = get_manager()
-        dark_name = mgr.current.name if mgr.is_auto() else (
-            THEMES[mgr.auto_dark()].name if mgr.auto_dark() in THEMES else "—"
-        )
+        # Always the configured night theme — in Auto mode during the day,
+        # mgr.current is the *light* theme (DS-16).
+        dark_name = THEMES[mgr.auto_dark()].name if mgr.auto_dark() in THEMES else "—"
         light_name = THEMES[mgr.auto_light()].name if mgr.auto_light() in THEMES else "—"
         pair_lbl = QtWidgets.QLabel(f"Night: {dark_name}  ·  Day: {light_name}")
         pair_lbl.setObjectName("mutedLabel")

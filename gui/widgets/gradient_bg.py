@@ -8,6 +8,16 @@ distinct atmospheric tint without competing with the cards laid on top.
 The effect is controlled by the ``bg_gradient_enabled`` key in
 ``~/.soundvault_config.json`` (defaults to ``True``).  Set it to ``false``
 to revert to a flat ``content_bg`` fill.
+
+The flag is read once and cached: ``paintEvent`` must never do file I/O
+(it used to re-read the config JSON on every paint of every gradient
+surface, DS-03 / SHELL-14). The cache is dropped on every theme change and
+by ``refresh_gradient_setting()``, which the Settings flow calls after
+saving.
+
+``GradientWidget`` also paints the *elevation* (soft drop shadow) of the
+cards registered with ``add_elevated()``. Shadows are painted, not a
+``QGraphicsDropShadowEffect``: see ``gui.themes.effects.paint_elevation``.
 """
 from __future__ import annotations
 
@@ -15,12 +25,38 @@ from gui.compat import QtCore, QtGui, QtWidgets
 from gui.themes.manager import get_manager
 
 
+_GRADIENT_FLAG: bool | None = None
+
+
 def _gradient_enabled() -> bool:
-    try:
-        from config import load_config
-        return bool(load_config().get("bg_gradient_enabled", True))
-    except Exception:
-        return True
+    """Cached ``bg_gradient_enabled`` flag (safe to call from paintEvent)."""
+    global _GRADIENT_FLAG
+    if _GRADIENT_FLAG is None:
+        try:
+            from config import load_config
+            _GRADIENT_FLAG = bool(load_config().get("bg_gradient_enabled", True))
+        except Exception:
+            _GRADIENT_FLAG = True
+    return _GRADIENT_FLAG
+
+
+def invalidate_gradient_setting() -> None:
+    """Forget the cached flag; the next paint re-reads it once."""
+    global _GRADIENT_FLAG
+    _GRADIENT_FLAG = None
+
+
+def refresh_gradient_setting() -> bool:
+    """Re-read the flag now and repaint every window. Call after the
+    settings are saved. Returns the new value."""
+    invalidate_gradient_setting()
+    value = _gradient_enabled()
+    app = QtWidgets.QApplication.instance()
+    if app is not None:
+        for w in app.topLevelWidgets():
+            for child in [w, *w.findChildren(QtWidgets.QWidget)]:
+                child.update()
+    return value
 
 
 def paint_window_gradient(
@@ -97,12 +133,40 @@ class GradientWidget(QtWidgets.QWidget):
     def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(parent)
         self._tokens = get_manager().current
+        self._elevated: list[QtWidgets.QWidget] = []
         get_manager().theme_changed.connect(self._on_theme_changed)
+
+    # ── Elevation ─────────────────────────────────────────────────────────
+
+    def add_elevated(self, widget: QtWidgets.QWidget) -> None:
+        """Paint a soft card shadow beneath ``widget`` (a descendant)."""
+        if widget in self._elevated:
+            return
+        self._elevated.append(widget)
+        widget.installEventFilter(self)
+
+    def elevated_widgets(self) -> list[QtWidgets.QWidget]:
+        self._elevated = [w for w in self._elevated if _alive(w)]
+        return list(self._elevated)
+
+    def _shadow_rect(self, widget: QtWidgets.QWidget) -> QtCore.QRect | None:
+        if not widget.isVisibleTo(self):
+            return None
+        top_left = widget.mapTo(self, QtCore.QPoint(0, 0))
+        return QtCore.QRect(top_left, widget.size())
+
+    def eventFilter(self, obj: QtCore.QObject, event: QtCore.QEvent) -> bool:  # noqa: N802
+        if event.type() in _GEOMETRY_EVENTS and isinstance(obj, QtWidgets.QWidget):
+            # The shadow extends outside the card, so the area the card
+            # leaves or enters must be repainted here, not only by the card.
+            self.update()
+        return False
 
     # ── Slots ─────────────────────────────────────────────────────────────
 
     def _on_theme_changed(self, tokens: object) -> None:
         self._tokens = tokens  # type: ignore[assignment]
+        invalidate_gradient_setting()
         self.update()
 
     # ── Painting ──────────────────────────────────────────────────────────
@@ -138,4 +202,27 @@ class GradientWidget(QtWidgets.QWidget):
             g2.setColorAt(1.0, c2_off)
             p.fillRect(rect, QtGui.QBrush(g2))
 
+        # ── Card elevation, beneath the (transparent-parented) cards ──────
+        if self._elevated:
+            from gui.themes.effects import elevation_margin, paint_elevation
+            dirty = event.rect().adjusted(*elevation_margin())
+            for card in self.elevated_widgets():
+                r = self._shadow_rect(card)
+                if r is not None and r.intersects(dirty):
+                    paint_elevation(p, r, t)
+
         p.end()
+
+
+_GEOMETRY_EVENTS = {
+    QtCore.QEvent.Type.Move, QtCore.QEvent.Type.Resize,
+    QtCore.QEvent.Type.Show, QtCore.QEvent.Type.Hide,
+}
+
+
+def _alive(obj: QtCore.QObject) -> bool:
+    try:
+        import shiboken6
+        return shiboken6.isValid(obj)
+    except Exception:  # pragma: no cover - non-PySide binding
+        return True

@@ -103,8 +103,13 @@ class TypeScale:
     """
 
     # ── Sizes (pt) ────────────────────────────────────────────────────────
+    # The ramp must read top-down: app title > section heading > card title
+    # > body > label > caption (DS-24: card titles used to be 13 px under
+    # ~15 px body text, and the section heading pt value was silently
+    # replaced by an 18 px QSS literal). ``px()`` converts for the QSS.
     APP_TITLE   = 16    # "AlphaDEX" brand in top bar
-    SECTION_HDR = 14    # Workspace section headings
+    SECTION_HDR = 15    # Workspace section headings (20 px)
+    CARD_TITLE  = 12    # Card headings (16 px), semibold
     BODY        = 11    # Default widget text
     LABEL       = 10    # Secondary / support text
     SMALL       = 9     # Muted captions, badge text, sub-labels
@@ -118,6 +123,15 @@ class TypeScale:
     BUTTON      = 11
     INPUT       = 11
     TAB         = 10
+
+    # ── Small text in px (QSS roles below body) ──────────────────────────
+    LABEL_PX    = 12    # subtitles, status hints, step labels, table headers
+    CAPTION_PX  = 11    # phase descriptions, notes
+
+    @staticmethod
+    def px(pt: float) -> int:
+        """Point size -> CSS px at the 96 dpi reference (1pt = 4/3 px)."""
+        return int(round(pt * 4 / 3))
 
     # ── Weights (QFont.Weight enum values) ────────────────────────────────
     W_THIN      = 100

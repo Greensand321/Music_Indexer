@@ -11,28 +11,36 @@ class HoverMixin:
 
     AlphaDEXStyle reads ``widget._hover_p`` in _hover_t() during paint.
     Install by calling ``_init_hover()`` from the subclass ``__init__``.
+
+    The animation comes from ``gui.themes.motion`` (``fast`` token,
+    ``standard`` easing): one parented animation per widget, restarted from
+    the current value, and instant under reduced motion.
     """
 
-    _DURATION = 150  # ms
+    _MOTION_KEY = "hover"
 
     def _init_hover(self) -> None:
         self._hover_p: float = 0.0
-        self._hover_anim = QtCore.QVariantAnimation(self)
-        self._hover_anim.setDuration(self._DURATION)
-        self._hover_anim.setEasingCurve(QtCore.QEasingCurve.Type.OutCubic)
-        self._hover_anim.valueChanged.connect(self._on_hover_value)
         self.setAttribute(QtCore.Qt.WidgetAttribute.WA_Hover, True)
 
+    @property
+    def _hover_anim(self):  # kept for callers/tests that inspect it
+        from gui.themes import motion
+        return motion.animation_for(self, self._MOTION_KEY)
+
     def _on_hover_value(self, value: float) -> None:
-        self._hover_p = value
+        self._hover_p = float(value)
         self.update()
 
     def _start_hover(self, entering: bool) -> None:
-        anim = self._hover_anim
-        anim.stop()
-        anim.setStartValue(self._hover_p)
-        anim.setEndValue(1.0 if entering else 0.0)
-        anim.start()
+        from gui.themes import motion
+        end = 1.0 if entering else 0.0
+        if self._hover_p == end and self._hover_anim is None:
+            return
+        motion.animate_value(
+            self, self._MOTION_KEY, float(self._hover_p), end, self._on_hover_value,
+            duration="fast", easing="standard",
+        )
 
     # QWidget event overrides — call super() so subclass chain works
     def enterEvent(self, event) -> None:
@@ -112,10 +120,12 @@ class AnimatedNavButton(HoverMixin, QtWidgets.QPushButton):
         if self._active == value:
             return
         self._active = value
-        # Ensure hover_p starts at correct end when activated externally
-        if value:
-            self._hover_p = 1.0
-            self._hover_anim.stop()
+        # Activation never touches the hover progress: the pill shows the
+        # active state. On deactivation, ease the hover back to what the
+        # pointer says, so an item activated from code (Ctrl+1..9,
+        # navigate_requested, play_tracks) never keeps a hover tint (DS-05).
+        if not value:
+            self._start_hover(self.underMouse())
         self.update()
 
     @property

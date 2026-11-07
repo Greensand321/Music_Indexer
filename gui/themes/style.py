@@ -43,6 +43,9 @@ _CE_GroupBoxLabel   = getattr(CE, "CE_GroupBoxLabel",   None)
 _CE_ScrollBarGroove = getattr(CE, "CE_ScrollBarGroove", None)
 
 
+# Dynamic property holding the font _polish_font assigned (DS-11).
+_ROLE_FONT_PROP = "_adxRoleFont"
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _aa(p: QP) -> None:
@@ -153,6 +156,14 @@ class AlphaDEXStyle(QtWidgets.QProxyStyle):
     @property
     def t(self) -> ThemeTokens:
         return self._t
+
+    def set_tokens(self, tokens: ThemeTokens) -> None:
+        """Swap the colour tokens in place (theme switch without setStyle).
+
+        Re-installing a style re-polishes every widget in the app; painting
+        reads ``self._t`` on every call, so swapping it and repainting is
+        all a colour change needs (DS-04)."""
+        self._t = tokens
 
     # ── Metrics ───────────────────────────────────────────────────────────
 
@@ -778,54 +789,67 @@ class AlphaDEXStyle(QtWidgets.QProxyStyle):
             f.setHintingPreference(HP.PreferNoHinting)
             return f
 
+        # Never override a font someone set explicitly (DS-11). Fonts this
+        # method assigned are remembered in a dynamic property, so a later
+        # re-polish may refresh them, but a caller's setFont() always wins.
+        if widget.testAttribute(Qt.WidgetAttribute.WA_SetFont):
+            ours = widget.property(_ROLE_FONT_PROP)
+            if not isinstance(ours, QtGui.QFont) or ours != widget.font():
+                return
+
         name = widget.objectName()
+
+        def _assign(f: QtGui.QFont) -> None:
+            f = _soft(f)
+            widget.setFont(f)
+            widget.setProperty(_ROLE_FONT_PROP, widget.font())
 
         if name == "appTitle":
             f = QtGui.QFont(UI_FAMILY, TypeScale.APP_TITLE)
             f.setWeight(W(TypeScale.W_BOLD))
             f.setLetterSpacing(SP.PercentageSpacing, 98.0)   # -0.02em
-            widget.setFont(_soft(f))
+            _assign(f)
 
         elif name == "sectionTitle":
             f = QtGui.QFont(UI_FAMILY, TypeScale.SECTION_HDR)
             f.setWeight(W(TypeScale.W_SEMIBOLD))
-            widget.setFont(_soft(f))
+            _assign(f)
 
         elif name in ("sectionSubtitle", "mutedLabel"):
             f = QtGui.QFont(UI_FAMILY, TypeScale.LABEL)
             f.setWeight(W(TypeScale.W_REGULAR))
-            widget.setFont(_soft(f))
+            _assign(f)
 
         elif name == "sidebarSectionLabel":
             f = QtGui.QFont(UI_FAMILY, TypeScale.NAV_SECTION)
             f.setWeight(W(TypeScale.W_SEMIBOLD))
             f.setLetterSpacing(SP.PercentageSpacing, 108.0)  # +0.08em
-            widget.setFont(_soft(f))
+            _assign(f)
 
         elif name == "navButton":
             f = QtGui.QFont(UI_FAMILY, TypeScale.NAV_ITEM)
             f.setWeight(W(TypeScale.W_REGULAR))
-            widget.setFont(_soft(f))
+            _assign(f)
 
         elif name in ("libraryPath", "libStats"):
             f = QtGui.QFont(UI_FAMILY, TypeScale.SMALL)
             f.setWeight(W(TypeScale.W_REGULAR))
-            widget.setFont(_soft(f))
+            _assign(f)
 
         elif name == "statNumber":
             f = QtGui.QFont(UI_FAMILY, TypeScale.SMALL)
             f.setWeight(W(TypeScale.W_SEMIBOLD))
-            widget.setFont(_soft(f))
+            _assign(f)
 
         elif name == "statUnit":
             f = QtGui.QFont(UI_FAMILY, TypeScale.SMALL)
             f.setWeight(W(TypeScale.W_REGULAR))
-            widget.setFont(_soft(f))
+            _assign(f)
 
         elif name == "logText":
             f = QtGui.QFont(MONO_FAMILY, TypeScale.MONO)
             f.setWeight(W(TypeScale.W_REGULAR))
-            widget.setFont(_soft(f))
+            _assign(f)
 
         elif isinstance(widget, (QtWidgets.QAbstractButton,
                                   QtWidgets.QComboBox,
@@ -834,7 +858,7 @@ class AlphaDEXStyle(QtWidgets.QProxyStyle):
                                   QtWidgets.QLineEdit)):
             f = QtGui.QFont(UI_FAMILY, TypeScale.BUTTON)
             f.setWeight(W(TypeScale.W_REGULAR))
-            widget.setFont(_soft(f))
+            _assign(f)
 
     def unpolish(self, obj: QtWidgets.QWidget | QtWidgets.QApplication) -> None:  # type: ignore[override]
         super().unpolish(obj)

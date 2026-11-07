@@ -15,7 +15,8 @@ get_manager()        – convenience accessor for ThemeManager.instance()
 AlphaDEXStyle        – QProxyStyle subclass; full QPainter rendering engine
 build_palette()      – build QPalette from ThemeTokens
 
-card_shadow()        – QGraphicsDropShadowEffect tuned to current theme
+paint_elevation()    – paint a card's soft shadow (cached 9-slice; preferred)
+card_shadow()        – legacy QGraphicsDropShadowEffect (pass a parent!)
 lerp_color()         – linear interpolation between two hex colours
 with_alpha()         – return QColor with given alpha
 
@@ -24,6 +25,9 @@ R                    – border-radius constants (button, card, input, …)
 HoverMixin           – hover animation mixin for QWidget subclasses
 AnimatedButton       – QPushButton with hover animation
 AnimatedNavButton    – sidebar nav button with badge + hover animation
+
+motion               – motion tokens, reduced-motion switch, safe animation
+                       helpers (animate_value / animate_property / fade)
 
 ThemePickerDialog    – full-screen swatch picker dialog
 AutoThemeDialog      – dark/light pair selector for Auto mode
@@ -39,7 +43,10 @@ from gui.themes.tokens import (
     DEFAULT_LIGHT,
 )
 from gui.themes.manager import ThemeManager, get_manager
-from gui.themes.effects import build_palette, card_shadow, lerp_color, with_alpha, R
+from gui.themes.effects import (
+    build_palette, card_shadow, lerp_color, with_alpha, R, paint_elevation,
+)
+from gui.themes import motion
 from gui.themes.animations import (
     HoverMixin,
     AnimatedButton,
@@ -54,7 +61,9 @@ __all__ = [
     # manager
     "ThemeManager", "get_manager",
     # effects
-    "build_palette", "card_shadow", "lerp_color", "with_alpha", "R",
+    "build_palette", "card_shadow", "lerp_color", "with_alpha", "R", "paint_elevation",
+    # motion
+    "motion",
     # animations
     "HoverMixin", "AnimatedButton", "AnimatedNavButton", "AnimatedTabButton",
     # picker

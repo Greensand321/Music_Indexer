@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 from gui.compat import QtCore, QtWidgets, Signal
-from gui.themes.effects import card_shadow
 from gui.themes.manager import get_manager
 from gui.widgets.gradient_bg import GradientWidget
 
@@ -66,17 +65,23 @@ class WorkspaceBase(QtWidgets.QWidget):
     # ── Builder helpers ───────────────────────────────────────────────────
 
     def _make_card(self) -> QtWidgets.QFrame:
+        """A themed card. Its shadow is painted by the scroll surface
+        (``GradientWidget.add_elevated``), not by a graphics effect, so the
+        card's one effect slot stays free for fades (DS-02)."""
         card = QtWidgets.QFrame()
         card.setObjectName("workspaceCard")
-        card.setGraphicsEffect(card_shadow(get_manager().current))
         self._cards.append(card)
+        surface = getattr(self, "_inner", None)
+        if hasattr(surface, "add_elevated"):
+            surface.add_elevated(card)
         return card
 
     def refresh_shadows(self) -> None:
-        """Re-apply drop shadows after a theme change."""
-        tokens = get_manager().current
-        for card in self._cards:
-            card.setGraphicsEffect(card_shadow(tokens))
+        """Repaint card shadows (they are painted from the live theme, so a
+        repaint is all a theme change needs). Kept for callers; cheap."""
+        surface = getattr(self, "_inner", None)
+        if surface is not None:
+            surface.update()
 
     def _make_section_title(self, text: str) -> QtWidgets.QLabel:
         lbl = QtWidgets.QLabel(text)
@@ -125,9 +130,9 @@ class WorkspaceBase(QtWidgets.QWidget):
     # ── Theme handling ────────────────────────────────────────────────────
 
     def _on_theme_changed_base(self, tokens: object) -> None:
-        """Called on every theme change; refreshes shadows then gradient."""
-        self.refresh_shadows()
-        # GradientWidget repaints itself via its own theme_changed connection.
+        """Called on every theme change. Nothing to rebuild here: the
+        GradientWidget surface repaints itself (background and card shadows)
+        via its own theme_changed connection. Subclasses extend this."""
 
     # ── Background jobs ───────────────────────────────────────────────────
     #
