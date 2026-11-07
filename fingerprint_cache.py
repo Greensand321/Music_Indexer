@@ -465,18 +465,20 @@ def get_fingerprint(
     if trace is None:
         trace = {}
 
-    path = ensure_long_path(path)
+    # The cache key and every OS call use the long-path form; the caller's
+    # own path is what compute_func, logs and messages see (no ``\\?\``).
+    key = ensure_long_path(path)
     os.makedirs(os.path.dirname(db_path), exist_ok=True)
     try:
-        mtime = os.path.getmtime(path)
-        size = os.path.getsize(path)
+        mtime = os.path.getmtime(key)
+        size = os.path.getsize(key)
     except OSError as e:
         log_callback(f"! Could not stat {path}: {e}")
         trace["source"] = "stat_error"
         trace["error"] = str(e)
         return None
 
-    fp = _memo_get(db_path, path, mtime, size)
+    fp = _memo_get(db_path, key, mtime, size)
     if fp is not None:
         _dlog("FP", f"cache hit (memory) {path}", log_callback)
         trace["source"] = "cache"
@@ -490,7 +492,7 @@ def get_fingerprint(
         if conn is not None:
             row = conn.execute(
                 "SELECT mtime, size, fingerprint FROM fingerprints WHERE path=?",
-                (path,),
+                (key,),
             ).fetchone()
     except sqlite3.Error as e:
         # An unreadable cache is a cache miss, not a reason to fail the lookup.
@@ -519,7 +521,7 @@ def get_fingerprint(
             f"fingerprint_prefix={fp[:16]} len={len(fp)}",
             log_callback,
         )
-        _memo_put(db_path, path, mtime, size, fp)
+        _memo_put(db_path, key, mtime, size, fp)
         trace["source"] = "cache"
         trace["error"] = ""
         return fp
@@ -538,9 +540,9 @@ def get_fingerprint(
             f"computed fingerprint prefix={fp_hash[:16]} len={len(fp_hash)}",
             log_callback,
         )
-        _memo_put(db_path, path, mtime, size, fp_hash)
+        _memo_put(db_path, key, mtime, size, fp_hash)
         try:
-            _get_writer(db_path).enqueue(path, mtime, size, duration, fp_hash)
+            _get_writer(db_path).enqueue(key, mtime, size, duration, fp_hash)
         except (sqlite3.Error, OSError) as e:
             log_callback(f"! Fingerprint cache write failed: {e}")
     if fp_hash:
@@ -567,7 +569,9 @@ def get_cached_fingerprint(
     if trace is None:
         trace = {}
 
-    path = ensure_long_path(path)
+    # The cache key and every OS call use the long-path form; the caller's
+    # own path is what compute_func, logs and messages see (no ``\\?\``).
+    key = ensure_long_path(path)
     os.makedirs(os.path.dirname(db_path), exist_ok=True)
     for attempt in range(retries):
         conn: sqlite3.Connection | None = None
@@ -578,8 +582,8 @@ def get_cached_fingerprint(
                 trace["error"] = ""
                 return None
             try:
-                mtime = os.path.getmtime(path)
-                size = os.path.getsize(path)
+                mtime = os.path.getmtime(key)
+                size = os.path.getsize(key)
             except OSError as e:
                 log_callback(f"! Could not stat {path}: {e}")
                 trace["source"] = "stat_error"
@@ -587,7 +591,7 @@ def get_cached_fingerprint(
                 return None
             row = conn.execute(
                 "SELECT mtime, size, fingerprint FROM fingerprints WHERE path=?",
-                (path,),
+                (key,),
             ).fetchone()
             cached_mtime = row[0] if row else None
             cached_size = row[1] if row else None
@@ -646,7 +650,9 @@ def get_cached_fingerprint_metadata(
         except Exception:
             return None
 
-    path = ensure_long_path(path)
+    # The cache key and every OS call use the long-path form; the caller's
+    # own path is what compute_func, logs and messages see (no ``\\?\``).
+    key = ensure_long_path(path)
     os.makedirs(os.path.dirname(db_path), exist_ok=True)
     for attempt in range(retries):
         conn: sqlite3.Connection | None = None
@@ -657,8 +663,8 @@ def get_cached_fingerprint_metadata(
                 trace["error"] = ""
                 return None, None
             try:
-                mtime = os.path.getmtime(path)
-                size = os.path.getsize(path)
+                mtime = os.path.getmtime(key)
+                size = os.path.getsize(key)
             except OSError as e:
                 log_callback(f"! Could not stat {path}: {e}")
                 trace["source"] = "stat_error"
@@ -685,7 +691,7 @@ def get_cached_fingerprint_metadata(
                 FROM fingerprints
                 WHERE path=?
                 """,
-                (path,),
+                (key,),
             ).fetchone()
             cached_mtime = row[0] if row else None
             cached_size = row[1] if row else None
@@ -763,18 +769,20 @@ def store_fingerprint(
     if log_callback is None:
         log_callback = lambda msg: None
 
-    path = ensure_long_path(path)
+    # The cache key and every OS call use the long-path form; the caller's
+    # own path is what compute_func, logs and messages see (no ``\\?\``).
+    key = ensure_long_path(path)
     os.makedirs(os.path.dirname(db_path), exist_ok=True)
     for attempt in range(retries):
         try:
             try:
-                mtime = os.path.getmtime(path)
-                size = os.path.getsize(path)
+                mtime = os.path.getmtime(key)
+                size = os.path.getsize(key)
             except OSError as e:
                 log_callback(f"! Could not stat {path}: {e}")
                 return False
             _get_writer(db_path).enqueue(
-                path,
+                key,
                 mtime,
                 size,
                 duration,
@@ -792,7 +800,7 @@ def store_fingerprint(
                 normalized_title=normalized_title,
                 normalized_album=normalized_album,
             )
-            _memo_put(db_path, path, mtime, size, fingerprint)
+            _memo_put(db_path, key, mtime, size, fingerprint)
             if flush:
                 flush_fingerprint_writes(db_path)
             return True

@@ -1382,8 +1382,14 @@ def build_indexer_plan(
 
 
 def _rel(path: str, root: str) -> str:
+    """``path`` relative to ``root`` for display, always with ``/``.
+
+    The preview and the execute log mix these with literal ``Trash/`` /
+    ``Docs/`` folder names, so on Windows the native ``\\`` would give
+    ``Aurora Lines\\Dawn Signals/``-style mixed separators.
+    """
     try:
-        return os.path.relpath(path, root)
+        return os.path.relpath(path, root).replace(os.sep, "/")
     except ValueError:
         return path
 

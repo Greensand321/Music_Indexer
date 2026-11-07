@@ -650,6 +650,8 @@ class PairReviewDialog(QtWidgets.QDialog):
 
     def _update_playlists(self, moved: str, kept: str) -> list[str]:
         """Point playlist entries for ``moved`` at ``kept``; returns the playlists changed."""
+        from utils.path_helpers import playlist_entry
+
         playlists_dir = os.path.join(self._library_path, "Playlists")
         if not os.path.isdir(playlists_dir):
             return []
@@ -671,7 +673,10 @@ class PairReviewDialog(QtWidgets.QDialog):
                     if entry and not entry.startswith("#"):
                         absolute = entry if os.path.isabs(entry) else os.path.join(dirpath, entry)
                         if os.path.normcase(os.path.normpath(absolute)) == target:
-                            line = kept if os.path.isabs(entry) else os.path.relpath(kept, dirpath)
+                            # Keep the entry's own form: absolute or relative,
+                            # "/" or "\\" (relative falls back to absolute
+                            # across Windows drives).
+                            line = playlist_entry(kept, dirpath, like=entry)
                             hit = True
                     out.append(line)
                 if hit:

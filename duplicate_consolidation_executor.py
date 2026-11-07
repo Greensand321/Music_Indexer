@@ -39,7 +39,7 @@ from duplicate_consolidation import (
 )
 from indexer_control import IndexCancelled, cancel_event as global_cancel_event
 from utils.audio_metadata_reader import _extract_cover_payloads, read_sidecar_artwork_bytes
-from utils.path_helpers import ensure_long_path
+from utils.path_helpers import ensure_long_path, match_separators, safe_relpath
 from utils.year_normalizer import UNKNOWN_YEAR
 
 try:
@@ -237,7 +237,9 @@ def _rewrite_playlist(path: str, mapping: Mapping[str, str], *, base_dir: str | 
         if normalized in mapping:
             replaced += 1
             new_abs = mapping[normalized]
-            rel = os.path.relpath(new_abs, playlist_dir)
+            # Relative to the playlist (absolute across Windows drives), in
+            # the separator style the entry already used.
+            rel = match_separators(safe_relpath(new_abs, playlist_dir), ln)
             new_lines.append(rel)
         else:
             new_lines.append(ln)
@@ -257,7 +259,9 @@ def _rewrite_playlist_lines(
         if normalized in mapping:
             replaced += 1
             new_abs = mapping[normalized]
-            rel = os.path.relpath(new_abs, playlist_dir)
+            # Relative to the playlist (absolute across Windows drives), in
+            # the separator style the entry already used.
+            rel = match_separators(safe_relpath(new_abs, playlist_dir), ln)
             new_lines.append(rel)
         else:
             new_lines.append(ln)
