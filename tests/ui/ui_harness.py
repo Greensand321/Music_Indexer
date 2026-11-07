@@ -342,11 +342,23 @@ class ThreadRecorder:
         deadline = time.monotonic() + timeout_ms / 1000
         app = QtWidgets.QApplication.instance()
         while time.monotonic() < deadline:
-            if app is not None:
-                app.processEvents(QtCore.QEventLoop.ProcessEventsFlag.AllEvents, 20)
             running = self.alive()
             if not running:
-                break
+                # Every recorded thread has finished, so whatever it emitted
+                # is already queued: deliver it, and stop only if that started
+                # no new thread. (Checking alive() right *after* a
+                # processEvents raced with a thread finishing in between: its
+                # queued signal -- e.g. "art ready", whose slot starts the
+                # neighbour-art loaders -- ran in the final processEvents
+                # below, after the wait had already returned.)
+                started = len(self._threads)
+                if app is not None:
+                    app.processEvents()
+                if len(self._threads) == started:
+                    break
+                continue
+            if app is not None:
+                app.processEvents(QtCore.QEventLoop.ProcessEventsFlag.AllEvents, 20)
             for t in running:
                 t.wait(10)
         if app is not None:
