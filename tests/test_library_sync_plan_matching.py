@@ -99,8 +99,11 @@ def test_plan_follows_matches_and_flags(sync_env, tmp_path):
     assert new.decision == library_sync.ExecutionDecision.COPY and new.action == "copy"   # LIB-03
     assert dupe.decision == library_sync.ExecutionDecision.SKIP_DUPLICATE                 # LIB-05
     assert up.decision == library_sync.ExecutionDecision.REPLACE                          # LIB-04
-    old_mp3 = library_sync._normalize_path(str(lib / "Aurora Lines" / "Dawn Signals" / "02 - Northbound.mp3"))
+    # Plan paths are real paths with their letter case kept (_abs_path); only
+    # comparison keys are lower-cased on Windows (_normalize_path).
+    old_mp3 = library_sync._abs_path(str(lib / "Aurora Lines" / "Dawn Signals" / "02 - Northbound.mp3"))
     assert up.destination == old_mp3[:-4] + ".flac"
+    assert "Aurora Lines" in up.destination and "Northbound" in up.destination
     assert plan.replacement_targets[up.source] == old_mp3
     assert plan.copy_only == {new.source}
     assert plan.allowed_replacements == {up.destination}

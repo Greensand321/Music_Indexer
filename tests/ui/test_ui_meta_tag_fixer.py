@@ -120,7 +120,7 @@ def test_sorting_then_toggling_rows_is_stable(make_workspace, tmp_path, monkeypa
         ws._on_deselect_all()
         set_row_checked(ws, "a.flac", "Artist", True)
         set_row_checked(ws, "c.opus", "Album", True)
-        selected = sorted((str(r.path).rsplit("/", 1)[-1], tuple(f)) for r, f in ws._selected_changes())
+        selected = sorted((Path(r.path).name, tuple(f)) for r, f in ws._selected_changes())
         assert selected == [("a.flac", ("artist",)), ("c.opus", ("album",))]
 
 

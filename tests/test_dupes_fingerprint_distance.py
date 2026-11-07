@@ -62,8 +62,23 @@ def test_decoder_accepts_bytes_and_padding():
     assert nd.decode_chromaprint(fp + "=" * (-len(fp) % 4)) == as_str
 
 
+def _import_chromaprint():
+    """Import pyacoustid's ``chromaprint`` binding, or skip.
+
+    The module is pure Python and imports fine everywhere, but it raises a plain
+    ``ImportError`` (not ``ModuleNotFoundError``) when the libchromaprint shared
+    library is missing -- the normal state on Windows. ``pytest.importorskip``
+    no longer skips on that, so catch it here.
+    """
+    try:
+        import chromaprint
+    except ImportError as exc:
+        pytest.skip(f"libchromaprint unavailable: {exc}")
+    return chromaprint
+
+
 def test_decoder_matches_libchromaprint():
-    chromaprint = pytest.importorskip("chromaprint")
+    chromaprint = _import_chromaprint()
     try:
         ref, algorithm = chromaprint.decode_fingerprint(FPS["songA.mp3_64"].encode())
     except Exception as exc:  # library missing at runtime
@@ -227,7 +242,7 @@ def _libchromaprint_fpcalc(bin_dir):
 def live_pipeline(tmp_path, monkeypatch):
     if os.name == "nt" or shutil.which("ffmpeg") is None:
         pytest.skip("needs ffmpeg and a POSIX shell")
-    chromaprint = pytest.importorskip("chromaprint")
+    chromaprint = _import_chromaprint()
     try:
         chromaprint.Fingerprinter()
     except Exception as exc:

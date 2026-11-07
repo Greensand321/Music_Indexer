@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import os
 import shutil
-import stat
 import sys
 import threading
 import time
@@ -18,20 +17,19 @@ from pathlib import Path
 
 import pytest
 
+from _helpers.fake_ffmpeg import install_fake_ffmpeg, pid_alive
 from utils import opus_library_mirror as mirror
 
 
-def _fake_ffmpeg(bin_dir: Path, mode: str) -> Path:
-    """Install a fake ``ffmpeg`` on PATH.
+def _fake_ffmpeg(bin_dir: Path, mode: str, monkeypatch) -> Path:
+    """Install a fake ``ffmpeg`` (a Python script; works on Windows too).
 
     mode "hang": write a few bytes to the output, record its pid, sleep.
     mode "fail": exit 1 with an error message.
     """
-    bin_dir.mkdir(parents=True, exist_ok=True)
-    script = bin_dir / "ffmpeg"
     pid_file = bin_dir / "ffmpeg.pid"
-    script.write_text(
-        f"#!{sys.executable}\n"
+    install_fake_ffmpeg(
+        bin_dir, monkeypatch,
         "import os, sys, time\n"
         f"mode = {mode!r}\n"
         "out = sys.argv[-1]\n"
@@ -41,22 +39,11 @@ def _fake_ffmpeg(bin_dir: Path, mode: str) -> Path:
         "open(out, 'wb').write(b'OggS-partial')\n"
         f"open({str(pid_file)!r}, 'w').write(str(os.getpid()))\n"
         "time.sleep(60)\n",
-        encoding="utf-8",
     )
-    script.chmod(script.stat().st_mode | stat.S_IEXEC)
     return pid_file
 
 
-def _pid_alive(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    # A zombie still answers kill(0); check its state on Linux.
-    status = Path(f"/proc/{pid}/status")
-    if status.exists():
-        return "zombie" not in status.read_text().lower()
-    return True
+_pid_alive = pid_alive
 
 
 def _flac_library(root: Path) -> Path:
@@ -79,8 +66,7 @@ def test_cancel_terminates_ffmpeg_and_removes_partial_output(tmp_path, monkeypat
     # Build the real FLAC first: the factory itself needs the real ffmpeg.
     build_library(tmp_path / "lib", [TrackSpec("A", "T", "B", 1, ext=".flac", relpath="in.flac")])
     src = tmp_path / "lib" / "in.flac"
-    pid_file = _fake_ffmpeg(tmp_path / "bin", "hang")
-    monkeypatch.setenv("PATH", f"{tmp_path / 'bin'}{os.pathsep}{os.environ['PATH']}")
+    pid_file = _fake_ffmpeg(tmp_path / "bin", "hang", monkeypatch)
     dest = tmp_path / "out" / "in.opus"
     dest.parent.mkdir()
 
@@ -132,8 +118,7 @@ def test_metadata_failure_leaves_no_untagged_file(tmp_path, monkeypatch):
 
 def test_ffmpeg_failure_goes_to_error_callback(tmp_path, monkeypatch):
     lib = _flac_library(tmp_path / "Music")
-    _fake_ffmpeg(tmp_path / "bin", "fail")
-    monkeypatch.setenv("PATH", f"{tmp_path / 'bin'}{os.pathsep}{os.environ['PATH']}")
+    _fake_ffmpeg(tmp_path / "bin", "fail", monkeypatch)
     infos: list[str] = []
     errors: list[str] = []
     summary = mirror.mirror_library(
