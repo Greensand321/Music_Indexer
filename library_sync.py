@@ -1,6 +1,7 @@
 """Helpers for comparing an existing library to an incoming folder."""
 from __future__ import annotations
 
+import errno
 import filecmp
 import hashlib
 import json
@@ -87,7 +88,29 @@ def _dlog(msg: str, log_callback: Callable[[str], None] | None = None) -> None:
 
 
 def _normalize_path(path: str) -> str:
+    """Comparison key for ``path`` (lower-cased on Windows).
+
+    Only ever use it to *compare* or *look up* paths: handing it to the file
+    system would create lower-cased folders and files on Windows. Real paths
+    go through :func:`_abs_path`.
+    """
     return os.path.normcase(os.path.normpath(os.path.abspath(path)))
+
+
+def _abs_path(path: str) -> str:
+    """Absolute, normalised ``path`` with its original letter case kept."""
+    return os.path.normpath(os.path.abspath(path))
+
+
+def _rel_inside(path: str, root: str) -> str | None:
+    """``path`` relative to ``root`` when it lies inside ``root``, else None."""
+    try:
+        rel = os.path.relpath(path, root)
+    except ValueError:      # another drive (Windows)
+        return None
+    if rel == os.pardir or rel.startswith(os.pardir + os.sep) or os.path.isabs(rel):
+        return None
+    return rel
 
 
 def _stable_track_id(path: str) -> str:
@@ -847,6 +870,12 @@ class LibrarySyncPlan:
     items: List[PlannedItem] = field(default_factory=list)
     transfer_mode: str = "move"
     match_based: bool = False   # items decided from the scan's match results
+    # What the plan assumed about the disk when it was built: path ->
+    # (size, mtime_ns) for every incoming file to transfer and every library
+    # file a Replace displaces, or None for a destination that must not exist
+    # yet. ``execute_plan`` skips (and reports) every item whose assumption no
+    # longer holds. Empty for hand-built legacy plans (nothing is checked).
+    snapshot: Dict[str, Optional[Tuple[int, int]]] = field(default_factory=dict)
 
     def planned_moves(self) -> Dict[str, str]:
         """Return a copy of the planned move mapping for execution."""
@@ -943,16 +972,46 @@ def _files_match(path_a: str, path_b: str) -> bool:
         return False
 
 
-def _unique_destination(path: str, taken: set[str]) -> str:
-    if path not in taken and not os.path.exists(path):
+def _unique_destination(path: str, taken) -> str:
+    """``path``, or ``name (n).ext`` when it exists on disk or its comparison
+    key is in ``taken`` (a set or dict of :func:`_normalize_path` keys).
+    The returned path keeps its original letter case."""
+    if _normalize_path(path) not in taken and not os.path.lexists(path):
         return path
     base, ext = os.path.splitext(path)
     n = 1
     while True:
-        candidate = _normalize_path(f"{base} ({n}){ext}")
-        if candidate not in taken and not os.path.exists(candidate):
+        candidate = f"{base} ({n}){ext}"
+        if _normalize_path(candidate) not in taken and not os.path.lexists(candidate):
             return candidate
         n += 1
+
+
+def _file_sig(path: str) -> Optional[Tuple[int, int]]:
+    """``(size, mtime_ns)`` of ``path``, or None when it does not exist."""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    return (int(st.st_size), int(st.st_mtime_ns))
+
+
+def _plan_snapshot(items: Iterable[PlannedItem], replacement_targets: Dict[str, str]) -> Dict[str, Optional[Tuple[int, int]]]:
+    """What execute must find on disk for ``items`` to still mean what the
+    preview said (see :attr:`LibrarySyncPlan.snapshot`)."""
+    snap: Dict[str, Optional[Tuple[int, int]]] = {}
+    for item in items:
+        if item.decision not in (ExecutionDecision.COPY, ExecutionDecision.REPLACE):
+            continue
+        snap[item.source] = _file_sig(item.source)
+        if item.decision == ExecutionDecision.REPLACE:
+            snap[item.destination] = _file_sig(item.destination)
+            target = replacement_targets.get(item.source)
+            if target:
+                snap[target] = _file_sig(target)
+        else:
+            snap[item.destination] = None
+    return snap
 
 
 def _compute_plan_items(
@@ -966,15 +1025,17 @@ def _compute_plan_items(
 ) -> List[PlannedItem]:
     """Attach deterministic execution decisions to each planned move."""
 
-    copy_only_set = set(copy_only or [])
-    allowed_replacements_set = set(allowed_replacements or [])
+    # Compared by key (case-insensitively on Windows), whatever form the
+    # caller's paths are in.
+    copy_only_set = {_normalize_path(p) for p in (copy_only or [])}
+    allowed_replacements_set = {_normalize_path(p) for p in (allowed_replacements or [])}
     normalized_transfer_mode = "copy" if str(transfer_mode).lower() == "copy" else "move"
     items: List[PlannedItem] = []
 
     for src, dst in sorted(moves.items(), key=lambda item: item[1]):
-        action = "copy" if src in copy_only_set else normalized_transfer_mode
+        action = "copy" if _normalize_path(src) in copy_only_set else normalized_transfer_mode
         dest_exists = os.path.exists(dst)
-        replacement_allowed = allow_all_replacements or dst in allowed_replacements_set
+        replacement_allowed = allow_all_replacements or _normalize_path(dst) in allowed_replacements_set
 
         if dest_exists and not replacement_allowed:
             if _files_match(src, dst):
@@ -1013,7 +1074,10 @@ def _decide_items_from_matches(
 ) -> Tuple[List[PlannedItem], set[str], set[str], Dict[str, str]]:
     """Decide every incoming track from its match result and the user's flags.
 
-    * New track → transferred to its routed destination.
+    * New track → transferred to its routed destination; when a *different*
+      file already has that name it is added under a ``(n)`` name (and the
+      reason says so). Only a byte-identical file there (or an identical
+      incoming file already being added) makes it a skip.
     * Exact match / collision → skipped (already in the library); a "Potential
       Upgrade" needs review instead.
     * Low-confidence match → needs review.
@@ -1022,6 +1086,9 @@ def _decide_items_from_matches(
     * Flag **Replace** → takes the matched track's place (same folder and
       name, incoming extension); the old file is backed up and retired.
     * Files the reviewed scan never saw → need review (scan again).
+
+    Paths in the result keep their letter case; matching uses
+    :func:`_normalize_path` keys (case-insensitive on Windows).
 
     Returns ``(items, copy_only, allowed_replacements, replacement_targets)``.
     """
@@ -1033,31 +1100,32 @@ def _decide_items_from_matches(
     copy_only: set[str] = set()
     allowed: set[str] = set()
     targets: Dict[str, str] = {}
-    taken: set[str] = set()
+    taken: Dict[str, str] = {}      # destination key -> incoming source taking it
 
     def add(src: str, dst: str, decision: ExecutionDecision, reason: str, action: str = mode) -> None:
         items.append(PlannedItem(source=src, destination=dst, decision=decision, reason=reason, action=action))
 
     for src, dst in sorted(moves.items(), key=lambda kv: kv[1]):
-        match = by_source.get(src)
+        match = by_source.get(_normalize_path(src))
         if match is None:
             add(src, dst, ExecutionDecision.REVIEW_REQUIRED,
                 "Not part of the reviewed scan — scan again to include it")
             continue
         track_id = match.incoming.track_id
         existing = match.existing
-        existing_path = _normalize_path(existing.path) if existing is not None else ""
+        existing_path = _abs_path(existing.path) if existing is not None else ""
         existing_rel = _rel_to(existing_path, library_root) if existing_path else ""
 
         if track_id in replace_ids and existing is not None:
             stem = os.path.splitext(os.path.basename(existing_path))[0]
-            new_dst = _normalize_path(os.path.join(os.path.dirname(existing_path), stem + match.incoming.ext))
-            if new_dst != existing_path and (os.path.exists(new_dst) or new_dst in taken):
+            new_dst = os.path.join(os.path.dirname(existing_path), stem + match.incoming.ext)
+            new_key = _normalize_path(new_dst)
+            if new_key != _normalize_path(existing_path) and (os.path.lexists(new_dst) or new_key in taken):
                 add(src, new_dst, ExecutionDecision.REVIEW_REQUIRED,
                     f"Flagged Replace, but {_rel_to(new_dst, library_root)} already exists "
                     "and is not the matched track")
                 continue
-            taken.add(new_dst)
+            taken[new_key] = src
             allowed.add(new_dst)
             targets[src] = existing_path
             add(src, new_dst, ExecutionDecision.REPLACE,
@@ -1066,7 +1134,7 @@ def _decide_items_from_matches(
 
         if track_id in copy_ids:
             final = _unique_destination(dst, taken)
-            taken.add(final)
+            taken[_normalize_path(final)] = src
             copy_only.add(src)
             reason = "Flagged Copy"
             if existing is not None and match.status != MatchStatus.NEW:
@@ -1075,15 +1143,24 @@ def _decide_items_from_matches(
             continue
 
         if match.status == MatchStatus.NEW or existing is None:
-            if os.path.exists(dst) or dst in taken:
-                if os.path.exists(dst) and _files_match(src, dst):
-                    add(src, dst, ExecutionDecision.SKIP_DUPLICATE, "Exact duplicate already at its destination")
-                else:
-                    add(src, dst, ExecutionDecision.SKIP_KEEP_EXISTING,
-                        "Destination already exists; keeping the library copy")
-            else:
-                taken.add(dst)
+            other = taken.get(_normalize_path(dst))
+            if other is not None and _files_match(src, other):
+                add(src, dst, ExecutionDecision.SKIP_DUPLICATE,
+                    f"Identical to {os.path.basename(other)}, which this plan already adds")
+                continue
+            if other is None and os.path.lexists(dst) and _files_match(src, dst):
+                add(src, dst, ExecutionDecision.SKIP_DUPLICATE, "Exact duplicate already at its destination")
+                continue
+            final = _unique_destination(dst, taken)
+            taken[_normalize_path(final)] = src
+            if final == dst:
                 add(src, dst, ExecutionDecision.COPY, "New track")
+            else:
+                # A *different* song already has the routed name: the track is
+                # still new, so it is added under a "(n)" name, not skipped.
+                add(src, final, ExecutionDecision.COPY,
+                    f"New track: {_rel_to(dst, library_root)} is already taken by a different "
+                    f"file, so it is added as {os.path.basename(final)}")
             continue
 
         if match.status == MatchStatus.LOW_CONFIDENCE:
@@ -1126,7 +1203,7 @@ def resolve_review_flags_to_paths(
     # Process copy flags
     for track_id in review_flags.flags.copy:
         if track_id in track_map:
-            copy_only_paths.append(_normalize_path(track_map[track_id].incoming.path))
+            copy_only_paths.append(_abs_path(track_map[track_id].incoming.path))
 
     # Process replace flags
     for incoming_id, existing_id in review_flags.flags.replace.items():
@@ -1134,7 +1211,7 @@ def resolve_review_flags_to_paths(
             # For replace, we allow the destination to be replaced
             existing_path = track_map[incoming_id].existing.path if track_map[incoming_id].existing else None
             if existing_path:
-                allowed_replacement_paths.append(_normalize_path(existing_path))
+                allowed_replacement_paths.append(_abs_path(existing_path))
 
     return copy_only_paths, allowed_replacement_paths
 
@@ -1196,15 +1273,32 @@ def compute_library_sync_plan(
         coord=None,
     )
 
-    destination_root = os.path.join(library_root, "Music")
+    # Real paths keep their letter case (normcase is for comparisons only:
+    # on Windows it lower-cases, and every folder and file Library Sync
+    # created used to come out lower-cased).
+    library_abs = _abs_path(library_root)
+    incoming_abs = _abs_path(incoming_folder)
+    destination_root = os.path.join(library_abs, "Music")
     if not os.path.isdir(destination_root):
-        destination_root = library_root
+        destination_root = library_abs
+    # The engine routes an incoming folder's tracks under *its* music root
+    # (``incoming/Music`` when that exists), so routes are re-based from
+    # there: an incoming ``Music/`` folder used to give ``Music/Music/…``.
+    incoming_music_root = os.path.join(incoming_abs, "Music")
+    if not os.path.isdir(incoming_music_root):
+        incoming_music_root = incoming_abs
 
     def _remap_path(path: str) -> str:
-        rel = os.path.relpath(path, incoming_folder)
-        return _normalize_path(os.path.join(destination_root, rel))
+        path = _abs_path(path)
+        rel = _rel_inside(path, incoming_music_root)
+        if rel is not None:
+            return _abs_path(os.path.join(destination_root, rel))
+        rel = _rel_inside(path, incoming_abs)
+        if rel is not None:      # e.g. a top-level folder beside incoming/Music
+            return _abs_path(os.path.join(library_abs, rel))
+        return path
 
-    remapped_moves = {_normalize_path(src): _remap_path(dst) for src, dst in moves.items()}
+    remapped_moves = {_abs_path(src): _remap_path(dst) for src, dst in moves.items()}
     remapped_tag_index = {_remap_path(dst): data for dst, data in tag_index.items()}
     normalized_mode = "copy" if str(transfer_mode).lower() == "copy" else "move"
 
@@ -1213,7 +1307,7 @@ def compute_library_sync_plan(
             remapped_moves,
             list(match_results),
             review_flags,
-            library_root=_normalize_path(library_root),
+            library_root=library_abs,
             transfer_mode=normalized_mode,
         )
         for item in plan_items:
@@ -1224,12 +1318,12 @@ def compute_library_sync_plan(
             f"{os.path.basename(i.source)}: {i.decision.value} — {i.reason}" for i in plan_items
         ]
     else:
-        copy_only = {_normalize_path(p) for p in (copy_only_paths or [])}
-        allowed = {_normalize_path(p) for p in (allowed_replacement_paths or [])}
+        copy_only = {_abs_path(p) for p in (copy_only_paths or [])}
+        allowed = {_abs_path(p) for p in (allowed_replacement_paths or [])}
         targets = {}
         plan_items = _compute_plan_items(
             remapped_moves,
-            destination_root=_normalize_path(destination_root),
+            destination_root=destination_root,
             copy_only=copy_only,
             allow_all_replacements=False,
             allowed_replacements=allowed,
@@ -1237,9 +1331,9 @@ def compute_library_sync_plan(
         )
 
     return LibrarySyncPlan(
-        library_root=_normalize_path(library_root),
-        incoming_root=_normalize_path(incoming_folder),
-        destination_root=_normalize_path(destination_root),
+        library_root=library_abs,
+        incoming_root=incoming_abs,
+        destination_root=destination_root,
         moves=remapped_moves,
         tag_index=remapped_tag_index,
         decision_log=decision_log,
@@ -1249,6 +1343,7 @@ def compute_library_sync_plan(
         items=plan_items,
         transfer_mode=normalized_mode,
         match_based=match_results is not None,
+        snapshot=_plan_snapshot(plan_items, targets),
     )
 
 
@@ -1306,19 +1401,20 @@ def build_review_replacement_plan(
         base_plan.allowed_replacements = set()
         base_plan.replacement_targets = {}
         base_plan.items = []
+        base_plan.snapshot = {}
         base_plan.decision_log.append("No replacement candidates selected.")
         return base_plan
 
     filtered_moves = {
-        src: dst for src, dst in base_plan.moves.items() if src in selected
+        src: dst for src, dst in base_plan.moves.items() if _normalize_path(src) in selected
     }
     filtered_tag_index = {
         dst: data for dst, data in base_plan.tag_index.items() if dst in filtered_moves.values()
     }
     replacement_targets = {
-        src: _normalize_path(selected[src].existing.path)  # type: ignore[union-attr]
+        src: _abs_path(selected[_normalize_path(src)].existing.path)  # type: ignore[union-attr]
         for src in filtered_moves
-        if selected[src].existing is not None
+        if selected[_normalize_path(src)].existing is not None
     }
     base_plan.moves = filtered_moves
     base_plan.tag_index = filtered_tag_index
@@ -1332,6 +1428,7 @@ def build_review_replacement_plan(
         allowed_replacements=base_plan.allowed_replacements,
         transfer_mode=base_plan.transfer_mode,
     )
+    base_plan.snapshot = _plan_snapshot(base_plan.items, base_plan.replacement_targets)
     base_plan.decision_log.append(
         f"Review action {action.value} selected {len(filtered_moves)} replacement(s)."
     )
@@ -1399,8 +1496,12 @@ def _render_execution_report(
     output_html_path: str,
     heading: str,
     dry_run: bool,
+    notes: Iterable[str] = (),
 ) -> str:
     """Write an executed-plan HTML using the indexer preview style."""
+    import html as _html
+
+    esc = _html.escape
     idx.render_dry_run_html_from_plan(
         plan.destination_root,
         output_html_path,
@@ -1413,16 +1514,20 @@ def _render_execution_report(
     sections: List[str] = []
     if dry_run:
         sections.append("<p><strong>Dry run:</strong> no files were modified.</p>")
+    for note in notes:
+        sections.append(f"<p>{esc(note)}</p>")
 
     def _format_section(title: str, items: List[Dict[str, str]]) -> None:
         if not items:
             return
-        sections.append(f"<h3>{idx.sanitize(title)}</h3>")
+        sections.append(f"<h3>{esc(title)}</h3>")
         sections.append("<ul>")
         for item in items:
-            src = idx.sanitize(os.path.basename(item.get("source", "")))
-            dst = idx.sanitize(os.path.basename(item.get("destination", "")))
-            reason = idx.sanitize(item.get("reason", ""))
+            # Escaped, not "sanitized": reasons carry paths (e.g. a leftover
+            # temporary file) that must stay readable.
+            src = esc(os.path.basename(str(item.get("source", ""))))
+            dst = esc(os.path.basename(str(item.get("destination", ""))))
+            reason = esc(str(item.get("reason", "") or ""))
             line = f"<li><code>{src}</code> → <code>{dst}</code>"
             if reason:
                 line += f" — {reason}"
@@ -1462,24 +1567,327 @@ def _unique_file_path(path: str) -> str:
     return f"{base} ({n}){ext}"
 
 
-def _transfer(src: str, dst: str, action: str, *, replace: bool) -> None:
-    """Copy or move ``src`` to ``dst``. With ``replace`` the existing ``dst`` is
-    swapped out atomically (never left missing if the transfer fails)."""
-    os.makedirs(os.path.dirname(dst), exist_ok=True)
-    if not replace:
-        if os.path.lexists(dst):
-            raise FileExistsError(f"destination exists: {dst}")
-        if action == "copy":
-            shutil.copy2(src, dst)
+# ── Reversible file transfers ────────────────────────────────────────────────
+#
+# Every step that changes the library can be undone if a later one fails:
+# content is written under a temporary name in the destination folder and
+# renamed to its final name only once it is complete (a failed or interrupted
+# copy never leaves a truncated file under a real track name); a move to
+# another drive copies first and deletes the original only after everything
+# else succeeded; a Replace backs the existing file up before displacing it.
+# When an undo itself fails the leftover path is reported, never abandoned.
+
+_STAGE_SUFFIX = ".alphadex-incoming"
+_PARTIAL_SUFFIX = ".alphadex-partial"
+_COPY_CHUNK = 1024 * 1024
+
+
+class TransferError(Exception):
+    """A transfer step failed.
+
+    ``undone`` describes the state it was left in (what was put back, or
+    where a file that could not be put back now is); ``leftover`` is that
+    file's path (None when everything was undone).
+    """
+
+    def __init__(self, message: str, *, undone: str = "", leftover: str | None = None) -> None:
+        super().__init__(message)
+        self.message = message
+        self.undone = undone
+        self.leftover = leftover
+
+    def describe(self) -> str:
+        parts = [self.message.rstrip(".") + "."]
+        if self.undone:
+            parts.append(self.undone)
+        return " ".join(parts)
+
+
+def _discard(path: str) -> str | None:
+    """Delete a file this run created; returns ``path`` if that failed."""
+    try:
+        if os.path.lexists(path):
+            os.unlink(path)
+        return None
+    except OSError:
+        return path
+
+
+def _make_parents(path: str) -> List[str]:
+    """Create the missing parent folders of ``path``; return them deepest first."""
+    created: List[str] = []
+    parent = os.path.dirname(path)
+    while parent and not os.path.isdir(parent):
+        created.append(parent)
+        nxt = os.path.dirname(parent)
+        if nxt == parent:
+            break
+        parent = nxt
+    if created:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+    return created
+
+
+def _remove_if_empty(folders: Iterable[str]) -> None:
+    for folder in folders:          # deepest first
+        try:
+            os.rmdir(folder)
+        except OSError:
+            break
+
+
+def _is_cross_device(exc: OSError) -> bool:
+    return exc.errno == errno.EXDEV or getattr(exc, "winerror", None) == 17
+
+
+def _same_device(path: str, folder: str) -> bool:
+    try:
+        return os.stat(path).st_dev == os.stat(folder).st_dev
+    except OSError:
+        return False
+
+
+def _rename_no_clobber(src: str, dst: str) -> None:
+    if os.path.lexists(dst):
+        raise FileExistsError(errno.EEXIST, "destination exists; not overwritten", dst)
+    os.rename(src, dst)
+
+
+def _copy_new(src: str, tmp: str) -> None:
+    """Copy ``src`` into the *new* file ``tmp`` (never an existing one), flush
+    it to disk and copy the timestamps. On any failure the partial ``tmp`` is
+    deleted and :class:`TransferError` raised."""
+    created = False
+    try:
+        with open(src, "rb") as fsrc:
+            with open(tmp, "xb") as fdst:
+                created = True
+                shutil.copyfileobj(fsrc, fdst, _COPY_CHUNK)
+                fdst.flush()
+                try:
+                    os.fsync(fdst.fileno())
+                except OSError:
+                    pass
+        try:
+            shutil.copystat(src, tmp)
+        except OSError:
+            pass
+    except Exception as exc:
+        leftover = _discard(tmp) if created else None
+        if leftover:
+            undone = f"The partial copy could not be removed and was left at {leftover}."
         else:
-            shutil.move(src, dst)
-        return
-    tmp = _unique_file_path(dst + ".alphadex-incoming")
-    if action == "copy":
-        shutil.copy2(src, tmp)
-    else:
-        shutil.move(src, tmp)
-    os.replace(tmp, dst)
+            undone = "The partial copy was removed." if created else ""
+        raise TransferError(f"copying failed ({exc})", undone=undone, leftover=leftover) from exc
+
+
+def _copy_file(src: str, dst: str) -> None:
+    """Copy ``src`` to the free name ``dst`` through a temporary file, so
+    ``dst`` only ever exists complete."""
+    _make_parents(dst)
+    tmp = _unique_file_path(dst + _PARTIAL_SUFFIX)
+    _copy_new(src, tmp)
+    try:
+        _rename_no_clobber(tmp, dst)
+    except OSError:
+        _discard(tmp)
+        raise
+
+
+@dataclass
+class _Staged:
+    """An incoming file's content placed in the library (under a temporary
+    or its final name), and how to take it back out."""
+
+    source: str
+    path: str
+    renamed: bool                     # the source itself was renamed here (one drive, move)
+    created_dirs: List[str] = field(default_factory=list)
+
+    def undo(self) -> Tuple[str, str | None]:
+        """Take the file back out of the library — rename it back to its
+        source, or delete this run's copy. Returns ``(what was done, leftover)``."""
+        if self.renamed:
+            try:
+                _rename_no_clobber(self.path, self.source)
+            except OSError as exc:
+                return (f"The incoming file could not be put back ({exc}); it is now at "
+                        f"{self.path} — move it back to {self.source}."), self.path
+            undone = f"The incoming file was put back at {self.source}."
+        else:
+            leftover = _discard(self.path)
+            if leftover:
+                return (f"This run's copy could not be removed and was left at {leftover}; "
+                        "the incoming file is untouched."), leftover
+            undone = "This run's copy was removed; the incoming file is untouched."
+        _remove_if_empty(self.created_dirs)
+        return undone, None
+
+    def finish(self, action: str) -> str | None:
+        """Complete a move that had to copy (another drive): delete the
+        original. Returns a problem message, or None."""
+        if action != "move" or self.renamed:
+            return None
+        try:
+            os.unlink(self.source)
+        except OSError as exc:
+            return ("it was copied in, but the original could not be removed from the "
+                    f"incoming folder ({exc})")
+        return None
+
+
+def _stage(src: str, final: str, action: str) -> _Staged:
+    """Put ``src``'s content next to ``final`` under a temporary name: a
+    rename for a move on one drive, otherwise a complete, flushed copy."""
+    tmp = _unique_file_path(final + _STAGE_SUFFIX)
+    if action == "move" and _same_device(src, os.path.dirname(final)):
+        try:
+            os.rename(src, tmp)
+            return _Staged(src, tmp, renamed=True)
+        except OSError as exc:
+            if not _is_cross_device(exc):
+                raise TransferError(f"the incoming file could not be moved ({exc})") from exc
+    _copy_new(src, tmp)
+    return _Staged(src, tmp, renamed=False)
+
+
+def _place_new(src: str, dst: str, action: str) -> _Staged:
+    """Transfer ``src`` to the free name ``dst``: staged next to it, then
+    renamed into place. On failure the library is as it was."""
+    if os.path.lexists(dst):
+        raise TransferError("the destination exists; not overwritten")
+    try:
+        created = _make_parents(dst)
+    except OSError as exc:
+        raise TransferError(f"its folder could not be created ({exc})") from exc
+    try:
+        staged = _stage(src, dst, action)
+    except TransferError:
+        _remove_if_empty(created)
+        raise
+    staged.created_dirs = created
+    try:
+        _rename_no_clobber(staged.path, dst)
+    except OSError as exc:
+        undone, leftover = staged.undo()
+        raise TransferError(f"it could not be renamed into place ({exc})",
+                            undone=undone, leftover=leftover) from exc
+    staged.path = dst
+    return staged
+
+
+def _replace_in_place(src: str, dst: str, action: str, backup_path: str) -> _Staged:
+    """Swap ``src`` in for the existing ``dst`` (already backed up at
+    ``backup_path``) with one atomic replace. On failure the library file is
+    untouched — or restored from the backup if it went missing."""
+    staged = _stage(src, dst, action)
+    try:
+        os.replace(staged.path, dst)
+    except OSError as exc:
+        undone, leftover = staged.undo()
+        notes = [undone] if undone else []
+        library_intact = os.path.lexists(dst)
+        if library_intact:
+            notes.insert(0, "The library file was not changed.")
+        else:
+            try:
+                _copy_file(backup_path, dst)
+                notes.append("The library file was restored from its backup.")
+            except Exception as restore_exc:  # noqa: BLE001
+                notes.append(f"The library file is missing and could not be restored "
+                             f"from its backup at {backup_path} ({restore_exc}).")
+        error = TransferError(f"the library file could not be replaced ({exc})",
+                              undone=" ".join(notes), leftover=leftover)
+        error.backup_needed = not library_intact
+        raise error from exc
+    staged.path = dst
+    return staged
+
+
+def _retire(path: str, backup_path: str) -> None:
+    """Move the replaced library file ``path`` into the run's backups."""
+    _make_parents(backup_path)
+    if _same_device(path, os.path.dirname(backup_path)):
+        try:
+            _rename_no_clobber(path, backup_path)
+            return
+        except OSError as exc:
+            if not _is_cross_device(exc):
+                raise
+    _copy_file(path, backup_path)
+    try:
+        os.unlink(path)
+    except OSError:
+        _discard(backup_path)
+        raise
+
+
+_UNSET = object()
+
+
+def _stale_reason(
+    item: PlannedItem,
+    snapshot: Dict[str, Optional[Tuple[int, int]]],
+    replacement_target: str | None,
+    library_root: str,
+) -> str | None:
+    """Why ``item`` no longer means what the preview said, or None."""
+    if not snapshot:
+        return None
+    expected = snapshot.get(item.source, _UNSET)
+    if expected is not _UNSET and expected is not None and _file_sig(item.source) != expected:
+        return f"the incoming file {os.path.basename(item.source)} changed"
+    if item.decision != ExecutionDecision.REPLACE:
+        return None
+    for path in (item.destination, replacement_target):
+        if not path:
+            continue
+        expected = snapshot.get(path, _UNSET)
+        if expected is _UNSET:
+            continue
+        now = _file_sig(path)
+        label = _rel_to(path, library_root)
+        if expected is None and now is not None:
+            return f"{label} appeared"
+        if expected is not None and now is None:
+            return f"{label}, the file it replaces, is gone"
+        if expected is not None and now != expected:
+            return f"{label}, the file it replaces, changed"
+    return None
+
+
+LATEST_AUDIT_NAME = "LibrarySyncAudit.json"
+LATEST_REPORT_NAME = "LibrarySyncExecuted.html"
+
+
+def _new_run_paths(docs_dir: str) -> Tuple[str, str, str, str]:
+    """``(run_id, backup folder, audit path, report path)`` for a new run —
+    none of them used by an earlier run."""
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    n = 0
+    while True:
+        run_id = stamp if n == 0 else f"{stamp}_{n}"
+        paths = (
+            os.path.join(docs_dir, "Backups", "LibrarySync", run_id),
+            os.path.join(docs_dir, f"LibrarySyncAudit_{run_id}.json"),
+            os.path.join(docs_dir, f"LibrarySyncExecuted_{run_id}.html"),
+        )
+        if not any(os.path.lexists(p) for p in paths):
+            return (run_id, *paths)
+        n += 1
+
+
+def _write_alias(src: str, alias: str, log_callback: Callable[[str], None]) -> str | None:
+    """Make ``alias`` a copy of ``src`` (the stable "latest run" name)."""
+    tmp = alias + ".tmp"
+    try:
+        shutil.copyfile(src, tmp)
+        os.replace(tmp, alias)
+        return alias
+    except OSError as exc:  # pragma: no cover - OS interaction
+        _discard(tmp)
+        log_callback(f"! Could not update {os.path.basename(alias)}: {exc}")
+        return None
 
 
 def execute_plan(
@@ -1504,11 +1912,25 @@ def execute_plan(
     from ``plan.moves`` plus ``plan.copy_only`` / ``plan.allowed_replacements``
     / ``allow_replacements``.
 
-    Safety checks still apply per item at execution time: a missing source
-    fails, an existing destination is never overwritten unless the item is a
-    REPLACE, and every replaced file is backed up (into a per-run folder under
-    ``Docs/Backups/LibrarySync/``) before it is swapped out. Everything is
-    recorded in a JSON audit and an executed-report HTML.
+    Safety checks still apply per item at execution time:
+
+    * an item whose files changed since the plan was built (``plan.snapshot``:
+      the incoming file, or the library file a Replace displaces) is skipped
+      and reported as stale — a Replace never silently becomes a plain copy;
+    * a missing source fails, and an existing destination is never
+      overwritten unless the item is a REPLACE;
+    * every transfer is reversible: files are copied under a temporary name
+      and renamed into place when complete, a move to another drive deletes
+      the original only after success, a replaced file is backed up (into a
+      per-run folder under ``Docs/Backups/LibrarySync/``) before it is
+      displaced, and on any failure the step is undone (what was undone, and
+      any leftover file, is in the audit).
+
+    ``replaced`` counts only files that were actually displaced. Each run
+    writes its own ``Docs/LibrarySyncAudit_<run>.json`` and
+    ``Docs/LibrarySyncExecuted_<run>.html`` (``run_id`` matches the backup
+    folder); ``Docs/LibrarySyncAudit.json`` / ``LibrarySyncExecuted.html`` are
+    copies of the latest run.
     """
 
     log_callback = log_callback or (lambda _msg: None)
@@ -1516,18 +1938,21 @@ def execute_plan(
     cancel_event = cancel_event or threading.Event()
 
     docs_dir = _ensure_docs_dir(plan.library_root)
-    audit_path = audit_path or os.path.join(docs_dir, "LibrarySyncAudit.json")
-    executed_report_path = executed_report_path or os.path.join(docs_dir, "LibrarySyncExecuted.html")
+    run_id, backup_root, run_audit_path, run_report_path = _new_run_paths(docs_dir)
+    latest_audit_path = os.path.join(docs_dir, LATEST_AUDIT_NAME) if audit_path is None else None
+    latest_report_path = (
+        os.path.join(docs_dir, LATEST_REPORT_NAME) if executed_report_path is None else None
+    )
+    audit_path = audit_path or run_audit_path
+    executed_report_path = executed_report_path or run_report_path
     playlist_root = os.path.join(plan.library_root, "Playlists")
     if playlist_path is None:
         playlist_stamp = datetime.now().strftime("%Y-%m-%d_%H%M")
-        playlist_path = os.path.join(playlist_root, f"LibrarySync_Added_{playlist_stamp}.m3u8")
-    # One backup folder per run: an earlier run's backup is never overwritten.
-    backup_root = os.path.join(
-        docs_dir, "Backups", "LibrarySync", datetime.now().strftime("%Y%m%d_%H%M%S")
-    )
+        playlist_path = _unique_file_path(
+            os.path.join(playlist_root, f"LibrarySync_Added_{playlist_stamp}.m3u8")
+        )
 
-    copy_only = set(getattr(plan, "copy_only", set()) or [])
+    copy_only_keys = {_normalize_path(p) for p in (getattr(plan, "copy_only", set()) or [])}
     if plan.items:
         plan_items = list(plan.items)
         if allow_replacements not in (None, False):
@@ -1540,11 +1965,12 @@ def execute_plan(
         plan_items = _compute_plan_items(
             plan.planned_moves(),
             destination_root=plan.destination_root,
-            copy_only=copy_only,
+            copy_only=getattr(plan, "copy_only", set()) or set(),
             allow_all_replacements=allow_all_replacements,
             allowed_replacements=allowed_replacements,
             transfer_mode=getattr(plan, "transfer_mode", "move"),
         )
+    snapshot = dict(getattr(plan, "snapshot", {}) or {})
 
     total = len(plan_items)
     timestamp = datetime.now(timezone.utc).isoformat()
@@ -1557,9 +1983,12 @@ def execute_plan(
         "errors": [],
         "skipped": [],
         "review_required": [],
+        "stale": [],
         "backups": [],
+        "leftovers": [],
         "cancelled": False,
         "dry_run": dry_run,
+        "run_id": run_id,
     }
     audit_items: List[Dict[str, object]] = []
     executed_moves: Dict[str, str] = {}
@@ -1574,6 +2003,21 @@ def execute_plan(
         if rel.startswith(".."):
             rel = os.path.basename(path)
         return _unique_file_path(os.path.join(backup_root, rel))
+
+    def _skip(outcome: Dict[str, object], reason: str, *, review: bool, stale: bool = False) -> None:
+        entry = {"source": outcome["source"], "destination": outcome["destination"], "reason": reason}
+        summary["skipped"].append(entry)  # type: ignore[union-attr]
+        if review:
+            summary["review_required"].append(entry)  # type: ignore[union-attr]
+        if stale:
+            summary["stale"].append(entry)  # type: ignore[union-attr]
+            msg = f"{os.path.basename(str(outcome['source']))}: {reason}"
+            summary["errors"].append(msg)  # type: ignore[union-attr]
+            log_callback(f"! {msg}")
+            outcome["stale"] = True
+        outcome["status"] = "skipped"
+        outcome["reason"] = reason
+        audit_items.append(outcome)
 
     if cancel_event.is_set():
         log_callback("✘ Execution cancelled before start.")
@@ -1590,7 +2034,7 @@ def execute_plan(
         src = item.source
         dst = item.destination
         progress_callback(idx_num, total, src, "execute")
-        action = item.action or ("copy" if src in copy_only else "move")
+        action = item.action or ("copy" if _normalize_path(src) in copy_only_keys else "move")
         outcome: Dict[str, object] = {
             "source": src,
             "destination": dst,
@@ -1605,14 +2049,8 @@ def execute_plan(
             ExecutionDecision.SKIP_KEEP_EXISTING,
             ExecutionDecision.REVIEW_REQUIRED,
         ):
-            reason = item.reason or "Skipped by plan decision"
-            skip_entry = {"source": src, "destination": dst, "reason": reason}
-            summary["skipped"].append(skip_entry)
-            if item.decision != ExecutionDecision.SKIP_DUPLICATE:
-                summary["review_required"].append(skip_entry)
-            outcome["status"] = "skipped"
-            outcome["reason"] = reason
-            audit_items.append(outcome)
+            _skip(outcome, item.reason or "Skipped by plan decision",
+                  review=item.decision != ExecutionDecision.SKIP_DUPLICATE)
             continue
 
         if not os.path.exists(src):
@@ -1623,90 +2061,134 @@ def execute_plan(
             audit_items.append(outcome)
             continue
 
-        dest_exists = os.path.exists(dst)
-        replacement_allowed = item.decision == ExecutionDecision.REPLACE
-
-        if dest_exists and not replacement_allowed:
-            reason = "Destination exists; replacement not allowed"
-            skip_entry = {"source": src, "destination": dst, "reason": reason}
-            summary["review_required"].append(skip_entry)
-            summary["skipped"].append(skip_entry)
-            outcome["status"] = "skipped"
-            outcome["reason"] = reason
-            audit_items.append(outcome)
+        stale = _stale_reason(item, snapshot, replacement_target, plan.library_root)
+        if stale:
+            _skip(outcome, f"Not done: the library changed since the plan was built — {stale}. "
+                           "Scan again and rebuild the plan.", review=True, stale=True)
             continue
+
+        is_replace = item.decision == ExecutionDecision.REPLACE
+        dest_exists = os.path.lexists(dst)
+        if dest_exists and not is_replace:
+            _skip(outcome, "Destination exists; replacement not allowed (the file appeared after "
+                           "the plan was built and is never overwritten)", review=True)
+            continue
+        in_place = is_replace and dest_exists
+        retire_target = (
+            replacement_target
+            if is_replace and replacement_target
+            and _normalize_path(replacement_target) != _normalize_path(dst)
+            and os.path.lexists(replacement_target)
+            else None
+        )
 
         if dry_run:
             outcome["status"] = "dry_run"
             outcome["reason"] = "No changes written (dry run)"
-            if replacement_target and replacement_target != dst:
-                outcome["replaced_path"] = replacement_target
+            if retire_target:
+                outcome["replaced_path"] = retire_target
+            elif in_place:
+                outcome["replaced_path"] = dst
             executed_moves[src] = dst
             audit_items.append(outcome)
             continue
 
-        if dest_exists and replacement_allowed:
-            # Never replace a file without a backup of it.
-            backup_path = _backup_path_for(dst)
-            try:
-                os.makedirs(os.path.dirname(backup_path), exist_ok=True)
-                shutil.copy2(dst, backup_path)
-            except Exception as exc:  # pragma: no cover - OS interaction
-                msg = f"Backup failed for {dst}: {exc}; nothing replaced"
-                summary["errors"].append(msg)  # type: ignore[arg-type]
-                outcome["status"] = "failed"
-                outcome["reason"] = msg
-                audit_items.append(outcome)
-                log_callback(msg)
-                continue
-            summary["backups"].append(backup_path)
-            outcome["backup_path"] = backup_path
-
+        backup_path: str | None = None
+        old_backup: str | None = None
         try:
-            _transfer(src, dst, action, replace=dest_exists and replacement_allowed)
-        except Exception as exc:  # pragma: no cover - OS interaction
-            msg = f"Failed to {action} {src} → {dst}: {exc}"
-            summary["errors"].append(msg)  # type: ignore[arg-type]
+            if in_place:
+                # Backed up before it is displaced; the swap itself is atomic.
+                backup_path = _backup_path_for(dst)
+                before = _file_sig(dst)
+                try:
+                    _copy_file(dst, backup_path)
+                except Exception as exc:  # noqa: BLE001
+                    detail = exc.describe() if isinstance(exc, TransferError) else str(exc)
+                    backup_path = None
+                    raise TransferError(f"backing up the library file failed ({detail}); "
+                                        "nothing was replaced") from exc
+                try:
+                    staged = _replace_in_place(src, dst, action, backup_path)
+                except TransferError as exc:
+                    if (not getattr(exc, "backup_needed", False) and _file_sig(dst) == before
+                            and _discard(backup_path) is None):
+                        backup_path = None      # unused: the library file is unchanged
+                    raise
+            else:
+                staged = _place_new(src, dst, action)
+                if retire_target:
+                    old_backup = _backup_path_for(retire_target)
+                    try:
+                        _retire(retire_target, old_backup)
+                    except Exception as exc:  # noqa: BLE001
+                        old_backup = None
+                        undone, leftover = staged.undo()
+                        raise TransferError(
+                            f"the file it replaces ({_rel_to(retire_target, plan.library_root)}) could "
+                            f"not be moved to the backups ({exc}), so the replace was undone",
+                            undone=undone, leftover=leftover,
+                        ) from exc
+        except Exception as exc:  # noqa: BLE001 - every failure is recorded
+            detail = exc.describe() if isinstance(exc, TransferError) else f"{exc}."
+            leftover = exc.leftover if isinstance(exc, TransferError) else None
+            msg = f"Failed to {action} {src} → {dst}: {detail}"
+            summary["errors"].append(msg)  # type: ignore[union-attr]
             outcome["status"] = "failed"
-            outcome["reason"] = str(exc)
+            outcome["reason"] = detail
+            if leftover:
+                outcome["leftover_path"] = leftover
+                summary["leftovers"].append(leftover)  # type: ignore[union-attr]
+            if backup_path:     # kept: the library file was restored from it
+                outcome["backup_path"] = backup_path
+                summary["backups"].append(backup_path)  # type: ignore[union-attr]
             log_callback(msg)
             audit_items.append(outcome)
             continue
 
-        if action == "copy":
-            summary["copied"] = int(summary["copied"]) + 1
-        else:
-            summary["moved"] = int(summary["moved"]) + 1
-        if replacement_allowed:
+        problem = staged.finish(action)
+        done = "copy" if action == "copy" or problem else "move"
+        counter = "copied" if done == "copy" else "moved"
+        summary[counter] = int(summary[counter]) + 1
+        outcome["done"] = done
+        if problem:
+            msg = f"{os.path.basename(src)}: {problem}"
+            summary["errors"].append(msg)  # type: ignore[union-attr]
+            outcome["note"] = problem
+            log_callback(f"! {msg}")
+        if in_place:
             summary["replaced"] = int(summary["replaced"]) + 1
+            summary["backups"].append(backup_path)  # type: ignore[union-attr]
+            outcome["backup_path"] = backup_path
+            outcome["replaced_path"] = dst
+        elif retire_target:
+            # The file it replaces (e.g. an MP3 upgraded to FLAC) is in the
+            # run's backup folder — moved there, never deleted.
+            summary["replaced"] = int(summary["replaced"]) + 1
+            summary["backups"].append(old_backup)  # type: ignore[union-attr]
+            outcome["replaced_path"] = retire_target
+            outcome["replaced_backup_path"] = old_backup
+            playlist_updates[retire_target] = dst
+        elif is_replace:
+            outcome["replace_note"] = "nothing was replaced: the file it was to replace is gone"
         executed_moves[src] = dst
         outcome["status"] = "success"
-
-        # Retire the file this one replaces (e.g. an MP3 upgraded to FLAC):
-        # moved into the run's backup folder, never deleted outright.
-        if replacement_target and replacement_target != dst and os.path.exists(replacement_target):
-            old_backup = _backup_path_for(replacement_target)
-            try:
-                os.makedirs(os.path.dirname(old_backup), exist_ok=True)
-                shutil.move(replacement_target, old_backup)
-                summary["backups"].append(old_backup)
-                outcome["replaced_path"] = replacement_target
-                outcome["replaced_backup_path"] = old_backup
-                playlist_updates[replacement_target] = dst
-            except Exception as exc:  # pragma: no cover - OS interaction
-                msg = f"Could not retire replaced file {replacement_target}: {exc} (left in place)"
-                summary["errors"].append(msg)  # type: ignore[arg-type]
-                log_callback(msg)
-
         audit_items.append(outcome)
 
     summary["transferred"] = int(summary.get("moved", 0)) + int(summary.get("copied", 0))
+    used_backups = bool(summary["backups"])
+    summary["backup_folder"] = backup_root if used_backups else None
 
     report_heading = "Library Sync (Executed)" if not dry_run else "Library Sync (Dry Run Execution)"
 
     report_skipped = [item for item in audit_items if item.get("status") == "skipped"]
     report_failed = [item for item in audit_items if item.get("status") == "failed"]
     report_review = [dict(rr) for rr in summary["review_required"]]  # type: ignore[arg-type]
+    notes = [f"Run {run_id} — audit: {os.path.basename(audit_path)}."]
+    if used_backups:
+        notes.append(f"Files this run replaced are backed up in {backup_root}.")
+    if summary["leftovers"]:
+        notes.append("Temporary files that could not be cleaned up: "
+                     + ", ".join(summary["leftovers"]))  # type: ignore[arg-type]
     _render_execution_report(
         plan,
         executed_moves,
@@ -1716,12 +2198,17 @@ def execute_plan(
         executed_report_path,
         report_heading,
         dry_run,
+        notes=notes,
     )
     summary["report_path"] = executed_report_path
+    summary["audit_path"] = audit_path
 
     audit_payload = {
+        "run_id": run_id,
         "executed_at": timestamp,
         "dry_run": dry_run,
+        "backup_folder": summary["backup_folder"],
+        "report_path": executed_report_path,
         "plan": {
             "library_root": plan.library_root,
             "incoming_root": plan.incoming_root,
@@ -1737,7 +2224,14 @@ def execute_plan(
             json.dump(audit_payload, f, indent=2)
     except Exception as exc:  # pragma: no cover - OS interaction
         log_callback(f"✘ Failed to write audit log: {exc}")
-    summary["audit_path"] = audit_path
+    summary["latest_audit_path"] = (
+        _write_alias(audit_path, latest_audit_path, log_callback)
+        if latest_audit_path and os.path.exists(audit_path) else None
+    )
+    summary["latest_report_path"] = (
+        _write_alias(executed_report_path, latest_report_path, log_callback)
+        if latest_report_path and os.path.exists(executed_report_path) else None
+    )
 
     playlist_created = None
     if create_playlist and executed_moves and not dry_run:

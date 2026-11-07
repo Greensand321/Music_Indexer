@@ -321,21 +321,29 @@ class SyncExecuteWorker(QtCore.QThread):
                 create_playlist=self.create_playlist,
             )
             self.summary = summary
-            report_path = str(summary.get("report_path") or "")
+            # The stable "latest run" copy (same content as this run's own
+            # timestamped report, which stays in Docs/ for the record).
+            report_path = str(summary.get("latest_report_path") or summary.get("report_path") or "")
+            audit_name = os.path.basename(str(summary.get("audit_path") or "LibrarySyncAudit.json"))
             moved = summary.get("moved", 0)
             copied = summary.get("copied", 0)
             replaced = summary.get("replaced", 0)
             skipped = len(summary.get("skipped", []) or [])
+            stale = len(summary.get("stale", []) or [])
             errors = list(summary.get("errors", []) or [])
             counts = f"{moved} moved, {copied} copied, {replaced} replaced, {skipped} skipped"
             if summary.get("cancelled"):
                 self.outcome = "cancelled"
                 finish(False, f"Execution cancelled — {counts} before stopping. "
-                              "See Docs/LibrarySyncAudit.json.", report_path)
+                              f"See Docs/{audit_name}.", report_path)
             elif errors:
                 self.outcome = "partial"
-                finish(False, f"Execution finished with {len(errors)} problem(s) — {counts}. "
-                              f"First problem: {errors[0]}", report_path)
+                stale_note = (
+                    f" {stale} item(s) were not done because the library changed since the plan "
+                    "was built — scan again." if stale else ""
+                )
+                finish(False, f"Execution finished with {len(errors)} problem(s) — {counts}.{stale_note} "
+                              f"First problem: {errors[0]} Full record: Docs/{audit_name}.", report_path)
             else:
                 self.outcome = "ok"
                 finish(True, f"Execution complete — {counts}.", report_path)
@@ -966,8 +974,10 @@ class LibrarySyncWorkspace(WorkspaceBase):
             f"• {c['replace']} existing track(s) replaced (each backed up to "
             "Docs/Backups/LibrarySync/ first)\n"
             f"• {c['skip']} skipped, {c['review']} left for review (not transferred)\n\n"
-            "Existing files are never overwritten except by a Replace you flagged. "
-            "Every action is recorded in Docs/LibrarySyncAudit.json.",
+            "Existing files are never overwritten except by a Replace you flagged, and an "
+            "item whose files changed since the plan was built is skipped and reported. "
+            "Every action is recorded in this run's own audit in Docs/ "
+            "(LibrarySyncAudit_<date_time>.json; LibrarySyncAudit.json is the latest run).",
             QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
         )
         if reply != QtWidgets.QMessageBox.StandardButton.Yes:
@@ -1086,6 +1096,12 @@ class LibrarySyncWorkspace(WorkspaceBase):
 
     @Slot(str)
     def _on_log_line(self, line: str) -> None:
+        # A worker abandoned after a library change (or replaced by a newer
+        # run) still flushes its last batch of lines: never show those in
+        # the current library's log.
+        sender = self.sender()
+        if sender is not None and sender not in (self._worker, self._build_worker, self._exec_worker):
+            return
         self._log_area.appendPlainText(line)
 
     @Slot(int, int, str)
@@ -1273,6 +1289,8 @@ class LibrarySyncWorkspace(WorkspaceBase):
                 self._log(f"Library changed — the running {label} was cancelled.", "warn")
         if self._exec_worker is not None:
             self._log("Library changed — the running execute continues on its own plan.", "warn")
+        else:
+            self._log_area.clear()      # the old library's log
         self._existing_entry.setText(path)
         self._refresh_controls()
 

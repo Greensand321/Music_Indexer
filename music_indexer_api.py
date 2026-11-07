@@ -50,6 +50,41 @@ DOC_EXTS = {".txt", ".html", ".db"}
 # Folder names skipped at *any* depth (historic indexer rule).
 _ANY_DEPTH_SKIP = {"not sorted", "playlists"}
 
+# Files and folders the OS, file browsers and sync tools keep inside music
+# folders. They are never swept to Trash/ (Explorer and Finder recreate and
+# rewrite them all the time, which also made every preview look stale) and
+# the folders are never scanned (old file versions and deleted files live in
+# some of them). Compared case-insensitively.
+_OS_METADATA_FILES = frozenset({
+    "desktop.ini", "thumbs.db", "ehthumbs.db", "ehthumbs_vista.db", ".ds_store",
+    ".localized", ".directory", "icon\r", ".picasa.ini", "picasa.ini", ".nomedia",
+    ".stignore", ".dropbox", ".dropbox.attr",
+})
+_OS_METADATA_PREFIXES = ("._", ".syncthing.", "~$")
+_OS_METADATA_SUFFIXES = (".!sync", ".!qb", ".crdownload", ".part")
+_OS_METADATA_DIRS = frozenset({
+    ".stfolder", ".stversions", ".sync", ".dropbox.cache", "@eadir", "#recycle",
+    ".spotlight-v100", ".trashes", ".fseventsd", ".temporaryitems",
+    ".documentrevisions-v100", "$recycle.bin", "system volume information",
+    ".tmp.drivedownload", ".tmp.driveupload", ".git",
+})
+
+
+def is_os_metadata_file(name: str) -> bool:
+    """True for OS / file-browser / sync-tool bookkeeping files (desktop.ini,
+    Thumbs.db, .DS_Store, ``._`` AppleDouble files, sync partials…)."""
+    low = name.casefold()
+    return (
+        low in _OS_METADATA_FILES
+        or low.startswith(_OS_METADATA_PREFIXES)
+        or low.endswith(_OS_METADATA_SUFFIXES)
+    )
+
+
+def is_os_metadata_dir(name: str) -> bool:
+    """True for OS / sync-tool folders (.stfolder, @eaDir, $RECYCLE.BIN…)."""
+    return name.casefold() in _OS_METADATA_DIRS
+
 
 # ─── Scan helpers ──────────────────────────────────────────────────────
 
@@ -59,6 +94,17 @@ def _path_key(path: str) -> str:
 
 def _same_path(a: str, b: str) -> bool:
     return _path_key(a) == _path_key(b)
+
+
+def _exact_path(path: str) -> str:
+    """Absolute, normalised ``path`` with its letter case kept."""
+    return os.path.normpath(os.path.abspath(path))
+
+
+def _real_moves(moves: dict) -> dict:
+    """The moves that change a file's path or name — including a rename that
+    only changes letter case, which a case-insensitive comparison misses."""
+    return {s: d for s, d in moves.items() if _exact_path(s) != _exact_path(d)}
 
 
 def _music_root_for(root_path: str) -> str:
@@ -73,8 +119,9 @@ def _iter_scan_dirs(library_root: str, scan_root: str | None = None):
     Not Sorted, Playlists, Manual Review, Docs, Trash, Quarantine) are pruned
     at the top of the library *and* at the top of ``scan_root`` (the
     ``Music/`` sub-folder when the library has one). ``Not Sorted`` and
-    ``Playlists`` are additionally skipped at any depth, as before. Directory
-    and file names are sorted so plans are deterministic.
+    ``Playlists`` are additionally skipped at any depth, as before, and so
+    are OS / sync-tool folders (``is_os_metadata_dir``). Directory and file
+    names are sorted so plans are deterministic.
     """
     scan_root = scan_root or library_root
     tops = {_path_key(library_root), _path_key(scan_root)}
@@ -86,6 +133,7 @@ def _iter_scan_dirs(library_root: str, scan_root: str | None = None):
             continue
         if _path_key(dirpath) in tops:
             dirnames[:] = [d for d in dirnames if d.casefold() not in reserved]
+        dirnames[:] = [d for d in dirnames if not is_os_metadata_dir(d)]
         dirnames.sort()
         filenames.sort()
         yield dirpath, dirnames, filenames
@@ -249,22 +297,33 @@ def _ensure_unique_destination(
     *,
     source_path: str | None = None,
     decision_log: list[str] | None = None,
+    taken: set | None = None,
 ) -> str:
-    """Resolve destination collisions deterministically by suffixing names."""
-    if path not in moves.values() and not os.path.exists(path):
+    """Resolve destination collisions deterministically by suffixing names.
+
+    Destinations are compared by ``_path_key`` — case-insensitively where the
+    file system is (Windows) — so two tracks whose names differ only in case
+    never get "different" destinations that collide at execute. ``taken`` is
+    the caller's set of keys of the destinations planned so far (computed
+    from ``moves`` when omitted).
+    """
+    if taken is None:
+        taken = {_path_key(v) for v in moves.values()}
+    if _path_key(path) not in taken and not os.path.exists(path):
         return path
     if (
         source_path is not None
         and _same_path(path, source_path)
-        and path not in moves.values()
+        and _path_key(path) not in taken
     ):
         # The file already sits at its destination (re-running the indexer on
-        # an organised library): it is its own "collision", keep the name.
+        # an organised library), possibly under a differently-cased name: it
+        # is its own "collision", keep the name.
         return path
     base, ext = os.path.splitext(path)
     counter = 1
     candidate = f"{base} ({counter}){ext}"
-    while candidate in moves.values() or os.path.exists(candidate):
+    while _path_key(candidate) in taken or os.path.exists(candidate):
         counter += 1
         candidate = f"{base} ({counter}){ext}"
     if log_callback:
@@ -289,7 +348,7 @@ def _cleanup_trailing_numeric_suffixes(
         def log_callback(_msg):
             pass
 
-    occupied = set(moves.values())
+    occupied = {_path_key(v) for v in moves.values()}
     suffix_pattern = re.compile(r"^(?P<base>.+) \((?P<num>\d+)\)$")
     for old_path, new_path in list(moves.items()):
         dir_name, filename = os.path.split(new_path)
@@ -301,12 +360,12 @@ def _cleanup_trailing_numeric_suffixes(
         candidate_path = os.path.join(dir_name, candidate_filename)
         if candidate_path == new_path:
             continue
-        if candidate_path in occupied or (
+        if _path_key(candidate_path) in occupied or (
             os.path.exists(candidate_path) and not _same_path(candidate_path, old_path)
         ):
             continue
-        occupied.remove(new_path)
-        occupied.add(candidate_path)
+        occupied.discard(_path_key(new_path))
+        occupied.add(_path_key(candidate_path))
         moves[old_path] = candidate_path
         if new_path in tag_index:
             tag_index[candidate_path] = tag_index.pop(new_path)
@@ -324,7 +383,7 @@ def _preview_trailing_suffix_cleanup(
     preview_tag_index = dict(tag_index)
     if not preview_moves:
         return preview_moves, preview_tag_index
-    occupied = set(preview_moves.values())
+    occupied = {_path_key(v) for v in preview_moves.values()}
     suffix_pattern = re.compile(r"^(?P<base>.+) \((?P<num>\d+)\)$")
     for old_path, new_path in list(preview_moves.items()):
         dir_name, filename = os.path.split(new_path)
@@ -336,12 +395,12 @@ def _preview_trailing_suffix_cleanup(
         candidate_path = os.path.join(dir_name, candidate_filename)
         if candidate_path == new_path:
             continue
-        if candidate_path in occupied or (
+        if _path_key(candidate_path) in occupied or (
             os.path.exists(candidate_path) and not _same_path(candidate_path, old_path)
         ):
             continue
-        occupied.remove(new_path)
-        occupied.add(candidate_path)
+        occupied.discard(_path_key(new_path))
+        occupied.add(_path_key(candidate_path))
         preview_moves[old_path] = candidate_path
         if new_path in preview_tag_index:
             preview_tag_index[candidate_path] = preview_tag_index.pop(new_path)
@@ -477,76 +536,10 @@ def extract_primary_and_collabs(raw_artist: str):
     return (text, [])
 
 
-def _split_primary_artist(raw_artist: str) -> tuple[str, str]:
-    text = _coerce_to_string(raw_artist).strip()
-    if not text:
-        return "", ""
+# (The execute-time artist-tag rewrite that used to live here was removed:
+# the Indexer only moves and renames files — tag edits are the Tag Fixer's,
+# which previews them first. See docs/features/indexer.md.)
 
-    if "/" in text:
-        idx = text.find("/")
-        return text[:idx].strip(), text[idx:]
-
-    lowered = text.lower()
-    separators = [" feat.", " ft.", " & ", " x ", ", ", ";"]
-    for sep in separators:
-        idx = lowered.find(sep)
-        if idx != -1:
-            return text[:idx].strip(), text[idx:]
-
-    match = re.search(r"(?<=[a-z])(?=[A-Z])", text)
-    if match:
-        idx = match.start()
-        return text[:idx].strip(), text[idx:]
-
-    return text, ""
-
-
-def _apply_canonical_primary(raw_artist: str, canonical_primary: str) -> str | None:
-    if not canonical_primary:
-        return None
-    primary, remainder = _split_primary_artist(raw_artist)
-    if not primary:
-        return None
-    if primary == canonical_primary:
-        return None
-    if primary.casefold() != canonical_primary.casefold():
-        return None
-    return f"{canonical_primary}{remainder}"
-
-
-def _update_primary_artist_metadata(
-    path: str,
-    canonical_primary: str | None,
-    log_callback=None,
-) -> bool:
-    if not canonical_primary:
-        return False
-    if log_callback is None:
-        def log_callback(_msg):
-            pass
-
-    tags = read_tags(path)
-    raw_artist = tags.get("artist")
-    updated = _apply_canonical_primary(raw_artist or "", canonical_primary)
-    if not updated:
-        return False
-    audio = MutagenFile(path, easy=True)
-    if audio is None:
-        log_callback(f"   ! Unable to update artist tag (unsupported format): {path}")
-        return False
-    if audio.tags is None and hasattr(audio, "add_tags"):
-        try:
-            audio.add_tags()
-        except Exception:
-            pass
-    try:
-        audio["artist"] = [updated]
-        audio.save()
-        log_callback(f"   → Updated artist tag to '{updated}' for {os.path.basename(path)}")
-        return True
-    except Exception as exc:
-        log_callback(f"   ! Failed to update artist tag for {path}: {exc}")
-        return False
 
 def derive_tags_from_path(filepath: str, music_root: str):
     """
@@ -709,6 +702,9 @@ def compute_moves_and_tag_index(
     log_callback("3/4: Determining destination paths for each file…")
     tag_index = {}
     moves = {}
+    # Keys (``_path_key``) of every destination planned so far: collisions
+    # are decided case-insensitively where the file system is, and in O(1).
+    taken = set()
     decision_log = []
     index = 0
     total = len(songs)
@@ -737,10 +733,11 @@ def compute_moves_and_tag_index(
             candidate = os.path.join(review_root, os.path.basename(old_path))
             root_c, ext_c = os.path.splitext(candidate)
             idx_dup = 1
-            while os.path.exists(candidate) or candidate in moves.values():
+            while os.path.exists(candidate) or _path_key(candidate) in taken:
                 candidate = f"{root_c} ({idx_dup}){ext_c}"
                 idx_dup += 1
             moves[old_path] = candidate
+            taken.add(_path_key(candidate))
             tag_index[candidate] = {
                 "leftover_tags": [],
                 "old_paths": sorted(folders),
@@ -787,8 +784,10 @@ def compute_moves_and_tag_index(
                 log_callback,
                 source_path=old_path,
                 decision_log=decision_log,
+                taken=taken,
             )
             moves[old_path] = new_path
+            taken.add(_path_key(new_path))
             tag_index[new_path] = {
                 "leftover_tags": [],
                 "old_paths": sorted(folders),
@@ -848,8 +847,10 @@ def compute_moves_and_tag_index(
                     log_callback,
                     source_path=old_path,
                     decision_log=decision_log,
+                    taken=taken,
                 )
                 moves[old_path] = new_path
+                taken.add(_path_key(new_path))
                 tag_index[new_path] = {
                     "leftover_tags": [],
                     "old_paths": sorted(folders),
@@ -937,8 +938,10 @@ def compute_moves_and_tag_index(
             log_callback,
             source_path=old_path,
             decision_log=decision_log,
+            taken=taken,
         )
         moves[old_path] = new_path
+        taken.add(_path_key(new_path))
         decision_log.append(
             f"  → Final: '{os.path.relpath(new_path, MUSIC_ROOT)}'"
         )
@@ -1149,8 +1152,13 @@ class IndexerPlan:
 
     @property
     def file_moves(self) -> dict:
-        """Moves that actually relocate or rename a file."""
-        return {s: d for s, d in self.moves.items() if not _same_path(s, d)}
+        """Moves that actually relocate or rename a file.
+
+        A case-only rename (``aurora lines.mp3`` → ``Aurora Lines.mp3``) is a
+        move: the preview shows the new name, so execute must apply it
+        (``_safe_move`` renames in place on a case-insensitive disk).
+        """
+        return _real_moves(self.moves)
 
     @property
     def manual_review(self) -> list:
@@ -1210,32 +1218,59 @@ def _unique_path(path: str, taken: set) -> str:
 def _plan_leftovers(root_path: str, music_root: str, moves: dict, exclude=()) -> dict:
     """Non-audio files left behind in folders the plan empties of music.
 
-    Only folders that will hold no audio after the plan are swept (a cover.jpg
-    next to an album that stays put is not a leftover). Each file keeps its
-    folder structure under ``Trash/`` or ``Docs/`` and gets a ``(n)`` suffix
-    rather than replacing anything already there.
+    A folder is swept only when all of these hold:
+
+    * it is not the library root (nor its ``Music/`` folder) — files sitting
+      there are the user's own;
+    * it, or a folder inside it, held audio when the plan was made — a folder
+      that never contained music (``Artwork/``, ``Scans/``) is the user's own;
+    * neither it nor any folder inside it holds audio after the plan (a
+      cover.jpg next to, or above, an album that stays put is not a leftover).
+
+    OS / file-browser / sync-tool files (desktop.ini, Thumbs.db, .DS_Store,
+    ``._*``, …; ``is_os_metadata_file``) are never swept, and their folders
+    are never entered. Each swept file keeps its folder structure under
+    ``Trash/`` or ``Docs/`` and gets a ``(n)`` suffix rather than replacing
+    anything already there.
     """
     docs_dir = os.path.join(root_path, "Docs")
     trash_dir = os.path.join(root_path, "Trash")
-    leaving = {_path_key(s) for s, d in moves.items() if not _same_path(s, d)}
-    audio_dirs_after = {_path_key(os.path.dirname(d)) for d in moves.values()}
+    stop = {_path_key(root_path), _path_key(music_root)}
+    moving = {_path_key(s) for s in _real_moves(moves)}
     excluded = {_path_key(p) for p in exclude if p}
+    entries = list(_iter_scan_dirs(root_path, music_root))
+
+    def _mark(dir_key: str, into: set) -> None:
+        # dir_key and its parents, up to (not including) the library root.
+        while dir_key and dir_key not in into and dir_key not in stop:
+            into.add(dir_key)
+            parent = os.path.dirname(dir_key)
+            if parent == dir_key:
+                break
+            dir_key = parent
+
+    held_audio: set = set()
+    audio_after: set = set()
+    for dirpath, _dirnames, filenames in entries:
+        dir_key = _path_key(dirpath)
+        for name in filenames:
+            if os.path.splitext(name)[1].lower() in NEVER_SWEPT_EXTS:
+                _mark(dir_key, held_audio)
+                if _path_key(os.path.join(dirpath, name)) not in moving:
+                    _mark(dir_key, audio_after)
+    for dest in moves.values():
+        _mark(os.path.dirname(_path_key(dest)), audio_after)
+
     taken: set = set()
     leftovers: dict = {}
-    for dirpath, _dirnames, filenames in _iter_scan_dirs(root_path, music_root):
-        if _path_key(dirpath) in audio_dirs_after:
-            continue
-        keeps_audio = any(
-            os.path.splitext(name)[1].lower() in NEVER_SWEPT_EXTS
-            and _path_key(os.path.join(dirpath, name)) not in leaving
-            for name in filenames
-        )
-        if keeps_audio:
+    for dirpath, _dirnames, filenames in entries:
+        dir_key = _path_key(dirpath)
+        if dir_key in stop or dir_key not in held_audio or dir_key in audio_after:
             continue
         for fname in filenames:
             full = os.path.join(dirpath, fname)
             ext = os.path.splitext(fname)[1].lower()
-            if ext in NEVER_SWEPT_EXTS or _path_key(full) in excluded:
+            if ext in NEVER_SWEPT_EXTS or is_os_metadata_file(fname) or _path_key(full) in excluded:
                 continue
             target_root = docs_dir if ext in DOC_EXTS else trash_dir
             dest = _unique_path(os.path.join(target_root, os.path.relpath(full, music_root)), taken)
@@ -1246,7 +1281,7 @@ def _plan_leftovers(root_path: str, music_root: str, moves: dict, exclude=()) ->
 
 def _predict_empty_dirs(root_path: str, music_root: str, moves: dict, leftovers: dict) -> list:
     """Folders that will be empty once the plan's files have left (deepest first)."""
-    leaving = {_path_key(s) for s, d in moves.items() if not _same_path(s, d)}
+    leaving = {_path_key(s) for s in _real_moves(moves)}
     leaving |= {_path_key(s) for s in leftovers}
     occupied: set = set()
     stop = {_path_key(root_path), _path_key(music_root)}
@@ -1368,7 +1403,13 @@ def _render_plan_extras_html(plan: IndexerPlan) -> str:
         f"({c['leftovers_to_trash']} to Trash/, {c['leftovers_to_docs']} to Docs/), "
         "keeping their folder structure. Nothing is overwritten.</li>"
     )
+    lines.append(
+        "<li>Left where they are: files directly in the library folder, folders that never "
+        "held music, and system / sync-tool files (desktop.ini, Thumbs.db, .DS_Store, "
+        "._* files, .stfolder/ …).</li>"
+    )
     lines.append(f"<li>{c['empty_dirs']} folder(s) removed once empty.</li>")
+    lines.append("<li>Files are only moved or renamed: no tag inside any file is changed.</li>")
     lines.append(
         "<li>Existing playlists in Playlists/ that reference moved tracks are updated; "
         "with “Create playlists” on, one playlist per source folder is (re)written.</li>"
@@ -1437,6 +1478,8 @@ def check_plan_freshness(plan: IndexerPlan) -> list:
     """Differences between the library now and when ``plan`` was computed."""
     problems = []
     for path, sig in plan.snapshot.items():
+        if is_os_metadata_file(os.path.basename(path)):
+            continue    # Explorer / Finder rewrite these just by opening a folder
         try:
             st = os.stat(path)
         except OSError:
@@ -1586,8 +1629,8 @@ def apply_indexer_plan(
             if error is None:
                 executed_moves[src] = dst
                 summary["moved"] += 1
-                canonical = plan.tag_index.get(dst, {}).get("canonical_primary")
-                _update_primary_artist_metadata(dst, canonical, log_callback)
+                # Execute only moves and renames files: tags are never
+                # rewritten (that was never previewed; the Tag Fixer does it).
 
         if executed_moves:
             try:

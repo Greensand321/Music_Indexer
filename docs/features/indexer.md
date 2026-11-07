@@ -134,10 +134,23 @@ A few guarantees hold that step together:
   non-audio files that will be swept (and where to), and the folders that will be
   removed once empty.
 - **Leftovers are swept carefully.** Only non-music files in folders the plan empties
-  of music count as leftovers (a `cover.jpg` next to an album that stays put is left
-  alone). They keep their folder structure inside `Trash/` or `Docs/`
+  of music count as leftovers (a `cover.jpg` next to, or above, an album that stays put
+  is left alone). They keep their folder structure inside `Trash/` or `Docs/`
   (`Trash/Artist/Album/cover.jpg`), and a name that is already taken gets a `(1)`
-  suffix — nothing is ever overwritten. Audio files are never swept.
+  suffix — nothing is ever overwritten. Never swept: audio files, files sitting
+  directly in the library folder, folders that never held music (an `Artwork/` or
+  `Scans/` folder), and system or sync-tool files (`desktop.ini`, `Thumbs.db`,
+  `.DS_Store`, `._*` files) — folders such as `.stfolder/`, `.stversions/`, `@eaDir/`
+  or `$RECYCLE.BIN/` are not even scanned. Because Explorer and Finder rewrite those
+  system files just by opening a folder, they are also ignored when Execute checks
+  whether the library changed. (A folder left holding only such files is not removed.)
+- **Files are only moved and renamed.** Execute never edits a tag. (It used to quietly
+  rewrite some artist tags to the census's canonical spelling — that was never shown
+  in the preview; use the Tag Fixer, which previews its changes, for tag edits.)
+- **Letter case counts.** On Windows two names that differ only in case are the same
+  file, so the plan treats them as a collision and gives one a `(1)` suffix; and a
+  rename that only changes case (`aurora lines.mp3` → `Aurora Lines.mp3`) is carried
+  out, as the preview shows.
 - **Nothing is overwritten during execution.** A destination that exists by the time a
   move runs is skipped and reported.
 - **Every action is logged** to `Docs/indexer_executed_<date>_<time>.txt` (and a
