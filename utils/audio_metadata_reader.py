@@ -258,13 +258,26 @@ def _extract_cover_payloads(audio) -> List[bytes]:
                         payloads.append(data)
                         break
 
-        covr = tags.get("covr") if isinstance(tags, Mapping) else None
+        # mutagen's MP4Tags / ASFTags are dict-like but are NOT
+        # collections.abc.Mapping instances, so an isinstance check silently
+        # skipped every M4A/WMA cover. Duck-type on .get instead.
+        getter = getattr(tags, "get", None)
+
+        def _lookup(key):
+            if not callable(getter):
+                return None
+            try:
+                return getter(key)
+            except Exception:  # noqa: BLE001 - odd tag containers
+                return None
+
+        covr = _lookup("covr")
         if covr:
             for cover in covr:
                 if cover:
                     payloads.append(bytes(cover))
 
-        wmp = tags.get("WM/Picture") if isinstance(tags, Mapping) else None
+        wmp = _lookup("WM/Picture")
         if wmp:
             for pic in wmp:
                 data = getattr(pic, "value", None)
