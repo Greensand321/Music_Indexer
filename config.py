@@ -1,5 +1,18 @@
-import os
+from __future__ import annotations
+
 import json
+import logging
+import os
+import shutil
+import tempfile
+import time
+
+_log = logging.getLogger(__name__)
+
+# Why the last load_config() fell back to defaults (None = it did not).
+_last_load_error: str | None = None
+# Where save_config() last rescued an unreadable settings file (None = never).
+_last_backup: str | None = None
 
 CONFIG_PATH = os.path.expanduser("~/.soundvault_config.json")
 
@@ -55,75 +68,143 @@ ALLOW_MISMATCHED_EDITS = True
 FP_SUBPROCESS_TIMEOUT_SEC = 180
 
 
+def _apply_defaults(cfg: dict) -> dict:
+    """Fill in every key the app expects (existing values always win)."""
+    if "musicbrainz_useragent" not in cfg:
+        cfg["musicbrainz_useragent"] = {
+            "app": "",
+            "version": "",
+            "contact": "",
+        }
+    if "format_fp_thresholds" not in cfg:
+        cfg["format_fp_thresholds"] = DEFAULT_FP_THRESHOLDS.copy()
+    cfg.setdefault("duplicate_threshold", DEFAULT_DUP_THRESHOLD)
+    cfg.setdefault("duplicate_prefix_len", DEFAULT_DUP_PREFIX_LEN)
+    cfg.setdefault("trim_silence", FP_TRIM_SILENCE)
+    cfg.setdefault("near_duplicate_threshold", NEAR_DUPLICATE_THRESHOLD)
+    cfg.setdefault("exact_duplicate_threshold", EXACT_DUPLICATE_THRESHOLD)
+    cfg.setdefault("fingerprint_offset_ms", FP_OFFSET_MS)
+    cfg.setdefault("fingerprint_duration_ms", FP_DURATION_MS)
+    cfg.setdefault("fingerprint_silence_threshold_db", FP_SILENCE_THRESHOLD_DB)
+    cfg.setdefault("fingerprint_silence_min_len_ms", FP_SILENCE_MIN_LEN_MS)
+    cfg.setdefault("fingerprint_trim_lead_max_ms", FP_TRIM_LEAD_MAX_MS)
+    cfg.setdefault("fingerprint_trim_trail_max_ms", FP_TRIM_TRAIL_MAX_MS)
+    cfg.setdefault("fingerprint_trim_padding_ms", FP_TRIM_PADDING_MS)
+    cfg.setdefault("allow_mismatched_edits", ALLOW_MISMATCHED_EDITS)
+    cfg.setdefault("fingerprint_subprocess_timeout_sec", FP_SUBPROCESS_TIMEOUT_SEC)
+    cfg.setdefault("mixed_codec_threshold_boost", MIXED_CODEC_THRESHOLD_BOOST)
+    cfg.setdefault("artwork_vastly_different_threshold", ARTWORK_VASTLY_DIFFERENT_THRESHOLD)
+    cfg.setdefault("duplicate_finder_show_artwork_variants", True)
+    cfg.setdefault("duplicate_finder_debug_trace", False)
+    cfg.setdefault("preview_artwork_max_dim", PREVIEW_ARTWORK_MAX_DIM)
+    cfg.setdefault("preview_artwork_quality", PREVIEW_ARTWORK_QUALITY)
+    cfg.setdefault("library_root", "")
+    cfg.setdefault("use_library_sync_review", False)
+    cfg.setdefault("library_sync_review", {})
+    return cfg
+
+
+def _read_config_file(path: str) -> dict:
+    """Parse ``path``; raise if it is missing (FileNotFoundError) or unusable."""
+    with open(path, "r", encoding="utf-8") as f:
+        cfg = json.load(f)
+    if not isinstance(cfg, dict):
+        raise ValueError("the top-level JSON value is not an object")
+    return cfg
+
+
+def last_load_error() -> str | None:
+    """Why the most recent ``load_config()`` fell back to defaults, or None.
+
+    ``None`` also when the file simply does not exist yet (first run).
+    """
+    return _last_load_error
+
+
 def load_config():
     """Load configuration from ``CONFIG_PATH``.
 
-    Returns an empty dict if the file does not exist or can't be read.
+    Returns the defaults when the file does not exist or can't be read. An
+    unreadable (truncated / corrupt) file is *not* lost: it is logged here,
+    reported by :func:`last_load_error`, and backed up by
+    :func:`save_config` before anything overwrites it.
     """
+    global _last_load_error
     try:
-        with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-            cfg = json.load(f)
-        if "musicbrainz_useragent" not in cfg:
-            cfg["musicbrainz_useragent"] = {
-                "app": "",
-                "version": "",
-                "contact": "",
-            }
-        if "format_fp_thresholds" not in cfg:
-            cfg["format_fp_thresholds"] = DEFAULT_FP_THRESHOLDS.copy()
-        cfg.setdefault("duplicate_threshold", DEFAULT_DUP_THRESHOLD)
-        cfg.setdefault("duplicate_prefix_len", DEFAULT_DUP_PREFIX_LEN)
-        cfg.setdefault("trim_silence", FP_TRIM_SILENCE)
-        cfg.setdefault("near_duplicate_threshold", NEAR_DUPLICATE_THRESHOLD)
-        cfg.setdefault("exact_duplicate_threshold", EXACT_DUPLICATE_THRESHOLD)
-        cfg.setdefault("fingerprint_offset_ms", FP_OFFSET_MS)
-        cfg.setdefault("fingerprint_duration_ms", FP_DURATION_MS)
-        cfg.setdefault("fingerprint_silence_threshold_db", FP_SILENCE_THRESHOLD_DB)
-        cfg.setdefault("fingerprint_silence_min_len_ms", FP_SILENCE_MIN_LEN_MS)
-        cfg.setdefault("fingerprint_trim_lead_max_ms", FP_TRIM_LEAD_MAX_MS)
-        cfg.setdefault("fingerprint_trim_trail_max_ms", FP_TRIM_TRAIL_MAX_MS)
-        cfg.setdefault("fingerprint_trim_padding_ms", FP_TRIM_PADDING_MS)
-        cfg.setdefault("allow_mismatched_edits", ALLOW_MISMATCHED_EDITS)
-        cfg.setdefault("fingerprint_subprocess_timeout_sec", FP_SUBPROCESS_TIMEOUT_SEC)
-        cfg.setdefault("mixed_codec_threshold_boost", MIXED_CODEC_THRESHOLD_BOOST)
-        cfg.setdefault("artwork_vastly_different_threshold", ARTWORK_VASTLY_DIFFERENT_THRESHOLD)
-        cfg.setdefault("duplicate_finder_show_artwork_variants", True)
-        cfg.setdefault("duplicate_finder_debug_trace", False)
-        cfg.setdefault("preview_artwork_max_dim", PREVIEW_ARTWORK_MAX_DIM)
-        cfg.setdefault("preview_artwork_quality", PREVIEW_ARTWORK_QUALITY)
-        cfg.setdefault("library_root", "")
-        cfg.setdefault("use_library_sync_review", False)
-        cfg.setdefault("library_sync_review", {})
-        return cfg
+        cfg = _read_config_file(CONFIG_PATH)
+    except FileNotFoundError:
+        _last_load_error = None
+        return _apply_defaults({})
+    except Exception as exc:  # corrupt JSON, wrong type, permissions, ...
+        message = (
+            f"Settings file {CONFIG_PATH} could not be read ({exc}); using defaults. "
+            "It will be backed up before it is overwritten."
+        )
+        if message != _last_load_error:
+            _log.warning(message)
+        _last_load_error = message
+        return _apply_defaults({})
+    _last_load_error = None
+    return _apply_defaults(cfg)
+
+
+def _backup_unreadable_config(path: str) -> str | None:
+    """Copy an existing-but-unreadable config aside; return the backup path."""
+    global _last_backup
+    if not os.path.exists(path):
+        return None
+    try:
+        _read_config_file(path)
+        return None  # readable: nothing to rescue
     except Exception:
-        return {
-            "trim_silence": FP_TRIM_SILENCE,
-            "near_duplicate_threshold": NEAR_DUPLICATE_THRESHOLD,
-            "exact_duplicate_threshold": EXACT_DUPLICATE_THRESHOLD,
-            "fingerprint_offset_ms": FP_OFFSET_MS,
-            "fingerprint_duration_ms": FP_DURATION_MS,
-            "fingerprint_silence_threshold_db": FP_SILENCE_THRESHOLD_DB,
-            "fingerprint_silence_min_len_ms": FP_SILENCE_MIN_LEN_MS,
-            "fingerprint_trim_lead_max_ms": FP_TRIM_LEAD_MAX_MS,
-            "fingerprint_trim_trail_max_ms": FP_TRIM_TRAIL_MAX_MS,
-            "fingerprint_trim_padding_ms": FP_TRIM_PADDING_MS,
-            "allow_mismatched_edits": ALLOW_MISMATCHED_EDITS,
-            "fingerprint_subprocess_timeout_sec": FP_SUBPROCESS_TIMEOUT_SEC,
-            "library_root": "",
-            "duplicate_threshold": DEFAULT_DUP_THRESHOLD,
-            "duplicate_prefix_len": DEFAULT_DUP_PREFIX_LEN,
-            "use_library_sync_review": False,
-            "library_sync_review": {},
-            "mixed_codec_threshold_boost": MIXED_CODEC_THRESHOLD_BOOST,
-            "artwork_vastly_different_threshold": ARTWORK_VASTLY_DIFFERENT_THRESHOLD,
-            "duplicate_finder_show_artwork_variants": True,
-            "duplicate_finder_debug_trace": False,
-            "preview_artwork_max_dim": PREVIEW_ARTWORK_MAX_DIM,
-            "preview_artwork_quality": PREVIEW_ARTWORK_QUALITY,
-        }
+        pass
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    backup = f"{path}.corrupt-{stamp}"
+    n = 1
+    while os.path.exists(backup):
+        n += 1
+        backup = f"{path}.corrupt-{stamp}-{n}"
+    shutil.copy2(path, backup)
+    _log.warning("Unreadable settings file backed up to %s before saving.", backup)
+    _last_backup = backup
+    return backup
+
+
+def last_backup_path() -> str | None:
+    """The backup ``save_config`` made of an unreadable settings file this
+    session, or None."""
+    return _last_backup
 
 
 def save_config(cfg: dict) -> None:
-    """Write ``cfg`` to ``CONFIG_PATH`` as JSON."""
-    with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-        json.dump(cfg, f, indent=2)
+    """Write ``cfg`` to ``CONFIG_PATH`` as JSON, atomically.
+
+    The JSON is written to a temporary file in the same folder and moved
+    over the old file with ``os.replace``, so a crash or full disk can never
+    leave a half-written (truncated) settings file. If the current file
+    exists but cannot be parsed, it is first copied to
+    ``<name>.corrupt-<timestamp>`` so its contents (API keys, ...) survive.
+    """
+    path = CONFIG_PATH
+    directory = os.path.dirname(os.path.abspath(path))
+    _backup_unreadable_config(path)
+    fd, tmp = tempfile.mkstemp(
+        prefix=os.path.basename(path) + ".", suffix=".tmp", dir=directory
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        if os.path.exists(path):
+            try:
+                shutil.copymode(path, tmp)
+            except OSError:
+                pass
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
