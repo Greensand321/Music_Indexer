@@ -139,7 +139,7 @@ during scans:
 python -m venv .venv
 source .venv/bin/activate      # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
-python main_gui.py
+python alpha_dex_gui.py        # the Qt app (primary); legacy Tk app: python main_gui.py
 ```
 
 FFmpeg must be on `PATH` for audio analysis. VLC / libVLC is required for the
@@ -161,22 +161,47 @@ pytest tests/test_duplicate_consolidation_hardening.py
 pytest -v
 ```
 
-**pytest config** (`pytest.ini`):
-- `testpaths = tests`
-- `pythonpath = .`
+Install the dev/test dependencies with `pip install -r requirements-dev.txt`
+(PySide6, pytest-qt, pytest-timeout, mutagen, ...). ffmpeg on `PATH` lets the
+synthetic test library use real MP3/FLAC/M4A/OGG/Opus files.
 
-The `tests/conftest.py` injects a lightweight stub for `pydub` so the suite can
-run without the real audio library installed. Do not remove or weaken this
-stub. Note that, despite older claims to the contrary, **there is no `tkinter`
-stub anywhere in the codebase** — `plugins/acoustid_plugin.py` imports
-`tkinter` directly, and any environment without a system Tkinter will fail to
-import that module (this currently breaks `tests/test_musicbrainz_service.py`
-in such environments; see `docs/ROADMAP.md`'s "Known bugs" section). Likewise,
-`mutagen` isn't centrally stubbed either — more than a dozen test files each
-build their own inline fake `mutagen` module rather than sharing one, which
-means the suite's pass/fail result can depend on execution order. Don't trust
-"the tests are green" as proof of behavior without checking which tests
-actually ran and in what order.
+**pytest config** (`pytest.ini`):
+- `testpaths = tests`, `pythonpath = .`, `qt_api = pyside6`
+- `timeout = 300` with `timeout_method = thread` (a test hung inside a Qt
+  event loop is killed instead of hanging CI)
+
+**Every test runs with an isolated HOME** (`tests/conftest.py::_isolated_home`
+also repoints `config.CONFIG_PATH`), so the suite can never read or overwrite
+the real `~/.soundvault_config.json`. `tests/conftest.py` also injects a
+lightweight `pydub` stub. Do not remove or weaken either. The
+`synthetic_library` fixture (from `tests/library_factory.py`) gives each test a
+fresh library of real, tagged audio files.
+
+**Module stubs must be scoped to one test.** Use
+`tests/_helpers/module_isolation.py` (`isolated_modules()`,
+`stub_if_unavailable()`) or `monkeypatch.setitem(sys.modules, ...)` — never
+assign into `sys.modules` at module level. Ad-hoc global stubs (mostly fake
+`mutagen` modules) used to make the result depend on file order; the suite is
+now verified green in default, reversed and shuffled order. Keep it that way.
+(`plugins/acoustid_plugin.py` no longer imports `tkinter`; there is still no
+tkinter stub, and none is needed by the Qt app.)
+
+**GUI tests** live in `tests/ui/` and run headless (`QT_QPA_PLATFORM=offscreen`).
+Read `tests/ui/README.md` before writing one. The harness automatically fails
+a test on: an unplanned modal dialog (queue answers through the `dialogs`
+fixture instead), a `QThread` left running, cross-thread/painting/animation Qt
+warnings, or any exception raised inside a slot or paint event. Fixtures:
+`main_window`, `make_workspace`, `library`, `dialogs`, `threads`, `motion`.
+`scripts/gui_snapshots.py` renders every page per theme to PNG for visual
+before/after comparison.
+
+**Static ratchets.** `tests/test_gui_hygiene_ratchets.py` caps the counts of
+hard-coded hex colours, inline `setStyleSheet` calls, `font-size` literals,
+direct `QThread.start()` calls and unparented animations in `gui/`. A change
+may lower a count, never raise it; lower the ceiling when you remove some.
+`tests/ui/test_ui_static_qt_api.py` fails on any `QtCore`/`QtGui`/`QtWidgets`
+name that doesn't exist in PySide6 (it caught `QFont.Weight.SemiBold` and the
+Qt5-era `QtWidgets.QShortcut`).
 
 Test files follow the `test_<module_or_feature>.py` naming convention.
 Individual tests use `monkeypatch` and `tmp_path` (pytest fixtures) — no
@@ -200,9 +225,28 @@ step.
 - Do not import `tkinter` in backend modules.
 
 ### Threading model
-Long operations run in daemon threads. GUI state is only mutated from the main
-thread via `widget.after(0, callback)`. Never call `.configure()`, `.insert()`,
-or any other widget method directly from a worker thread.
+Long operations run in worker threads; GUI state is only mutated on the main
+thread (Qt: emit signals from the worker; legacy Tk: `widget.after(0, ...)`).
+Never call widget methods directly from a worker thread.
+
+**Qt app: start every `QThread` through `WorkspaceBase._start_worker(worker,
+"Name")`** (or `gui.workers.start_worker(...)` outside a workspace). The
+`JobRegistry` in `gui/workers.py` keeps each thread alive until the real C++
+`QThread::finished()` arrives. Before it existed, dropping `self._worker` in a
+"finished" slot, re-running a job, or quitting mid-run destroyed a running
+thread — `QThread: Destroyed while thread is still running`, a hard abort of
+the whole process, sometimes mid file-move. The main window's `closeEvent`
+asks before quitting with jobs running, cancels them cooperatively (calls the
+worker's `cancel()` and `requestInterruption()`), and waits. So: give long
+workers a real `cancel()`, disable Run buttons while running, and decide what
+a library change mid-run does.
+
+### Reserved library folders
+Use `utils/reserved_folders.py` (`RESERVED_FOLDERS`, `NON_LIBRARY_FOLDERS`,
+`walk_library`, `iter_library_files`, `is_reserved_path`) for any scan that
+treats files as "the library". Don't keep private folder lists — several
+workflows used to scan `Quarantine/`, `Trash/` and `Docs/` as music (the
+Indexer even moved quarantined duplicate losers back into the library).
 
 ### No silent data loss
 Operations that move or delete files must log every action to `Docs/` and
@@ -256,6 +300,8 @@ second pass found and corrected substantial drift, especially in
 | `docs/features/playlists_and_clustering.md` | Before touching playlists, clustering, or the graph |
 | `docs/ROADMAP.md` | What's planned but not yet built, plus a "Known bugs" section (single source of truth for gaps) |
 | `docs/gui_inventory.md` | Detailed map of every screen and control in the Qt app, including which controls are currently decorative |
+| `docs/redesign/README.md` | **GUI redesign groundwork:** the intent of every page, how pages connect, systemic problems, proposed IA, design-system/motion plan, open decisions, bug status. Per-area detail (with bug tables) in `docs/redesign/pages/` |
+| `tests/ui/README.md` | The headless Qt test harness: fixtures, guards, ratchets, snapshots |
 | `docs/archive/` | Superseded planning notes / audit snapshots — history only, not current |
 
 ---
