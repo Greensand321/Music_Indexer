@@ -7,6 +7,7 @@ just to skip a track or adjust volume.
 from __future__ import annotations
 
 from gui.compat import QtCore, QtGui, QtWidgets, Signal
+from gui.themes.manager import get_manager
 
 
 class NowPlayingBar(QtWidgets.QWidget):
@@ -16,8 +17,15 @@ class NowPlayingBar(QtWidgets.QWidget):
         play_pause_requested
         next_requested
         prev_requested
-        seek_requested(int)   — target position in ms
+        seek_requested(int)   — target position in ms (drag release, wheel,
+                                keys, groove click)
+        volume_changed(int)   — 0-100, from any user interaction
         keyboard_mode_toggled(bool)  — arrow-key navigation mode
+
+    ``update_now_playing(title, artist, album, pm)``: ``pm`` None keeps the
+    current thumbnail (art still loading); a *null* QPixmap means "no art"
+    (♪ placeholder); an empty title with a null pixmap means nothing is
+    loaded any more — the bar resets and hides.
     """
 
     play_pause_requested = Signal()
@@ -28,6 +36,7 @@ class NowPlayingBar(QtWidgets.QWidget):
     keyboard_mode_toggled = Signal(bool)
 
     _ART_SIZE = 44   # px, small square thumbnail
+    _KB_PULSE_MS = 120
 
     def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(parent)
@@ -39,6 +48,8 @@ class NowPlayingBar(QtWidgets.QWidget):
         self._user_seeking = False
 
         self._build_ui()
+        get_manager().theme_changed.connect(self._apply_theme)
+        self._apply_theme(get_manager().current)
         self.setVisible(False)   # hidden until first track is loaded
 
     # ── Construction ──────────────────────────────────────────────────────
@@ -50,11 +61,9 @@ class NowPlayingBar(QtWidgets.QWidget):
 
         # Art thumbnail
         self._art_lbl = QtWidgets.QLabel()
+        self._art_lbl.setObjectName("npbArt")
         self._art_lbl.setFixedSize(self._ART_SIZE, self._ART_SIZE)
         self._art_lbl.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-        self._art_lbl.setStyleSheet(
-            "background: #1e2130; border-radius: 6px; color: #475569; font-size: 18px;"
-        )
         self._art_lbl.setText("♪")
         root.addWidget(self._art_lbl)
 
@@ -62,13 +71,13 @@ class NowPlayingBar(QtWidgets.QWidget):
         meta_col = QtWidgets.QVBoxLayout()
         meta_col.setSpacing(1)
         self._title_lbl = QtWidgets.QLabel("—")
-        self._title_lbl.setStyleSheet("font-size: 12px; font-weight: 600;")
+        self._title_lbl.setObjectName("npbTitle")
         self._title_lbl.setMaximumWidth(260)
         self._title_lbl.setTextInteractionFlags(
             QtCore.Qt.TextInteractionFlag.NoTextInteraction
         )
         self._artist_lbl = QtWidgets.QLabel("")
-        self._artist_lbl.setStyleSheet("color: #64748b; font-size: 11px;")
+        self._artist_lbl.setObjectName("npbMuted")
         self._artist_lbl.setMaximumWidth(260)
         meta_col.addWidget(self._title_lbl)
         meta_col.addWidget(self._artist_lbl)
@@ -102,7 +111,7 @@ class NowPlayingBar(QtWidgets.QWidget):
 
         # Seek area: time + slider + duration
         self._pos_lbl = QtWidgets.QLabel("0:00")
-        self._pos_lbl.setStyleSheet("color: #64748b; font-size: 11px;")
+        self._pos_lbl.setObjectName("npbMuted")
         self._pos_lbl.setFixedWidth(34)
 
         self._seek_slider = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
@@ -110,9 +119,11 @@ class NowPlayingBar(QtWidgets.QWidget):
         self._seek_slider.setFixedWidth(180)
         self._seek_slider.sliderPressed.connect(self._on_slider_pressed)
         self._seek_slider.sliderReleased.connect(self._on_slider_released)
+        # Wheel / keys / groove clicks change the value without a press.
+        self._seek_slider.valueChanged.connect(self._on_seek_value_changed)
 
         self._dur_lbl = QtWidgets.QLabel("0:00")
-        self._dur_lbl.setStyleSheet("color: #64748b; font-size: 11px;")
+        self._dur_lbl.setObjectName("npbMuted")
         self._dur_lbl.setFixedWidth(34)
         self._dur_lbl.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight)
 
@@ -130,11 +141,9 @@ class NowPlayingBar(QtWidgets.QWidget):
         self._vol_slider.setValue(80)
         self._vol_slider.setFixedWidth(70)
         self._vol_slider.setToolTip("Volume")
-        # Use sliderMoved so programmatic set_volume() doesn't echo back
-        self._vol_slider.sliderMoved.connect(self.volume_changed)
-        self._vol_slider.sliderReleased.connect(
-            lambda: self.volume_changed.emit(self._vol_slider.value())
-        )
+        # Any user change (drag, wheel, keys, groove click) is emitted;
+        # set_volume() blocks signals, so syncing from the page can't echo.
+        self._vol_slider.valueChanged.connect(self.volume_changed)
         root.addWidget(vol_lbl)
         root.addWidget(self._vol_slider)
 
@@ -149,62 +158,59 @@ class NowPlayingBar(QtWidgets.QWidget):
             "Keyboard Mode: ↓ preview next  → next  ← prev  ↑ restart"
         )
         self._kb_btn.setObjectName("kbModeBtn")
-        self._apply_kb_style(False)
         self._kb_btn.toggled.connect(self._on_kb_toggled)
         root.addWidget(self._kb_btn)
 
-    # ── Keyboard mode styling ─────────────────────────────────────────────
+        # Press pulse: animate an opacity effect, never the geometry of a
+        # layout-managed widget (that drifted when toggled quickly). One
+        # reusable, parented animation that is restarted, not stacked.
+        self._kb_fx = QtWidgets.QGraphicsOpacityEffect(self._kb_btn)
+        self._kb_fx.setOpacity(1.0)
+        self._kb_fx.setEnabled(False)
+        self._kb_btn.setGraphicsEffect(self._kb_fx)
+        self._kb_anim = QtCore.QPropertyAnimation(self._kb_fx, b"opacity", self)
+        self._kb_anim.setDuration(self._KB_PULSE_MS)
+        self._kb_anim.setKeyValueAt(0.0, 1.0)
+        self._kb_anim.setKeyValueAt(0.5, 0.55)
+        self._kb_anim.setKeyValueAt(1.0, 1.0)
+        self._kb_anim.setEasingCurve(QtCore.QEasingCurve.Type.OutCubic)
+        self._kb_anim.finished.connect(self._on_kb_pulse_finished)
 
-    def _apply_kb_style(self, active: bool) -> None:
-        if active:
-            self._kb_btn.setStyleSheet("""
-                #kbModeBtn {
-                    background: #6366f1;
-                    color: #ffffff;
-                    border: 2px solid #818cf8;
-                    border-radius: 12px;
-                    font-size: 14px;
-                    font-weight: bold;
-                }
-                #kbModeBtn:hover {
-                    background: #818cf8;
-                }
-            """)
-        else:
-            self._kb_btn.setStyleSheet("""
-                #kbModeBtn {
-                    background: transparent;
-                    color: #64748b;
-                    border: 1px solid #30363d;
-                    border-radius: 12px;
-                    font-size: 14px;
-                }
-                #kbModeBtn:hover {
-                    background: rgba(99,102,241,40);
-                    color: #818cf8;
-                    border-color: #818cf8;
-                }
-            """)
+    # ── Theme ─────────────────────────────────────────────────────────────
+
+    def _apply_theme(self, tokens=None) -> None:
+        t = tokens if tokens is not None else get_manager().current
+        self.setStyleSheet(
+            f"#npbArt {{ background: {t.card_bg}; border-radius: 6px; color: {t.text_muted};"
+            f" font-size: 18px; }}"
+            "#npbTitle { font-size: 12px; font-weight: 600; }"
+            f"#npbMuted {{ color: {t.text_secondary}; font-size: 11px; }}"
+            f"#kbModeBtn {{ background: transparent; color: {t.text_secondary};"
+            f" border: 1px solid {t.card_border}; border-radius: 12px; font-size: 14px; }}"
+            f"#kbModeBtn:hover {{ color: {t.accent}; border-color: {t.accent}; }}"
+            f"#kbModeBtn:checked {{ background: {t.accent}; color: {t.text_inverse};"
+            f" border: 2px solid {t.accent_hover}; font-weight: bold; }}"
+            f"#kbModeBtn:checked:hover {{ background: {t.accent_hover}; }}"
+        )
+        self.update()
+
+    # ── Keyboard mode ─────────────────────────────────────────────────────
 
     def _on_kb_toggled(self, checked: bool) -> None:
-        self._apply_kb_style(checked)
+        # Styling follows ``:checked`` in the theme QSS (_apply_theme).
         self._animate_kb_press(checked)
         self.keyboard_mode_toggled.emit(checked)
 
     def _animate_kb_press(self, active: bool) -> None:
-        """Scale-pulse animation when toggling keyboard mode."""
-        anim = QtCore.QPropertyAnimation(self._kb_btn, b"geometry")
-        geo = self._kb_btn.geometry()
-        small = QtCore.QRect(geo.x() + 3, geo.y() + 2, geo.width() - 6, geo.height() - 4)
-        anim.setDuration(120)
-        anim.setKeyValueAt(0.0, geo)
-        anim.setKeyValueAt(0.5, small)
-        anim.setKeyValueAt(1.0, geo)
-        anim.setEasingCurve(QtCore.QEasingCurve.Type.OutCubic)
-        # Self-cleanup
-        anim.finished.connect(anim.deleteLater)
-        anim.start()
-        self._kb_anim = anim  # prevent GC during animation
+        """Short opacity pulse when toggling keyboard mode."""
+        self._kb_anim.stop()
+        self._kb_fx.setEnabled(True)
+        self._kb_fx.setOpacity(1.0)
+        self._kb_anim.start()
+
+    def _on_kb_pulse_finished(self) -> None:
+        self._kb_fx.setOpacity(1.0)
+        self._kb_fx.setEnabled(False)
 
     # ── Painting ──────────────────────────────────────────────────────────
 
@@ -212,19 +218,12 @@ class NowPlayingBar(QtWidgets.QWidget):
         p = QtGui.QPainter(self)
         try:
             p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
-            try:
-                from gui.themes.manager import get_manager
-                t = get_manager().current
-                bg = t.sidebar_bg
-                border = t.card_border
-            except Exception:
-                bg, border = "#0d1117", "#30363d"
-
+            t = get_manager().current
             r = QtCore.QRectF(self.rect())
             # Background
-            p.fillRect(r.toRect(), QtGui.QColor(bg))
+            p.fillRect(r.toRect(), QtGui.QColor(t.sidebar_bg))
             # Top border line
-            p.setPen(QtGui.QPen(QtGui.QColor(border), 1.0))
+            p.setPen(QtGui.QPen(QtGui.QColor(t.card_border), 1.0))
             p.drawLine(
                 QtCore.QPointF(r.left(), r.top()),
                 QtCore.QPointF(r.right(), r.top()),
@@ -238,12 +237,17 @@ class NowPlayingBar(QtWidgets.QWidget):
     def update_now_playing(
         self, title: str, artist: str, album: str, pm: object
     ) -> None:
-        """Update track info and optionally the art thumbnail."""
+        """Update track info and the art thumbnail (see the class docstring)."""
+        is_null_pm = isinstance(pm, QtGui.QPixmap) and pm.isNull()
+        if not title and is_null_pm:
+            self.clear()
+            return
+
         self._title_lbl.setText(title or "—")
         sub = "  ·  ".join(p for p in [artist, album] if p)
         self._artist_lbl.setText(sub)
 
-        if pm and not pm.isNull():
+        if isinstance(pm, QtGui.QPixmap) and not pm.isNull():
             scaled = pm.scaled(
                 self._ART_SIZE, self._ART_SIZE,
                 QtCore.Qt.AspectRatioMode.KeepAspectRatioByExpanding,
@@ -251,9 +255,28 @@ class NowPlayingBar(QtWidgets.QWidget):
             )
             self._art_lbl.setText("")
             self._art_lbl.setPixmap(scaled)
-        # else: keep previous art until new art is ready
+        elif is_null_pm:
+            self._reset_art()
+        # else (None): art still loading — keep what is shown
 
         self.setVisible(True)
+
+    @QtCore.Slot()
+    def clear(self) -> None:
+        """Nothing is loaded any more: reset to the initial state and hide."""
+        self._title_lbl.setText("—")
+        self._artist_lbl.setText("")
+        self._reset_art()
+        self.set_playing(False)
+        self._duration_ms = 0
+        self._set_seek_value(0)
+        self._pos_lbl.setText("0:00")
+        self._dur_lbl.setText("0:00")
+        self.setVisible(False)
+
+    def _reset_art(self) -> None:
+        self._art_lbl.setPixmap(QtGui.QPixmap())
+        self._art_lbl.setText("♪")
 
     @QtCore.Slot(bool)
     def set_playing(self, is_playing: bool) -> None:
@@ -263,27 +286,40 @@ class NowPlayingBar(QtWidgets.QWidget):
     @QtCore.Slot(int, int)
     def update_position(self, pos_ms: int, dur_ms: int) -> None:
         self._duration_ms = dur_ms
-        if not self._user_seeking:
-            if dur_ms > 0:
-                self._seek_slider.setValue(int((pos_ms / dur_ms) * 1000))
+        if not self._user_seeking and not self._seek_slider.isSliderDown():
+            self._set_seek_value(int((pos_ms / dur_ms) * 1000) if dur_ms > 0 else 0)
             self._pos_lbl.setText(self._fmt(pos_ms))
         self._dur_lbl.setText(self._fmt(dur_ms))
 
     @QtCore.Slot(int)
     def set_volume(self, value: int) -> None:
-        """Keep the bar's volume knob in sync with the player workspace slider."""
-        self._vol_slider.setValue(max(0, min(100, value)))
+        """Keep the bar's volume knob in sync with the player (no echo)."""
+        was = self._vol_slider.blockSignals(True)
+        self._vol_slider.setValue(max(0, min(100, int(value))))
+        self._vol_slider.blockSignals(was)
 
     # ── Seek interaction ──────────────────────────────────────────────────
+
+    def _set_seek_value(self, value: int) -> None:
+        was = self._seek_slider.blockSignals(True)
+        self._seek_slider.setValue(value)
+        self._seek_slider.blockSignals(was)
 
     def _on_slider_pressed(self) -> None:
         self._user_seeking = True
 
     def _on_slider_released(self) -> None:
         self._user_seeking = False
+        self._emit_seek(self._seek_slider.value())
+
+    def _on_seek_value_changed(self, value: int) -> None:
+        if self._user_seeking or self._seek_slider.isSliderDown():
+            return  # the release emits the final position
+        self._emit_seek(value)
+
+    def _emit_seek(self, value: int) -> None:
         if self._duration_ms > 0:
-            target_ms = int((self._seek_slider.value() / 1000.0) * self._duration_ms)
-            self.seek_requested.emit(target_ms)
+            self.seek_requested.emit(int((value / 1000.0) * self._duration_ms))
 
     # ── Helpers ───────────────────────────────────────────────────────────
 
