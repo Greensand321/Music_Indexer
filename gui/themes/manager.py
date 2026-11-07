@@ -398,11 +398,20 @@ class ThemeManager(QtCore.QObject):
             # popup view, for one); skip wrappers whose C++ side is gone.
             if not shiboken6.isValid(w):
                 continue
-            if _is_themed(w):
+            # A widget with its own inline stylesheet had its palette
+            # snapshotted by Qt's stylesheet engine at polish time, so it (and
+            # every child inheriting from it) keeps the old theme unless it is
+            # re-polished too — e.g. the sidebar's section headers stayed
+            # Midnight-white on Pearl. tests/ui/test_ui_theme_switch_equivalence.py
+            # The same applies to descendants of such a widget (an inline
+            # sheet cascades): Qt pins their palette too (WA_SetPalette). Owners
+            # that set a palette deliberately re-apply it on theme_changed,
+            # which is emitted after this pass, so re-polishing them is safe.
+            if _is_themed(w) or w.styleSheet() or w.testAttribute(set_palette):
                 st = w.style()
                 st.unpolish(w)
                 st.polish(w)
-            elif not w.testAttribute(set_palette):
+            else:
                 w.setPalette(empty)
             # Style-painted widgets read the tokens at paint time.
             w.update()

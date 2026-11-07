@@ -100,13 +100,13 @@ def main(argv=None) -> int:
     started = time.perf_counter()
     for theme in themes:
         get_manager().apply(theme)
-        process_events(args.settle_ms)
+        _settle(window, args.settle_ms, process_events)
         tdir = out / theme
         tdir.mkdir(parents=True, exist_ok=True)
         for i, key in enumerate(keys, 1):
             window._on_nav_changed(key)
             job_registry().wait_all(30_000)
-            process_events(args.settle_ms)
+            _settle(window, args.settle_ms, process_events)
             path = tdir / f"{i:02d}_{key}.png"
             window.grab().save(str(path))
             shots.setdefault(theme, []).append((key, path))
@@ -123,6 +123,25 @@ def main(argv=None) -> int:
     window.close()
     mp.undo()
     return 0
+
+
+def _settle(window, settle_ms: int, process_events, timeout_ms: int = 5000) -> None:
+    """Spin the event loop, then wait until no finite animation under the
+    window is still running, so a capture never shows motion mid-flight
+    (e.g. the sidebar pill's overshoot)."""
+    import time as _time
+    from PySide6 import QtCore
+
+    process_events(settle_ms)
+    deadline = _time.monotonic() + timeout_ms / 1000
+    while _time.monotonic() < deadline:
+        running = [
+            a for a in window.findChildren(QtCore.QAbstractAnimation)
+            if a.state() == QtCore.QAbstractAnimation.State.Running and a.loopCount() != -1
+        ]
+        if not running:
+            return
+        process_events(20)
 
 
 def _write_index(out: Path, shots: dict, library: str) -> None:

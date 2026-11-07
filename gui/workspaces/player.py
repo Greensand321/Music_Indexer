@@ -1162,7 +1162,10 @@ class PlayerWorkspace(WorkspaceBase):
             reason = b.unavailable_reason or "No playback backend is available."
             self._vlc_status_lbl.setText("Playback unavailable")
             self._vlc_status_lbl.setToolTip(reason)
-            self._log(f"Playback unavailable: {reason}", "warn")
+            # "info", not "warn": a missing optional dependency is reported on
+            # the page itself, and a warning would pop the Activity Log open
+            # on every launch of a machine without VLC.
+            self._log(f"Playback unavailable: {reason}", "info")
             for w in (self._play_btn, self._prev_btn, self._next_btn, self._stop_btn,
                       self._seek_slider):
                 w.setToolTip(f"Playback unavailable — {reason}")
