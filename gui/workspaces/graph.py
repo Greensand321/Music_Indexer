@@ -35,6 +35,12 @@ class GraphWorkspace(WorkspaceBase):
         self._labels: list = []
         self._tracks: list = []
         self._metadata: list = []
+        # The track pinned by a click: the details panel (and its Play button)
+        # stays on it while the mouse wanders over other points. -1 = none.
+        self._pinned: int = -1
+        # (mtime_ns, size) of the cluster_info.json last loaded, so the page
+        # can reload by itself when a clustering run has replaced it.
+        self._loaded_stamp: tuple | None = None
         self._build_ui()
         self.reload_data()
 
@@ -118,6 +124,8 @@ class GraphWorkspace(WorkspaceBase):
         side_layout.setSpacing(12)
 
         self._legend = ClusterLegendWidget()
+        # Room for several rows beside the details panel (it was squeezed to ~2).
+        self._legend.setMinimumHeight(200)
         self._legend.cluster_toggled.connect(self._plot.set_cluster_visible)
         self._legend.cluster_selected.connect(self._on_cluster_selected)
         side_layout.addWidget(self._legend, 1)
@@ -156,11 +164,35 @@ class GraphWorkspace(WorkspaceBase):
 
     # ── Data ──────────────────────────────────────────────────────────────
 
+    def _data_stamp(self) -> tuple | None:
+        if not self._library_path:
+            return None
+        try:
+            st = cgd.cluster_info_path(self._library_path).stat()
+        except OSError:
+            return None
+        return (st.st_mtime_ns, st.st_size)
+
+    def showEvent(self, event: QtGui.QShowEvent) -> None:  # noqa: N802
+        """Pick up a clustering run that finished since the last load.
+
+        The Clustered page hands its result over only through
+        ``Docs/cluster_info.json``; without this the graph kept saying "No
+        cluster data" until the user pressed Reload.
+        """
+        super().showEvent(event)
+        if self._library_path and self._data_stamp() != self._loaded_stamp:
+            self.reload_data()
+
     @Slot()
     def reload_data(self) -> None:
         """Load cluster data from disk and populate the graph."""
+        self._loaded_stamp = self._data_stamp()
         if not self._library_path:
             self._set_empty("No library selected.")
+            return
+        if not self._plot.available:
+            self._set_empty("The interactive graph is unavailable (see the notice above).")
             return
         try:
             data = cgd.load_cluster_data(self._library_path)
@@ -197,6 +229,7 @@ class GraphWorkspace(WorkspaceBase):
             cluster_info=cgd.normalize_cluster_info(data.get("cluster_info")),
         )
         self._details.clear()
+        self._pinned = -1
 
         summary = cgd.summarize(labels)
         if data.get("X_downsampled"):
@@ -212,10 +245,14 @@ class GraphWorkspace(WorkspaceBase):
 
     def _set_empty(self, message: str) -> None:
         self._xy, self._labels, self._tracks, self._metadata = [], [], [], []
+        self._pinned = -1
         self._status.setText(message)
         self._set_controls_enabled(False)
-        if hasattr(self, "_details"):
-            self._details.clear()
+        # Clear what was drawn too: a failed reload used to leave the previous
+        # map and a clickable legend on screen under an error message.
+        self._plot.clear_data()
+        self._legend.clear()
+        self._details.clear()
 
     def _set_controls_enabled(self, enabled: bool) -> None:
         for b in (self._fit_btn, self._clear_btn):
@@ -228,6 +265,9 @@ class GraphWorkspace(WorkspaceBase):
                 b.setEnabled(False)
 
     def _on_library_changed(self, path: str) -> None:
+        # Hidden clusters belong to the previous library's map.
+        self._plot.reset_visibility()
+        self._legend.reset_visibility()
         self.reload_data()
 
     # ── Interaction ───────────────────────────────────────────────────────
@@ -237,7 +277,10 @@ class GraphWorkspace(WorkspaceBase):
 
     @Slot(int)
     def _on_hover(self, index: int) -> None:
-        if index < 0:
+        # Hover previews only while nothing is pinned; once a point is clicked
+        # the panel (and its Play button) stays on that track — the tooltip
+        # still identifies whatever is under the cursor.
+        if index < 0 or self._pinned >= 0 or index >= len(self._tracks):
             return
         self._details.set_track(
             self._tracks[index],
@@ -249,6 +292,7 @@ class GraphWorkspace(WorkspaceBase):
     @Slot(int)
     def _on_point_clicked(self, index: int) -> None:
         if 0 <= index < len(self._tracks):
+            self._pinned = index
             self._details.set_track(
                 self._tracks[index],
                 self._metadata_for(index),
@@ -275,7 +319,11 @@ class GraphWorkspace(WorkspaceBase):
         for b in (self._play_btn, self._csv_btn, self._m3u_btn):
             b.setEnabled(n > 0)
         if n == 1:
-            self._on_point_clicked(indices[0])
+            if indices[0] != self._pinned:
+                self._on_point_clicked(indices[0])
+        elif self._pinned >= 0 and self._pinned not in indices:
+            self._pinned = -1
+            self._details.clear()
 
     # ── Actions ───────────────────────────────────────────────────────────
 

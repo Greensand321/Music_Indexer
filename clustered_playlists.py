@@ -7,15 +7,20 @@ import logging
 import json as json_module
 from contextlib import contextmanager
 from collections import Counter
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait as _wait_futures
 import multiprocessing
+import time
 from typing import Literal
 
 logger = logging.getLogger(__name__)
 
 from sklearn.cluster import KMeans
 from sklearn.preprocessing import MinMaxScaler, RobustScaler, StandardScaler
-import hdbscan
+
+# hdbscan is imported lazily, inside the HDBSCAN branch of cluster_tracks():
+# importing it here made K-Means clustering and Auto-DJ (which only needs
+# extract_audio_features) fail with "No module named 'hdbscan'" on installs
+# that never use HDBSCAN.
 
 from utils.path_helpers import ensure_long_path
 
@@ -381,20 +386,50 @@ def _decode_opus_as_wav(file_path: str, log_callback):
             pass
 
 
+class ClusteringCancelled(Exception):
+    """Raised when a clustering run is cancelled through its ``cancel_event``.
+
+    Nothing is written to ``Docs/cluster_info.json`` / ``cluster_graph.html``
+    for a cancelled run; feature vectors extracted before the cancel are kept
+    in the cache so the next run resumes instead of starting over.
+    """
+
+
+def _is_cancelled(cancel_event) -> bool:
+    return cancel_event is not None and cancel_event.is_set()
+
+
 def _extract_worker(
     path: str, engine: AudioFeatureEngine, features: dict | None = None
-) -> tuple[str, "np.ndarray", str | None]:
-    """Process-pool friendly wrapper around :func:`extract_audio_features`."""
+) -> tuple[str, "np.ndarray | None", str | None]:
+    """Process-pool friendly wrapper around :func:`extract_audio_features`.
+
+    A failure returns ``(path, None, error)``. It used to return a zero vector,
+    which was then cached and clustered forever as a fake "silent" track.
+    """
 
     try:
         return path, extract_audio_features(path, engine=engine, features=features), None
     except Exception as exc:  # pragma: no cover - defensive logging path
-        zeros = (
-            np.zeros(feature_vector_length(features), dtype=np.float32)
-            if np is not None
-            else None
-        )
-        return path, zeros, str(exc)
+        return path, None, str(exc)
+
+
+def _collect_extracted(tracks, cache, failed: dict, log_callback):
+    """Return ``(kept_tracks, feats)`` for the tracks that have a vector.
+
+    Failed tracks are left out of both lists together, so the feature matrix
+    stays index-aligned with the track list it is clustered against.
+    """
+    kept: list[str] = []
+    feats: list["np.ndarray"] = []
+    for path in tracks:
+        if path in cache:
+            kept.append(path)
+            feats.append(cache[path])
+        elif path not in failed:
+            failed[path] = "no features available after extraction"
+            log_callback(f"! No features found for {os.path.basename(path)}; leaving it out")
+    return kept, feats
 
 
 def _extract_features_parallel(
@@ -404,12 +439,26 @@ def _extract_features_parallel(
     engine: AudioFeatureEngine,
     use_max_workers: bool = False,
     features: dict | None = None,
+    cancel_event=None,
+    progress_callback=None,
 ):
-    """Fill ``cache`` for ``tracks`` using a bounded process pool."""
+    """Fill ``cache`` for ``tracks`` using a bounded process pool.
 
-    feats: list["np.ndarray"] = []
+    Returns ``(kept_tracks, feats, updated, failed)``. ``cancel_event`` is
+    polled while waiting on the pool; on cancel, queued work is dropped
+    (``cancel_futures``), files already being decoded are allowed to finish,
+    and :class:`ClusteringCancelled` is raised.
+    """
+
+    failed: dict[str, str] = {}
     missing = [p for p in tracks if p not in cache]
+    cached_count = len(tracks) - len(missing)
+    if cached_count:
+        log_callback(f"• Using cached features for {cached_count} track(s)")
+    if progress_callback is not None:
+        progress_callback(cached_count, len(tracks))
 
+    updated = False
     if missing:
         if use_max_workers:
             workers = max(1, multiprocessing.cpu_count() - 1)
@@ -418,30 +467,48 @@ def _extract_features_parallel(
         log_callback(
             f"⚙ Parallel feature extraction for {len(missing)} files ({workers} workers)"
         )
-        with ProcessPoolExecutor(max_workers=workers) as ex:
-            future_map = {
-                ex.submit(_extract_worker, path, engine, features): path
+        ex = ProcessPoolExecutor(max_workers=workers)
+        cancelled = False
+        try:
+            pending = {
+                ex.submit(_extract_worker, path, engine, features)
                 for path in missing
             }
-            for done, fut in enumerate(as_completed(future_map), 1):
-                path, vec, err = fut.result()
-                if err:
-                    log_callback(f"! Failed features for {path}: {err}")
+            done_count = 0
+            while pending:
+                if _is_cancelled(cancel_event):
+                    cancelled = True
+                    # Keep results that are already in, so a re-run resumes.
+                    done = {f for f in pending if f.done() and not f.cancelled()}
+                    pending = set()
                 else:
-                    log_callback(
-                        f"• Extracted features {done}/{len(missing)}: {os.path.basename(path)}"
+                    done, pending = _wait_futures(
+                        pending, timeout=0.25, return_when=FIRST_COMPLETED
                     )
-                cache[path] = vec
+                for fut in done:
+                    path, vec, err = fut.result()
+                    done_count += 1
+                    if err or vec is None:
+                        failed[path] = err or "unknown error"
+                        log_callback(f"! Failed features for {path}: {err}")
+                    else:
+                        cache[path] = vec
+                        updated = True
+                        log_callback(
+                            f"• Extracted features {done_count}/{len(missing)}: {os.path.basename(path)}"
+                        )
+                    if progress_callback is not None:
+                        progress_callback(cached_count + done_count, len(tracks))
+        finally:
+            # cancel_futures drops everything still queued; wait=True only
+            # waits for the handful of files the workers are decoding right
+            # now, so no child process is orphaned.
+            ex.shutdown(wait=True, cancel_futures=cancelled)
+        if cancelled:
+            raise ClusteringCancelled()
 
-    for path in tracks:
-        if path in cache:
-            log_callback(f"• Using cached features for {os.path.basename(path)}")
-            feats.append(cache[path])
-        else:
-            log_callback(f"! ERROR: No features found for {os.path.basename(path)} after extraction")
-            raise RuntimeError(f"Feature extraction failed for {path} - no cached features available")
-
-    return feats, bool(missing)
+    kept, feats = _collect_extracted(tracks, cache, failed, log_callback)
+    return kept, feats, updated, failed
 
 
 def _extract_features_serial(
@@ -450,12 +517,16 @@ def _extract_features_serial(
     log_callback,
     engine: AudioFeatureEngine,
     features: dict | None = None,
+    cancel_event=None,
+    progress_callback=None,
 ):
-    """Sequential feature extraction (original behavior)."""
+    """Sequential feature extraction. Returns ``(kept, feats, updated, failed)``."""
 
-    feats: list["np.ndarray"] = []
+    failed: dict[str, str] = {}
     updated = False
     for idx, path in enumerate(tracks, 1):
+        if _is_cancelled(cancel_event):
+            raise ClusteringCancelled()
         if path in cache:
             log_callback(f"• Using cached features for {os.path.basename(path)}")
         else:
@@ -464,15 +535,48 @@ def _extract_features_serial(
                 cache[path] = extract_audio_features(
                     path, log_callback, engine=engine, features=features
                 )
+                updated = True
             except Exception as e:  # pragma: no cover - defensive path
+                # Not cached: a transient failure (locked file, missing
+                # ffmpeg) must be retried next run, not frozen in as zeros.
+                failed[path] = str(e)
                 log_callback(f"! Failed features for {path}: {e}")
-                cache[path] = np.zeros(
-                    feature_vector_length(features), dtype=np.float32
-                )
-            updated = True
-        feats.append(cache[path])
+        if progress_callback is not None:
+            progress_callback(idx, len(tracks))
 
-    return feats, updated
+    kept, feats = _collect_extracted(tracks, cache, failed, log_callback)
+    return kept, feats, updated, failed
+
+
+#: Accepted spellings of the clustering methods (the wizard once sent
+#: "k-means", which silently ran HDBSCAN instead).
+_METHOD_ALIASES = {
+    "kmeans": "kmeans",
+    "k-means": "kmeans",
+    "k_means": "kmeans",
+    "hdbscan": "hdbscan",
+}
+
+
+def normalize_method(method: str) -> str:
+    """Return ``"kmeans"`` or ``"hdbscan"``; raise ``ValueError`` otherwise."""
+    key = str(method or "").strip().lower()
+    if key not in _METHOD_ALIASES:
+        raise ValueError(
+            f"Unknown clustering method {method!r}; expected 'kmeans' or 'hdbscan'"
+        )
+    return _METHOD_ALIASES[key]
+
+
+def _import_hdbscan():
+    try:
+        import hdbscan  # type: ignore
+    except ImportError as exc:
+        raise RuntimeError(
+            "HDBSCAN clustering needs the optional 'hdbscan' package "
+            "(pip install hdbscan). K-Means works without it."
+        ) from exc
+    return hdbscan
 
 
 def cluster_tracks(
@@ -486,6 +590,7 @@ def cluster_tracks(
     if log_callback is None:
         log_callback = lambda msg: None
 
+    method = normalize_method(method)
     if method == "kmeans":
         n_clusters = max(1, int(kwargs.get("n_clusters", 5)))
         if n_clusters > len(feature_matrix):
@@ -524,6 +629,7 @@ def cluster_tracks(
             )
         if engine == "parallel":
             extra["core_dist_n_jobs"] = max(1, multiprocessing.cpu_count() - 1)
+        hdbscan = _import_hdbscan()
         log_callback("⚙ Running clustering algorithm …")
         labels = hdbscan.HDBSCAN(
             min_cluster_size=min_cluster_size, **extra
@@ -678,17 +784,61 @@ def _validate_cache_entry(path: str, cached_time: float) -> bool:
         return False
 
 
+def _load_feature_cache(cache_file: str, log_callback=None) -> dict:
+    """Read a feature cache written by :func:`_save_feature_cache`.
+
+    The cache lives in the library's ``Docs/`` folder, so it is loaded with
+    ``allow_pickle=False``: the old format was a pickled dict, and unpickling a
+    file from a library folder can run arbitrary code. Any unreadable,
+    corrupt or legacy-format file is ignored (logged) and rebuilt, rather than
+    failing every run until the user deletes it.
+    """
+    if log_callback is None:
+        log_callback = lambda msg: None
+    if not os.path.exists(cache_file):
+        return {}
+    try:
+        data = np.load(cache_file, allow_pickle=False)
+        if not hasattr(data, "files"):
+            raise ValueError("legacy (pickled) cache format")
+        try:
+            paths = [str(p) for p in data["paths"]]
+            vectors = np.asarray(data["vectors"], dtype=np.float32)
+        finally:
+            data.close()
+        if vectors.ndim != 2 or len(vectors) != len(paths):
+            raise ValueError("paths and vectors are not aligned")
+        return {path: vectors[i] for i, path in enumerate(paths)}
+    except Exception as e:  # noqa: BLE001 - any bad cache means "re-extract"
+        log_callback(f"! Ignoring unreadable feature cache ({e}); it will be rebuilt")
+        return {}
+
+
+def _save_feature_cache(cache_file: str, cache: dict) -> None:
+    """Write ``cache`` (path -> vector) as a pickle-free ``.npz`` payload.
+
+    The file keeps its historical name (``features*.npy``); ``np.load`` tells
+    the formats apart by content. Written to a temp file and renamed, so a
+    crash mid-write cannot leave a truncated cache behind.
+    """
+    paths = list(cache.keys())
+    if paths:
+        vectors = np.vstack([np.asarray(cache[p], dtype=np.float32) for p in paths])
+    else:
+        vectors = np.zeros((0, 0), dtype=np.float32)
+    tmp = cache_file + ".tmp"
+    with open(tmp, "wb") as fh:
+        np.savez(fh, paths=np.array(paths, dtype=str), vectors=vectors)
+    os.replace(tmp, cache_file)
+
+
 def _load_cache_with_validation(cache_file: str, tracks: list, log_callback=None) -> dict:
     """Load feature cache with validation for stale entries."""
     if log_callback is None:
         log_callback = lambda msg: None
 
-    try:
-        cache = dict(np.load(cache_file, allow_pickle=True).item())
-    except FileNotFoundError:
-        return {}
-    except Exception as e:
-        log_callback(f"! Error loading cache file: {e}")
+    cache = _load_feature_cache(cache_file, log_callback)
+    if not cache:
         return {}
 
     # Validate cache entries against track modification times
@@ -696,8 +846,8 @@ def _load_cache_with_validation(cache_file: str, tracks: list, log_callback=None
     try:
         with open(cache_metadata_file) as f:
             metadata = json_module.load(f)
-        cache_time = metadata.get("created_time", 0)
-    except (FileNotFoundError, json_module.JSONDecodeError):
+        cache_time = float(metadata.get("created_time", 0))
+    except (OSError, ValueError, TypeError, AttributeError):
         cache_time = 0
 
     # Remove stale entries
@@ -715,6 +865,68 @@ def _load_cache_with_validation(cache_file: str, tracks: list, log_callback=None
     return valid_cache
 
 
+def _write_cache_metadata(cache_file: str, created_time: float, track_count: int) -> None:
+    cache_metadata_file = cache_file.replace(".npy", "_metadata.json")
+    with open(cache_metadata_file, "w") as f:
+        json_module.dump(
+            {"created_time": created_time, "track_count": track_count}, f, indent=2
+        )
+
+
+def visualization_indices(n_points: int, max_points: int = None) -> "np.ndarray | None":
+    """Indices of the points to keep for the graph, or ``None`` to keep all.
+
+    Evenly spaced across the whole range (so every cluster keeps its share),
+    exactly ``max_points`` long. The old "every n-th point" step kept all
+    points for anything below 2x the limit while logging that it had
+    downsampled.
+    """
+    if max_points is None:
+        max_points = MAX_VISUALIZATION_POINTS
+    if n_points <= max_points:
+        return None
+    keep = max(max_points, MIN_VISUALIZATION_POINTS)
+    return np.unique(np.linspace(0, n_points - 1, keep).astype(int))
+
+
+def build_cluster_payload(X, X_2d, X_3d, labels, tracks, cluster_info, log_callback=None) -> dict:
+    """Assemble the ``Docs/cluster_info.json`` payload.
+
+    Every per-point array (``X``, ``X_2d``, ``X_3d``, ``labels``, ``tracks``)
+    is subset with the *same* indices when downsampling, so point i of each
+    array still describes the same track (see CLAUDE.md).
+    """
+    if log_callback is None:
+        log_callback = lambda msg: None
+    labels = np.asarray(labels)
+    n = len(X)
+    if not (len(X_2d) == len(X_3d) == len(labels) == len(tracks) == n):
+        raise ValueError(
+            "cluster arrays are not index-aligned "
+            f"(X={n}, X_2d={len(X_2d)}, X_3d={len(X_3d)}, labels={len(labels)}, tracks={len(tracks)})"
+        )
+    indices = visualization_indices(n)
+    if indices is not None:
+        log_callback(
+            f"⚠ Library has {n} tracks; downsampling to {len(indices)} "
+            f"points for visualization"
+        )
+        X, X_2d, X_3d = X[indices], X_2d[indices], X_3d[indices]
+        labels = labels[indices]
+        tracks = [tracks[i] for i in indices]
+    return {
+        "X": np.asarray(X).tolist(),
+        "X_2d": np.asarray(X_2d).tolist(),   # 2D embedding for quick scatter plot
+        "X_3d": np.asarray(X_3d).tolist(),   # 3D embedding for advanced exploration
+        "X_downsampled": indices is not None,
+        "X_total_points": n,
+        "X_indices": [int(i) for i in indices] if indices is not None else None,
+        "labels": labels.tolist(),
+        "tracks": list(tracks),
+        "cluster_info": cluster_info,
+    }
+
+
 def generate_clustered_playlists(
     tracks,
     root_path: str,
@@ -726,13 +938,30 @@ def generate_clustered_playlists(
     use_max_workers: bool = False,
     features: dict | None = None,
     normalization: str = "standard",
-) -> None:
-    """Create clustered data for the given tracks without writing playlists.
+    cancel_event=None,
+    progress_callback=None,
+) -> dict:
+    """Cluster ``tracks`` and write the graph artefacts. Writes **no playlists**.
+
+    Despite the historical name, this only writes analysis artefacts: the
+    feature cache, ``Docs/cluster_info.json`` and ``Docs/cluster_graph.html``.
+    Cluster playlists are exported by hand from the Music Graph (select a
+    cluster, then "Export playlist…").
 
     ``features`` picks which audio qualities to cluster on (see
     :data:`FEATURE_ORDER`); ``None`` keeps the legacy MFCC+tempo behaviour.
     ``normalization`` selects the scaler applied before clustering — see
     :data:`SCALERS`.
+
+    ``cancel_event`` (a ``threading.Event``) is polled throughout feature
+    extraction and between the later stages; when set,
+    :class:`ClusteringCancelled` is raised and no ``cluster_info.json`` /
+    ``cluster_graph.html`` is written. ``progress_callback(done, total)``
+    reports per-file extraction progress.
+
+    Tracks whose features cannot be extracted are left out (and listed in the
+    result's ``failed`` mapping) rather than clustered as zero vectors; the
+    returned ``tracks``/``X``/``labels`` are index-aligned with each other.
     """
     if log_callback is None:
         log_callback = lambda msg: None
@@ -751,6 +980,11 @@ def generate_clustered_playlists(
         raise RuntimeError(
             "Essentia required for feature extraction (engine='essentia')"
         )
+    method = normalize_method(method)
+    if method == "hdbscan":
+        _import_hdbscan()  # fail before a long extraction, not after it
+
+    run_started = time.time()
 
     # ------------------------------------------------------------------
     # Feature cache setup
@@ -785,27 +1019,51 @@ def generate_clustered_playlists(
         f"({feature_vector_length(selection)} dimensions)"
     )
 
-    if engine_mode == "parallel":
-        feats, updated = _extract_features_parallel(
-            tracks,
-            cache,
-            log_callback,
-            feature_engine,
-            use_max_workers=use_max_workers,
-            features=selection,
-        )
-    else:
-        feats, updated = _extract_features_serial(
-            tracks, cache, log_callback, feature_engine, features=selection
-        )
-
-    if updated:
+    def _save_cache() -> None:
         try:
-            np.save(cache_file, cache)
+            _save_feature_cache(cache_file, cache)
+            _write_cache_metadata(cache_file, run_started, len(cache))
             log_callback(f"✓ Saved feature cache ({len(cache)} entries) to {cache_file}")
         except OSError as e:
             log_callback(f"! Warning: Could not save cache file: {e}")
             logger.warning(f"Failed to save feature cache: {e}")
+
+    extract_kwargs = dict(
+        features=selection, cancel_event=cancel_event, progress_callback=progress_callback
+    )
+    if engine_mode == "parallel":
+        extract = _extract_features_parallel
+        extract_kwargs["use_max_workers"] = use_max_workers
+    else:
+        extract = _extract_features_serial
+    cache_len_before = len(cache)
+    try:
+        kept_tracks, feats, updated, failed = extract(
+            tracks, cache, log_callback, feature_engine, **extract_kwargs
+        )
+    except ClusteringCancelled:
+        # Keep what was extracted so the next run resumes; write nothing else.
+        if len(cache) != cache_len_before:
+            _save_cache()
+        log_callback("! Clustering cancelled; no cluster data was written.")
+        raise
+
+    if updated:
+        _save_cache()
+
+    if failed:
+        log_callback(
+            f"⚠ {len(failed)} track(s) could not be analysed and were left out "
+            "(they will be retried next run)"
+        )
+    if not feats:
+        first = next(iter(failed.values()), "no tracks")
+        raise RuntimeError(
+            f"Feature extraction failed for every track (first error: {first})"
+        )
+    if _is_cancelled(cancel_event):
+        raise ClusteringCancelled()
+    tracks = kept_tracks
 
     X = np.vstack(feats)
     scaler_cls = SCALERS.get(normalization)
@@ -828,7 +1086,10 @@ def generate_clustered_playlists(
     )
     log_cluster_summary(labels, log_callback)
 
-    log_callback("→ Automatic playlist export disabled; manage selections manually.")
+    log_callback(
+        "→ Cluster playlists are not written automatically; export a cluster "
+        "from the Music Graph (select it, then Export playlist…)."
+    )
 
     # Prepare cluster metadata
     unique_labels = set([l for l in labels if l >= 0])
@@ -841,6 +1102,9 @@ def generate_clustered_playlists(
             "tempo": [0, 0],  # Could compute from features if available
         }
 
+    if _is_cancelled(cancel_event):
+        raise ClusteringCancelled()
+
     # Compute 2D embedding for visualization
     log_callback("→ Computing 2D scatter plot coordinates…")
     X_2d = compute_2d_embedding(X, log_callback)
@@ -849,68 +1113,22 @@ def generate_clustered_playlists(
     log_callback("→ Computing 3D audio feature space (preserves ~80% data variance)…")
     X_3d = compute_3d_embedding(X, log_callback)
 
-    # Save cluster data to JSON for visualization
-    # For large datasets, optionally downsample X for visualization
-    x_to_save = X
-    x_2d_to_save = X_2d
-    x_3d_to_save = X_3d
-    labels_to_save = labels
-    tracks_to_save = tracks
-    vis_indices = None
-    downsampled = False
+    if _is_cancelled(cancel_event):
+        raise ClusteringCancelled()
 
-    if len(X) > MAX_VISUALIZATION_POINTS:
-        log_callback(
-            f"⚠ Library has {len(X)} tracks; downsampling to {MAX_VISUALIZATION_POINTS} "
-            f"points for visualization"
-        )
-        # Keep every nth point to maintain cluster distribution
-        step = max(1, len(X) // MAX_VISUALIZATION_POINTS)
-        indices = np.arange(0, len(X), step)
-        if len(indices) < MIN_VISUALIZATION_POINTS:
-            # Ensure minimum number of points for visualization
-            indices = np.linspace(0, len(X) - 1, MIN_VISUALIZATION_POINTS, dtype=int)
-        x_to_save = X[indices]
-        x_2d_to_save = X_2d[indices]
-        x_3d_to_save = X_3d[indices]
-        # Every saved array has to stay index-aligned: point i of X_2d/X_3d must
-        # be labels[i] and tracks[i]. Subsetting the coordinates while writing
-        # the full-length labels/tracks left the file misaligned, which made the
-        # 3D graph generator reject it outright ("Length mismatch: X_3d has N
-        # entries but labels has M") for every library above the threshold, and
-        # would have mapped selected points to the wrong tracks.
-        labels_to_save = labels[indices]
-        tracks_to_save = [tracks[i] for i in indices]
-        vis_indices = [int(i) for i in indices]
-        downsampled = True
-
-    cluster_data = {
-        "X": x_to_save.tolist(),
-        "X_2d": x_2d_to_save.tolist(),   # 2D embedding for quick scatter plot
-        "X_3d": x_3d_to_save.tolist(),   # 3D embedding for advanced exploration (preserves ~80% variance)
-        "X_downsampled": downsampled,  # Flag if X was downsampled
-        "X_total_points": len(X),      # Original number of points
-        "X_indices": vis_indices,      # Original positions of the saved points (None when not downsampled)
-        "labels": labels_to_save.tolist(),
-        "tracks": tracks_to_save,
-        "cluster_info": cluster_info,
-    }
+    # Save cluster data to JSON for visualization (downsampled for very large
+    # libraries, but always index-aligned — see build_cluster_payload).
+    cluster_data = build_cluster_payload(
+        X, X_2d, X_3d, labels, tracks, cluster_info, log_callback
+    )
 
     cluster_info_file = os.path.join(docs, "cluster_info.json")
     try:
-        with open(cluster_info_file, "w") as f:
+        tmp = cluster_info_file + ".tmp"
+        with open(tmp, "w") as f:
             json_module.dump(cluster_data, f, indent=2)
+        os.replace(tmp, cluster_info_file)
         log_callback(f"✓ Saved cluster data to {cluster_info_file}")
-
-        # Save cache metadata with timestamp
-        cache_metadata_file = cache_file.replace(".npy", "_metadata.json")
-        import time
-        metadata = {
-            "created_time": time.time(),
-            "track_count": len(tracks),
-        }
-        with open(cache_metadata_file, "w") as f:
-            json_module.dump(metadata, f, indent=2)
     except OSError as e:
         log_callback(f"! Error saving cluster data: {e}")
         logger.exception("Failed to save cluster data")
@@ -934,5 +1152,6 @@ def generate_clustered_playlists(
         "labels": labels,
         "tracks": tracks,
         "cluster_info": cluster_info,
+        "failed": failed,
         "metrics": {},  # Will be filled by caller with sklearn metrics
     }

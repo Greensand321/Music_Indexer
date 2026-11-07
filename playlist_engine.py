@@ -84,7 +84,8 @@ def _compute_tempo_energy_librosa(path: str) -> tuple[float, float]:
     y, sr = librosa.load(path, mono=True, sr=None)
     tempo, _ = librosa.beat.beat_track(y=y, sr=sr)
     rms = float(np.mean(librosa.feature.rms(y=y)))
-    return tempo, rms
+    # Newer librosa returns tempo as a 1-element array.
+    return float(np.atleast_1d(tempo)[0]), rms
 
 
 def _compute_tempo_energy_essentia(path: str) -> tuple[float, float]:
@@ -96,6 +97,62 @@ def _compute_tempo_energy_essentia(path: str) -> tuple[float, float]:
     return float(tempo), rms
 
 
+def _load_tempo_cache(cache_file: str, log_callback) -> dict:
+    """Read ``Docs/tempo_energy.npy`` without unpickling it.
+
+    The file sits in the library folder, so it is loaded with
+    ``allow_pickle=False`` (the old pickled-dict format is ignored and
+    rebuilt). A corrupt or unreadable file is logged and rebuilt instead of
+    failing every Tempo run until the user deletes it.
+    """
+    if not os.path.exists(cache_file):
+        log_callback("→ No tempo/energy cache found; analyzing all tracks")
+        return {}
+    try:
+        data = np.load(cache_file, allow_pickle=False)
+        if not hasattr(data, "files"):
+            raise ValueError("legacy (pickled) cache format")
+        try:
+            paths = [str(p) for p in data["paths"]]
+            engines = [str(e) for e in data["engines"]]
+            tempos = [float(t) for t in data["tempos"]]
+            rms = [float(r) for r in data["rms"]]
+        finally:
+            data.close()
+        if not (len(paths) == len(engines) == len(tempos) == len(rms)):
+            raise ValueError("cache arrays are not aligned")
+    except Exception as exc:  # noqa: BLE001 - any bad cache means "re-analyse"
+        log_callback(f"! Ignoring unreadable tempo/energy cache ({exc}); it will be rebuilt")
+        return {}
+    cache = {
+        p: {"engine": e, "tempo": t, "rms": r}
+        for p, e, t, r in zip(paths, engines, tempos, rms)
+    }
+    log_callback(f"→ Loaded {len(cache)} cached tempo/energy entries")
+    return cache
+
+
+def _save_tempo_cache(cache_file: str, cache: dict) -> None:
+    paths = list(cache)
+    tmp = cache_file + ".tmp"
+    with open(tmp, "wb") as fh:
+        np.savez(
+            fh,
+            paths=np.array(paths, dtype=str),
+            engines=np.array([str(cache[p].get("engine", "")) for p in paths], dtype=str),
+            tempos=np.array([float(cache[p]["tempo"]) for p in paths], dtype=np.float64),
+            rms=np.array([float(cache[p]["rms"]) for p in paths], dtype=np.float64),
+        )
+    os.replace(tmp, cache_file)
+
+
+def _in_range(value: float, bounds) -> bool:
+    if not bounds:
+        return True
+    low, high = bounds
+    return float(low) <= float(value) <= float(high)
+
+
 def bucket_by_tempo_energy(
     tracks: list[str],
     root_path: str,
@@ -103,7 +160,17 @@ def bucket_by_tempo_energy(
     progress_callback=None,
     cancel_event=None,
     engine: TempoEngine = "librosa",
+    tempo_range: tuple[float, float] | None = None,
+    energy_range: tuple[float, float] | None = None,
 ) -> dict:
+    """Analyse tempo/energy and group tracks into ``slow|medium|fast x low|medium|high``.
+
+    Writes no playlists (only the analysis cache under ``Docs/``); the
+    returned ``playlist_paths`` are where the caller *may* write them.
+    ``tempo_range`` (BPM) and ``energy_range`` (mean RMS, 0-1) drop tracks
+    outside the given inclusive bounds; their count is returned as
+    ``excluded``.
+    """
     if log_callback is None:
         log_callback = lambda m: None
     if progress_callback is None:
@@ -117,18 +184,12 @@ def bucket_by_tempo_energy(
             "Tempo/Energy buckets require numpy and Essentia when engine='essentia'. Install Essentia to continue."
         )
     playlists_dir = os.path.join(root_path, "Playlists")
-    os.makedirs(playlists_dir, exist_ok=True)
 
     # Cached results setup (mirrors clustering tools for faster re-runs)
     docs_dir = os.path.join(root_path, "Docs")
     os.makedirs(docs_dir, exist_ok=True)
     cache_file = os.path.join(docs_dir, "tempo_energy.npy")
-    try:
-        cache = dict(np.load(cache_file, allow_pickle=True).item())
-        log_callback(f"→ Loaded {len(cache)} cached tempo/energy entries")
-    except FileNotFoundError:
-        cache = {}
-        log_callback("→ No tempo/energy cache found; analyzing all tracks")
+    cache = _load_tempo_cache(cache_file, log_callback)
 
     # Normalize cache keys to absolute paths so repeated runs can reuse results
     # even if callers pass in different path representations.
@@ -141,6 +202,7 @@ def bucket_by_tempo_energy(
 
     buckets: dict[tuple[str, str], list[str]] = {}
     processed = 0
+    excluded = 0
     updated_cache = cache_normalized_changed
 
     normalized_tracks: list[tuple[str, str]] = []
@@ -182,6 +244,15 @@ def bucket_by_tempo_energy(
                 tempo, rms = compute_tempo_energy(path_str, engine=engine)
                 cache[cache_key] = {"engine": engine, "tempo": tempo, "rms": rms}
                 updated_cache = True
+            if not (_in_range(tempo, tempo_range) and _in_range(rms, energy_range)):
+                excluded += 1
+                log_callback(
+                    f"• {os.path.basename(path_str)} skipped "
+                    f"({float(tempo):.0f} BPM, energy {float(rms):.2f} outside the chosen range)"
+                )
+                processed += 1
+                progress_callback(processed)
+                continue
             tb = categorize_tempo(tempo)
             eb = categorize_energy(rms)
             buckets.setdefault((tb, eb), []).append(path_str)
@@ -192,8 +263,11 @@ def bucket_by_tempo_energy(
         progress_callback(processed)
 
     if updated_cache:
-        np.save(cache_file, cache)
-        log_callback(f"✓ Saved tempo/energy cache ({len(cache)} entries) to {cache_file}")
+        try:
+            _save_tempo_cache(cache_file, cache)
+            log_callback(f"✓ Saved tempo/energy cache ({len(cache)} entries) to {cache_file}")
+        except (OSError, KeyError, TypeError, ValueError) as exc:
+            log_callback(f"! Could not save tempo/energy cache: {exc}")
     out_paths = {}
     for (tb, eb), items in buckets.items():
         outfile = os.path.join(playlists_dir, f"{tb}_{eb}.m3u")
@@ -215,6 +289,7 @@ def bucket_by_tempo_energy(
         "playlist_paths": out_paths,
         "stats": stats,
         "processed": processed,
+        "excluded": excluded,
         "total": len(tracks),
         "cancelled": bool(cancel_event and cancel_event.is_set()),
     }

@@ -1,9 +1,14 @@
 """Multi-step clustering configuration wizard dialog."""
 from __future__ import annotations
 
-from typing import Dict, List
+from typing import Dict
 
 from gui.compat import QtCore, QtGui, QtWidgets
+
+#: Shown on the controls the clustering engine does not implement yet. They
+#: stay visible (the redesign decides their fate) but cannot be changed, so the
+#: wizard no longer promises behaviour that never happens.
+_NOT_AVAILABLE = "Not available yet — the clustering engine does not do this."
 
 
 class ClusteringWizardDialog(QtWidgets.QDialog):
@@ -11,10 +16,14 @@ class ClusteringWizardDialog(QtWidgets.QDialog):
 
     Steps:
     1. Feature Selection (which features to use)
-    2. Normalization & Preprocessing (scaling, reduction)
+    2. Normalization (scaling)
     3. Algorithm Selection (K-Means vs HDBSCAN)
-    4. Post-Processing (merge small clusters, remove outliers)
-    5. Output Options (playlists, visualization, report)
+    4. Post-Processing (not implemented by the engine yet; shown disabled)
+    5. Output (what a run produces)
+
+    Every page's controls are read when the user moves *off* the page and
+    again in :meth:`get_config`, so no choice is lost whichever way the user
+    navigates.
     """
 
     def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
@@ -40,17 +49,17 @@ class ClusteringWizardDialog(QtWidgets.QDialog):
             "k": 8,
             "min_cluster_size": 5,
             "min_samples": 5,
-            "eps": 0.5,
-            "remove_small_clusters": True,
+            # Not implemented by the engine; recorded as what really happens.
+            "remove_small_clusters": False,
             "min_cluster_threshold": 5,
-            "merge_into_misc": True,
-            "create_playlists": True,
+            "merge_into_misc": False,
+            "create_playlists": False,
             "generate_report": True,
-            "open_graph": True,
+            "open_graph": False,
         }
 
-        self._build_ui()
         self._current_step = 0
+        self._build_ui()
         self._show_step(0)
 
     def _build_ui(self) -> None:
@@ -60,11 +69,11 @@ class ClusteringWizardDialog(QtWidgets.QDialog):
         # Title and step indicator
         title_layout = QtWidgets.QHBoxLayout()
         self._title = QtWidgets.QLabel("Step 1: Feature Selection")
-        self._title.setStyleSheet("font-weight: bold; font-size: 14px;")
+        self._title.setObjectName("cardTitle")
         title_layout.addWidget(self._title)
 
         self._step_indicator = QtWidgets.QLabel("1 of 5")
-        self._step_indicator.setStyleSheet("color: #666; font-size: 12px;")
+        self._step_indicator.setObjectName("statusHint")
         title_layout.addStretch()
         title_layout.addWidget(self._step_indicator)
         layout.addLayout(title_layout)
@@ -109,14 +118,19 @@ class ClusteringWizardDialog(QtWidgets.QDialog):
         button_layout.addWidget(self._cancel_btn)
 
         layout.addLayout(button_layout)
-        self.setLayout(layout)
+
+    @staticmethod
+    def _hint(text: str) -> QtWidgets.QLabel:
+        label = QtWidgets.QLabel(text)
+        label.setObjectName("notesHint")
+        label.setWordWrap(True)
+        return label
 
     def _create_page_features(self) -> QtWidgets.QWidget:
         """Create feature selection page."""
         page = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(page)
 
-        # Intro
         intro = QtWidgets.QLabel(
             "Select which audio features to use for clustering.\n"
             "More features = more detailed clustering, longer computation.\n"
@@ -125,7 +139,6 @@ class ClusteringWizardDialog(QtWidgets.QDialog):
         intro.setWordWrap(True)
         layout.addWidget(intro)
 
-        # Features as checkboxes
         features_info = {
             "tempo": "Beats Per Minute (BPM) - rhythm tempo",
             "mfcc": "Mel-Frequency Cepstral Coefficients - timbre/tone color",
@@ -143,7 +156,6 @@ class ClusteringWizardDialog(QtWidgets.QDialog):
             self._feature_checkboxes[feat] = cb
             layout.addWidget(cb)
 
-        # Preset buttons
         preset_layout = QtWidgets.QHBoxLayout()
         preset_layout.addWidget(QtWidgets.QLabel("Presets:"))
 
@@ -163,41 +175,37 @@ class ClusteringWizardDialog(QtWidgets.QDialog):
         return page
 
     def _create_page_normalization(self) -> QtWidgets.QWidget:
-        """Create normalization & preprocessing page."""
+        """Create normalization page."""
         page = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(page)
 
-        # Intro
         intro = QtWidgets.QLabel(
-            "Choose how to normalize features and reduce dimensions.\n"
-            "Normalization ensures all features contribute equally.\n"
-            "Dimensionality reduction can improve visualization and speed."
+            "Choose how to normalize features.\n"
+            "Normalization ensures all features contribute equally."
         )
         intro.setWordWrap(True)
         layout.addWidget(intro)
 
-        # Normalization
         layout.addWidget(QtWidgets.QLabel("Normalization Method:"))
         self._norm_combo = QtWidgets.QComboBox()
-        norm_options = [
+        for display_text, value in [
             ("Standard (Z-score)", "standard"),
             ("MinMax (0-1)", "minmax"),
             ("Robust (outlier-resistant)", "robust"),
-        ]
-        for display_text, value in norm_options:
+        ]:
             self._norm_combo.addItem(display_text, userData=value)
         self._norm_combo.setCurrentIndex(0)
         layout.addWidget(self._norm_combo)
 
-        norm_info = QtWidgets.QLabel(
+        layout.addWidget(self._hint(
             "• Standard: Mean 0, std dev 1 (default, good for most cases)\n"
             "• MinMax: Values between 0 and 1 (good for bounded features)\n"
             "• Robust: Less affected by outliers (good for skewed data)"
-        )
-        norm_info.setStyleSheet("color: #666; font-size: 10px;")
-        layout.addWidget(norm_info)
+        ))
 
-        # Dimensionality reduction
+        # Dimensionality reduction before clustering is not implemented: the
+        # engine always clusters on every selected feature. (The 2-D/3-D maps
+        # use UMAP or t-SNE automatically, for display only.)
         layout.addWidget(QtWidgets.QLabel("Dimensionality Reduction:"))
         self._reduction_combo = QtWidgets.QComboBox()
         self._reduction_combo.addItems([
@@ -206,17 +214,15 @@ class ClusteringWizardDialog(QtWidgets.QDialog):
             "t-SNE (better visualization, slow)",
             "UMAP (balanced, if installed)",
         ])
-        self._reduction_combo.setCurrentText("None (use all features)")
+        self._reduction_combo.setCurrentIndex(0)
+        self._reduction_combo.setEnabled(False)
+        self._reduction_combo.setToolTip(_NOT_AVAILABLE)
         layout.addWidget(self._reduction_combo)
-
-        reduction_info = QtWidgets.QLabel(
-            "• None: Cluster using all features (most accurate)\n"
-            "• PCA: Fast linear reduction, good for many features\n"
-            "• t-SNE: Creates visual separation, not for clustering\n"
-            "• UMAP: Preserves both local and global structure"
-        )
-        reduction_info.setStyleSheet("color: #666; font-size: 10px;")
-        layout.addWidget(reduction_info)
+        layout.addWidget(self._hint(
+            "Clustering always uses all selected features. The map views reduce "
+            "them to 2-D/3-D automatically (UMAP if installed, otherwise t-SNE), "
+            "for display only."
+        ))
 
         layout.addStretch()
         return page
@@ -229,24 +235,25 @@ class ClusteringWizardDialog(QtWidgets.QDialog):
         intro = QtWidgets.QLabel(
             "Choose a clustering algorithm.\n"
             "K-Means requires specifying K (number of clusters).\n"
-            "HDBSCAN automatically finds cluster count."
+            "HDBSCAN automatically finds cluster count (needs the optional "
+            "'hdbscan' package)."
         )
         intro.setWordWrap(True)
         layout.addWidget(intro)
 
-        # Algorithm selection
         layout.addWidget(QtWidgets.QLabel("Algorithm:"))
         self._algo_combo = QtWidgets.QComboBox()
-        self._algo_combo.addItems(["K-Means", "HDBSCAN"])
-        self._algo_combo.currentTextChanged.connect(self._on_algorithm_changed)
+        # userData is the engine's method name; the text is only for display
+        # ("K-Means".lower() is "k-means", which the engine did not accept).
+        self._algo_combo.addItem("K-Means", userData="kmeans")
+        self._algo_combo.addItem("HDBSCAN", userData="hdbscan")
+        self._algo_combo.currentIndexChanged.connect(self._on_algorithm_changed)
         layout.addWidget(self._algo_combo)
 
-        algo_info = QtWidgets.QLabel(
+        layout.addWidget(self._hint(
             "K-Means: Fast, requires specifying cluster count. Best for genre/mood grouping.\n"
             "HDBSCAN: Density-based, finds clusters automatically. Better for complex data."
-        )
-        algo_info.setStyleSheet("color: #666; font-size: 10px;")
-        layout.addWidget(algo_info)
+        ))
 
         # K-Means parameters
         self._kmeans_widget = QtWidgets.QWidget()
@@ -258,12 +265,10 @@ class ClusteringWizardDialog(QtWidgets.QDialog):
         self._k_spinbox.setToolTip("Number of clusters")
         kmeans_layout.addRow("K (clusters):", self._k_spinbox)
 
-        self._k_info = QtWidgets.QLabel(
+        self._k_info = self._hint(
             "Tip: Start with 8-12 clusters and adjust based on results.\n"
             "More clusters = more specific groupings, less coherent."
         )
-        self._k_info.setStyleSheet("color: #666; font-size: 10px;")
-        self._k_info.setWordWrap(True)
         kmeans_layout.addRow("", self._k_info)
 
         layout.addWidget(self._kmeans_widget)
@@ -284,12 +289,10 @@ class ClusteringWizardDialog(QtWidgets.QDialog):
         self._min_samples_spinbox.setToolTip("Minimum samples in neighborhood")
         hdbscan_layout.addRow("Min samples:", self._min_samples_spinbox)
 
-        self._hdbscan_info = QtWidgets.QLabel(
+        self._hdbscan_info = self._hint(
             "Tip: Increase min_cluster_size to reduce outliers.\n"
             "Lower values = more clusters and outliers."
         )
-        self._hdbscan_info.setStyleSheet("color: #666; font-size: 10px;")
-        self._hdbscan_info.setWordWrap(True)
         hdbscan_layout.addRow("", self._hdbscan_info)
 
         self._hdbscan_widget.setVisible(False)
@@ -299,13 +302,14 @@ class ClusteringWizardDialog(QtWidgets.QDialog):
         return page
 
     def _create_page_postprocessing(self) -> QtWidgets.QWidget:
-        """Create post-processing options page."""
+        """Create post-processing options page (not implemented by the engine)."""
         page = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(page)
 
         intro = QtWidgets.QLabel(
-            "Configure post-processing options.\n"
-            "These can improve cluster quality and usability."
+            "Post-processing is not available yet: every cluster the algorithm finds "
+            "is kept as it is. With HDBSCAN, tracks that fit no cluster are shown as "
+            "“Unclustered”."
         )
         intro.setWordWrap(True)
         layout.addWidget(intro)
@@ -317,66 +321,61 @@ class ClusteringWizardDialog(QtWidgets.QDialog):
         self._min_threshold_spin = QtWidgets.QSpinBox()
         self._min_threshold_spin.setRange(1, 100)
         self._min_threshold_spin.setValue(self.config["min_cluster_threshold"])
-        self._min_threshold_spin.setToolTip("Minimum tracks per cluster")
         layout.addWidget(QtWidgets.QLabel("Minimum cluster size (tracks):"))
         layout.addWidget(self._min_threshold_spin)
-
-        layout.addWidget(QtWidgets.QLabel(""))  # Spacer
 
         self._merge_cb = QtWidgets.QCheckBox("Merge small clusters into 'Miscellaneous'")
         self._merge_cb.setChecked(self.config["merge_into_misc"])
         layout.addWidget(self._merge_cb)
 
-        merge_info = QtWidgets.QLabel(
-            "If enabled, small clusters are merged into a catch-all cluster.\n"
-            "Otherwise, small clusters are simply removed."
-        )
-        merge_info.setStyleSheet("color: #666; font-size: 10px;")
-        layout.addWidget(merge_info)
+        for w in (self._remove_small_cb, self._min_threshold_spin, self._merge_cb):
+            w.setEnabled(False)
+            w.setToolTip(_NOT_AVAILABLE)
 
         layout.addStretch()
         return page
 
     def _create_page_output(self) -> QtWidgets.QWidget:
-        """Create output options page."""
+        """Create output page: what a run actually produces."""
         page = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(page)
 
         intro = QtWidgets.QLabel(
-            "Configure what to generate after clustering.\n"
-            "You can always access these later."
+            "A run saves the cluster data used by the Music Graph and the 3D view "
+            "(in the library's Docs/ folder) and, when the scores can be computed, "
+            "offers a quality report. Nothing in your library is modified."
         )
         intro.setWordWrap(True)
         layout.addWidget(intro)
 
         self._create_playlists_cb = QtWidgets.QCheckBox("Create M3U playlists for each cluster")
-        self._create_playlists_cb.setChecked(self.config["create_playlists"])
-        layout.addWidget(self._create_playlists_cb)
-
+        self._create_playlists_cb.setChecked(False)
         self._generate_report_cb = QtWidgets.QCheckBox("Generate cluster quality report")
-        self._generate_report_cb.setChecked(self.config["generate_report"])
-        layout.addWidget(self._generate_report_cb)
-
+        self._generate_report_cb.setChecked(True)
         self._open_graph_cb = QtWidgets.QCheckBox("Open interactive graph after clustering")
-        self._open_graph_cb.setChecked(self.config["open_graph"])
-        layout.addWidget(self._open_graph_cb)
-
-        layout.addWidget(QtWidgets.QLabel(""))  # Spacer
-
-        playlist_info = QtWidgets.QLabel(
-            "• Playlists: Created in Music/Playlists/ folder\n"
-            "• Report: Shows cluster quality metrics and suggestions\n"
-            "• Graph: Interactive visualization to explore clusters"
+        self._open_graph_cb.setChecked(False)
+        for cb in (self._create_playlists_cb, self._generate_report_cb, self._open_graph_cb):
+            cb.setEnabled(False)
+            layout.addWidget(cb)
+        self._create_playlists_cb.setToolTip(
+            "Not available yet. Export a cluster from the Music Graph instead "
+            "(click it in the legend, then “Export playlist…”)."
         )
-        playlist_info.setStyleSheet("color: #666; font-size: 10px;")
-        layout.addWidget(playlist_info)
+        self._generate_report_cb.setToolTip("Always offered when the scores can be computed.")
+        self._open_graph_cb.setToolTip("Use “Open Visual Graph” on the Results tab.")
+
+        layout.addWidget(self._hint(
+            "• Playlists: export any cluster or selection from the Music Graph\n"
+            "• Report: “View Quality Report” on the Results tab\n"
+            "• Graph: “Open Visual Graph” on the Results tab"
+        ))
 
         layout.addStretch()
         return page
 
-    def _on_algorithm_changed(self, algo_name: str) -> None:
-        """Handle algorithm change."""
-        is_kmeans = algo_name == "K-Means"
+    def _on_algorithm_changed(self, _index: int = 0) -> None:
+        """Show the parameters of the selected algorithm."""
+        is_kmeans = self._algo_combo.currentData() == "kmeans"
         self._kmeans_widget.setVisible(is_kmeans)
         self._hdbscan_widget.setVisible(not is_kmeans)
 
@@ -386,7 +385,7 @@ class ClusteringWizardDialog(QtWidgets.QDialog):
             cb.setChecked(preset_config.get(feat, False))
 
     def _show_step(self, step: int) -> None:
-        """Show a specific step."""
+        """Show a specific step (callers save the page being left first)."""
         self._current_step = step
         self._stack.setCurrentIndex(step)
         self._progress_bar.setValue(step + 1)
@@ -394,70 +393,79 @@ class ClusteringWizardDialog(QtWidgets.QDialog):
 
         titles = [
             "Step 1: Feature Selection",
-            "Step 2: Normalization & Preprocessing",
+            "Step 2: Normalization",
             "Step 3: Algorithm Selection",
             "Step 4: Post-Processing",
-            "Step 5: Output Options",
+            "Step 5: Output",
         ]
         self._title.setText(titles[step])
 
-        # Update buttons
         self._prev_btn.setEnabled(step > 0)
         self._next_btn.setText("Finish" if step == 4 else "Next >")
 
-        # Save config from current page
-        self._save_current_step()
+    def _validate_step(self, step: int) -> bool:
+        """Return False (after telling the user) if ``step`` cannot be left."""
+        if step == 0 and not any(cb.isChecked() for cb in self._feature_checkboxes.values()):
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Invalid Selection",
+                "Select at least one audio feature to cluster on.",
+            )
+            return False
+        return True
 
-    def _save_current_step(self) -> None:
-        """Save configuration from current step."""
-        if self._current_step == 0:  # Features
+    def _save_step(self, step: int) -> None:
+        """Copy page ``step``'s widgets into :attr:`config`."""
+        if step == 0:  # Features
             for feat, cb in self._feature_checkboxes.items():
                 self.config["features"][feat] = cb.isChecked()
-
-            # Validate at least one feature is selected
-            selected_features = [k for k, v in self.config["features"].items() if v]
-            if not selected_features:
-                # Re-check at least one feature (tempo as default)
-                self.config["features"]["tempo"] = True
-                self._feature_checkboxes["tempo"].setChecked(True)
-                QtWidgets.QMessageBox.warning(
-                    self,
-                    "Invalid Selection",
-                    "At least one feature must be selected. Re-enabled tempo."
-                )
-        elif self._current_step == 1:  # Normalization
-            # Get normalization value from combo box userData
+        elif step == 1:  # Normalization
             norm_value = self._norm_combo.currentData()
             self.config["normalization"] = norm_value if norm_value else "standard"
-            self.config["dimensionality_reduction"] = self._reduction_combo.currentText().split()[0].lower()
-        elif self._current_step == 2:  # Algorithm
-            self.config["algorithm"] = self._algo_combo.currentText().lower()
+            self.config["dimensionality_reduction"] = "none"
+        elif step == 2:  # Algorithm
+            self.config["algorithm"] = self._algo_combo.currentData() or "kmeans"
             self.config["k"] = self._k_spinbox.value()
             self.config["min_cluster_size"] = self._min_size_spinbox.value()
             self.config["min_samples"] = self._min_samples_spinbox.value()
-        elif self._current_step == 3:  # Post-processing
+        elif step == 3:  # Post-processing (disabled controls)
             self.config["remove_small_clusters"] = self._remove_small_cb.isChecked()
             self.config["min_cluster_threshold"] = self._min_threshold_spin.value()
             self.config["merge_into_misc"] = self._merge_cb.isChecked()
-        elif self._current_step == 4:  # Output
+        elif step == 4:  # Output (disabled controls)
             self.config["create_playlists"] = self._create_playlists_cb.isChecked()
             self.config["generate_report"] = self._generate_report_cb.isChecked()
             self.config["open_graph"] = self._open_graph_cb.isChecked()
 
+    def _save_current_step(self) -> None:
+        """Backwards-compatible alias: save the page currently shown."""
+        self._save_step(self._current_step)
+
+    def _save_all(self) -> None:
+        for step in range(len(self._pages)):
+            self._save_step(step)
+
     def _on_prev(self) -> None:
-        """Go to previous step."""
+        """Go to previous step (keeping what was entered on this one)."""
         if self._current_step > 0:
+            self._save_step(self._current_step)
             self._show_step(self._current_step - 1)
 
     def _on_next(self) -> None:
         """Go to next step or accept."""
+        if not self._validate_step(self._current_step):
+            return
+        self._save_step(self._current_step)
         if self._current_step < 4:
             self._show_step(self._current_step + 1)
         else:
-            self._save_current_step()
+            if not self._validate_step(0):
+                self._show_step(0)
+                return
+            self._save_all()
             self.accept()
 
     def get_config(self) -> Dict:
-        """Get the final configuration."""
-        self._save_current_step()
+        """Get the final configuration (read from every page's widgets)."""
+        self._save_all()
         return self.config

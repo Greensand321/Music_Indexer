@@ -36,7 +36,31 @@ available dimensions are intuitive:
   it's labeled, or when it came out.
 
 You can even combine dimensions — "slow but high-energy," for instance — to carve out
-specific moods.
+specific moods. The tempo and energy *range* fields narrow this further: tracks
+outside the chosen BPM / energy window are left out of every bucket.
+
+**Nothing is written without your say-so.** Every mode of the Playlist Generator
+(folder, tempo/energy, Auto-DJ and repair) first works out exactly which `.m3u`
+files it would write, then shows you that list — marking which existing playlists
+would be *replaced* — and only writes after you confirm. Any playlist it replaces is
+copied to `name.m3u.<date-time>.bak` beside it first, and every write and backup is
+appended to `Docs/playlist_writes.log`. A Cancel button stops a long analysis.
+
+- **Folder playlists** are one per *album folder* (every folder that directly holds
+  audio files), named after its path (`Artist_Album.m3u`). The library's own
+  folders — Docs, Playlists, Trash, Quarantine, Not Sorted, Manual Review — are
+  skipped.
+- **Auto-DJ** needs a seed track from your library; it no longer silently starts
+  from whichever file happens to be found first.
+- **Playlist repair** checks the playlists you add (or, with an empty list, every
+  playlist in the library's `Playlists/` folder). A missing entry is first pointed at
+  the same track in the other codec (FLAC → Opus when "Prefer Opus" is ticked, Opus →
+  FLAC otherwise), and otherwise matched by file name across the library. You see the
+  fixes, and the entries that are still missing, before anything is saved.
+
+The analysis caches (`Docs/tempo_energy.npy`, `Docs/features*.npy`) are stored in a
+plain numeric format and are never unpickled; a corrupt cache — or one written by an
+older version — is simply rebuilt, so the first run after upgrading re-analyses once.
 
 ### Auto-DJ: playlists that flow
 
@@ -164,9 +188,15 @@ them in a **step-by-step wizard** that asks plain questions in sequence:
 2. **How should I put the different qualities on an equal footing?** (normalization —
    making sure one feature with naturally large numbers doesn't drown out the others)
 3. **Which grouping strategy, and with what settings?** (K-Means or HDBSCAN)
-4. **What should I do with tiny or stray groups?** (clean-up — merge them into a
-   "Miscellaneous" pile, or set them aside)
-5. **What should I produce?** (playlists, a quality report, a visual graph)
+4. **What should I do with tiny or stray groups?** (clean-up — *shown but not
+   available yet*: every group the algorithm finds is kept)
+5. **What will I get?** (the data for the Music Graph and the 3-D view, plus a
+   quality report; the playlist/auto-open options are shown but not available yet)
+
+The dimensionality-reduction choice on step 2 is likewise shown disabled: clustering
+always uses every selected feature, and the maps flatten them automatically for
+display only. HDBSCAN needs the optional `hdbscan` package; K-Means (and Auto-DJ)
+work without it.
 
 The wizard's value is that it lets you express intent — "group my library into eight
 piles based mainly on rhythm and texture" — without needing to know the mathematics
@@ -184,12 +214,18 @@ different features. (Two companion scores measure related notions of how distinc
 compact the groups are.) Think of these as a report card on the grouping, telling you
 whether to trust it or try again.
 
+The scores are computed on clustered tracks only: HDBSCAN's "unclustered" tracks
+are not a group, so they are left out of the scores and reported separately (as is
+the cluster count). Tracks whose audio could not be analysed are left out of the run
+and listed, and are retried next time rather than being remembered as silence.
+
 ### From groups to playlists
 
-Finally, each discovered group becomes a playlist. The tracks HDBSCAN judged to be
-true outliers can either be gathered into their own "Miscellaneous" list or left out
-entirely, so your clean mood-playlists aren't polluted by the one weird track that
-fits nowhere.
+Clustering does **not** write playlists by itself. Each run saves the analysis
+(`Docs/cluster_info.json`, `Docs/cluster_graph.html`); to turn a group into a
+playlist, open the Music Graph, click the cluster in the legend (or lasso a region)
+and use **Export playlist…**. HDBSCAN's unclustered tracks are listed separately in
+the legend, so they never end up in a mood playlist by accident.
 
 ## Level 3: The Visual Music Graph
 
@@ -274,8 +310,16 @@ export it as a **CSV** or an **`.m3u` playlist** — the point of the whole exer
 see a region of your library that sounds alike, and turn it into something you can
 listen to.
 
-> **If PyQtGraph isn't installed**, the plot area explains that and tells you how to
-> install it, and the 3-D browser view keeps working regardless.
+> **If PyQtGraph isn't installed** (or is installed but fails to load, for example
+> because one of its dependencies is missing), the plot area shows the actual reason,
+> the graph controls stay disabled, and the 3-D browser view keeps working regardless.
+
+The map refreshes itself: when you come to the Music Graph after a clustering run, it
+notices the new `cluster_info.json` and reloads (Reload is still there for edits
+made outside the app). A click *pins* a track in the details panel, so moving the
+mouse across other dots on the way to its Play button no longer swaps the track out.
+Hiding a cluster in the legend also removes its tracks from the current selection.
+The plot follows the app's light/dark theme.
 
 The "Open Visual Graph" button in the clustering workspace's Results tab does now
 take you straight to the Music Graph room (it used to just show a message box asking
@@ -296,7 +340,11 @@ repository. If you're reading the source to understand this feature, ignore
 *(Historical note on the quality report: the dialog that displays your Silhouette /
 Davies-Bouldin / Calinski-Harabasz scores used to fail to render its per-cluster
 breakdown against any real result — it called an internal method that didn't exist
-under that name. That's fixed; the scoring math was never affected.)*
+under that name, and later rendered as three empty boxes because each section
+attached a second layout to its card. Both are fixed; the scoring math was never
+affected. Likewise, the wizard used to discard every choice (it saved the page being
+entered rather than the one being left) and sent "k-means", which ran HDBSCAN; it
+now keeps every choice and runs the algorithm you picked.)*
 
 ## What's real today, and what's still ahead
 
@@ -305,12 +353,13 @@ In the spirit of an honest, up-to-date resource:
 **Working today:** rule-based playlists and Auto-DJ; MusicBrainz-based genre
 tag-filling (see the caveat above on what "normalization" means here); clustering by
 timbre and tempo with both K-Means and HDBSCAN; the five-step configuration wizard;
-the quality scores and the report dialog that displays them; automatic playlist
-creation from clusters; the 3-D browser visualization; and the in-app 2-D map with
+the quality scores and the report dialog that displays them; exporting a cluster or
+any selection as a playlist from the Music Graph; the 3-D browser visualization; and the in-app 2-D map with
 pan/rectangle/lasso selection, hover and click inspection, legend-driven cluster
 visibility, and selection → Player / CSV / `.m3u`.
 
-**Still ahead (see ROADMAP.md):** live re-tuning of a clustering without recomputing
+**Still ahead (see ROADMAP.md):** writing a playlist per cluster automatically (with
+a preview); the wizard's clean-up and dimensionality-reduction options; live re-tuning of a clustering without recomputing
 everything from scratch; choosing the map-flattening method from the interface; in-map
 cluster *editing* (merging clusters, moving a track between them); selecting by
 distance from a point and filtering the map by metadata; a suggestion engine for weak
