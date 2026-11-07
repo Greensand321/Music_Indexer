@@ -399,6 +399,142 @@ def _extract_artwork_bytes(path: str) -> bytes | None:
     return None
 
 
+def _payload_mime(payload: bytes) -> str:
+    if payload.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if payload[:4] == b"RIFF" and payload[8:12] == b"WEBP":
+        return "image/webp"
+    return "image/jpeg"
+
+
+def _edit_copy_then_replace(target: str, edit: Callable[[str], tuple]) -> tuple:
+    """Run ``edit`` on a copy of ``target``; swap the copy in only if it worked.
+
+    ``edit(copy_path)`` returns a tuple whose first item says whether it
+    succeeded. The winner — the copy the user keeps — is therefore never left
+    half-written by a crash, a full disk or a tag library error mid-save: it
+    is either untouched or atomically replaced by the fully written copy. A
+    symlinked winner is edited at its real location.
+    """
+    real = os.path.realpath(ensure_long_path(target))
+    directory = os.path.dirname(real)
+    ext = os.path.splitext(real)[1]
+    fd, tmp_path = tempfile.mkstemp(prefix=".alphadex-edit-", suffix=ext, dir=directory)
+    os.close(fd)
+    try:
+        shutil.copy2(real, tmp_path)
+        outcome = edit(tmp_path)
+        if outcome and outcome[0]:
+            os.replace(tmp_path, real)
+            tmp_path = ""
+        return outcome
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+
+
+_VORBIS_COMMENT_MODULES = ("mutagen.oggvorbis", "mutagen.oggopus", "mutagen.oggflac", "mutagen.oggspeex")
+_ID3_CHUNK_MODULES = ("mutagen.mp3", "mutagen.wave", "mutagen.aiff", "mutagen.trueaudio", "mutagen.dsf")
+
+
+def _embedded_front_covers(audio: object) -> List[bytes]:
+    """Front-cover payloads in a loaded mutagen file, for every format we write."""
+    covers: List[bytes] = []
+    module = type(audio).__module__
+    if module == "mutagen.flac":
+        covers.extend(bytes(p.data) for p in getattr(audio, "pictures", []) if getattr(p, "type", None) == 3)
+    tags = getattr(audio, "tags", None)
+    if tags is None:
+        return covers
+    if module.startswith(_VORBIS_COMMENT_MODULES):
+        from mutagen.flac import Picture  # type: ignore
+
+        for value in tags.get("metadata_block_picture", []) or []:
+            try:
+                picture = Picture(base64.b64decode(value))
+            except Exception:
+                continue
+            if picture.type == 3:
+                covers.append(bytes(picture.data))
+    elif module.startswith("mutagen.mp4"):
+        covers.extend(bytes(c) for c in tags.get("covr", []) or [])
+    elif hasattr(tags, "getall"):
+        covers.extend(bytes(f.data) for f in tags.getall("APIC") if getattr(f, "type", None) == 3)
+    return covers
+
+
+def _embed_front_cover(path: str, payload: bytes) -> tuple[bool, str]:
+    """Embed ``payload`` as the front cover of ``path`` in that format's own way.
+
+    Other pictures are kept. Formats without a known cover container are
+    refused rather than guessed: the old fallback wrote an ID3 header onto the
+    front of OGG/Opus/WAV/AIFF files, which made them unreadable.
+    """
+    mime = _payload_mime(payload)
+    audio = MutagenFile(path)
+    try:
+        if audio is None:
+            return False, "Unsupported audio format for embedding."
+        module = type(audio).__module__
+        if module == "mutagen.flac":
+            from mutagen.flac import Picture  # type: ignore
+
+            kept = [p for p in audio.pictures if getattr(p, "type", None) != 3]
+            pic = Picture()
+            pic.data, pic.type, pic.mime, pic.desc = payload, 3, mime, "Front cover"
+            audio.clear_pictures()
+            for p in kept:
+                audio.add_picture(p)
+            audio.add_picture(pic)
+            audio.save()
+            return True, "Embedded FLAC picture."
+        if module.startswith("mutagen.mp4"):
+            from mutagen.mp4 import MP4Cover  # type: ignore
+
+            if audio.tags is None:
+                audio.add_tags()
+            cover_format = MP4Cover.FORMAT_PNG if mime == "image/png" else MP4Cover.FORMAT_JPEG
+            audio.tags["covr"] = [MP4Cover(payload, imageformat=cover_format)]
+            audio.save()
+            return True, "Embedded MP4 cover atom."
+        if module.startswith(_VORBIS_COMMENT_MODULES):
+            from mutagen.flac import Picture  # type: ignore
+
+            if audio.tags is None:
+                audio.add_tags()
+            kept: List[str] = []
+            for value in audio.tags.get("metadata_block_picture", []) or []:
+                try:
+                    if Picture(base64.b64decode(value)).type == 3:
+                        continue
+                except Exception:
+                    pass
+                kept.append(value)
+            pic = Picture()
+            pic.data, pic.type, pic.mime, pic.desc = payload, 3, mime, "Front cover"
+            audio.tags["metadata_block_picture"] = kept + [base64.b64encode(pic.write()).decode("ascii")]
+            audio.save()
+            return True, "Embedded Vorbis comment picture."
+        if module.startswith(_ID3_CHUNK_MODULES):
+            from mutagen.id3 import APIC  # type: ignore
+
+            if audio.tags is None:
+                audio.add_tags()
+            preserved = [f for f in audio.tags.getall("APIC") if getattr(f, "type", None) != 3]
+            audio.tags.delall("APIC")
+            for frame in preserved:
+                audio.tags.add(frame)
+            audio.tags.add(APIC(encoding=3, mime=mime, type=3, desc="Front cover", data=payload))
+            audio.save()
+            return True, "Embedded ID3 cover art."
+        return False, f"Embedding artwork into {type(audio).__name__} files is not supported; file left unchanged."
+    finally:
+        _close_mutagen_audio(audio)
+
+
 def _apply_artwork(action: ArtworkDirective) -> tuple[bool, str]:
     payload = _extract_artwork_bytes(action.source)
     if payload is None:
@@ -422,80 +558,76 @@ def _apply_artwork(action: ArtworkDirective) -> tuple[bool, str]:
     if MutagenFile is None:
         return True, "Mutagen unavailable; wrote artwork sidecar only."
 
-    target_path = ensure_long_path(action.target)
-    audio = MutagenFile(target_path)
     try:
-        if audio is None:
-            return False, "Unsupported audio format for embedding."
-
-        ext = os.path.splitext(action.source)[1].lower()
-        mime = "image/jpeg"
-        if ext == ".png":
-            mime = "image/png"
-
-        try:
-            if hasattr(audio, "pictures"):
-                # FLAC/APE: replace front cover while preserving other pictures.
-                from mutagen.flac import Picture  # type: ignore
-
-                existing = [p for p in getattr(audio, "pictures") if getattr(p, "type", None) != 3]
-                pic = Picture()
-                pic.data = payload
-                pic.type = 3
-                pic.mime = mime
-                pic.desc = "Front cover"
-                audio.clear_pictures()
-                for p in existing:
-                    audio.add_picture(p)
-                audio.add_picture(pic)
-                audio.save()
-                return True, "Embedded FLAC/APE picture."
-            if audio.__class__.__module__.startswith("mutagen.mp4"):
-                from mutagen.mp4 import MP4, MP4Cover  # type: ignore
-
-                mp4 = audio if isinstance(audio, MP4) else MP4(target_path)
-                cover_format = MP4Cover.FORMAT_PNG if mime == "image/png" else MP4Cover.FORMAT_JPEG
-                mp4["covr"] = [MP4Cover(payload, imageformat=cover_format)]
-                mp4.save()
-                return True, "Embedded MP4 cover atom."
-            # Default to ID3/APIC handling
-            from mutagen.id3 import APIC, ID3, ID3NoHeaderError  # type: ignore
-
-            try:
-                tags = ID3(target_path)
-            except ID3NoHeaderError:
-                tags = ID3()
-            preserved = [frame for frame in tags.getall("APIC") if getattr(frame, "type", None) != 3]
-            tags.delall("APIC")
-            for frame in preserved:
-                tags.add(frame)
-            tags.add(APIC(encoding=3, mime=mime, type=3, desc="Front cover", data=payload))
-            tags.save(target_path)
-            return True, "Embedded ID3 cover art."
-        except Exception as exc:
-            return False, f"Artwork embed failed: {exc}"
-    finally:
-        _close_mutagen_audio(audio)
+        return _edit_copy_then_replace(action.target, lambda copy: _embed_front_cover(copy, payload))
+    except Exception as exc:
+        return False, f"Artwork embed failed: {exc}"
 
 
 def _verify_artwork_write(action: ArtworkDirective) -> tuple[bool, str]:
-    if not os.path.exists(action.target):
+    if not os.path.exists(ensure_long_path(action.target)):
         return False, "Target missing after artwork update."
     sidecar = f"{action.target}.artwork"
-    if not os.path.exists(sidecar):
-        return False, "Artwork sidecar missing after update."
+    if MutagenFile is None:
+        if not os.path.exists(sidecar):
+            return False, "Artwork sidecar missing after update."
+        try:
+            if os.path.getsize(sidecar) <= 0:
+                return False, "Artwork sidecar is empty."
+        except OSError:
+            return False, "Artwork sidecar could not be read."
+        return True, "Artwork write verified."
+    payload = _extract_artwork_bytes(action.source)
+    audio = None
     try:
-        if os.path.getsize(sidecar) <= 0:
-            return False, "Artwork sidecar is empty."
-    except OSError:
-        return False, "Artwork sidecar could not be read."
+        audio = MutagenFile(ensure_long_path(action.target))
+        if audio is None:
+            return False, "Target is no longer a readable audio file after the artwork update."
+        if payload is not None and payload not in _embedded_front_covers(audio):
+            return False, "Embedded front cover does not match the planned artwork."
+    except Exception as exc:
+        return False, f"Target could not be read back after the artwork update ({exc})."
+    finally:
+        _close_mutagen_audio(audio)
     return True, "Artwork write verified."
 
 
-def _apply_metadata(target: str, planned_tags: Mapping[str, object]) -> tuple[bool, str, List[str]]:
-    if MutagenFile is None:
-        return True, "Mutagen unavailable; metadata not written.", []
-    audio = MutagenFile(ensure_long_path(target), easy=True)
+# Planner-internal keys: normalised duplicates of a real tag (``track`` and
+# ``disc`` mirror ``tracknumber``/``discnumber``, ``year`` mirrors ``date``) or
+# planning context (``album_type``). Writing them added stray TRACK=, DISC=,
+# YEAR= fields to FLAC/Vorbis files.
+_INTERNAL_PLAN_TAGS = {"album_type", "track", "disc", "year", "cover_hash", "artwork_hash"}
+
+
+def _tags_to_write(planned: Mapping[str, object], changes: Mapping[str, object]) -> Dict[str, object]:
+    """The tag values to write for one winner: exactly the previewed changes.
+
+    The preview shows ``metadata_changes``; the executor used to write the whole
+    ``planned_winner_tags`` dict instead, including internal keys. Values that
+    are missing or the "Unknown" year placeholder are never written, and no
+    tag is ever removed.
+    """
+    out: Dict[str, object] = {}
+    for key in changes:
+        if key in _INTERNAL_PLAN_TAGS:
+            continue
+        value = planned.get(key)
+        if value in (None, "", []) or _is_placeholder_tag(key, value):
+            continue
+        out[key] = value
+    if "year" in changes and "date" not in out and not planned.get("date"):
+        year = planned.get("year")
+        if year not in (None, "") and not _is_placeholder_tag("year", year):
+            out["date"] = str(year)
+    return out
+
+
+def _normalized_tag_value(value: object) -> List[str]:
+    return [str(v) for v in value] if isinstance(value, (list, tuple)) else [str(value)]
+
+
+def _write_easy_tags(path: str, planned_tags: Mapping[str, object]) -> tuple[bool, str, List[str]]:
+    audio = MutagenFile(path, easy=True)
     try:
         if audio is None:
             return True, "Unsupported audio format; metadata not written.", []
@@ -507,7 +639,7 @@ def _apply_metadata(target: str, planned_tags: Mapping[str, object]) -> tuple[bo
             if key in INTERNAL_TAG_KEYS:
                 skipped.append(key)
                 continue
-            normalized = [str(value)] if not isinstance(value, list) else [str(v) for v in value]
+            normalized = _normalized_tag_value(value)
             try:
                 current = audio.tags.get(key) if audio.tags else None
                 if current != normalized:
@@ -518,8 +650,8 @@ def _apply_metadata(target: str, planned_tags: Mapping[str, object]) -> tuple[bo
         if changed:
             try:
                 audio.save()
-            except Exception:
-                return False, "Failed to save metadata tags.", skipped
+            except Exception as exc:
+                return False, f"Failed to save metadata tags ({exc}).", skipped
         if skipped:
             skipped_list = ", ".join(sorted(set(skipped)))
             return True, f"Metadata normalized; skipped unsupported keys: {skipped_list}.", skipped
@@ -528,11 +660,24 @@ def _apply_metadata(target: str, planned_tags: Mapping[str, object]) -> tuple[bo
         _close_mutagen_audio(audio)
 
 
+def _apply_metadata(target: str, planned_tags: Mapping[str, object]) -> tuple[bool, str, List[str]]:
+    if MutagenFile is None:
+        return True, "Mutagen unavailable; metadata not written.", []
+    if not planned_tags:
+        return True, "No previewed tag changes to write.", []
+    try:
+        return _edit_copy_then_replace(target, lambda copy: _write_easy_tags(copy, planned_tags))
+    except Exception as exc:
+        return False, f"Failed to write metadata tags ({exc}).", []
+
+
 def _verify_metadata_write(target: str, planned_tags: Mapping[str, object], skipped_keys: Iterable[str]) -> tuple[bool, str]:
-    if not os.path.exists(target):
+    if not os.path.exists(ensure_long_path(target)):
         return False, "Target missing after metadata update."
     if MutagenFile is None:
         return False, "Mutagen unavailable; metadata not verified."
+    if not planned_tags:
+        return True, "Nothing to verify."
     audio = MutagenFile(ensure_long_path(target), easy=True)
     try:
         if audio is None or audio.tags is None:
@@ -544,9 +689,8 @@ def _verify_metadata_write(target: str, planned_tags: Mapping[str, object], skip
                 continue
             if _is_placeholder_tag(key, value):
                 continue
-            normalized = [str(value)] if not isinstance(value, list) else [str(v) for v in value]
             current = audio.tags.get(key)
-            if current != normalized:
+            if current != _normalized_tag_value(value):
                 mismatched.append(key)
         if mismatched:
             return False, f"Metadata mismatch after write: {', '.join(sorted(mismatched))}."
@@ -964,7 +1108,9 @@ def execute_consolidation_plan(
         group_lookup = {g.group_id: g for g in plan.groups}
         for group in plan.groups:
             if group.metadata_changes:
-                planned_tags[group.winner_path] = dict(group.planned_winner_tags)
+                to_write = _tags_to_write(group.planned_winner_tags, group.metadata_changes)
+                if to_write:
+                    planned_tags[group.winner_path] = to_write
             for loser in group.losers:
                 loser_to_winner[loser] = group.winner_path
                 loser_disposition[loser] = group.loser_disposition.get(loser, "quarantine")
