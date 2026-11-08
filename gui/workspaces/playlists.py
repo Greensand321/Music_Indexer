@@ -33,6 +33,33 @@ def _same_path(a: str, b: str) -> bool:
     return os.path.normcase(os.path.abspath(a)) == os.path.normcase(os.path.abspath(b))
 
 
+class AudioFeatureCache(dict):
+    """Auto-DJ's per-track feature vectors, kept between runs for one library.
+
+    ``playlist_engine`` caches by path; this remembers each file's size and
+    mtime too, so a file replaced or re-encoded since it was analysed is
+    analysed again instead of reusing the old vector.
+    """
+
+    @staticmethod
+    def _stamp(path):
+        try:
+            st = os.stat(path)
+        except OSError:
+            return None
+        return (st.st_size, st.st_mtime_ns)
+
+    def __contains__(self, path) -> bool:
+        entry = dict.get(self, path)
+        return entry is not None and entry[0] is not None and entry[0] == self._stamp(path)
+
+    def __getitem__(self, path):
+        return dict.__getitem__(self, path)[1]
+
+    def __setitem__(self, path, value) -> None:
+        dict.__setitem__(self, path, (self._stamp(path), value))
+
+
 class PlaylistWorker(QtCore.QThread):
     """Plans (``mode`` = folder/tempo/autodj/repair) or writes (``mode`` = write)."""
 
@@ -54,8 +81,10 @@ class PlaylistWorker(QtCore.QThread):
         repair_paths: list | None = None,
         prefer_opus: bool = False,
         plan: list | None = None,
+        feature_cache: dict | None = None,
     ) -> None:
         super().__init__()
+        self.feature_cache = feature_cache
         self.library_path = library_path
         self.mode = mode
         self.output_dir = output_dir
@@ -153,6 +182,7 @@ class PlaylistWorker(QtCore.QThread):
                 n=self.autodj_count,
                 log_callback=self._log,
                 cancel_event=self._cancel_event,
+                feature_cache=self.feature_cache,
             )
             out_path = os.path.join(self.library_path, "Playlists", "autodj.m3u")
             return [pg.plan_playlist(ordered, out_path)]
@@ -211,6 +241,9 @@ class PlaylistsWorkspace(WorkspaceBase):
         super().__init__(library_path, parent)
         self._worker: PlaylistWorker | None = None
         self._run_buttons: list[QtWidgets.QPushButton] = []
+        # Auto-DJ analysis is the slow part; keep it for the next run in this
+        # library (one worker at a time uses it, so no locking is needed).
+        self._feature_caches: dict[str, AudioFeatureCache] = {}
         self._build_ui()
         self._set_busy(False)
 
@@ -491,6 +524,9 @@ class PlaylistsWorkspace(WorkspaceBase):
             seed_track=seed,
             repair_paths=repair_paths,
             prefer_opus=self._prefer_opus_cb.isChecked(),
+            feature_cache=self._feature_caches.setdefault(
+                os.path.normcase(os.path.abspath(self._library_path)), AudioFeatureCache()
+            ) if mode == "autodj" else None,
         )
         self._start(worker, "Playlist preview")
 

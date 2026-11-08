@@ -273,3 +273,37 @@ def test_library_change_mid_run_cancels_and_ignores_stale_result(make_workspace,
     assert threads.wait_all(5000) == []
     process_events(50)
     assert not dialogs.calls_of("question"), "a plan for the old library was offered"
+
+
+def test_autodj_analysis_is_kept_for_the_next_run_and_redone_for_changed_files(
+        make_workspace, tmp_path, qtbot, dialogs, monkeypatch):
+    """The audit found Auto-DJ re-analysed the whole library on every run."""
+    import clustered_playlists
+    import numpy as np
+
+    analysed = []
+
+    def fake_extract(path, log_callback=None, engine="librosa"):
+        analysed.append(os.path.basename(path))
+        return np.full(27, float(len(analysed)))
+
+    monkeypatch.setattr(clustered_playlists, "extract_audio_features", fake_extract)
+    ws, lib = _ws(make_workspace, tmp_path)
+    seed = lib / "Artist B" / "Album X" / "01 d.mp3"
+    ws._autodj_seed.setText(str(seed))
+    dialogs.answer_no()          # decline the write; only the analysis matters here
+    ws._on_run("autodj")
+    _wait_idle(ws, qtbot)
+    first = len(analysed)
+    assert first >= 2
+
+    dialogs.answer_no()
+    ws._on_run("autodj")
+    _wait_idle(ws, qtbot)
+    assert len(analysed) == first, "the second run reuses every vector"
+
+    seed.write_bytes(seed.read_bytes() + b"\0")   # the file changed on disk
+    dialogs.answer_no()
+    ws._on_run("autodj")
+    _wait_idle(ws, qtbot)
+    assert analysed[first:] == ["01 d.mp3"], "only the changed file is analysed again"
