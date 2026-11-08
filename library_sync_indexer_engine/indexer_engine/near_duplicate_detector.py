@@ -213,6 +213,51 @@ def is_empty_chromaprint(fp: object) -> bool:
     return bool(data) and len(data) == 4 and data[1:4] == b"\x00\x00\x00"
 
 
+#: Trailing run of one repeated sub-fingerprint (~0.124 s each) that marks a
+#: print as made from silence-padded audio: ~5 s. Chromaprint turns digital
+#: silence into a single constant item (627964279 for the default algorithm,
+#: whatever the sample rate or channel count), so a short track padded to the
+#: fingerprint window ends in a long run of it. (Ported from the root module.)
+SILENCE_PADDING_MIN_ITEMS = 40
+# After its first item, a run of N equal items compresses to N - 1 zero
+# 3-bit codes, i.e. at least (3(N - 1) - 7) // 8 consecutive zero bytes: a
+# cheap test that rules out almost every print without decoding it.
+_PADDING_ZERO_BYTES = b"\x00" * ((3 * (SILENCE_PADDING_MIN_ITEMS - 1) - 7) // 8)
+
+
+def has_silence_padding(fp: object, *, min_items: int = SILENCE_PADDING_MIN_ITEMS) -> bool:
+    """True when a compressed print ends in ``min_items`` or more identical items.
+
+    That is the signature of the silence padding ``audio_norm.normalize_for_fp``
+    used to add to tracks shorter than the fingerprint window — which Library
+    Sync's generator always used (its default window is 120 s): the prints of
+    two *different* short tracks then agreed on the padding. Library Sync's
+    cache uses it to stop reusing such prints. Plain integer lists and anything
+    that is not a compressed Chromaprint fingerprint return False.
+    """
+    text = _fp_text(fp)
+    if not text:
+        return False
+    text = text.strip()
+    data = _b64decode_strict(text)
+    if not data or (min_items >= SILENCE_PADDING_MIN_ITEMS and _PADDING_ZERO_BYTES not in data):
+        return False
+    decoded = _decoded_packed(text)
+    if decoded is None:
+        return False
+    packed = decoded[1]
+    count = len(packed) // 4
+    if count < min_items:
+        return False
+    last = packed[-4:]
+    run = 1
+    while run < count and packed[-4 * (run + 1):-4 * run] == last:
+        run += 1
+        if run >= min_items:
+            return True
+    return run >= min_items
+
+
 def decode_chromaprint(fp: object) -> tuple[int, List[int]] | None:
     """Decode a compressed Chromaprint fingerprint (str or bytes).
 

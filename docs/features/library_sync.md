@@ -114,9 +114,22 @@ used to be padded with silence up to the full window, so the prints of two
 *different* short tracks agreed on all that silence: unrelated 5-second clips scored
 about 0.01 (an "exact match"), 20-second clips about 0.05 and 40-second clips about
 0.1 — so interludes, intros and short songs of similar length were matched to each
-other. Nothing is padded now (`audio_norm.normalize_for_fp`). Fingerprints already in
-the cache from before this change are still padded until those files are
-fingerprinted again.
+other. Nothing is padded now (`audio_norm.normalize_for_fp`), and Library Sync's
+cache no longer reuses the padded fingerprints it already holds: a cached fingerprint
+from before the fix whose end is a run of padding silence (about 5 seconds of one
+repeated value) is a cache miss, so that track is fingerprinted once more on the next
+scan. Every other cached fingerprint stays valid, so only short tracks are redone —
+the stored duration could not tell them apart (it equals the window either way), the
+fingerprint itself can. Fingerprints written now are marked as made without padding
+and are always trusted, so a short track that really ends in silence is redone once,
+not on every scan. The decoded copy kept next to a fingerprint (see *Finding
+candidates*) is cleared whenever the fingerprint is rewritten.
+
+**A damaged cache is rebuilt, not fatal.** If Library Sync's fingerprint cache file is
+unreadable ("file is not a database"), it is renamed to `….corrupt-<date>` — not
+deleted — and a fresh cache is started; that scan simply fingerprints everything. A
+single unreadable row is a cache miss, and a fingerprint the cache cannot store is
+still used for the scan.
 
 Alongside the match, Library Sync also weighs **quality**: it compares the incoming
 file's format and bitrate against the existing one and labels the pairing as a

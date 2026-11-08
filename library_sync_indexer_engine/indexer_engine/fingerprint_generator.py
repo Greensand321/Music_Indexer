@@ -17,6 +17,7 @@ def _with_thresh(func, *args, silence_threshold_db: float = SILENCE_THRESH, **kw
 from concurrent.futures import ProcessPoolExecutor
 import acoustid
 from .utils.path_helpers import ensure_long_path
+from . import fingerprint_cache
 import audio_norm
 
 # ``.opus`` included: Library Sync scans Opus tracks, and an unfingerprinted
@@ -121,20 +122,21 @@ def compute_fingerprint_for_file(
 
 def _load_cached_entries(
     conn: sqlite3.Connection,
-) -> dict[str, Tuple[float, int | None, str | None, int | None]]:
-    """Return a mapping of path -> (mtime, duration, fingerprint, size)."""
+) -> dict[str, Tuple[float, int | None, str | None, int | None, int | None]]:
+    """Return a mapping of path -> (mtime, duration, fingerprint, size, fp_scheme).
 
-    cursor = conn.execute(
-        "SELECT path, mtime, duration, fingerprint, size FROM fingerprints"
-    )
-    return {row[0]: (row[1], row[2], _fp_text(row[3]), row[4]) for row in cursor.fetchall()}
+    An unreadable cache is an empty one (every file is fingerprinted).
+    """
 
-
-def _ensure_size_column(conn: sqlite3.Connection) -> None:
-    cols = {row[1] for row in conn.execute("PRAGMA table_info(fingerprints)")}
-    if "size" not in cols:
-        conn.execute("ALTER TABLE fingerprints ADD COLUMN size INTEGER")
-        conn.commit()
+    try:
+        cursor = conn.execute(
+            "SELECT path, mtime, duration, fingerprint, size, fp_scheme FROM fingerprints"
+        )
+        return {
+            row[0]: (row[1], row[2], _fp_text(row[3]), row[4], row[5]) for row in cursor.fetchall()
+        }
+    except sqlite3.DatabaseError:
+        return {}
 
 
 def _gather_audio_files(root_path: str | Iterable[str]) -> List[str]:
@@ -192,21 +194,9 @@ def compute_fingerprints_parallel(
     if max_workers is None:
         max_workers = os.cpu_count() or 1
 
-    db_folder = os.path.dirname(db_path)
-    os.makedirs(db_folder, exist_ok=True)
-    conn = sqlite3.connect(db_path)
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS fingerprints (
-          path TEXT PRIMARY KEY,
-          mtime REAL,
-          size INTEGER,
-          duration INT,
-          fingerprint TEXT
-        );
-        """
-    )
-    _ensure_size_column(conn)
+    # The cache's own opener: full schema (``decoded``, ``fp_scheme``), and a
+    # corrupt file is set aside and rebuilt instead of failing the scan.
+    conn = fingerprint_cache._ensure_db(db_path)
 
     results: list[tuple[str, int | None, str | None]] = []
     audio_files = _gather_audio_files(root_path)
@@ -250,12 +240,15 @@ def compute_fingerprints_parallel(
         cache_entry = cached.get(path)
         # Reuse only when both mtime and size still match: an edit that keeps
         # the timestamp (some tag editors do) must not serve a stale print.
+        # An old row holding a silence-padded short-track print is not reused
+        # either (``fingerprint_cache.fingerprint_trusted``).
         if (
             cache_entry
             and cache_entry[2] is not None
             and cache_entry[0] == mtime
             and cache_entry[3] is not None
             and int(cache_entry[3]) == int(size)
+            and fingerprint_cache.fingerprint_trusted(cache_entry[2], cache_entry[4])
         ):
             duration, fp_hash = cache_entry[1], cache_entry[2]
             results.append((path, duration, fp_hash))
@@ -288,10 +281,12 @@ def compute_fingerprints_parallel(
                     continue
                 fp_hash = _fp_text(fp_hash)
                 st = os.stat(ensure_long_path(path))
-                conn.execute(
-                    "INSERT OR REPLACE INTO fingerprints (path, mtime, size, duration, fingerprint) VALUES (?, ?, ?, ?, ?)",
-                    (path, st.st_mtime, st.st_size, duration, fp_hash),
-                )
+                try:
+                    fingerprint_cache.store_fingerprint_row(
+                        conn, path, st.st_mtime, st.st_size, duration, fp_hash
+                    )
+                except sqlite3.Error as exc:  # the cache is a speed-up only
+                    log_callback(f"   ! Could not cache fingerprint for {path}: {exc}")
                 results.append((path, duration, fp_hash))
                 log_callback(f"Fingerprinted {path}")
                 progress_callback(completed, total, path, phase)

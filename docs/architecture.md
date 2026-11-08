@@ -355,13 +355,24 @@ this repository:
 `fingerprint_cache.py` at all. It imports its own vendored copy under
 `library_sync_indexer_engine/indexer_engine/`, loaded dynamically by
 `library_sync_indexer_engine/__init__.py`. The two copies started from the same
-source but have since **drifted apart**: the vendored `fingerprint_cache.py` is about 230
+source but have since **drifted apart**: the vendored `fingerprint_cache.py` is about 360
 lines with no background writer thread, no WAL mode, and none of the extended
 metadata columns (bitrate, codec, embedded tags, artwork) that the root
-`fingerprint_cache.py` has grown to about 840 lines to support; it does keep a
+`fingerprint_cache.py` has grown to about 1,000 lines to support; it does keep a
 `decoded` column so Library Sync decodes each fingerprint once, not on every run. The
 decoded-Chromaprint distance was **ported** to the vendored `near_duplicate_detector.py`,
-so both engines now score matches on the same scale. The
+so both engines now score matches on the same scale. So were the duplicate-finder
+audit's cache fixes, adapted to the simpler cache: the `fp_scheme` column and
+`has_silence_padding` check (old rows holding a silence-padded short-track print are a
+cache miss — and this is the cache that really held them, because only Library Sync's
+generator fingerprinted through `audio_norm.normalize_for_fp` with a window), and the
+corrupt-file handling (renamed to `.corrupt-<time>`, rebuilt). Library Sync reads and
+writes that cache in three places — `library_sync._scan_folder`, the vendored
+generator's own reuse check, and `fingerprint_cache.get_fingerprint` — and all three
+use the same helpers (`row_is_current`, `fingerprint_trusted`, `store_fingerprint_row`,
+which also clears the row's `decoded` blob). There is no writer thread to kill, so the
+root's "one unbindable row stops every later write" bug never applied; a row that
+cannot be stored is now skipped instead of failing the scan. The
 vendored `music_indexer_api.py` is missing a few refinements (like richer
 collision-decision logging) that the root copy has picked up since.
 

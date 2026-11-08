@@ -125,9 +125,10 @@ Status legend: **Done** (in the code now) · **Pending owner** (decision needed;
 - **Why**: measured with real Chromaprint, two *unrelated* 5 s clips scored 0.011–0.014 (under the 0.02
   exact-duplicate threshold). 20 s clips scored about 0.05 and 40 s clips about 0.1, both under Library Sync's
   0.2. So intros, skits and interludes could be matched to each other as duplicates.
-- **Still open**: fingerprints already cached were made padded and stay that way until those files are
-  fingerprinted again. Targeted invalidation of short-track entries is being handled with the duplicate-finder
-  audit.
+- **Cached prints**: fingerprints cached before the fix stay padded until the file is fingerprinted again.
+  Both caches now treat an old row (no `fp_scheme`) whose print ends in a run of padding silence as a cache
+  miss: the root cache (duplicate-finder audit) and Library Sync's vendored cache (the one that actually held
+  padded prints, since only its generator fingerprinted through `normalize_for_fp`). See A23.
 
 ### A16. M4A track and disc numbers read as "3/12", not the integer 3 — **Done**
 - `test_audio_metadata_reader.py` asserted an integer. Every other format already returned "N/T", and the M4A
