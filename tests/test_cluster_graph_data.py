@@ -174,3 +174,99 @@ def test_selection_to_m3u_is_relative_to_the_playlist():
 
 def test_selection_to_m3u_ends_with_newline():
     assert cgd.selection_to_m3u(["/a/b.mp3"], "/a/p.m3u").endswith("\n")
+
+
+# ── Full membership: cluster_members.json (cluster playlists, CP-7…CP-9) ──
+
+
+def _write_members(lib, members) -> None:
+    docs = lib / "Docs"
+    docs.mkdir(exist_ok=True)
+    (docs / "cluster_members.json").write_text(json.dumps(members), encoding="utf-8")
+
+
+def test_load_members_missing_invalid_misaligned(tmp_path):
+    from _helpers.cluster_payloads import make_cluster_run
+
+    assert cgd.cluster_members_path(tmp_path) == tmp_path / "Docs" / "cluster_members.json"
+    with pytest.raises(cgd.ClusterDataError, match="No cluster membership"):
+        cgd.load_cluster_members(tmp_path)
+
+    (tmp_path / "Docs").mkdir()
+    (tmp_path / "Docs" / "cluster_members.json").write_text("{nope", encoding="utf-8")
+    with pytest.raises(cgd.ClusterDataError, match="Could not read"):
+        cgd.load_cluster_members(tmp_path)
+
+    _write_members(tmp_path, [1, 2, 3])
+    with pytest.raises(cgd.ClusterDataError, match="JSON object"):
+        cgd.load_cluster_members(tmp_path)
+
+    _payload, good = make_cluster_run(n=9, n_clusters=3, noise=2)
+    for drop in ("run", "tracks", "labels"):
+        bad = {k: v for k, v in good.items() if k != drop}
+        _write_members(tmp_path, bad)
+        with pytest.raises(cgd.ClusterDataError, match=drop):
+            cgd.load_cluster_members(tmp_path)
+    for run_key in ("run_id", "track_count"):
+        bad = json.loads(json.dumps(good))
+        del bad["run"][run_key]
+        _write_members(tmp_path, bad)
+        with pytest.raises(cgd.ClusterDataError, match=f"run.{run_key}"):
+            cgd.load_cluster_members(tmp_path)
+
+    _write_members(tmp_path, good)
+    assert cgd.load_cluster_members(tmp_path)["run"]["run_id"] == good["run"]["run_id"]
+
+    def broken(mutate):
+        data = json.loads(json.dumps(good))
+        mutate(data)
+        with pytest.raises(cgd.ClusterDataError):
+            cgd.validate_cluster_members(data)
+
+    last = len(good["labels"]) - 1
+    broken(lambda d: d.__setitem__("labels", d["labels"][:-1]))                  # misaligned
+    broken(lambda d: d.__setitem__("centroid_distance", d["centroid_distance"][1:]))
+    broken(lambda d: d.__setitem__("tempo_bpm", d["tempo_bpm"] + [1.0]))
+    broken(lambda d: d.__setitem__("energy", d["energy"][:3]))
+    broken(lambda d: d["labels"].__setitem__(0, True))                          # a bool is not an int
+    broken(lambda d: d["labels"].__setitem__(0, 1.0))
+    broken(lambda d: d["centroid_distance"].__setitem__(0, None))               # clustered, no distance
+    broken(lambda d: d["centroid_distance"].__setitem__(last, 0.5))             # noise with one
+    broken(lambda d: d["run"].__setitem__("track_count", 99))
+
+
+def test_members_must_match_payload_run_and_arrays():
+    from _helpers.cluster_payloads import make_cluster_run
+
+    payload, members = make_cluster_run(n=30, n_clusters=3)
+    cgd.check_members_match_payload(payload, members)
+
+    other_run = json.loads(json.dumps(payload))
+    other_run["run"]["run_id"] = "20200101-000000-000000"
+    with pytest.raises(cgd.ClusterDataError, match="out of step with the map.*Re-run the analysis"):
+        cgd.check_members_match_payload(other_run, members)
+
+    no_run = {k: v for k, v in payload.items() if k != "run"}
+    with pytest.raises(cgd.ClusterDataError, match="out of step"):
+        cgd.check_members_match_payload(no_run, members)
+
+    swapped = json.loads(json.dumps(payload))
+    swapped["labels"][0], swapped["labels"][1] = swapped["labels"][1], swapped["labels"][0]
+    with pytest.raises(cgd.ClusterDataError, match="out of step"):
+        cgd.check_members_match_payload(swapped, members)
+
+    # Downsampled map: the points must be the members at X_indices.
+    small, full = make_cluster_run(n=40, n_clusters=4, downsample_to=10)
+    assert small["X_downsampled"] and len(small["tracks"]) == 10
+    cgd.check_members_match_payload(small, full)
+    for mutate in (
+        lambda p: p.__setitem__("X_total_points", 39),
+        lambda p: p.__setitem__("X_indices", p["X_indices"][:-1]),
+        lambda p: p["X_indices"].__setitem__(1, p["X_indices"][1] + 1),
+        lambda p: p["tracks"].__setitem__(2, "/elsewhere.mp3"),
+        lambda p: p["labels"].__setitem__(3, 99),
+    ):
+        bad = json.loads(json.dumps(small))
+        mutate(bad)
+        with pytest.raises(cgd.ClusterDataError, match="out of step"):
+            cgd.check_members_match_payload(bad, full)

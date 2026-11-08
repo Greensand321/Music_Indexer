@@ -1,8 +1,13 @@
 """Sound Map → Analyse: the clustering panel (wizard and interactive results).
 
-Analysis only: a run writes the feature cache, ``Docs/cluster_info.json`` and
-``Docs/cluster_graph.html``. It does not write playlists; clusters are
-exported as playlists from the Sound Map's Map section (``graph.py``).
+Analysis only: a run writes the feature cache, ``Docs/cluster_members.json``
+(the full membership), ``Docs/cluster_info.json`` (the map) and
+``Docs/cluster_graph.html``. It writes no playlists itself: the Sound Map's
+**Save cluster playlists…** action previews and saves one playlist per
+cluster (``gui/cluster_playlist_jobs.py``), and a map selection can be
+exported from the Map section (``graph.py``). After a successful run this
+panel emits ``analysis_succeeded(result)``; the page uses it to offer the
+preview when the wizard's "Offer to save a playlist per cluster" is ticked.
 """
 from __future__ import annotations
 
@@ -12,6 +17,7 @@ import os
 import threading
 
 from gui.compat import QtCore, QtGui, QtWidgets, Signal, Slot
+from gui.cluster_playlist_jobs import ANALYSIS_JOB_NAME
 from gui.themes.manager import get_manager
 from gui.workspaces.base import WorkspaceBase
 from gui.dialogs.clustering_wizard_dialog import ClusteringWizardDialog
@@ -19,6 +25,8 @@ from gui.dialogs.cluster_quality_report_dialog import ClusterQualityReportDialog
 
 logger = logging.getLogger(__name__)
 
+#: Audio files an analysis looks at. ``cluster_playlist_export.AUDIO_EXTS``
+#: must equal this set (a test pins the two).
 _AUDIO_EXTS = {".mp3", ".flac", ".m4a", ".aac", ".ogg", ".wav", ".opus"}
 
 #: Settings used by "Run Quick Start" (also the wizard's "Balanced" preset).
@@ -236,10 +244,16 @@ class EnhancedClusteredWorkspace(WorkspaceBase):
     # Emitted whenever the latest result changes (a run finished, or the
     # results were cleared), so the Sound Map page can enable its actions.
     result_changed = Signal()
+    # Emitted with the result after a *successful* run only (never on a
+    # failure or cancel): the page offers "Save cluster playlists" on it.
+    analysis_succeeded = Signal(dict)
 
     def __init__(self, library_path: str = "", parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(library_path, parent)
         self._worker: ClusterWorker | None = None
+        # True while another job on the page (Save cluster playlists) runs:
+        # the Run buttons wait for it (spec CP-34).
+        self._external_busy = False
         # The wizard's settings (Advanced → Run) are kept apart from whatever
         # ran last, so a Quick Start run cannot replace them behind the user's
         # back while the Advanced tab still displays the wizard's choices.
@@ -264,8 +278,9 @@ class EnhancedClusteredWorkspace(WorkspaceBase):
         cl.addWidget(self._make_subtitle(
             "Analyse your tracks' audio (tempo, timbre, energy and, if you choose, harmony, "
             "brightness and rhythm density) and group similar tracks with K-Means or "
-            "HDBSCAN. Then explore the groups on the Map, where you can play a cluster "
-            "or export it as a playlist. Nothing in your library is modified."
+            "HDBSCAN. Then explore the groups on the Map, play a cluster, or save a "
+            "playlist per cluster with Save cluster playlists… (previewed first). "
+            "The analysis itself modifies nothing in your library."
         ))
 
         # ── Config Tabs ────────────────────────────────────────────────────────
@@ -359,7 +374,17 @@ class EnhancedClusteredWorkspace(WorkspaceBase):
 
     def _set_busy(self, busy: bool) -> None:
         for btn in self._run_buttons:
-            btn.setEnabled(not busy)
+            btn.setEnabled(not busy and not self._external_busy)
+            btn.setToolTip(
+                "Wait for Save cluster playlists to finish." if self._external_busy and not busy else ""
+            )
+
+    def set_external_busy(self, busy: bool) -> None:
+        """Another job on the page (Save cluster playlists) started or ended:
+        a new analysis waits for it, so it cannot replace the membership the
+        preview or write is working from."""
+        self._external_busy = bool(busy)
+        self._set_busy(self.is_busy())
 
     def _status(self, text: str, role: str) -> None:
         tokens = get_manager().current
@@ -416,8 +441,10 @@ class EnhancedClusteredWorkspace(WorkspaceBase):
             "",
             "Output:",
             "  Cluster data for the Map and the 3D view, plus a quality report.",
-            "  Playlists are not written automatically: export a cluster from the Map.",
+            "  Save cluster playlists… writes one playlist per cluster",
         ])
+        if config.get("create_playlists"):
+            lines.append("  Offers to save them when the run finishes")
 
         self._config_display.setPlainText("\n".join(lines))
 
@@ -433,7 +460,7 @@ class EnhancedClusteredWorkspace(WorkspaceBase):
 
     def _run_clustering(self, config: dict) -> None:
         """Start clustering with given configuration."""
-        if self.is_busy():
+        if self.is_busy() or self._external_busy:
             return  # Run buttons are disabled; guards a queued second click
         if not self._library_path:
             QtWidgets.QMessageBox.warning(self, "No Library", "Please select a library folder first.")
@@ -451,7 +478,8 @@ class EnhancedClusteredWorkspace(WorkspaceBase):
         self._worker = worker
         self._set_busy(True)
         self._status("Clustering…", "busy")
-        self._start_worker(worker, "Clustering")
+        # The shared name lets Save cluster playlists wait for any analysis.
+        self._start_worker(worker, ANALYSIS_JOB_NAME)
 
     # ── Results area ──────────────────────────────────────────────────────
 
@@ -557,6 +585,10 @@ class EnhancedClusteredWorkspace(WorkspaceBase):
             self._log(message, "error")
 
         self._results_layout.addStretch(1)
+        if success:
+            # Last, once the results are on screen: the page may offer the
+            # Save cluster playlists preview (wizard option, CP-44).
+            self.analysis_succeeded.emit(result)
 
     def _show_results_panel(self, result: dict) -> None:
         """Show clustering results panel."""
@@ -598,8 +630,8 @@ class EnhancedClusteredWorkspace(WorkspaceBase):
         self._results_layout.addWidget(summary_card)
 
         hint = QtWidgets.QLabel(
-            "Playlists are not created automatically. Open the map, click a "
-            "cluster in its legend (or lasso a region) and use “Export playlist…”."
+            "Save a playlist per cluster with “Save cluster playlists…” (at the top "
+            "of the Sound Map), or export a lasso selection from the map."
         )
         hint.setObjectName("statusHint")
         hint.setWordWrap(True)

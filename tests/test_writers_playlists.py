@@ -268,3 +268,101 @@ def test_repair_write_refuses_to_reencode(tmp_path):
     result = pg.write_playlist_plan([item])
     assert result["written"] == [] and len(result["errors"]) == 1
     assert pl.read_bytes() == before
+
+
+# ── verify / cancel_event (cluster playlists, spec CP-27) ────────────────
+
+
+def _stamp(path: Path) -> tuple:
+    st = os.stat(path)
+    return (st.st_mtime_ns, st.st_size)
+
+
+def test_verify_skips_changed_and_appeared_files(tmp_path):
+    out = tmp_path / "Playlists"
+    out.mkdir()
+    existing = out / "changed.m3u"
+    existing.write_text("old\n", encoding="utf-8")
+    snapshot = _stamp(existing)
+    existing.write_text("edited by the user since the preview\n", encoding="utf-8")
+    appeared = out / "appeared.m3u"
+    appeared.write_text("made by someone else\n", encoding="utf-8")
+    fresh = out / "fresh.m3u"
+
+    plan = [
+        pg.PlannedPlaylist(path=str(existing), lines=["a"], exists=True, entries=1, snapshot=snapshot),
+        pg.PlannedPlaylist(path=str(appeared), lines=["b"], exists=False, entries=1),
+        pg.PlannedPlaylist(path=str(fresh), lines=["c"], exists=False, entries=1),
+    ]
+    result = pg.write_playlist_plan(plan, log_dir=str(tmp_path / "Docs"), verify=True)
+
+    assert result["written"] == [str(fresh)]
+    assert sorted(result["errors"]) == sorted([
+        (str(existing), "changed since the preview"),
+        (str(appeared), "changed since the preview"),
+    ])
+    assert existing.read_text(encoding="utf-8").startswith("edited")
+    assert appeared.read_text(encoding="utf-8") == "made by someone else\n"
+    assert result["backups"] == [] and not list(out.glob("*.bak"))
+    log = (tmp_path / "Docs" / "playlist_writes.log").read_text(encoding="utf-8")
+    assert f"ERROR {existing}: changed since the preview" in log
+    assert f"ERROR {appeared}: changed since the preview" in log
+    assert f"WRITE {fresh}" in log
+
+
+def test_verify_writes_an_unchanged_overwrite_with_a_backup(tmp_path):
+    pl = tmp_path / "same.m3u"
+    pl.write_text("old\n", encoding="utf-8")
+    item = pg.PlannedPlaylist(path=str(pl), lines=["new"], exists=True, entries=1, snapshot=_stamp(pl))
+    result = pg.write_playlist_plan([item], verify=True)
+    assert result["written"] == [str(pl)] and len(result["backups"]) == 1
+    assert pl.read_text(encoding="utf-8") == "new\n"
+    assert Path(result["backups"][0]).read_text(encoding="utf-8") == "old\n"
+
+
+def test_verify_writes_a_vanished_overwrite_as_new(tmp_path):
+    pl = tmp_path / "gone.m3u"
+    item = pg.PlannedPlaylist(path=str(pl), lines=["x"], exists=True, entries=1, snapshot=(1, 2))
+    result = pg.write_playlist_plan([item], verify=True)
+    assert result["written"] == [str(pl)] and result["errors"] == [] and result["backups"] == []
+    assert pl.read_text(encoding="utf-8") == "x\n"
+
+
+def test_defaults_unchanged(tmp_path):
+    """Without verify/cancel_event the writer behaves exactly as before: a file
+    that appeared since planning is backed up and overwritten, and the only
+    new result key is ``cancelled``."""
+    pl = tmp_path / "p.m3u"
+    item = pg.PlannedPlaylist(path=str(pl), lines=["#EXTM3U", "a.mp3"], exists=False, entries=1)
+    pl.write_text("appeared\n", encoding="utf-8")
+    result = pg.write_playlist_plan([item], log_dir=str(tmp_path / "Docs"))
+    assert set(result) == {"written", "backups", "errors", "cancelled"}
+    assert result["cancelled"] is False
+    assert result["written"] == [str(pl)] and len(result["backups"]) == 1
+    assert pl.read_bytes() == b"#EXTM3U\na.mp3\n"
+    assert pg.PlannedPlaylist(path="x").snapshot is None
+    assert pg.relative_playlist_lines is pg._relative_lines
+
+
+def test_cancel_event_stops_between_files_and_still_logs(tmp_path):
+    import threading
+
+    cancel = threading.Event()
+    seen = []
+
+    def log(line):
+        seen.append(line)
+        if line.startswith("✓ Wrote"):
+            cancel.set()        # cancelled while the first file is being written
+
+    plan = [
+        pg.PlannedPlaylist(path=str(tmp_path / f"{i}.m3u"), lines=[str(i)], entries=1)
+        for i in range(3)
+    ]
+    result = pg.write_playlist_plan(plan, log_callback=log, log_dir=str(tmp_path / "Docs"),
+                                    cancel_event=cancel)
+    assert result["cancelled"] is True
+    assert result["written"] == [str(tmp_path / "0.m3u")]
+    assert not (tmp_path / "1.m3u").exists() and not (tmp_path / "2.m3u").exists()
+    log_text = (tmp_path / "Docs" / "playlist_writes.log").read_text(encoding="utf-8")
+    assert f"WRITE {tmp_path / '0.m3u'}" in log_text

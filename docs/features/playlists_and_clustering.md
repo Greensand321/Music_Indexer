@@ -202,8 +202,12 @@ them in a **step-by-step wizard** that asks plain questions in sequence:
 3. **Which grouping strategy, and with what settings?** (K-Means or HDBSCAN)
 4. **What should I do with tiny or stray groups?** (clean-up — *shown but not
    available yet*: every group the algorithm finds is kept)
-5. **What will I get?** (the data for the Music Graph and the 3-D view, plus a
-   quality report; the playlist/auto-open options are shown but not available yet)
+5. **What will I get?** (the data for the map, the 3-D view and Save cluster
+   playlists, plus a quality report). One option here is live: **Offer to save a
+   playlist per cluster when the analysis finishes** (off by default) opens the Save
+   cluster playlists preview after a successful run, and nothing is written until
+   you click Save there. The report and auto-open options are shown but not
+   available yet.
 
 The dimensionality-reduction choice on step 2 is likewise shown disabled: clustering
 always uses every selected feature, and the maps flatten them automatically for
@@ -233,11 +237,53 @@ and listed, and are retried next time rather than being remembered as silence.
 
 ### From groups to playlists
 
-Clustering does **not** write playlists by itself. Each run saves the analysis
-(`Docs/cluster_info.json`, `Docs/cluster_graph.html`); to turn a group into a
-playlist, open the Music Graph, click the cluster in the legend (or lasso a region)
-and use **Export playlist…**. HDBSCAN's unclustered tracks are listed separately in
-the legend, so they never end up in a mood playlist by accident.
+The analysis itself writes no playlists. Each run saves its results in the
+library's `Docs/` folder: `cluster_members.json` (which track is in which group, for
+**every** track), `cluster_info.json` (what the map draws; above 5,000 tracks the
+map shows an evenly spread 5,000 of them) and `cluster_graph.html`. Both JSON files
+carry the same run identity, so the app can tell when they belong to different
+analyses.
+
+To turn the groups into playlists, use **Save cluster playlists…** at the top of the
+Sound Map (it is there in both the Analyse and Map sections). It is preview-first,
+like every other write in the app:
+
+1. It first checks the analysis against your library (read-only, in the background,
+   with a Cancel): which tracks are still there, whether the library has moved
+   (an external drive back under another letter is mapped automatically), and how
+   many tracks were added since. It also reads the tags of the most typical tracks
+   of each group to name it.
+2. The preview lists one row per group: its colour, a name you can edit, how many
+   tracks it has, how many are missing, and whether Save would make a **New** file,
+   **Replace** one, or **Skip** it (and why). Groups you hid in the map's legend
+   start unticked. You choose the order inside each playlist (**closest to the centre
+   first**, the most typical tracks first, or **library order**) and a minimum size
+   (5 by default; smaller groups are skipped).
+3. **Save N playlists** writes exactly what the preview shows. If any file would be
+   replaced, you are asked first, and each replaced file is backed up beside it.
+   Every write goes to `Docs/playlist_writes.log`.
+
+Names are built from what the group's tracks have in common: the dominant genre (or
+two, as `Techno & House`), otherwise a dominant artist, then the typical tempo and an
+energy word — for example `Cluster 03 - Deep House - ~120 BPM - high energy`, or just
+`Cluster 07` when nothing stands out. Names are made safe for Windows, macOS and
+Linux, and kept short enough for Windows' path limit.
+
+Each analysis gets its own folder, `Playlists/Clusters/<date time> <method>/`
+(for example `2026-11-07 15.30.12 K-Means (k=8)`), so re-clustering never overwrites
+an earlier set; saving the same analysis again replaces its own files (with backups)
+and leaves any file you renamed alone. The playlists are ordinary `.m3u` files with
+relative entries, so later Indexer moves and duplicate quarantines keep them working.
+
+A few things to know: HDBSCAN's **unclustered** tracks are never saved as a
+playlist. Analyses made before this feature have no membership file and need to be
+run again (Save cluster playlists says so). Tracks added since the analysis are in no
+group until you analyse again, and tracks retagged or re-encoded in place are not
+noticed.
+
+You can still turn any hand-picked part of the map into one playlist: click a
+cluster in the legend (or lasso a region) and use **Export playlist…**. That export
+now goes through the same writer, so a playlist it replaces is backed up and logged.
 
 ## Level 3: The Visual Music Graph
 
@@ -366,13 +412,16 @@ In the spirit of an honest, up-to-date resource:
 tag-filling (see the caveat above on what "normalization" means here); clustering on any
 of the six sound features (timbre, tempo, harmony, brightness, energy, percussive
 density) with both K-Means and HDBSCAN; the five-step configuration wizard;
-the quality scores and the report dialog that displays them; exporting a cluster or
-any selection as a playlist from the Music Graph; the 3-D browser visualization; and the in-app 2-D map with
+the quality scores and the report dialog that displays them; **Save cluster
+playlists** — a previewed one-playlist-per-cluster export into a per-run folder,
+optionally offered right after an analysis; exporting a cluster or any selection
+as a playlist from the map; the 3-D browser visualization; and the in-app 2-D map with
 pan/rectangle/lasso selection, hover and click inspection, legend-driven cluster
 visibility, and selection → Player / CSV / `.m3u`.
 
-**Still ahead (see ROADMAP.md):** writing a playlist per cluster automatically (with
-a preview); the wizard's clean-up and dimensionality-reduction options; live re-tuning of a clustering without recomputing
+**Still ahead (see ROADMAP.md):** a "smooth path through the cluster" playlist order,
+saving a cluster from the legend's right-click, playing a cluster from inside the save
+preview, and retiring earlier cluster playlist sets; the wizard's clean-up and dimensionality-reduction options; live re-tuning of a clustering without recomputing
 everything from scratch; choosing the map-flattening method from the interface; in-map
 cluster *editing* (merging clusters, moving a track between them); selecting by
 distance from a point and filtering the map by metadata; a suggestion engine for weak

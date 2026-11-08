@@ -19,7 +19,9 @@ class ClusteringWizardDialog(QtWidgets.QDialog):
     2. Normalization (scaling)
     3. Algorithm Selection (K-Means vs HDBSCAN)
     4. Post-Processing (not implemented by the engine yet; shown disabled)
-    5. Output (what a run produces)
+    5. Output (what a run produces; "Offer to save a playlist per cluster"
+       sets the run-config key ``create_playlists`` — in-memory only, never
+       saved to ~/.soundvault_config.json)
 
     Every page's controls are read when the user moves *off* the page and
     again in :meth:`get_config`, so no choice is lost whichever way the user
@@ -53,6 +55,8 @@ class ClusteringWizardDialog(QtWidgets.QDialog):
             "remove_small_clusters": False,
             "min_cluster_threshold": 5,
             "merge_into_misc": False,
+            # Live: offer the Save cluster playlists preview after a
+            # successful run (read by ClusterPlaylistFlow.offer_after_run).
             "create_playlists": False,
             "generate_report": True,
             "open_graph": False,
@@ -341,31 +345,37 @@ class ClusteringWizardDialog(QtWidgets.QDialog):
         layout = QtWidgets.QVBoxLayout(page)
 
         intro = QtWidgets.QLabel(
-            "A run saves the cluster data used by the Map and the 3D view "
-            "(in the library's Docs/ folder) and, when the scores can be computed, "
-            "offers a quality report. Nothing in your library is modified."
+            "A run saves the cluster data used by the Map, the 3D view and Save "
+            "cluster playlists (in the library's Docs/ folder) and, when the scores "
+            "can be computed, offers a quality report. The analysis itself modifies "
+            "nothing in your library; playlists are only written when you click Save "
+            "in the Save cluster playlists preview."
         )
         intro.setWordWrap(True)
         layout.addWidget(intro)
 
-        self._create_playlists_cb = QtWidgets.QCheckBox("Create M3U playlists for each cluster")
-        self._create_playlists_cb.setChecked(False)
+        self._create_playlists_cb = QtWidgets.QCheckBox(
+            "Offer to save a playlist per cluster when the analysis finishes"
+        )
+        self._create_playlists_cb.setChecked(bool(self.config.get("create_playlists")))
+        self._create_playlists_cb.setToolTip(
+            "Opens the Save cluster playlists preview after a successful run. "
+            "Nothing is written until you click Save."
+        )
         self._generate_report_cb = QtWidgets.QCheckBox("Generate cluster quality report")
         self._generate_report_cb.setChecked(True)
         self._open_graph_cb = QtWidgets.QCheckBox("Open interactive graph after clustering")
         self._open_graph_cb.setChecked(False)
-        for cb in (self._create_playlists_cb, self._generate_report_cb, self._open_graph_cb):
+        layout.addWidget(self._create_playlists_cb)
+        for cb in (self._generate_report_cb, self._open_graph_cb):
             cb.setEnabled(False)
             layout.addWidget(cb)
-        self._create_playlists_cb.setToolTip(
-            "Not available yet. Export a cluster from the Map instead "
-            "(click it in the legend, then “Export playlist…”)."
-        )
         self._generate_report_cb.setToolTip("Always offered when the scores can be computed.")
         self._open_graph_cb.setToolTip("Use “Open the map” on the Results tab.")
 
         layout.addWidget(self._hint(
-            "• Playlists: export any cluster or selection from the Map\n"
+            "• Playlists: “Save cluster playlists…” on the Sound Map previews one "
+            "playlist per cluster (or export a selection from the Map)\n"
             "• Report: “View Quality Report” on the Results tab\n"
             "• Map: “Open the map” on the Results tab"
         ))
@@ -432,7 +442,7 @@ class ClusteringWizardDialog(QtWidgets.QDialog):
             self.config["remove_small_clusters"] = self._remove_small_cb.isChecked()
             self.config["min_cluster_threshold"] = self._min_threshold_spin.value()
             self.config["merge_into_misc"] = self._merge_cb.isChecked()
-        elif step == 4:  # Output (disabled controls)
+        elif step == 4:  # Output (only "offer to save playlists" is live)
             self.config["create_playlists"] = self._create_playlists_cb.isChecked()
             self.config["generate_report"] = self._generate_report_cb.isChecked()
             self.config["open_graph"] = self._open_graph_cb.isChecked()

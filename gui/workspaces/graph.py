@@ -1,8 +1,16 @@
 """Sound Map → Map: the in-app 2-D cluster map, plus the 3-D browser view.
 
 The scatter plot, legend and details panel are display-only widgets; loading
-and validating ``Docs/cluster_info.json`` and turning a selection into CSV/M3U
-lives in :mod:`cluster_graph_data`.
+and validating ``Docs/cluster_info.json`` and turning a selection into CSV
+lives in :mod:`cluster_graph_data`. A selection exported as a playlist goes
+through the shared preview-first writer (``playlist_generator``), so a
+replaced file is backed up and logged.
+
+This panel also owns the Sound Map's :class:`ClusterPlaylistFlow` ("Save
+cluster playlists…", docs/specs/cluster_playlists.md): it tells the flow which
+clusters are hidden, which run the map shows and each cluster's colour, and
+refreshes it on every (re)load and library change. ``SoundMapPage`` places
+the flow's button among its page actions.
 """
 from __future__ import annotations
 
@@ -13,6 +21,7 @@ import webbrowser
 from pathlib import Path
 
 from gui.compat import QtCore, QtGui, QtWidgets, Signal, Slot
+from gui.cluster_playlist_jobs import ClusterPlaylistFlow
 from gui.workspaces.base import WorkspaceBase
 from gui.widgets.interactive_scatter_plot import (
     MODE_LASSO,
@@ -48,8 +57,23 @@ class GraphWorkspace(WorkspaceBase):
         # (mtime_ns, size) of the cluster_info.json last loaded, so the page
         # can reload by itself when a clustering run has replaced it.
         self._loaded_stamp: tuple | None = None
+        # run_id of the payload on the map: None = nothing loaded, "" = a
+        # payload written before runs had ids.
+        self._map_run: str | None = None
         self._build_ui()
+        self._playlists_flow = ClusterPlaylistFlow(
+            self,
+            hidden_clusters=self._hidden_clusters,
+            map_run_id=self.map_run_id,
+            cluster_colour=self._cluster_colour_for,
+        )
+        self._playlists_flow.result_ready.connect(self._on_playlists_result)
         self.reload_data()
+
+    @property
+    def cluster_playlists_flow(self) -> ClusterPlaylistFlow:
+        """The "Save cluster playlists…" flow (its button is placed by the page)."""
+        return self._playlists_flow
 
     # ── UI ────────────────────────────────────────────────────────────────
 
@@ -61,7 +85,8 @@ class GraphWorkspace(WorkspaceBase):
             "Your clustered library as a map. Each dot is a track and each colour "
             "a cluster, so tracks that sound alike sit together. Hover to identify "
             "one, drag a rectangle or lasso to grab a region, then play or export "
-            "the selection. Run an analysis first (the Analyse tab) to produce the data."
+            "the selection; Save cluster playlists… saves every cluster at once. "
+            "Run an analysis first (the Analyse tab) to produce the data."
         ))
 
         # ── Toolbar ────────────────────────────────────────────────────────
@@ -194,6 +219,13 @@ class GraphWorkspace(WorkspaceBase):
     @Slot()
     def reload_data(self) -> None:
         """Load cluster data from disk and populate the graph."""
+        try:
+            self._reload_data()
+        finally:
+            # Contract item 2: availability follows every (failed) load.
+            self._playlists_flow.refresh()
+
+    def _reload_data(self) -> None:
         self._loaded_stamp = self._data_stamp()
         if not self._library_path:
             self._set_empty("No library selected.")
@@ -213,6 +245,8 @@ class GraphWorkspace(WorkspaceBase):
             return
 
         self._xy, self._labels, self._tracks = xy, labels, tracks
+        run = data.get("run") if isinstance(data.get("run"), dict) else {}
+        self._map_run = str(run.get("run_id") or "")
 
         metadata = data.get("metadata") or []
         if len(metadata) != len(tracks):
@@ -252,6 +286,7 @@ class GraphWorkspace(WorkspaceBase):
 
     def _set_empty(self, message: str) -> None:
         self._xy, self._labels, self._tracks, self._metadata = [], [], [], []
+        self._map_run = None
         self._pinned = -1
         self._status.setText(message)
         self._set_controls_enabled(False)
@@ -275,7 +310,32 @@ class GraphWorkspace(WorkspaceBase):
         # Hidden clusters belong to the previous library's map.
         self._plot.reset_visibility()
         self._legend.reset_visibility()
+        # Drops a running cluster-playlist preview; a running write finishes
+        # in the library it was confirmed for.
+        self._playlists_flow.on_library_changed()
         self.reload_data()
+
+    # ── What the cluster playlist flow asks the map (contract item 4) ─────
+
+    def map_run_id(self) -> str | None:
+        """run_id of the analysis on the map (None: nothing loaded; "": a
+        payload from before runs had ids)."""
+        return self._map_run
+
+    def _hidden_clusters(self) -> set:
+        """Clusters the user hid in the legend (only ones the map has)."""
+        shown = set(self._legend.visible_clusters())
+        return {cid for cid in cgd.cluster_order(self._labels) if cid not in shown}
+
+    def _cluster_colour_for(self, cluster_id: int):
+        """The map's colour for ``cluster_id`` (None if the map lacks it)."""
+        if not self._plot.available or cluster_id not in set(self._labels):
+            return None
+        return self._plot.cluster_colour(cluster_id)
+
+    @Slot(str, bool)
+    def _on_playlists_result(self, text: str, _ok: bool) -> None:
+        self._status.setText(text)
 
     # ── Interaction ───────────────────────────────────────────────────────
 
@@ -374,14 +434,37 @@ class GraphWorkspace(WorkspaceBase):
 
     @Slot()
     def _on_export_m3u(self) -> None:
+        """Export the selection as a playlist through the shared writer
+        (CP-42): the file dialog's overwrite prompt is the confirmation, and a
+        replaced playlist is backed up beside it and logged to
+        ``Docs/playlist_writes.log``."""
         paths = self._selection_paths()
         if not paths:
+            return
+        if self._library_writes_blocked("Export playlist"):
             return
         target, _ = QtWidgets.QFileDialog.getSaveFileName(
             self, "Export playlist", self._playlists_dir(), "Playlists (*.m3u *.m3u8)"
         )
-        if target:
-            self._write(target, cgd.selection_to_m3u(paths, target), len(paths))
+        if not target:
+            return
+        import playlist_generator as pg
+
+        item = pg.plan_playlist(paths, target)
+        item.lines = ["#EXTM3U", *item.lines]
+        result = pg.write_playlist_plan(
+            [item], backup=True,
+            log_callback=lambda line: self._log(line, "info"),
+            log_dir=self._docs_dir() or None,
+        )
+        if result["errors"]:
+            _path, msg = result["errors"][0]
+            self._log(f"Export failed: {msg}", "error")
+            self._status.setText(f"Export failed: {msg}")
+            return
+        note = " (the previous file was backed up beside it)" if result["backups"] else ""
+        self._log(f"Exported {len(paths)} track(s) to {target}{note}", "ok")
+        self._status.setText(f"Exported {len(paths)} track(s) to {target}{note}")
 
     def _write(self, target: str, text: str, count: int) -> None:
         try:

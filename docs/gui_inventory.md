@@ -626,27 +626,32 @@ worker.
 
 ### 6.8 Sound Map
 
-Analyse → map → select → play / save. `SoundMapPage` (`gui/pages.py`) adds a page
-action right of the tabs, visible in both sections:
+Analyse → map → select → play / save. `SoundMapPage` (`gui/pages.py`) adds page
+actions right of the tabs, visible in both sections:
 
 | Action | Purpose |
 |---|---|
+| Save cluster playlists… | Previews one playlist per cluster of the latest analysis (§7.6), then saves them to `Playlists/Clusters/<date time> <method>/`. The button belongs to a `ClusterPlaylistFlow` (`gui/cluster_playlist_jobs.py`) owned by the Map panel; the page places it. Enabled when the library has `Docs/cluster_members.json` (it does not need the map, or PyQtGraph); disabled with a tooltip without one ("Analyse your library first…") and while an analysis runs anywhere ("Wait for the analysis to finish."). While the read-only preview job runs it reads **Cancel preview**. The preview job is read-only (`ask_before_quit=False`); the save job takes the library-write lock. Both check the lock first ("Library Busy"). A result line ("Saved N cluster playlists to … (K replaced, backed up as .bak; E failed).") goes to the log and the Map's status line. |
 | Quality report | The latest analysis' cluster quality report (§7.3); enabled once an analysis with scores finished in this session (`EnhancedClusteredWorkspace.result_changed` / `quality_report_available()`). |
 
-*"Save clusters as playlists"* is not built (see ROADMAP.md); `SoundMapPage` documents
-where it goes (`_build_actions` → `add_action`).
+While Save cluster playlists runs, Analyse's Run buttons wait for it. When the
+wizard's "Offer to save a playlist per cluster" was ticked, a successful run opens the
+preview (`analysis_succeeded` → `offer_after_run`); if the Sound Map is not on screen
+then, the offer waits until it is shown.
 
 #### 6.8.1 Analyse (`clustered_enhanced.py`)
 
 Formerly the Clustered page; titled "Analyse your music". **Analysis only:** a run writes the feature
-cache, `Docs/cluster_info.json` and `Docs/cluster_graph.html`; it does **not** write
-playlists.
+cache, `Docs/cluster_members.json` (full membership), `Docs/cluster_info.json` and
+`Docs/cluster_graph.html`; it does **not** write playlists (Save cluster playlists…
+does, after its preview). The analysis job is named `Clustering`
+(`gui.cluster_playlist_jobs.ANALYSIS_JOB_NAME`).
 
 | Tab | Contents |
 |---|---|
 | 🚀 Quick Start | States the fixed settings (8 K-Means clusters; tempo, MFCC and energy; standard normalization) and a Run Quick Start button. |
 | ⚙ Advanced | Configure with Wizard… (§7.2), the chosen configuration as read-only text, and Run. Kept separate from Quick Start. |
-| 📊 Results | Progress bar, status, live log and a **Cancel** button during the run (cooperative; finishes the files being analysed). Then: clusters created, total tracks, unclustered (noise) count, tracks that could not be analysed, silhouette score, a hint that playlists are exported from the Map, **View Quality Report** and **Open the map**. |
+| 📊 Results | Progress bar, status, live log and a **Cancel** button during the run (cooperative; finishes the files being analysed). Then: clusters created, total tracks, unclustered (noise) count, tracks that could not be analysed, silhouette score, a hint pointing at **Save cluster playlists…** (or a lasso export from the map), **View Quality Report** and **Open the map**. |
 
 Noise is not counted as a cluster and is excluded from the scores. Reserved folders
 are not clustered. A library change cancels a run and resets the results (and
@@ -670,7 +675,7 @@ validation and export live in the Qt-free `cluster_graph_data.py`.
 | Scatter plot | `InteractiveScatterPlot` | One dot per track, coloured by cluster; noise grey. Hover identifies; **a click pins** the track in the details panel (hover no longer replaces it). |
 | Cluster legend | `ClusterLegendWidget` | Colour key and counts; checkbox hides a cluster (and drops its tracks from the selection); clicking a row selects it; Show all / Hide all |
 | Track details | `TrackDetailsPanel` | Art and tags of the hovered or pinned track, with Play and Open-folder |
-| Selection bar | Label + buttons | "N tracks selected", ▶ Play selection, Export CSV…, Export playlist… |
+| Selection bar | Label + buttons | "N tracks selected", ▶ Play selection, Export CSV…, Export playlist… (checks the library-write lock first; written through `playlist_generator`, so a replaced playlist gets a `.bak` beside it and a line in `Docs/playlist_writes.log`) |
 
 The page **reloads itself when shown** if `Docs/cluster_info.json` changed; a failed
 reload clears the plot and legend. The plot background, selection outline and marquee
@@ -815,7 +820,7 @@ go Back and Next.
 | 2. Normalization & Preprocessing | Standard / MinMax / Robust (used). Dimensionality reduction (None / PCA / t-SNE / UMAP) is **disabled: not available yet**. |
 | 3. Algorithm Selection | K-Means (cluster count) or HDBSCAN (min cluster size, min samples); the choice is passed through correctly. |
 | 4. Post-Processing | Remove small clusters / merge into "Miscellaneous": **disabled, not available yet**. |
-| 5. Output Options | Create M3U playlists / generate quality report / open graph: **disabled**, with tooltips pointing at what to use instead (Map export; the report is offered when scores exist; "Open the map"). |
+| 5. Output Options | **Offer to save a playlist per cluster when the analysis finishes** (live, off by default; run-config key `create_playlists`, never saved to the settings file): a successful run opens the Save cluster playlists preview (§7.6). Generate quality report / open graph: **disabled**, with tooltips pointing at what to use instead (the report is offered when scores exist; "Open the map"). |
 
 Refuses to proceed if every feature is unticked.
 
@@ -844,6 +849,26 @@ The Opus / M4A testers are embedded now (§6.10.2; `MediaTesterDialog` remains a
 wrapper the app does not open), and `CrashLogDialog` is no longer opened: Activity shows
 the same crash-log tail (`gui/workspaces/activity.py` reuses its `crash_log_paths()` /
 `_tail()`).
+
+### 7.6 ClusterPlaylistsDialog (`gui/dialogs/cluster_playlists_dialog.py`)
+
+The Save cluster playlists preview, opened by the Sound Map's page action (§6.8) after
+the read-only summary job (`cluster_playlist_export.summarize_cluster_run`). Modal;
+nothing is written from it. Spec: `docs/specs/cluster_playlists.md`.
+
+| Element | Purpose |
+|---|---|
+| Header | Method and parameter, number of clusters and tracks, when the analysis ran, and the destination (`Playlists/Clusters/<folder>/`). On a downsampled map: "The map shows 5,000 of 20,000 tracks; the playlists include all of them." |
+| Warnings | Shown only when there are any: the library was moved (paths mapped), tracks added since the analysis, "changed a lot; consider re-analysing", the map shows an older analysis, earlier sets kept in `Playlists/Clusters/`. |
+| Order / Minimum tracks | *Closest to the centre first* (default) or *Library order*; minimum 2–500, default 5, counted in present tracks. |
+| Table | One row per cluster (noise last): Save checkbox (pre-ticked: every cluster except those hidden in the map legend; locked, with the reason as tooltip, while too small or too long for Windows), colour swatch (an icon, not a style sheet), **editable name**, tracks present, missing (tooltip lists up to 20 paths), and the action: New, Replace or Skip · reason. "Unclustered (N) — not saved" has no checkbox. Two ticked rows with the same name (ignoring case) disable Save. |
+| Left unchanged | Files already in the run folder that this save does not touch. |
+| Buttons | Select all / Select none, Open folder (only when the run folder exists; `QDesktopServices`), **Save N playlists (K replace)** and Cancel (the default button). |
+
+Every option, checkbox and committed name edit re-plans on the GUI thread with the pure
+`plan_cluster_playlists`. After Save the flow asks once if anything would be replaced
+("K existing files … will be replaced (backed up first …)") and then writes exactly
+`dialog.plan()`.
 
 ---
 

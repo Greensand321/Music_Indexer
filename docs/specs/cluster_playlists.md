@@ -1,8 +1,10 @@
 # Spec: cluster playlists ("Save every cluster as a playlist")
 
-_Status: ready for implementation (audited 2026-11-07, see the audit log at the end) ·
-Written 2026-11-07 · Area: LISTEN → Sound Map (`docs/redesign/README.md` §5) · Supersedes
-the ROADMAP item "Playlists straight from a clustering run (Designed, not started)"._
+_Status: **Implemented** (2026-11-08; see "Implementation notes" at the end of the audit
+log for where the code follows the merged Sound Map page instead of the pre-merge text) ·
+Audited 2026-11-07 · Written 2026-11-07 · Area: LISTEN → Sound Map
+(`docs/redesign/README.md` §5) · Supersedes the ROADMAP item "Playlists straight from a
+clustering run (Designed, not started)"._
 
 ## 0. Summary
 
@@ -979,3 +981,65 @@ line was opened; callers of every changed function were grepped. Changes, with r
     technique specified for the mid-write tests, the `scripts/gui_snapshots.py` hedge
     removed (it doesn't enumerate dialogs), and the DoD's "PL-15 is marked fixed" narrowed
     (PL-15 also covers wizard options that stay disabled).
+
+### Implementation notes (2026-11-08)
+
+The spec was written before the page restructure merged the Graph page and the
+Clustered tab into one **Sound Map** page (`SoundMapPage` in `gui/pages.py`, with the
+sections Analyse = `EnhancedClusteredWorkspace` and Map = `GraphWorkspace`). Where the
+code follows the merged page, or settles a detail the text left open, it is recorded
+here. §1's line references describe the code before this implementation.
+
+- **One flow, not two (§8.4).** With analysis and map on one page there is a single
+  `ClusterPlaylistFlow`. The **Map panel owns it** (`GraphWorkspace.cluster_playlists_flow`;
+  it is the flow's host, so the jobs belong to it): it supplies the three callables
+  (item 4), refreshes the flow after every load and failed load (item 2) and calls
+  `on_library_changed()` (item 3). **`SoundMapPage._build_actions` places the button**
+  with `add_action` (item 1; first, before *Quality report*), points the flow's new
+  `set_show_target(page)` at the *page* so a held offer opens on either section and
+  never over another page, connects the Analyse panel's new
+  `analysis_succeeded(dict)` signal to `offer_after_run` (item 5), and connects
+  `busy_changed` to the new `EnhancedClusteredWorkspace.set_external_busy` (CP-34's
+  "a page that also runs analyses disables its Run buttons").
+- **CP-43, Results tab.** The Results tab does not get its own button: the page action
+  is visible in the Analyse section too. The hint says "Save a playlist per cluster
+  with “Save cluster playlists…” (at the top of the Sound Map), or export a lasso
+  selection from the map." `test_results_point_to_save_cluster_playlists` checks the
+  hint and the page's button on a stand-alone `SoundMapPage`.
+- **CP-44 tests** build a stand-alone `SoundMapPage` (the offer is page wiring) instead
+  of `make_workspace("clustered")`; `test_offer_waits_until_the_page_is_shown` builds it
+  hidden and then shows it.
+- **CP-13.** The analysis panel now imports `ANALYSIS_JOB_NAME` from
+  `gui/cluster_playlist_jobs.py`, but still keeps its own `_AUDIO_EXTS`; the test pins
+  the two sets by reading the panel's source (no Qt needed).
+- **CP-17.** `sanitize_playlist_stem(text, limit=100, *, fallback="")`: the "becomes
+  `Cluster <id>`" rule needs the id, so the caller passes it as `fallback`. The device
+  suffix `_` never pushes a stem past `limit`.
+- **CP-46 / CP-17, generated names.** Descriptor parts are dropped from the right until
+  the name fits; a generated name is never hard-trimmed (with every part dropped it is
+  `Cluster <id>`, and when even that does not fit the row is Skip). Only user-edited
+  names are trimmed. The planner also checks the final `item.path` against the budget.
+- **CP-21, "left unchanged".** The plan carries `left_unchanged` (existing files no item
+  targets, recomputed on every re-plan, so a rename or an unticked row shows up); the
+  dialog shows it as a live line rather than a fixed summary warning. `RunSummary` also
+  has the field, computed against the proposed names.
+- **CP-37, older map.** `map_run_id()` returns `None` when the map shows nothing (no
+  warning; everything preselected) and `""` for a payload without a run block (treated
+  as an older analysis: the warning is added).
+- **CP-11 / CP-13.** Every member is checked, noise included; `missing_total` counts
+  missing noise members too (it only feeds the "changed a lot" warning).
+- **CP-31 / CP-41.** `write_cluster_playlists` returns the writer's dict plus
+  `refused` (the refusal message or `None`); the summary line is built by
+  `cluster_playlist_export.result_message(plan, result)` so it is tested without Qt.
+  A refusal writes nothing at all, not even a `playlist_writes.log` line.
+- **CP-34.** `start()` itself also refuses while an analysis runs (not only the
+  button), and an offer waits for the analysis job to have fully ended.
+- **CP-35 / CP-44.** A preview that finishes while its page is hidden is held, like an
+  offer, and opens the next time the page is shown.
+- **CP-12 wording.** `load_cluster_data`'s message still says "Run Clustered
+  Playlists"; the flow rewrites it the way the Map panel does ("Run an analysis
+  (Analyse tab)").
+- **Not done here (owned elsewhere):** the §11 updates to `CLAUDE.md` (index-alignment
+  bullet) and to `docs/redesign/pages/06_playlists_clustering_graph.md` (PL-15) are
+  left to the owner of those files. `gui/pages.py`'s module docstring still says
+  "Save clusters as playlists belongs" there.
