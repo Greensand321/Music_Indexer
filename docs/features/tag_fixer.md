@@ -71,8 +71,9 @@ tags changed since the logged write is skipped and reported, never overwritten; 
 file that has been moved or deleted is reported as missing. Every value of a
 multi-value field comes back, a field that did not exist before is removed again, and
 WAV files with ID3 tags work too. The revert is itself logged
-(`Docs/tag_changes_revert_<timestamp>.jsonl`), so it can be reverted. *(Backend only
-for now: the page that offers it is part of the GUI redesign.)*
+(`Docs/tag_changes_revert_<timestamp>.jsonl`), so it can be reverted. In the app this is
+**Metadata → Undo changes**: pick an apply, **Preview undo** (writes nothing), then
+**Undo these changes**.
 
 ### An honest note on the "score tiers"
 

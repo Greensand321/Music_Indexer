@@ -142,7 +142,7 @@ untitled last group sits under a hairline instead of a heading.
 | | `library_sync` | Library Sync | Merge an incoming folder (§6.3) |
 | | `file_cleanup` | File Cleanup | Remove copy suffixes, previewed and undoable (§6.4) |
 | **CLEAN UP** | `duplicates` | Duplicates | Six sections (§6.5) |
-| | `metadata` | Metadata | Tag Fixer · Fill genres · Normalize genres (§6.6) |
+| | `metadata` | Metadata | Tag Fixer · Fill genres · Normalize genres · Undo changes (§6.6) |
 | **LISTEN** | `player` | Player | §6.7 |
 | | `sound_map` | Sound Map | Analyse · Map (§6.8) |
 | | `playlists` | Playlists | §6.9 |
@@ -184,6 +184,7 @@ tabs (`SectionedPage.add_action`).
 | Metadata | `tag_fixer` | Tag Fixer | `tag_fixer` → `TagFixerWorkspace` |
 | | `fill_genres` | Fill genres | `genres` → `GenresWorkspace`, view `fill` |
 | | `normalize_genres` | Normalize genres | `genres` → `GenresWorkspace`, view `normalize` |
+| | `undo_tags` | Undo changes | `tag_history` → `TagHistoryWorkspace` |
 | Sound Map | `analyse` | Analyse | `clustered` → `EnhancedClusteredWorkspace` |
 | | `map` | Map | `graph` → `GraphWorkspace` |
 | Mirror | `build` | Build the mirror | `compression` → `CompressionWorkspace` |
@@ -363,9 +364,9 @@ Preview first; Execute applies **that** preview.
 | Workflow stepper | Header | 1. Preview (dry run) → 2. Review HTML report → 3. Execute changes |
 | Dry run | Checkbox | Checked by default. Unchecking switches the Run button to Execute. |
 | Create playlists after execution | Checkbox | Checked: regenerate playlists after the moves. Unchecked: only update existing playlists' paths. |
-| Cross-album scan (Phase C) | Checkbox | **Disabled**, tooltip: the current indexer engine ignores this option. |
-| Flush fingerprint cache before scan | Checkbox | **Disabled**, same tooltip. |
-| Max workers | SpinBox | **Disabled**, same tooltip. |
+| Cross-album scan (Phase C) | Checkbox | **Disabled**, tooltip: the engine has no cross-album phase. |
+| Flush fingerprint cache before scan | Checkbox | **Disabled**, tooltip: the Indexer keeps no cache, so there is nothing to flush. |
+| Max workers | SpinBox | 1–32, default **1**. How many files have their tags read at once during a preview. 1 is fastest on a local disk; more helps on a network share or slow drive. Locked while a run is going. |
 | Run | Button (primary) | "▶ Run Preview" while Dry run is checked; "▶ Execute Previewed Plan" otherwise, enabled only while a preview of the current library exists. |
 | Open Report | Button | Opens `Docs/MusicIndex.html` |
 | Cancel | Button | Cancels the running preview or execute (the worker has its own cancel event) |
@@ -564,6 +565,19 @@ multi-value lists, skip files changed since the preview, log every write to
 
 Preview is disabled while any apply runs. A library change cancels scans, previews and
 lookups and drops their results.
+
+#### 6.6.3 Undo changes (`tag_history.py`)
+
+Rolls back one Tag Fixer or genre apply from its change log (`controllers/tag_revert.py`).
+
+| Element | Type | Purpose |
+|---|---|---|
+| Tag applies in this library | List | Every change log in `Docs/` that wrote something, newest first: When, Tool, Files, Changes, Status ("Undone" in muted text once reverted; an undo is listed as "Undo"). Re-read on Refresh, on showing the tab, and after an undo. |
+| Preview undo | Button (primary) | Read-only job: per file and tag, what it holds now and what it gets back. Files edited since the apply, missing or unreadable are listed as "Left alone". Writes nothing. |
+| Undo these changes | Button (primary) | Enabled only with a preview that restores something. Confirms, then writes exactly the preview, re-checking each file first. Holds the tag-write guard and the library-write lock. Logged to `Docs/tag_changes_revert_*.jsonl`, so it can be undone too. |
+| Cancel | Button | Stops the preview or the undo at the next file |
+
+Selecting another apply drops the shown preview. A library change drops the preview; a confirmed undo finishes on its own library.
 
 ### 6.7 Player (`player.py`)
 

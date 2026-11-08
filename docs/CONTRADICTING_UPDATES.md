@@ -70,7 +70,7 @@ Status legend: **Done** (in the code now) · **Pending owner** (decision needed;
 - The reviewer proposed refusing the whole run when the library changed since Build Plan. Instead, each stale
   item is skipped and reported, and the rest proceed (Library Sync items are independent).
 
-### A10. Indexer "Max workers" is real now — **Done** (backend; the GUI control is wired with the new pages)
+### A10. Indexer "Max workers" is real now — **Done**
 - **Was**: `docs/ROADMAP.md` ("Controls that are still switched off") and `CLAUDE.md` say the engine ignores
   Max workers. The control was disabled, with a default of 4.
 - **Is**: `build_indexer_plan(..., max_workers=N)` reads tags on a bounded thread pool. Results come back in
@@ -78,8 +78,11 @@ Status legend: **Done** (in the code now) · **Pending owner** (decision needed;
 - **Measured** on 3,000 tagged files:
   - local disk: 1 worker 0.69 s, 4 workers 2.34 s;
   - with 5 ms latency per file: 1 worker 16.7 s, 4 workers 4.4 s.
-  So the default becomes **1**, and more workers are offered for network or slow drives. The old default of 4
-  would have made local scans about 3× slower.
+  So the control is now enabled with a default of **1**, and its tooltip says more only helps on network or slow
+  drives. The old default of 4 would have made local scans about 3× slower. The control is locked while a run is
+  going.
+- **Contradicts**: `docs/ROADMAP.md` (now updated), `CLAUDE.md` (now updated), and the old "Advanced (not used by
+  the current engine)" group title (now just "Advanced").
 - **Undo**: `music_indexer_api._iter_tags` / `MAX_TAG_WORKERS`.
 
 ### A11. Indexer "Flush fingerprint cache" stays switched off, and its premise was wrong — **Done**
@@ -96,11 +99,14 @@ Status legend: **Done** (in the code now) · **Pending owner** (decision needed;
   The dead backing code `build_review_replacement_plan`, `_select_replacement_sources` and `ReviewAction`
   (no callers anywhere) was deleted. A static HTML file can't safely run file operations.
 
-### A13. Tag writes can be undone; `None` now means "remove this tag" — **Done** (backend; GUI coming)
+### A13. Tag writes can be undone; `None` now means "remove this tag" — **Done**
 - **New**: `controllers/tag_revert.py` lists each Tag Fixer / Genre Normalizer apply from its `Docs/` change
   log, and restores exactly what was there before. That covers every value of a multi-value field, and removes
   a field that didn't exist before. Files edited since then are skipped as conflicts, and each revert is itself
   logged so it can be reverted.
+- **In the app**: a new fourth tab, **Metadata → Undo changes**. It lists each apply, "Preview undo" writes
+  nothing, and "Undo these changes" confirms, then writes exactly the preview. It holds the tag-write guard and
+  the library-write lock.
 - **Contradicts**: `utils/tag_change_log.py`'s "a future revert tool" note. `utils/tag_writer.py` now treats a
   `None` value as "remove the field" (no existing caller passed `None`).
 
@@ -112,7 +118,7 @@ Status legend: **Done** (in the code now) · **Pending owner** (decision needed;
   "compares the compressed fingerprint text" and listed that as a known bug. The decoded metric was already
   ported, so that text was stale and is corrected.
 
-## B. Structure that changed (adopted IA) — **In progress**
+## B. Structure that changed (adopted IA) — **Done**
 
 ### B1. New page structure replaces the 13-page sidebar
 - **Was**: ORGANIZE (Indexer, Library Sync) · CLEAN UP (Duplicates, Similarity, Tag Fixer, Genre Normalizer) ·
@@ -127,18 +133,44 @@ Status legend: **Done** (in the code now) · **Pending owner** (decision needed;
   - The page names used throughout `docs/features/*.md` ("Genre Normalizer", "Clustered", "Music Graph",
     "Compression", "Utilities").
 - **Old keys still route**: `similarity`, `tag_fixer`, `genres`, `clustered`, `graph`, `compression` and `tools`
-  open the right page and section.
+  open the right page and section. `main_window._workspaces[old_key]` still returns the panel for every old key
+  except `tools`, which no longer has a panel.
+- **Docs now updated**: `docs/gui_inventory.md` (rewritten) and `CLAUDE.md` (layout, plus a new "Adding a page or
+  a section" pattern; the Tk "Tools menu" / "Playlist Creator" patterns are marked legacy).
+- **Docs still using old names**, to fix in the docs pass after the redesign settles:
+  - `docs/architecture.md` (the sidebar table, "Settings dialog", "Utilities exports", "Utilities → View Crash
+    Log");
+  - `docs/features/duplicate_finder.md` ("Utilities → Pair Review");
+  - `docs/ROADMAP.md` ("Utilities → Diagnostics", "Crash Log viewer", "Settings dialog", "Music Graph");
+  - `docs/features/playlists_and_clustering.md` ("Music Graph room", "sidebar's Clustered");
+  - `docs/features/tag_fixer.md` (the Genre Normalizer sidebar entry);
+  - `docs/README.md`;
+  - the root `README.md` ("5 sections, 13 items", tools.py as "Export & Utilities");
+  - `docs/redesign/README.md` (its "13 sidebar entries" wording and hygiene table).
+- **Panel headings** still use old names under the new pages ("Genre Normalizer", "Library Compression",
+  "Similarity Inspector"). Only Analyse and Map were retitled. The backend copy in `cluster_graph_data.py`,
+  `cluster_graph_3d.py` and `clustered_playlists.py` still says "Clustered Playlists" / "Music Graph".
 
 ### B2. Prototype duplicate tools live inside Duplicates with an "Experimental" pill
 - Fuzzy Finder, Scan Engine and Bucketing POC moved from the Utilities → Diagnostics tile to Duplicates
   sections, each marked **Experimental** (not ready to test).
+- Pair Review and the three prototypes are still **dialogs**, opened by an "Open …" button inside their
+  section. Each has its own close button and worker lifecycle, so embedding them is redesign work.
 
 ### B3. Settings is a page; the theme picker is its Appearance section
 - **Was**: a modal Settings dialog plus a separate Theme picker window.
+- **Is**: Settings has three sections: Metadata services, General and Appearance. It saves under the same config
+  keys.
+- **Kept, but no longer opened by the app**: the thin wrappers `SettingsDrawer`, `ThemePickerDialog` /
+  `open_theme_picker`, `MediaTesterDialog` and the `CrashLogDialog` class. Deleting them needs the owner's OK.
 
 ### B4. Utilities is gone
 - Its pieces moved: File Cleanup → Organize, exports → Exports, Validator → Home, crash log → Activity, and the
   Opus/M4A testers → Mirror.
+
+### B5. Metadata has a fourth section, "Undo changes" (see A13)
+- This is not in the adopted IA proposal (§5 of `docs/redesign/README.md`), which listed three Metadata
+  sections. It is added because undo is per-tool history and belongs next to the tools that write tags.
 
 ## C. Files deleted (owner approved) — **Done**
 - Deleted: `gui/widgets/splash.py`, `gui/workspaces/clustered.py`, `gui/widgets/interactive_3d_scatter.py`,

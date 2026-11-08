@@ -27,7 +27,7 @@ def test_sections_of_the_composed_pages():
     sections = {p.key: [s.key for s in p.sections] for p in nav.PAGES if p.has_sections}
     assert sections == {
         "duplicates": ["find", "compare", "pair_review", "fuzzy_finder", "scan_engine", "bucketing"],
-        "metadata": ["tag_fixer", "fill_genres", "normalize_genres"],
+        "metadata": ["tag_fixer", "fill_genres", "normalize_genres", "undo_tags"],
         "sound_map": ["analyse", "map"],
         "mirror": ["build", "verify"],
         "settings": ["services", "general", "appearance"],

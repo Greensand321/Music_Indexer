@@ -35,6 +35,7 @@ from gui.workspaces.launchers import (
 )
 from gui.workspaces.tag_fixer import TagFixerWorkspace
 from gui.workspaces.genres import GenresWorkspace
+from gui.workspaces.tag_history import TagHistoryWorkspace
 from gui.workspaces.player import PlayerWorkspace
 from gui.workspaces.clustered_enhanced import EnhancedClusteredWorkspace as ClusteredWorkspace
 from gui.workspaces.graph import GraphWorkspace
@@ -63,6 +64,7 @@ _WORKSPACE_MAP: dict[str, type[WorkspaceBase]] = {
     "bucketing":     BucketingWorkspace,
     "tag_fixer":     TagFixerWorkspace,
     "genres":        GenresWorkspace,
+    "tag_history":   TagHistoryWorkspace,
     "player":        PlayerWorkspace,
     "clustered":     ClusteredWorkspace,
     "graph":         GraphWorkspace,

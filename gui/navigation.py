@@ -94,6 +94,7 @@ PAGES: tuple[Page, ...] = (
              Section("tag_fixer", "Tag Fixer", "tag_fixer"),
              Section("fill_genres", "Fill genres", "genres", view="fill"),
              Section("normalize_genres", "Normalize genres", "genres", view="normalize"),
+             Section("undo_tags", "Undo changes", "tag_history"),
          )),
 
     _single("player", "Player", "▶", "LISTEN",
