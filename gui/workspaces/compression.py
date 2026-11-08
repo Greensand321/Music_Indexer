@@ -29,11 +29,13 @@ class MirrorWorker(QtCore.QThread):
         overwrite: bool,
         bitrate_kbps: int,
         parent: QtCore.QObject | None = None,
+        update_changed: bool = True,
     ) -> None:
         super().__init__(parent)
         self.source = source
         self.destination = destination
         self.overwrite = overwrite
+        self.update_changed = update_changed
         self.bitrate_kbps = bitrate_kbps
         self._cancel = threading.Event()
 
@@ -54,6 +56,7 @@ class MirrorWorker(QtCore.QThread):
                 bitrate_kbps=self.bitrate_kbps,
                 cancel_event=self._cancel,
                 error_callback=self.error_line.emit,
+                update_changed=self.update_changed,
             )
             self.finished.emit(summary)
         except Exception as exc:  # noqa: BLE001
@@ -69,6 +72,27 @@ class MirrorWorker(QtCore.QThread):
         errors: int,
     ) -> None:
         self.progress.emit(total_tasks, completed, converted, copied, skipped, errors)
+
+
+class OrphanRemovalWorker(QtCore.QThread):
+    """Deletes a reviewed list of orphaned mirror files (never anything else)."""
+
+    finished = Signal(dict)
+    error = Signal(str)
+
+    def __init__(self, source: str, destination: str, orphans: list[str]) -> None:
+        super().__init__()
+        self.source = source
+        self.destination = destination
+        self.orphans = list(orphans)
+
+    def run(self) -> None:
+        try:
+            from utils.opus_library_mirror import remove_mirror_orphans
+
+            self.finished.emit(remove_mirror_orphans(self.source, self.destination, self.orphans))
+        except Exception as exc:  # noqa: BLE001
+            self.error.emit(str(exc) or type(exc).__name__)
 
 
 class EstimateWorker(QtCore.QThread):
@@ -129,6 +153,9 @@ class CompressionWorkspace(WorkspaceBase):
         self._estimate_running_key: tuple | None = None
         self._pending_source: str | None = None   # library change that arrived mid-run
         self._report_path: str | None = None
+        self._orphans = None                      # (source, destination, [paths]) of the last run
+        self._orphan_worker: OrphanRemovalWorker | None = None
+        self._last_run_paths: tuple[str, str] | None = None
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -137,8 +164,8 @@ class CompressionWorkspace(WorkspaceBase):
         cl.addWidget(self._make_section_title("Library Compression"))
         cl.addWidget(self._make_subtitle(
             "Create a compressed mirror of your library. FLAC files are converted to Opus "
-            "at the chosen bitrate; all other formats are copied unchanged. "
-            "Originals in the source library are never modified. "
+            "at the chosen bitrate; other files are copied, and copied playlists point at "
+            "the converted .opus files. Originals in the source library are never modified. "
             "Quarantine/, Trash/ and Docs/ are not mirrored."
         ))
 
@@ -179,7 +206,9 @@ class CompressionWorkspace(WorkspaceBase):
         cfg_layout.setSpacing(10)
         cfg_layout.addWidget(self._make_card_title("Transcode Settings"))
 
-        info = QtWidgets.QLabel("FLAC → Opus  |  All other formats: copied unchanged")
+        info = QtWidgets.QLabel(
+            "FLAC → Opus  |  Other files: copied  |  Playlists: FLAC entries point at the .opus"
+        )
         info.setObjectName("statusHint")
         cfg_layout.addWidget(info)
 
@@ -193,8 +222,16 @@ class CompressionWorkspace(WorkspaceBase):
         bitrate_row.addStretch(1)
         cfg_layout.addLayout(bitrate_row)
 
-        self._overwrite_cb = QtWidgets.QCheckBox("Overwrite existing files in destination")
+        self._update_cb = QtWidgets.QCheckBox("Update mirror files whose source has changed")
+        self._update_cb.setChecked(True)
+        self._update_cb.setToolTip(
+            "A mirrored file older than its changed source (re-tagged, replaced) is redone.\n"
+            "Unchecked: it is kept and only reported as out of date."
+        )
+        cfg_layout.addWidget(self._update_cb)
+        self._overwrite_cb = QtWidgets.QCheckBox("Overwrite every existing file in destination")
         self._overwrite_cb.setChecked(False)
+        self._overwrite_cb.setToolTip("Redo the whole mirror, even files that are up to date.")
         cfg_layout.addWidget(self._overwrite_cb)
         cl.addWidget(cfg_card)
 
@@ -216,6 +253,14 @@ class CompressionWorkspace(WorkspaceBase):
         btn_row.addWidget(self._run_btn)
         btn_row.addWidget(self._cancel_btn)
         btn_row.addWidget(self._report_btn)
+        self._orphans_btn = QtWidgets.QPushButton("Remove orphaned files…")
+        self._orphans_btn.setToolTip(
+            "Files in the mirror whose source was deleted or renamed. Lists them first; "
+            "deletes only those, only inside the mirror."
+        )
+        self._orphans_btn.setVisible(False)
+        self._orphans_btn.clicked.connect(self._on_remove_orphans)
+        btn_row.addWidget(self._orphans_btn)
         btn_row.addStretch(1)
         cl.addLayout(btn_row)
 
@@ -316,23 +361,14 @@ class CompressionWorkspace(WorkspaceBase):
                 self, "Destination Required", "Select a destination folder."
             )
             return None
-        src_real = os.path.normcase(os.path.realpath(source))
-        dst_real = os.path.normcase(os.path.realpath(destination))
-        if src_real == dst_real:
-            QtWidgets.QMessageBox.critical(
-                self, "Invalid Destination",
-                "Destination must be different from source."
-            )
-            return None
+        from utils.opus_library_mirror import check_mirror_folders
+
         try:
-            inside = os.path.commonpath([src_real, dst_real]) == src_real
-        except ValueError:  # different drives
-            inside = False
-        if inside:
-            QtWidgets.QMessageBox.critical(
-                self, "Invalid Destination",
-                "Destination cannot be inside the source library."
-            )
+            # Same folder, destination inside the source, or source inside the
+            # destination: all refused (the backend checks again before writing).
+            check_mirror_folders(source, destination)
+        except ValueError as exc:
+            QtWidgets.QMessageBox.critical(self, "Invalid Destination", str(exc))
             return None
         if os.path.exists(destination) and not os.path.isdir(destination):
             QtWidgets.QMessageBox.warning(
@@ -352,6 +388,10 @@ class CompressionWorkspace(WorkspaceBase):
     def _invalidate_estimate(self, *_args) -> None:
         if self._worker is not None:
             return
+        if self._orphans and self._orphan_worker is None and (
+            self._source_edit.text().strip(), self._dest_edit.text().strip()
+        ) != tuple(self._orphans[:2]):
+            self._set_orphans(None)   # the list belongs to the folders it was found in
         if self._estimate_worker is not None:
             self._estimate_worker.cancel()
         if self._estimate_key is not None:
@@ -443,13 +483,19 @@ class CompressionWorkspace(WorkspaceBase):
             return
 
         overwrite = self._overwrite_cb.isChecked()
+        update_changed = self._update_cb.isChecked()
+        if overwrite:
+            existing = "OVERWRITTEN"
+        elif update_changed:
+            existing = "kept (skipped) unless their source changed"
+        else:
+            existing = "kept (skipped)"
         reply = QtWidgets.QMessageBox.question(
             self, "Start Compression",
             f"Convert FLAC → Opus ({self._bitrate_spin.value()} kbps) and copy all other files.\n\n"
             f"Source:       {source}\n"
             f"Destination:  {destination}\n"
-            "Existing files in the destination: "
-            f"{'OVERWRITTEN' if overwrite else 'kept (skipped)'}\n"
+            f"Existing files in the destination: {existing}\n"
             "Not mirrored: Quarantine/, Trash/, Docs/\n\n"
             "Originals in the source are never modified. Proceed?",
             QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
@@ -460,6 +506,7 @@ class CompressionWorkspace(WorkspaceBase):
         self._set_running(True)
         self._report_path = None
         self._report_btn.setEnabled(False)
+        self._set_orphans(None)
         self._log(f"Starting compression: {source} → {destination}", "info")
 
         worker = MirrorWorker(
@@ -468,6 +515,7 @@ class CompressionWorkspace(WorkspaceBase):
             overwrite=overwrite,
             bitrate_kbps=self._bitrate_spin.value(),
             parent=self,
+            update_changed=update_changed,
         )
         worker.progress.connect(self._on_progress)
         worker.log_line.connect(self._on_worker_log)
@@ -503,6 +551,8 @@ class CompressionWorkspace(WorkspaceBase):
         self._dst_browse.setEnabled(not running)
         self._bitrate_spin.setEnabled(not running)
         self._overwrite_cb.setEnabled(not running)
+        self._update_cb.setEnabled(not running)
+        self._orphans_btn.setEnabled(not running)
         self._prog_bar.setVisible(running)
         if running:
             self._prog_bar.setMaximum(0)  # indeterminate until first tick
@@ -541,7 +591,9 @@ class CompressionWorkspace(WorkspaceBase):
 
     @Slot(dict)
     def _on_finished(self, summary: dict) -> None:
-        destination = self._worker.destination if self._worker is not None else self._dest_edit.text().strip()
+        worker = self._worker
+        destination = worker.destination if worker is not None else self._dest_edit.text().strip()
+        self._last_run_paths = (worker.source, worker.destination) if worker is not None else None
         self._run_ended()
         self._prog_bar.setMaximum(100)
         self._prog_bar.setValue(100)
@@ -552,6 +604,23 @@ class CompressionWorkspace(WorkspaceBase):
             f"skipped {summary['skipped']}, "
             f"errors {summary['errors']}."
         )
+        extras = []
+        if summary.get("updated"):
+            extras.append(f"{summary['updated']} out-of-date file(s) redone")
+        stale_kept = int(summary.get("stale", 0) or 0) - int(summary.get("updated", 0) or 0)
+        if stale_kept > 0:
+            extras.append(
+                f"{stale_kept} file(s) older than their changed source were kept "
+                "(tick “Update mirror files…” to redo them)"
+            )
+        if summary.get("partials_removed"):
+            extras.append(f"{summary['partials_removed']} leftover temporary file(s) from an "
+                          "interrupted run removed")
+        orphans = list(summary.get("orphan_files") or [])
+        if orphans:
+            extras.append(f"{len(orphans)} file(s) in the mirror no longer have a source")
+        if extras:
+            counts += "  " + "; ".join(extras) + "."
         if summary.get("cancelled"):
             msg = (
                 f"Cancelled.  {counts}  {summary.get('not_started', 0)} file(s) were not "
@@ -568,6 +637,10 @@ class CompressionWorkspace(WorkspaceBase):
         set_tone(self._result_lbl, tone)
         self._prog_counter.setText("")
         self._log(msg, level)
+        if (orphans and not summary.get("cancelled") and self._last_run_paths is not None
+                and (self._source_edit.text().strip(), self._dest_edit.text().strip())
+                == self._last_run_paths):
+            self._set_orphans((*self._last_run_paths, orphans))
         for path, reason in summary.get("error_files", [])[:20]:
             self._log(f"Compression error: {path}: {reason}", "error")
 
@@ -594,6 +667,83 @@ class CompressionWorkspace(WorkspaceBase):
         self._result_lbl.setText(f"Error: {error}")
         set_tone(self._result_lbl, "danger")
         self._log(f"Compression failed: {error}", "error")
+
+    # ── Orphaned mirror files ─────────────────────────────────────────────
+
+    def _set_orphans(self, orphans) -> None:
+        """``(source, destination, [paths])`` from the last complete run, or None."""
+        self._orphans = orphans
+        if orphans:
+            self._orphans_btn.setText(f"Remove {len(orphans[2])} orphaned file(s)…")
+        self._orphans_btn.setVisible(bool(orphans))
+
+    @Slot()
+    def _on_remove_orphans(self) -> None:
+        if not self._orphans or self._worker is not None or self._orphan_worker is not None:
+            return
+        source, destination, paths = self._orphans
+        shown = "\n".join(
+            "  " + os.path.relpath(p, destination) if os.path.isabs(p) else "  " + p
+            for p in paths[:15]
+        )
+        more = f"\n  … and {len(paths) - 15} more (all listed in the report)" if len(paths) > 15 else ""
+        reply = QtWidgets.QMessageBox.question(
+            self, "Remove Orphaned Files",
+            f"Delete these {len(paths)} file(s) from the mirror? Their source file in the "
+            f"library was deleted or renamed.\n\n{shown}{more}\n\n"
+            f"Mirror: {destination}\n"
+            "Only these files are deleted, only inside the mirror; a file whose source has "
+            "come back is kept. Your library is never touched. Every deletion is logged in "
+            "the mirror's Docs/ folder.",
+            QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
+            QtWidgets.QMessageBox.StandardButton.No,
+        )
+        if reply != QtWidgets.QMessageBox.StandardButton.Yes:
+            return
+        worker = OrphanRemovalWorker(source, destination, paths)
+        worker.finished.connect(self._on_orphans_removed)
+        worker.error.connect(self._on_orphans_failed)
+        self._orphan_worker = worker
+        self._orphans_btn.setEnabled(False)
+        self._run_btn.setEnabled(False)
+        self._estimate_btn.setEnabled(False)
+        self._start_worker(worker, "Remove orphaned mirror files")
+
+    def _orphans_done(self) -> None:
+        self._orphan_worker = None
+        self._set_orphans(None)
+        self._orphans_btn.setEnabled(True)
+        self._estimate_btn.setEnabled(True)
+
+    @Slot(dict)
+    def _on_orphans_removed(self, result: dict) -> None:
+        if self.sender() is not self._orphan_worker:
+            return
+        self._orphans_done()
+        removed, refused, failed = (result.get(k) or [] for k in ("removed", "refused", "failed"))
+        msg = f"Removed {len(removed)} orphaned file(s) from the mirror."
+        if refused:
+            msg += f" {len(refused)} kept (see the log)."
+        if failed:
+            msg += f" {len(failed)} could not be deleted."
+        for path, why in list(refused)[:20]:
+            self._log(f"Kept {path}: {why}", "warn")
+        for path, why in list(failed)[:20]:
+            self._log(f"Could not delete {path}: {why}", "error")
+        if result.get("log_path"):
+            self._log(f"Orphan removal logged to {result['log_path']}", "info")
+        self._result_lbl.setText(msg)
+        set_tone(self._result_lbl, "danger" if failed else "success")
+        self._log(msg, "error" if failed else "ok")
+
+    @Slot(str)
+    def _on_orphans_failed(self, error: str) -> None:
+        if self.sender() is not self._orphan_worker:
+            return
+        self._orphans_done()
+        self._result_lbl.setText(f"Orphan removal failed: {error}")
+        set_tone(self._result_lbl, "danger")
+        self._log(f"Orphan removal failed: {error}", "error")
 
     # ── Open report ───────────────────────────────────────────────────────
 

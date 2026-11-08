@@ -707,23 +707,26 @@ change cancels planning but not a confirmed write.
 
 Formerly the Compression page (still titled "Library Compression"). **A FLAC → Opus
 library mirror.** Output is always Opus in a separate folder; other
-files are copied unchanged.
+files are copied, and copied playlists have their FLAC entries pointed at the `.opus`.
 
 | Element | Type | Purpose |
 |---|---|---|
-| Source / Destination | Entry + Browse… | The destination may not be inside the source; this is checked before anything is created |
+| Source / Destination | Entry + Browse… | Refused, before anything is created: the same folder, a destination inside the source, or a source inside the destination (`check_mirror_folders`) |
 | Opus bitrate (kbps) | SpinBox | 48–320, default 96; disabled during a run |
-| Overwrite existing files in destination | Checkbox | The confirmation states the choice |
+| Update mirror files whose source has changed | Checkbox | Checked by default. A mirrored file older than its changed source is redone; unchecked, it is kept and reported as out of date |
+| Overwrite every existing file in destination | Checkbox | Redo the whole mirror. The confirmation states the choice |
 | 🔍 Estimate Space Savings | Button (primary) | Runs in a worker; never creates the destination |
 | ▶ Start Compression | Button | Enabled only by an estimate for the current source / destination / bitrate; changing any of them invalidates the estimate. Needs FFmpeg on `PATH`. |
 | ■ Cancel | Button | Real cancel: terminates ffmpeg and removes partial output |
 | Progress + counter | Bar + label | |
 | Open Report | Button | `<destination>/Docs/opus_library_mirror_reports/opus_library_mirror_report_<timestamp>.html` |
+| Remove N orphaned file(s)… | Button | Shown after a complete run that found mirror files with no source any more (deleted or renamed in the library). Lists them, asks, then deletes only those, only inside the mirror (never one whose source came back), in a worker; every outcome is logged in the mirror's `Docs/`. Changing the folders hides it. |
 
 Quarantine/, Trash/ and Docs/ are not mirrored. Output is encoded and tagged under a
 temporary name and renamed when complete. Two sources that would land on the same
-destination name (`Song.flac` and `Song.opus`) are resolved before any worker runs. A
-library change during a run is applied after the run.
+destination name (`Song.flac` and `Song.opus`), or folders differing only in case, are
+resolved before any worker runs. Temporary files left by an interrupted earlier run are
+removed. A library change during a run is applied after the run.
 
 #### 6.10.2 Verify the mirror (`mirror_verify.py`)
 

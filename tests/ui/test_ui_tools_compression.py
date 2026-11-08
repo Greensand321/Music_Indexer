@@ -172,3 +172,105 @@ def test_closing_the_window_mid_compression_stops_cleanly(
     out = tmp_path / "Mirror" / "Basalt"
     assert not list(out.rglob("*.opus"))
     assert not [p for p in out.rglob("*") if ".alphadex-partial" in p.name]
+
+
+# ── Folder checks, out-of-date files and orphans (mirror backend audit) ─────
+
+
+def test_source_inside_the_destination_is_refused(make_workspace, library, dialogs, qtbot):
+    ws = make_workspace("compression", library_path=library.root)
+    ws._dest_edit.setText(str(library.root.parent))
+    ws._estimate_btn.click()
+    (call,) = dialogs.calls_of("critical")
+    assert call.title == "Invalid Destination" and "inside the destination" in call.text
+    assert not ws._run_btn.isEnabled()
+
+
+def _fake_mirror(monkeypatch, summary_extra, seen):
+    import utils.opus_library_mirror as mirror
+
+    def fake(source, destination, overwrite, **kwargs):
+        seen.append(kwargs)
+        summary = {"total": 1, "converted": 0, "copied": 1, "skipped": 0, "errors": 0,
+                   "stale": 0, "updated": 0, "cancelled": False, "error_files": [],
+                   "skipped_files": [], "orphan_files": [], "partials_removed": 0}
+        summary.update(summary_extra(destination))
+        return summary
+
+    monkeypatch.setattr(mirror, "mirror_library", fake)
+    monkeypatch.setattr(shutil, "which", lambda name, *a, **k: "/usr/bin/" + name)
+
+
+def _run(ws, dialogs, qtbot):
+    _estimate(ws, qtbot)
+    dialogs.answer_yes()
+    ws._run_btn.click()
+    qtbot.waitUntil(lambda: ws._worker is None, timeout=20000)
+
+
+def test_update_changed_is_on_by_default_and_reaches_the_backend(
+        make_workspace, library, dialogs, qtbot, tmp_path, monkeypatch):
+    seen = []
+    _fake_mirror(monkeypatch, lambda _d: {"stale": 3, "updated": 3}, seen)
+    ws = make_workspace("compression", library_path=library.root)
+    ws._dest_edit.setText(str(tmp_path / "Mirror"))
+    assert ws._update_cb.isChecked()
+    _run(ws, dialogs, qtbot)
+    assert seen[-1]["update_changed"] is True
+    assert "unless their source changed" in dialogs.calls_of("question")[-1].text
+    assert "3 out-of-date file(s) redone" in ws._result_lbl.text()
+
+    _fake_mirror(monkeypatch, lambda _d: {"stale": 2}, seen)
+    ws._update_cb.setChecked(False)
+    _run(ws, dialogs, qtbot)
+    assert seen[-1]["update_changed"] is False
+    assert "2 file(s) older than their changed source were kept" in ws._result_lbl.text()
+
+
+def test_orphans_are_listed_then_removed_only_after_confirmation(
+        make_workspace, library, dialogs, qtbot, threads, tmp_path, monkeypatch):
+    dest = tmp_path / "Mirror"
+    orphan = dest / "Old Artist" / "gone.opus"
+    keep = dest / "keep.txt"
+
+    def extra(destination):
+        orphan.parent.mkdir(parents=True, exist_ok=True)
+        orphan.write_bytes(b"opus")
+        keep.write_text("not listed")
+        return {"orphan_files": [str(orphan)]}
+
+    _fake_mirror(monkeypatch, extra, [])
+    before = sorted(p.relative_to(library.root) for p in library.root.rglob("*"))
+    ws = make_workspace("compression", library_path=library.root)
+    ws._dest_edit.setText(str(dest))
+    _run(ws, dialogs, qtbot)
+    assert "1 file(s) in the mirror no longer have a source" in ws._result_lbl.text()
+    assert ws._orphans_btn.isVisibleTo(ws) and "1 orphaned" in ws._orphans_btn.text()
+
+    dialogs.answer_no()
+    ws._orphans_btn.click()
+    assert orphan.exists(), "declining deletes nothing"
+    assert os.path.join("Old Artist", "gone.opus") in dialogs.calls_of("question")[-1].text
+
+    dialogs.answer_yes()
+    ws._orphans_btn.click()
+    threads.wait_all()
+    qtbot.waitUntil(lambda: ws._orphan_worker is None, timeout=20000)
+    assert not orphan.exists()
+    assert keep.exists(), "only the listed files are deleted"
+    assert sorted(p.relative_to(library.root) for p in library.root.rglob("*")) == before
+    assert not ws._orphans_btn.isVisibleTo(ws)
+    assert "Removed 1 orphaned file(s)" in ws._result_lbl.text()
+    assert list((dest / "Docs").rglob("*orphan*")), "every deletion is logged in the mirror's Docs/"
+
+
+def test_changing_the_folders_drops_the_orphan_list(
+        make_workspace, library, dialogs, qtbot, tmp_path, monkeypatch):
+    dest = tmp_path / "Mirror"
+    _fake_mirror(monkeypatch, lambda d: {"orphan_files": [os.path.join(d, "x.opus")]}, [])
+    ws = make_workspace("compression", library_path=library.root)
+    ws._dest_edit.setText(str(dest))
+    _run(ws, dialogs, qtbot)
+    assert ws._orphans_btn.isVisibleTo(ws)
+    ws._dest_edit.setText(str(tmp_path / "Elsewhere"))
+    assert not ws._orphans_btn.isVisibleTo(ws)
