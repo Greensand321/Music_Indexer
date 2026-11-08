@@ -629,6 +629,10 @@ def test_landing_tile_click_plays_and_counts_the_library(landing_factory, tmp_pa
 @pytest.mark.motion(time_scale=1.0)
 def test_landing_hover_lifts_without_moving_the_tile(landing_factory, motion):
     landing = landing_factory()
+    for tile in landing._tiles:
+        # The test drives hover itself: a cursor an earlier test left over a
+        # tile must not send real Enter/Leave events meanwhile.
+        tile.hovered.disconnect()
     landing.show()
     for tile in landing._tiles:
         tile.move(tile._target)
@@ -719,3 +723,34 @@ def test_reduce_motion_setting_reaches_the_motion_switch(main_window):
     settings._reduce_motion_cb.setChecked(False)
     assert settings._on_save()
     assert mo.reduced_motion() is False
+
+
+class _QuietGate(QtCore.QThread):
+    """A housekeeping job that runs until cancelled."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.stop = threading.Event()
+
+    def cancel(self) -> None:
+        self.stop.set()
+
+    def run(self) -> None:
+        self.stop.wait(10)
+
+
+def test_quiet_housekeeping_never_holds_the_window_open(main_window, threads, dialogs):
+    """A quiet job (the backdrop build) is cancelled silently and the window
+    closes at once; the registry still keeps the thread until it finishes."""
+    from gui.workers import job_registry, start_worker
+
+    gate = _QuietGate()
+    start_worker(gate, owner=main_window, name="Backdrop", ask_before_quit=False, quiet=True)
+    assert gate.isRunning()
+    assert [j.name for j in job_registry().listed_jobs()] == []
+    main_window.close()
+    process_events(20)
+    assert not main_window.isVisible()
+    assert gate.stop.is_set(), "cancelled on close"
+    assert dialogs.calls_of("question") == []
+    assert threads.wait_all(5000) == []

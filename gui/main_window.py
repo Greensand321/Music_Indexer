@@ -642,7 +642,13 @@ class AlphaDEXWindow(QtWidgets.QMainWindow):
         from gui.workers import job_registry
 
         registry = job_registry()
-        jobs = registry.jobs()
+        # Housekeeping (the backdrop build) is read-only and never worth a
+        # wait: cancel it and close. The registry keeps its thread alive until
+        # it really finishes, and main() waits for the registry on exit.
+        quiet = [j for j in registry.jobs() if j.quiet]
+        if quiet:
+            registry.cancel_all(quiet)
+        jobs = [j for j in registry.jobs() if not j.quiet]
         if jobs:
             if not getattr(self, "_closing", False):
                 # Read-only jobs (scans, previews, art loads) are cancelled
