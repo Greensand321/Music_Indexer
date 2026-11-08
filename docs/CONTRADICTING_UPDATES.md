@@ -576,3 +576,35 @@ short muted line saying what it is for, and buttons use painted glyphs instead o
   - `docs/library_sync_per_item_review_testing.md` (emoji labels);
   - `docs/features/library_sync.md` (old capitalisation);
   - `docs/architecture.md` ("Undo Last Cleanup").
+
+### G5. Player and Playlists
+- **The capsule is the only transport.** This follows the adopted IA: "the bar is the only transport".
+  - **Was**: the Player page had its own seek bar, ⏮ ▶ ⏭ ■, shuffle, repeat and volume, so the screen showed two
+    of each.
+  - **Is**: shuffle and repeat are glyph toggles on the capsule. Repeat cycles Off → Track → All; Track shows a
+    "1" badge.
+- **Stop is dropped.** Pause silences, Previous after 3 s restarts, and Clear on the queue unloads everything. A
+  sixth round button didn't fit the capsule at 900 px. The internal `_on_stop()` is kept.
+- **When the capsule shows**: the Player page shows it idle ("Nothing playing" / "Playback unavailable") before
+  anything has played. Other pages keep R1's rule: hidden until something plays. A page switch shows it at once,
+  because the page itself fades in; loading a track still fades it in.
+- **Capsule at narrow widths**: three tiers.
+  - Below about 840 px the volume slider moves into a popup behind the speaker button.
+  - Below about 724 px the times move into the seek bar's tooltip.
+  - Every control stays reachable.
+- **Cover art**: when a track has no embedded cover, the folder's `cover.jpg` (or the landing's other names) is
+  used in the capsule, the carousel and the Player card. Before, only embedded art was used.
+- **Player layout**:
+  - The resizable splitter → fixed glass cards. **You can no longer drag the divider.**
+  - The cover carousel hides when the column is too short.
+  - No alternating row colours.
+  - On narrow tables, Album and then # hide; search still matches them.
+  - The playing row is tinted with the accent and shows a play or pause glyph.
+- **Playlists**:
+  - The "Playlist Generator" heading is gone.
+  - The four "Generate" buttons → a kind switcher (Folder · Tempo & energy · Auto-DJ · Repair) with one Preview
+    button.
+  - The always-visible Log card → behind "Details".
+  - The plan shows as glass rows with new / replace / written / failed pills.
+- **Found, not changed**: the folder-playlist plan names the library root's loose tracks `Playlists/..m3u`
+  (`playlist_generator.plan_folder_playlists`). The new preview rows make it visible.
