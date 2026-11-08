@@ -37,12 +37,16 @@ from duplicate_consolidation import (
     ConsolidationPlan,
     _hamming_distance,
     _capture_library_state,
+    _iter_playlists as _planner_iter_playlists,
     consolidation_plan_from_dict,
     planned_winner_rename,
+    playlist_path_key,
+    playlist_write_encoding,
+    read_playlist_lines,
 )
 from indexer_control import IndexCancelled, cancel_event as global_cancel_event
 from utils.audio_metadata_reader import _extract_cover_payloads, read_sidecar_artwork_bytes
-from utils.path_helpers import ensure_long_path, match_separators, safe_relpath
+from utils.path_helpers import ensure_long_path, match_separators, playlist_entry, safe_relpath
 from utils.year_normalizer import UNKNOWN_YEAR
 
 try:
@@ -200,12 +204,23 @@ def _atomic_write_json(path: str, payload: Mapping[str, object]) -> None:
 
 
 def _iter_playlists(playlists_dir: str) -> Iterable[str]:
-    if not os.path.isdir(playlists_dir):
-        return []
-    for dirpath, _dirs, files in os.walk(playlists_dir):
-        for fname in files:
-            if fname.lower().endswith(".m3u"):
-                yield os.path.join(dirpath, fname)
+    return _planner_iter_playlists(playlists_dir)
+
+
+def _read_playlist(path: str) -> List[str]:
+    """A playlist's lines in whatever encoding it uses (FileNotFoundError if absent)."""
+    return read_playlist_lines(path)[0]
+
+
+def _playlist_format(path: str) -> tuple[str, str]:
+    """``(encoding, newline)`` a rewrite of ``path`` must keep."""
+    try:
+        with open(ensure_long_path(path), "rb") as handle:
+            data = handle.read()
+        _lines, encoding = read_playlist_lines(path)
+    except OSError:
+        return "utf-8", "\n"
+    return playlist_write_encoding(path, encoding), ("\r\n" if b"\r\n" in data else "\n")
 
 
 def _default_max_workers() -> int:
@@ -227,26 +242,11 @@ def _normalize_playlist_entry(entry: str, playlist_dir: str) -> str:
 
 def _rewrite_playlist(path: str, mapping: Mapping[str, str], *, base_dir: str | None = None) -> tuple[int, List[str]]:
     playlist_dir = base_dir or os.path.dirname(path)
-    replaced = 0
     try:
-        with open(path, "r", encoding="utf-8") as handle:
-            lines = [ln.rstrip("\n") for ln in handle]
+        lines = _read_playlist(path)
     except FileNotFoundError:
         return 0, []
-
-    new_lines: List[str] = []
-    for ln in lines:
-        normalized = _normalize_playlist_entry(ln, playlist_dir)
-        if normalized in mapping:
-            replaced += 1
-            new_abs = mapping[normalized]
-            # Relative to the playlist (absolute across Windows drives), in
-            # the separator style the entry already used.
-            rel = match_separators(safe_relpath(new_abs, playlist_dir), ln)
-            new_lines.append(rel)
-        else:
-            new_lines.append(ln)
-    return replaced, new_lines
+    return _rewrite_playlist_lines(lines, mapping, playlist_dir=playlist_dir)
 
 
 def _rewrite_playlist_lines(
@@ -256,30 +256,38 @@ def _rewrite_playlist_lines(
     playlist_dir: str,
 ) -> tuple[int, List[str]]:
     replaced = 0
+    keyed = {playlist_path_key(k): v for k, v in mapping.items()}
     new_lines: List[str] = []
     for ln in lines:
-        normalized = _normalize_playlist_entry(ln, playlist_dir)
-        if normalized in mapping:
+        entry = ln.strip()
+        normalized = _normalize_playlist_entry(entry, playlist_dir)
+        new_abs = keyed.get(playlist_path_key(normalized)) if entry and not entry.startswith("#") else None
+        if new_abs is not None:
             replaced += 1
-            new_abs = mapping[normalized]
-            # Relative to the playlist (absolute across Windows drives), in
-            # the separator style the entry already used.
-            rel = match_separators(safe_relpath(new_abs, playlist_dir), ln)
-            new_lines.append(rel)
+            # Absolute stays absolute, relative stays relative (absolute
+            # across Windows drives), in the entry's own separator style.
+            new_lines.append(playlist_entry(new_abs, playlist_dir, like=entry))
         else:
             new_lines.append(ln)
     return replaced, new_lines
 
 
 def _write_playlist_atomic(path: str, lines: Sequence[str]) -> None:
+    """Replace ``path`` with ``lines`` in the file's own encoding and line endings.
+
+    Raises ``UnicodeEncodeError`` (before anything is written) when a new
+    entry cannot be represented in that encoding — the playlist is then left
+    alone and the run stops before any loser is touched.
+    """
     directory = os.path.dirname(path)
     os.makedirs(directory, exist_ok=True)
-    tmp = tempfile.NamedTemporaryFile("w", delete=False, dir=directory, encoding="utf-8")
+    encoding, newline = _playlist_format(path)
+    payload = "".join(ln + newline for ln in lines).encode(encoding)
+    tmp = tempfile.NamedTemporaryFile("wb", delete=False, dir=directory)
     tmp_path = tmp.name
     try:
         with tmp:
-            for ln in lines:
-                tmp.write(ln + "\n")
+            tmp.write(payload)
         os.replace(tmp_path, path)
     finally:
         if os.path.exists(tmp_path):
@@ -291,8 +299,7 @@ def _write_playlist_atomic(path: str, lines: Sequence[str]) -> None:
 
 def _verify_playlist_write(path: str, expected_lines: Sequence[str]) -> tuple[bool, str]:
     try:
-        with open(path, "r", encoding="utf-8") as handle:
-            actual_lines = [ln.rstrip("\n") for ln in handle]
+        actual_lines = _read_playlist(path)
     except FileNotFoundError:
         return False, "Playlist missing after rewrite."
     if list(expected_lines) != actual_lines:
@@ -304,10 +311,10 @@ def _validate_playlist_lines(lines: Sequence[str], *, base_dir: str | None = Non
     playlist_dir = base_dir or os.getcwd()
     missing: List[str] = []
     for ln in lines:
-        normalized = _normalize_playlist_entry(ln, playlist_dir)
+        normalized = _normalize_playlist_entry(ln.strip(), playlist_dir)
         if not normalized or normalized.startswith("#"):
             continue
-        if not os.path.exists(normalized):
+        if not os.path.exists(ensure_long_path(normalized)):
             missing.append(normalized)
     return missing
 
@@ -315,8 +322,7 @@ def _validate_playlist_lines(lines: Sequence[str], *, base_dir: str | None = Non
 def _validate_playlist(path: str, *, base_dir: str | None = None) -> List[str]:
     playlist_dir = base_dir or os.path.dirname(path)
     try:
-        with open(path, "r", encoding="utf-8") as handle:
-            lines = [ln.rstrip("\n") for ln in handle]
+        lines = _read_playlist(path)
     except FileNotFoundError:
         return ["Playlist missing after rewrite."]
 
@@ -324,7 +330,10 @@ def _validate_playlist(path: str, *, base_dir: str | None = None) -> List[str]:
 
 
 def _backup_playlist(path: str, backup_root: str) -> str:
-    rel = os.path.relpath(path, os.path.commonpath([path, backup_root]))
+    try:
+        rel = os.path.relpath(path, os.path.commonpath([path, backup_root]))
+    except ValueError:  # another drive on Windows
+        rel = os.path.basename(path)
     dest = os.path.join(backup_root, rel)
     os.makedirs(os.path.dirname(dest), exist_ok=True)
     shutil.copy2(path, dest)
@@ -1079,13 +1088,16 @@ def execute_consolidation_plan(
                 lines = list(playlist_lines.get(working_path, [])) or None
             if lines is None:
                 try:
-                    with open(working_path, "r", encoding="utf-8") as handle:
-                        lines = [ln.rstrip("\n") for ln in handle]
+                    lines = _read_playlist(working_path)
                 except FileNotFoundError:
                     continue
             playlist_dir = (playlist_base_dirs or {}).get(playlist) or os.path.dirname(working_path)
-            normalized = {_normalize_playlist_entry(ln, playlist_dir) for ln in lines if ln}
-            hits = sorted([loser for loser in playlist_rewrite_map.keys() if loser in normalized])
+            normalized = {
+                playlist_path_key(_normalize_playlist_entry(ln.strip(), playlist_dir)) for ln in lines if ln.strip()
+            }
+            hits = sorted(
+                [loser for loser in playlist_rewrite_map.keys() if playlist_path_key(loser) in normalized]
+            )
             if hits:
                 refs[playlist] = hits
         return refs
@@ -1301,16 +1313,18 @@ def execute_consolidation_plan(
             candidate_playlists = list(plan.impacted_playlists)
         else:
             candidate_playlists = list(_iter_playlists(playlists_dir))
+        rewrite_keys = {playlist_path_key(loser): loser for loser in playlist_rewrite_map}
         for playlist in candidate_playlists:
             try:
-                with open(playlist, "r", encoding="utf-8") as handle:
-                    lines = [ln.rstrip("\n") for ln in handle]
+                lines = _read_playlist(playlist)
             except FileNotFoundError:
                 continue
             playlist_source_lines[playlist] = lines
             playlist_dir = os.path.dirname(playlist)
-            normalized = {_normalize_playlist_entry(ln, playlist_dir) for ln in lines if ln}
-            affected = normalized & playlist_rewrite_map.keys()
+            normalized = {
+                playlist_path_key(_normalize_playlist_entry(ln.strip(), playlist_dir)) for ln in lines if ln.strip()
+            }
+            affected = {rewrite_keys[key] for key in normalized & rewrite_keys.keys()}
             if affected:
                 impacted.append(playlist)
                 playlist_groups[playlist] = {path_to_group.get(path, "") for path in affected if path in path_to_group}
@@ -1478,6 +1492,19 @@ def execute_consolidation_plan(
                 missing = _validate_playlist_lines(expected_lines, base_dir=base_dir)
             else:
                 missing = _validate_playlist(result.playlist, base_dir=base_dir)
+            # Entries that were already dead before the rewrite are the user's
+            # business, not this run's: they used to abort every execution
+            # whose losers appeared in that playlist.
+            source_lines = playlist_source_lines.get(result.original_playlist or result.playlist)
+            already_missing = (
+                set(_validate_playlist_lines(source_lines, base_dir=base_dir)) if source_lines is not None else set()
+            )
+            if already_missing:
+                log(
+                    f"Playlist {result.playlist}: {len(already_missing)} entr(y/ies) already pointed at "
+                    "missing files before this run; left as they were."
+                )
+            missing = [m for m in missing if m not in already_missing]
             if missing:
                 success = False
                 try:
@@ -2162,9 +2189,14 @@ def execute_consolidation_plan(
                 for playlist in _iter_playlists(playlists_dir):
                     _check_cancel("filename_cleanup_playlists")
                     base_dir = os.path.dirname(playlist)
-                    replaced, new_lines = _rewrite_playlist(playlist, rename_map, base_dir=base_dir)
+                    try:
+                        before_lines = _read_playlist(playlist)
+                    except FileNotFoundError:
+                        continue
+                    replaced, new_lines = _rewrite_playlist_lines(before_lines, rename_map, playlist_dir=base_dir)
                     if replaced == 0:
                         continue
+                    already_missing = set(_validate_playlist_lines(before_lines, base_dir=base_dir))
                     if playlist not in playlist_backups:
                         try:
                             backup_path = _backup_playlist(playlist, backups_dir)
@@ -2210,7 +2242,9 @@ def execute_consolidation_plan(
                         )
                         if not verified:
                             raise RuntimeError(f"Playlist cleanup rewrite verification failed for {playlist}")
-                        missing = _validate_playlist(playlist, base_dir=base_dir)
+                        missing = [
+                            m for m in _validate_playlist(playlist, base_dir=base_dir) if m not in already_missing
+                        ]
                         if missing:
                             success = False
                             _record(

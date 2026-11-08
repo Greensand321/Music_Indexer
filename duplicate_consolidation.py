@@ -9,6 +9,7 @@ before executing any changes.
 from __future__ import annotations
 
 import base64
+import codecs
 import datetime
 import html
 import hashlib
@@ -1599,13 +1600,53 @@ def _expect_str_mapping(value: object, field: str) -> Dict[str, object]:
     return {str(k): v for k, v in mapping.items()}
 
 
+PLAYLIST_EXTENSIONS = (".m3u", ".m3u8")
+_PLAYLIST_FALLBACK_ENCODINGS = ("cp1252", "latin-1")
+
+
 def _iter_playlists(playlists_dir: str) -> Iterable[str]:
-    if not os.path.isdir(playlists_dir):
+    """Every ``.m3u``/``.m3u8`` under ``playlists_dir`` (``.m3u8`` used to be missed,
+    so its entries kept pointing at quarantined losers)."""
+    if not playlists_dir or not os.path.isdir(playlists_dir):
         return []
     for dirpath, _dirs, files in os.walk(playlists_dir):
-        for fname in files:
-            if fname.lower().endswith(".m3u"):
+        for fname in sorted(files):
+            if fname.lower().endswith(PLAYLIST_EXTENSIONS):
                 yield os.path.join(dirpath, fname)
+
+
+def read_playlist_lines(path: str) -> tuple[List[str], str]:
+    """``(lines, encoding)`` of a playlist, without line endings.
+
+    ``.m3u`` files made on Windows are usually cp1252, not UTF-8. Reading them
+    as UTF-8 raised ``UnicodeDecodeError``, which crashed the whole duplicate
+    scan (only ``OSError`` was caught). The encoding found here is the one a
+    rewrite must use, so the file's other entries survive byte for byte.
+    Raises ``OSError`` only when the file cannot be read.
+    """
+    with open(ensure_long_path(path), "rb") as handle:
+        data = handle.read()
+    text: str | None = None
+    encoding = "utf-8"
+    if data.startswith(codecs.BOM_UTF8):
+        try:
+            text, encoding = data[len(codecs.BOM_UTF8):].decode("utf-8"), "utf-8-sig"
+        except UnicodeDecodeError:
+            data = data[len(codecs.BOM_UTF8):]
+    if text is None:
+        for candidate in ("utf-8", *_PLAYLIST_FALLBACK_ENCODINGS):
+            try:
+                text, encoding = data.decode(candidate), candidate
+                break
+            except UnicodeDecodeError:
+                continue
+    return (text or "").splitlines(), encoding
+
+
+def playlist_write_encoding(path: str, encoding: str) -> str:
+    if path.lower().endswith(".m3u8") and encoding not in ("utf-8", "utf-8-sig"):
+        return "utf-8"
+    return encoding or "utf-8"
 
 
 def _normalize_playlist_entry(entry: str, playlist_dir: str) -> str:
@@ -1616,37 +1657,64 @@ def _normalize_playlist_entry(entry: str, playlist_dir: str) -> str:
     return os.path.normpath(os.path.join(playlist_dir, entry))
 
 
+def playlist_path_key(path: str) -> str:
+    """How a playlist entry is compared with a library path: Windows paths are
+    case-insensitive (``normcase``), so ``c:\\music\\song.mp3`` in a playlist
+    is the loser ``C:\\Music\\Song.mp3``. A no-op case fold elsewhere."""
+    return os.path.normcase(os.path.normpath(path)) if path else path
+
+
 def _playlist_rewrite_losers(
     playlists_dir: str | None,
     losers: Iterable[str],
 ) -> tuple[set[str], int, set[str]]:
     if not playlists_dir or not os.path.isdir(playlists_dir):
         return set(), 0, set()
-    loser_set = {os.path.normpath(path) for path in losers if path}
-    if not loser_set:
+    loser_by_key = {playlist_path_key(path): path for path in losers if path}
+    if not loser_by_key:
         return set(), 0, set()
     matches: set[str] = set()
     playlists_with_hits = 0
     impacted_playlists: set[str] = set()
     for playlist in _iter_playlists(playlists_dir):
         try:
-            with open(playlist, "r", encoding="utf-8") as handle:
-                lines = [ln.rstrip("\n") for ln in handle]
+            lines, _encoding = read_playlist_lines(playlist)
         except OSError:
             continue
         playlist_dir = os.path.dirname(playlist)
-        normalized_lines = {_normalize_playlist_entry(ln, playlist_dir) for ln in lines if ln}
-        hit = loser_set & normalized_lines
+        normalized_lines = {
+            playlist_path_key(_normalize_playlist_entry(ln, playlist_dir)) for ln in lines if ln
+        }
+        hit = {loser_by_key[key] for key in loser_by_key.keys() & normalized_lines}
         if hit:
             playlists_with_hits += 1
             matches.update(hit)
             impacted_playlists.add(playlist)
-            if len(matches) == len(loser_set):
-                return matches, playlists_with_hits, impacted_playlists
     return matches, playlists_with_hits, impacted_playlists
 
 
-def _infer_playlists_dir(paths: Sequence[str]) -> str | None:
+def _scan_roots(tracks: Sequence[Mapping[str, object]]) -> List[str]:
+    roots: List[str] = []
+    for raw in tracks:
+        discovery = raw.get("discovery") if isinstance(raw.get("discovery"), Mapping) else {}
+        listed = discovery.get("scan_roots") if isinstance(discovery.get("scan_roots"), list) else []
+        for root in listed:
+            if isinstance(root, str) and root and root not in roots:
+                roots.append(root)
+    return roots
+
+
+def _infer_playlists_dir(paths: Sequence[str], scan_roots: Sequence[str] = ()) -> str | None:
+    """``<library>/Playlists``: from the scan root when the caller gave one.
+
+    Falling back to the tracks' common folder found no playlists at all when
+    every track sat under one top-level folder (``Music/iTunes/...``), so no
+    playlist entry was redirected and quarantining a loser left them dangling.
+    """
+    for root in scan_roots:
+        candidate = os.path.join(root, "Playlists")
+        if os.path.isdir(candidate):
+            return candidate
     if not paths:
         return None
     try:
@@ -1666,17 +1734,15 @@ def _build_playlist_index(playlists_dir: str | None) -> Dict[str, set[str]]:
     index: Dict[str, set[str]] = {}
     for playlist in _iter_playlists(playlists_dir):
         try:
-            with open(playlist, "r", encoding="utf-8") as handle:
-                lines = [ln.rstrip("\n") for ln in handle]
+            lines, _encoding = read_playlist_lines(playlist)
         except OSError:
             continue
         playlist_dir = os.path.dirname(playlist)
         for line in lines:
-            normalized = _normalize_playlist_entry(line, playlist_dir)
+            normalized = _normalize_playlist_entry(line.strip(), playlist_dir)
             if not normalized or normalized.startswith("#"):
                 continue
-            normalized = os.path.normpath(normalized)
-            index.setdefault(normalized, set()).add(playlist)
+            index.setdefault(playlist_path_key(normalized), set()).add(playlist)
     return index
 
 
@@ -2848,7 +2914,7 @@ def build_consolidation_plan(
     plans: List[GroupPlan] = []
     plan_placeholders = False
     plan_impacted_playlists: set[str] = set()
-    playlists_dir = _infer_playlists_dir([t.path for t in normalized])
+    playlists_dir = _infer_playlists_dir([t.path for t in normalized], _scan_roots(raw_tracks))
     playlist_index: Dict[str, set[str]] = {}
     if playlists_dir:
         log("Grouping phase: indexing playlists...")
@@ -3165,7 +3231,7 @@ def build_consolidation_plan(
 
             dispositions = {loser: "quarantine" for loser in losers}
             if playlist_index:
-                normalized_losers = {os.path.normpath(loser): loser for loser in losers}
+                normalized_losers = {playlist_path_key(loser): loser for loser in losers}
                 hit_norms = {
                     norm for norm in normalized_losers.keys() if norm in playlist_index
                 }
