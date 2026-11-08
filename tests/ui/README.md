@@ -39,7 +39,8 @@ def test_example(main_window, library, dialogs, threads, motion, qtbot):
     ...
 ```
 
-* `main_window`: a shown `AlphaDEXWindow` with no library selected. It opens on Home.
+* `main_window`: a shown `AlphaDEXWindow` with no library selected, its housekeeping (the backdrop build,
+  a quiet job) settled. It opens on Home.
   `main_window._workspaces[panel_key]` is a panel (the old workspace keys still work),
   `main_window._pages[page_key]` a page; `current_page()` / `current_panel()` say what is
   on screen. Navigate with `_on_nav_changed("page/section")` (or any key from

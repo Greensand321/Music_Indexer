@@ -474,10 +474,11 @@ group/room names differ from what you might expect from the feature name):
 | **Utilities** | A tile grid of exports, diagnostics, and cleanup tools. |
 | **Help** | Documentation, shortcuts, and project links. |
 
-A persistent **Now Playing bar** sits between the workspace area and the log drawer,
+A persistent **Now Playing capsule** floats at the bottom centre of the page area,
 shared across the whole app (not confined to the Player workspace) once a track is
 loaded — it stays visible no matter which workspace you're in, with its own
-transport controls that mirror the Player workspace's.
+transport controls that mirror the Player workspace's. Pages keep room under their
+content so it never covers anything.
 
 Two things worth knowing if you go looking for them: an **older "Clustered"
 workspace** (`gui/workspaces/clustered.py`) still exists in the codebase but is
@@ -574,9 +575,21 @@ exactly the tracks missing metadata. The Opus mirror leaves out `Quarantine/`,
 
 ## Themes and motion
 
-The modern app has 14 themes and an Auto mode, and it animates a fair amount (nav
-hover, the sidebar's sliding pill, the log drawer, status chips, the landing). Three
-pieces keep this fast and well-behaved.
+The modern app has 15 themes — **Liquid Glass** (the default, in four accents) and
+14 classic ones — plus an Auto mode, and it animates a fair amount (nav hover, the
+sidebar's sliding pill, the section tabs' thumb, page cross-fades, the log drawer,
+status chips, the landing). A few pieces keep this fast and well-behaved.
+
+**Glass is just tokens** (`gui/themes/tokens.py`, `gui/themes/glass.py`). Every theme
+carries a *material*: per-elevation surfaces (sidebar, card, raised, capsule, well) with
+a fill, border, top highlight and shadow, plus the backdrop. Liquid Glass's fills are
+translucent; the classic themes get an opaque material derived from their colours, so
+both render through the same components (`paint_surface`, `GlassCard`, the style).
+On the web, glass blurs what is behind it at paint time; Qt has no cheap live blur, so
+the **backdrop** (`gui/widgets/backdrop.py`: a wall of the library's covers) is composed
+and blurred *once*, off the GUI thread with `QImage` and numpy, cached per library and
+size bucket, and simply blitted on paint. A translucent fill over an already-blurred,
+static backdrop reads as glass. Reduce transparency flattens every surface to opaque.
 
 **A theme switch is a palette swap, not a restyle** (`gui/themes/manager.py`). Any
 change to an application stylesheet makes Qt re-polish every widget in the window —
@@ -592,14 +605,16 @@ A switch now costs roughly 60–80 ms. `tests/ui/test_ui_theme_switch_equivalenc
 builds a window, switches it live, builds a second window directly in the target
 theme, and checks that every widget's resolved palette matches.
 
-**Shadows are painted, not attached** (`gui/themes/effects.py`, `gui/widgets/gradient_bg.py`).
-Cards get their soft shadow painted by the `GradientWidget` surface beneath them, from
-a cached 9-slice pixmap per colour. A `QGraphicsDropShadowEffect` would re-render and
+**Shadows are painted, not attached** (`gui/themes/glass.py`, `gui/widgets/gradient_bg.py`).
+Cards get their soft shadow painted by the transparent `GradientWidget` surface beneath
+them (the sidebar's by the backdrop, the Now Playing capsule's by a mouse-transparent
+`ShadowLayer` above the page), from a cached 9-slice pixmap per colour, blur and radius,
+clipped so it never paints under the surface itself. A `QGraphicsDropShadowEffect` would re-render and
 blur the whole card every time anything inside it repainted (a hover frame, a progress
 tick, a blinking caret), and would occupy the card's only graphics-effect slot, which
 fades need. (The old effect also never showed: it was passed as a temporary and
-dropped.) The background-gradient setting is read once and cached, so no paint event
-reads the config file.
+dropped.) The backdrop setting is read once and cached, so no paint event reads the
+config file.
 
 **Every animation goes through the motion module** (`gui/themes/motion.py`). It defines
 the duration tokens (`micro` 120 ms, `fast` 150, `base` 220, `slow` 320, `page` 420,
