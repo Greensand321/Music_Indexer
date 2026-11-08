@@ -51,6 +51,15 @@ from indexer_control import IndexCancelled
 from utils.audio_metadata_reader import read_tags
 
 
+def _finite(value) -> float | None:
+    """``value`` as a finite float, or ``None`` (missing, NaN, inf, junk)."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
 def categorize_tempo(bpm: float) -> str:
     if bpm < 90:
         return "slow"
@@ -169,7 +178,10 @@ def bucket_by_tempo_energy(
     returned ``playlist_paths`` are where the caller *may* write them.
     ``tempo_range`` (BPM) and ``energy_range`` (mean RMS, 0-1) drop tracks
     outside the given inclusive bounds; their count is returned as
-    ``excluded``.
+    ``excluded``. A track listed twice is analysed and bucketed once. A track
+    whose analysis fails or yields no finite tempo/energy (NaN used to land
+    in "fast/high", since every comparison with NaN is false) is put in no
+    bucket, is not cached, and is listed in ``failed``.
     """
     if log_callback is None:
         log_callback = lambda m: None
@@ -203,9 +215,11 @@ def bucket_by_tempo_energy(
     buckets: dict[tuple[str, str], list[str]] = {}
     processed = 0
     excluded = 0
+    failed: list[str] = []
     updated_cache = cache_normalized_changed
 
     normalized_tracks: list[tuple[str, str]] = []
+    seen_keys: set[str] = set()
     for path in tracks:
         try:
             path_str = os.fspath(path)
@@ -218,11 +232,21 @@ def bucket_by_tempo_energy(
                 processed += 1
                 progress_callback(processed)
                 continue
-        normalized_tracks.append((path_str, os.path.abspath(path_str)))
+        abs_path = os.path.abspath(path_str)
+        if os.path.normcase(abs_path) in seen_keys:
+            processed += 1
+            progress_callback(processed)
+            continue
+        seen_keys.add(os.path.normcase(abs_path))
+        normalized_tracks.append((path_str, abs_path))
+
+    def _cached_ok(entry) -> bool:
+        return bool(entry) and entry.get("engine") == engine and (
+            _finite(entry.get("tempo")) is not None and _finite(entry.get("rms")) is not None
+        )
 
     all_cached = bool(normalized_tracks) and all(
-        (entry := cache.get(abs_path)) and entry.get("engine") == engine
-        for _, abs_path in normalized_tracks
+        _cached_ok(cache.get(abs_path)) for _, abs_path in normalized_tracks
     )
     if all_cached:
         log_callback(
@@ -235,13 +259,25 @@ def bucket_by_tempo_energy(
             break
         cached = cache.get(cache_key)
         try:
-            if cached and cached.get("engine") == engine:
+            if _cached_ok(cached):
                 tempo = float(cached["tempo"])
                 rms = float(cached["rms"])
                 if not all_cached:
                     log_callback(f"• Using cached tempo/energy for {os.path.basename(path_str)}")
             else:
-                tempo, rms = compute_tempo_energy(path_str, engine=engine)
+                raw_tempo, raw_rms = compute_tempo_energy(path_str, engine=engine)
+                tempo, rms = _finite(raw_tempo), _finite(raw_rms)
+                if tempo is None or rms is None:
+                    if cache.pop(cache_key, None) is not None:
+                        updated_cache = True
+                    failed.append(path_str)
+                    log_callback(
+                        f"! Failed analysis for {path_str}: no usable tempo/energy "
+                        f"(got {raw_tempo!r} BPM, energy {raw_rms!r})"
+                    )
+                    processed += 1
+                    progress_callback(processed)
+                    continue
                 cache[cache_key] = {"engine": engine, "tempo": tempo, "rms": rms}
                 updated_cache = True
             if not (_in_range(tempo, tempo_range) and _in_range(rms, energy_range)):
@@ -258,6 +294,7 @@ def bucket_by_tempo_energy(
             buckets.setdefault((tb, eb), []).append(path_str)
             log_callback(f"• {os.path.basename(path_str)} → {tb}/{eb}")
         except Exception as e:
+            failed.append(path_str)
             log_callback(f"! Failed analysis for {path_str}: {e}")
         processed += 1
         progress_callback(processed)
@@ -290,6 +327,7 @@ def bucket_by_tempo_energy(
         "stats": stats,
         "processed": processed,
         "excluded": excluded,
+        "failed": failed,
         "total": len(tracks),
         "cancelled": bool(cancel_event and cancel_event.is_set()),
     }
@@ -471,6 +509,100 @@ def _get_feat(path: str, cache: dict, log_callback, engine: TempoEngine = "libro
     return cache[path]
 
 
+def _usable_vector(vec) -> list[float] | None:
+    """``vec`` as a list of finite floats, or ``None`` if it cannot be compared."""
+    if vec is None:
+        return None
+    try:
+        values = [float(x) for x in (vec.tolist() if hasattr(vec, "tolist") else vec)]
+    except (TypeError, ValueError):
+        return None
+    if not values or not all(math.isfinite(x) for x in values):
+        return None
+    return values
+
+
+def _track_key(path) -> str:
+    """Identity of a track for de-duplication (the same file listed twice)."""
+    try:
+        return os.path.normcase(os.path.abspath(os.fspath(path)))
+    except TypeError:
+        return repr(path)
+
+
+def _candidate_vectors(
+    ref_track: str,
+    tracks: Iterable[str],
+    feature_cache: dict,
+    log_callback,
+    engine: TempoEngine,
+    cancel_event=None,
+    progress=None,
+) -> tuple[list[float], list[str], list[list[float]]]:
+    """The reference vector, then every other usable track and its vector.
+
+    Each track appears once (the first time it is listed). A track whose
+    features cannot be extracted, are not finite or have another length than
+    the reference's is left out with a log line — one unreadable file used to
+    abort the whole Auto-DJ run. Raises ``RuntimeError`` when the reference
+    itself cannot be analysed, and ``IndexCancelled`` when cancelled (checked
+    before every track, so Cancel works during the analysis of a large
+    library, not only between picks).
+    """
+    try:
+        ref_vec = _usable_vector(_get_feat(ref_track, feature_cache, log_callback, engine))
+    except IndexCancelled:
+        raise
+    except Exception as exc:  # noqa: BLE001 - reported as one clear error
+        raise RuntimeError(
+            f"Could not analyse the seed track {os.path.basename(str(ref_track))}: {exc}"
+        ) from exc
+    if ref_vec is None:
+        raise RuntimeError(
+            f"Could not analyse the seed track {os.path.basename(str(ref_track))}: "
+            "no usable audio features"
+        )
+    seen = {_track_key(ref_track)}
+    unique: list[str] = []
+    for track in tracks:
+        key = _track_key(track)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(track)
+
+    names: list[str] = []
+    vectors: list[list[float]] = []
+    for index, track in enumerate(unique, start=1):
+        if cancel_event is not None and cancel_event.is_set():
+            raise IndexCancelled()
+        try:
+            vec = _usable_vector(_get_feat(track, feature_cache, log_callback, engine))
+            problem = None if vec is not None else "no usable audio features"
+        except IndexCancelled:
+            raise
+        except Exception as exc:  # noqa: BLE001 - one bad file must not stop the run
+            vec, problem = None, str(exc) or type(exc).__name__
+        if vec is not None and len(vec) != len(ref_vec):
+            vec, problem = None, "its features do not match the seed's"
+        if vec is None:
+            log_callback(f"! Skipping {os.path.basename(str(track))}: {problem}")
+        else:
+            names.append(track)
+            vectors.append(vec)
+        if progress is not None:
+            progress(index, len(unique))
+    return ref_vec, names, vectors
+
+
+def _distances(cur: list[float], vectors: list[list[float]]) -> list[float]:
+    if np is not None and vectors:
+        return np.linalg.norm(
+            np.asarray(vectors, dtype=np.float64) - np.asarray(cur, dtype=np.float64), axis=1
+        ).tolist()
+    return [_dist(cur, v) for v in vectors]
+
+
 def _dist(a, b) -> float:
     if np is not None:
         return float(np.linalg.norm(np.array(a) - np.array(b)))
@@ -485,18 +617,17 @@ def more_like_this(
     log_callback=None,
     engine: TempoEngine = "librosa",
 ) -> list[str]:
+    """The ``n`` tracks closest to ``ref_track`` (nearest first; ties keep
+    input order). Tracks that cannot be analysed are skipped."""
     if log_callback is None:
         log_callback = lambda m: None
-    feature_cache = feature_cache or {}
-    ref_vec = _get_feat(ref_track, feature_cache, log_callback, engine)
-    others = [t for t in tracks if t != ref_track]
-    dist = []
-    for t in others:
-        vec = _get_feat(t, feature_cache, log_callback, engine)
-        d = _dist(ref_vec, vec)
-        dist.append((d, t))
-    dist.sort()
-    return [t for _d, t in dist[:n]]
+    if feature_cache is None:
+        feature_cache = {}
+    ref_vec, names, vectors = _candidate_vectors(
+        ref_track, tracks, feature_cache, log_callback, engine
+    )
+    dist = sorted(zip(_distances(ref_vec, vectors), range(len(names))))
+    return [names[i] for _d, i in dist[: max(0, n)]]
 
 
 def autodj_playlist(
@@ -509,26 +640,44 @@ def autodj_playlist(
     progress_callback=None,
     cancel_event=None,
 ) -> list[str]:
+    """Greedy nearest-neighbour chain of up to ``n`` tracks from ``start_track``.
+
+    Every track is used at most once (a track listed twice is one track),
+    the result is deterministic (ties go to the track listed first), and it
+    always terminates. Tracks whose features cannot be extracted are skipped
+    and logged; only an unreadable seed is an error. ``feature_cache`` (a
+    dict, filled in place — an empty one too) avoids re-extracting features.
+    """
     if log_callback is None:
         log_callback = lambda m: None
     if progress_callback is None:
         progress_callback = lambda _c, _t, _m=None: None
-    feature_cache = feature_cache or {}
+    if feature_cache is None:
+        feature_cache = {}
+    if n <= 0:
+        return []
+    if cancel_event is not None and cancel_event.is_set():
+        raise IndexCancelled()
+
+    def _analysis_progress(done: int, count: int) -> None:
+        if done == count or done % 25 == 0:
+            progress_callback(1, min(n, count + 1), f"Analysed {done} of {count} tracks")
+
+    cur, names, vectors = _candidate_vectors(
+        start_track, tracks, feature_cache, log_callback, engine,
+        cancel_event=cancel_event, progress=_analysis_progress,
+    )
     order = [start_track]
-    remaining = [t for t in tracks if t != start_track]
-    total = min(n, len(tracks))
+    total = min(n, len(names) + 1)
     progress_callback(1, total, "Seed track selected")
+    remaining = list(range(len(names)))
     while remaining and len(order) < n:
         if cancel_event is not None and cancel_event.is_set():
             raise IndexCancelled()
-        cur_feat = _get_feat(order[-1], feature_cache, log_callback, engine)
-        next_track = min(
-            remaining,
-            key=lambda t: _dist(
-                cur_feat, _get_feat(t, feature_cache, log_callback, engine)
-            ),
-        )
-        order.append(next_track)
-        remaining.remove(next_track)
+        dists = _distances(cur, [vectors[i] for i in remaining])
+        best = min(range(len(remaining)), key=lambda j: (dists[j], j))
+        pick = remaining.pop(best)
+        order.append(names[pick])
+        cur = vectors[pick]
         progress_callback(len(order), total, f"Added track {len(order)} of {total}")
     return order
