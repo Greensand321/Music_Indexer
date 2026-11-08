@@ -287,9 +287,10 @@ def test_top_bar_path_colour_follows_library_state(main_window, tmp_path, thread
 
     t = get_manager().current
     bar = main_window._top_bar
-    assert t.text_secondary in bar._path_label.styleSheet()
+    role = QtGui.QPalette.ColorRole.WindowText
+    assert bar._path_label.palette().color(role).name() == t.text_secondary
     main_window.set_library(make_album_tree(tmp_path / "Lib"))
-    assert t.text_primary in bar._path_label.styleSheet()
+    assert bar._path_label.palette().color(role).name() == t.text_primary
     assert threads.wait_all(10_000) == []
 
 

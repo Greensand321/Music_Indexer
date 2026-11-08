@@ -1,4 +1,17 @@
-"""Top bar widget — library selector, stats, and global actions."""
+"""The page header: page title, library chip with stats, search, Change library.
+
+Liquid Glass puts no card behind the header: the title (34/700, −0.03em)
+sits on the backdrop, with a library-path chip (a pill: fill .10, border
+.16) and the muted stats under it. On the right: a search pill and the
+"Change library" pill (44 px).
+
+The search pill is real: Enter shows the Player and filters its track list
+(``search_requested``; the main window routes it to the Player's existing
+filter). Theme and Settings buttons are gone from the header — Settings is
+in the sidebar (Ctrl+, still works) and the theme lives in Settings →
+Appearance; the ``settings_requested`` / ``theme_requested`` signals remain
+for callers.
+"""
 from __future__ import annotations
 
 from pathlib import Path
@@ -16,148 +29,174 @@ def _abbreviate_path(path: str) -> str:
     if len(parts) <= 2:
         return path
     tail = "  /  ".join(str(p) for p in parts[-2:])
-    return f"\u2026  {tail}"
+    return f"…  {tail}"
 
 
-class _VSep(QtWidgets.QWidget):
-    """1 px vertical separator that follows the theme's card_border colour."""
-
-    def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
-        super().__init__(parent)
-        self.setFixedSize(1, 28)
-        self._color = QtGui.QColor("#30363d")
-
-    def set_color(self, hex_color: str) -> None:
-        self._color = QtGui.QColor(hex_color)
-        self.update()
-
-    def paintEvent(self, _event) -> None:  # noqa: N802
-        p = QtGui.QPainter(self)
-        p.setPen(self._color)
-        p.drawLine(0, 0, 0, self.height() - 1)
+def _search_icon(colour: QtGui.QColor, size: int = 16) -> QtGui.QIcon:
+    """The magnifier (circle r7 + handle), painted for the search pill."""
+    dpr = 2.0
+    pm = QtGui.QPixmap(int(size * dpr), int(size * dpr))
+    pm.setDevicePixelRatio(dpr)
+    pm.fill(QtCore.Qt.GlobalColor.transparent)
+    p = QtGui.QPainter(pm)
+    try:
+        p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+        k = size / 24.0
+        pen = QtGui.QPen(colour, 2.0 * k * 1.2, QtCore.Qt.PenStyle.SolidLine,
+                         QtCore.Qt.PenCapStyle.RoundCap)
+        p.setPen(pen)
+        p.drawEllipse(QtCore.QPointF(11 * k, 11 * k), 7 * k, 7 * k)
+        p.drawLine(QtCore.QPointF(20 * k, 20 * k), QtCore.QPointF(16.5 * k, 16.5 * k))
+    finally:
         p.end()
+    return QtGui.QIcon(pm)
+
+
+class _LibraryChip(QtWidgets.QWidget):
+    """The library path in a pill (fill .10, border .16)."""
+
+    def __init__(self, label: QtWidgets.QLabel, parent: QtWidgets.QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("libraryChip")
+        lay = QtWidgets.QHBoxLayout(self)
+        lay.setContentsMargins(12, 4, 12, 5)
+        lay.addWidget(label)
+
+    def paintEvent(self, event: QtGui.QPaintEvent) -> None:  # noqa: N802
+        from gui.themes.glass import current_material, paint_surface
+        from gui.themes.tokens import PILL, Surface, is_opaque
+
+        m = current_material()
+        # The well, a touch brighter on glass (fill .10, border .16).
+        spec = (Surface("rgba(255,255,255,0.10)", "rgba(255,255,255,0.16)", radius=PILL)
+                if m.is_glass and not is_opaque(m.well.fill) else
+                Surface(m.well.fill, m.well.border, radius=PILL))
+        p = QtGui.QPainter(self)
+        try:
+            paint_surface(p, QtCore.QRectF(self.rect()), spec)
+        finally:
+            p.end()
 
 
 class TopBar(QtWidgets.QWidget):
-    """Fixed-height bar at the top of the main window.
+    """The page header above the page stack.
 
     Emits:
         library_changed(str)  — user selected a new library folder
-        settings_requested()  — user clicked the Settings button
-        theme_requested()     — user clicked the Theme button
+        search_requested(str) — Enter in the search pill
+        settings_requested()  — kept for callers (no button any more)
+        theme_requested()     — kept for callers (no button any more)
     """
 
     library_changed = Signal(str)
+    search_requested = Signal(str)
     settings_requested = Signal()
     theme_requested = Signal()
 
+    PATH_MAX_WIDTH = 380
+
     def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setObjectName("topBar")
-        self.setFixedHeight(64)
+        from gui.themes.glass import font
+
+        self.setObjectName("pageHeader")
         self._library_path: str = ""
 
         layout = QtWidgets.QHBoxLayout(self)
-        layout.setContentsMargins(20, 0, 16, 0)
-        layout.setSpacing(0)
+        layout.setContentsMargins(24, 10, 24, 16)
+        layout.setSpacing(16)
 
-        # ── Brand ────────────────────────────────────────────────────────────
-        brand = QtWidgets.QLabel("AlphaDEX")
-        brand.setObjectName("appTitle")
-        layout.addWidget(brand)
+        # ── Title and library line ────────────────────────────────────────
+        col = QtWidgets.QVBoxLayout()
+        col.setSpacing(6)
+        col.setContentsMargins(0, 0, 0, 0)
+        self._title = QtWidgets.QLabel("Home")
+        self._title.setObjectName("pageTitle")
+        self._title.setFont(font("display"))
+        col.addWidget(self._title)
 
-        layout.addSpacing(18)
-
-        # ── Vertical separator ────────────────────────────────────────────────
-        self._sep = _VSep()
-        layout.addWidget(self._sep, 0, QtCore.Qt.AlignmentFlag.AlignVCenter)
-
-        layout.addSpacing(18)
-
-        # ── Library info ──────────────────────────────────────────────────────
-        lib_col = QtWidgets.QVBoxLayout()
-        lib_col.setSpacing(3)
-        lib_col.setContentsMargins(0, 0, 0, 0)
-
-        # Path row — folder glyph + abbreviated path
-        path_row = QtWidgets.QHBoxLayout()
-        path_row.setSpacing(6)
-        path_row.setContentsMargins(0, 0, 0, 0)
-
-        self._folder_icon = QtWidgets.QLabel("\u2302")   # ⌂ house/folder glyph
-        self._folder_icon.setObjectName("mutedLabel")
-        path_row.addWidget(self._folder_icon)
-
+        line = QtWidgets.QHBoxLayout()
+        line.setSpacing(10)
+        line.setContentsMargins(0, 0, 0, 0)
         self._path_label = QtWidgets.QLabel("No library selected")
         self._path_label.setObjectName("libraryPath")
-        path_row.addWidget(self._path_label)
-        path_row.addStretch()
-        lib_col.addLayout(path_row)
+        self._path_label.setFont(font("label"))
+        self._chip = _LibraryChip(self._path_label)
+        line.addWidget(self._chip)
 
-        # Stats row — three (number, unit) pairs
-        stats_row = QtWidgets.QHBoxLayout()
-        stats_row.setSpacing(0)
-        stats_row.setContentsMargins(0, 0, 0, 0)
-
+        # Stats: three (number, unit) pairs: "4,812 tracks · 162.4 GB · 391 artists"
         self._stat_widgets: list[tuple[QtWidgets.QLabel, QtWidgets.QLabel]] = []
-        _placeholders = [("–", "tracks"), ("–", "GB"), ("–", "artists")]
-        for i, (num, unit) in enumerate(_placeholders):
+        for i, (num, unit) in enumerate((("–", "tracks"), ("–", "GB"), ("–", "artists"))):
             if i:
-                dot = QtWidgets.QLabel("  ·  ")
-                dot.setObjectName("mutedLabel")
-                stats_row.addWidget(dot)
+                dot = QtWidgets.QLabel("·")
+                dot.setObjectName("headerStats")
+                dot.setFont(font("label"))
+                line.addWidget(dot)
             num_lbl = QtWidgets.QLabel(num)
-            num_lbl.setObjectName("statNumber")
-            unit_lbl = QtWidgets.QLabel(f" {unit}")
-            unit_lbl.setObjectName("statUnit")
-            stats_row.addWidget(num_lbl)
-            stats_row.addWidget(unit_lbl)
+            num_lbl.setObjectName("headerStats")
+            num_lbl.setFont(font("label"))
+            unit_lbl = QtWidgets.QLabel(unit)
+            unit_lbl.setObjectName("headerStats")
+            unit_lbl.setFont(font("label"))
+            pair = QtWidgets.QHBoxLayout()
+            pair.setSpacing(4)
+            pair.addWidget(num_lbl)
+            pair.addWidget(unit_lbl)
+            line.addLayout(pair)
             self._stat_widgets.append((num_lbl, unit_lbl))
+        line.addStretch(1)
+        col.addLayout(line)
+        layout.addLayout(col, 1)
 
-        stats_row.addStretch()
-        lib_col.addLayout(stats_row)
+        # ── Search (routes to the Player's filter) ────────────────────────
+        self._search = QtWidgets.QLineEdit()
+        self._search.setObjectName("headerSearch")
+        self._search.setPlaceholderText("Search artists, albums, tracks")
+        self._search.setAccessibleName("Search the library")
+        self._search.setToolTip("Press Enter to show matching tracks in the Player")
+        self._search.setClearButtonEnabled(True)
+        self._search.setFixedHeight(44)
+        self._search.setMinimumWidth(260)
+        self._search.setMaximumWidth(300)
+        self._search.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding,
+                                   QtWidgets.QSizePolicy.Policy.Fixed)
+        self._search_action = self._search.addAction(
+            QtGui.QIcon(), QtWidgets.QLineEdit.ActionPosition.LeadingPosition)
+        self._search.returnPressed.connect(self._on_search)
+        layout.addWidget(self._search, 0, QtCore.Qt.AlignmentFlag.AlignVCenter)
 
-        layout.addLayout(lib_col, 1)
-
-        layout.addSpacing(12)
-
-        # ── Action buttons ────────────────────────────────────────────────────
-        self._change_btn = AnimatedButton("Change Library")
+        # ── Change library ────────────────────────────────────────────────
+        self._change_btn = AnimatedButton("Change library")
+        self._change_btn.setObjectName("headerPill")
+        self._change_btn.setFixedHeight(44)
         self._change_btn.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
+        self._change_btn.setToolTip("Open another music library folder (Ctrl+O)")
         self._change_btn.clicked.connect(self._on_change_library)
-        layout.addWidget(self._change_btn)
+        layout.addWidget(self._change_btn, 0, QtCore.Qt.AlignmentFlag.AlignVCenter)
 
-        layout.addSpacing(8)
-
-        self._theme_btn = AnimatedButton("Theme")
-        self._theme_btn.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
-        self._theme_btn.clicked.connect(self.theme_requested.emit)
-        layout.addWidget(self._theme_btn)
-
-        layout.addSpacing(8)
-
-        self._settings_btn = AnimatedButton("Settings")
-        self._settings_btn.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
-        self._settings_btn.clicked.connect(self.settings_requested.emit)
-        layout.addWidget(self._settings_btn)
-
-        # ── Theme wiring ──────────────────────────────────────────────────────
+        # ── Theme wiring ──────────────────────────────────────────────────
         mgr = get_manager()
         mgr.theme_changed.connect(self._on_theme_changed)
         self._apply_theme(mgr.current)
 
-    # ── Public API ────────────────────────────────────────────────────────────
+    # ── Public API ────────────────────────────────────────────────────────
+
+    def set_title(self, text: str) -> None:
+        self._title.setText(text)
+
+    def title(self) -> str:
+        return self._title.text()
 
     def set_library(self, path: str) -> None:
         self._library_path = path
         if path:
-            self._path_label.setText(_abbreviate_path(path))
+            fm = QtGui.QFontMetrics(self._path_label.font())
+            self._path_label.setText(
+                fm.elidedText(path, QtCore.Qt.TextElideMode.ElideMiddle, self.PATH_MAX_WIDTH))
             self._path_label.setToolTip(path)
-            self._folder_icon.setVisible(True)
         else:
             self._path_label.setText("No library selected")
             self._path_label.setToolTip("")
-            self._folder_icon.setVisible(False)
         # The path colour depends on whether a library is set.
         self._apply_path_colour(get_manager().current)
         self._clear_stats()
@@ -166,46 +205,50 @@ class TopBar(QtWidgets.QWidget):
         if tracks == 0:
             self._clear_stats()
             return
-        unit_label = "artist" if artists == 1 else "artists"
+        units = ["track" if tracks == 1 else "tracks", "GB",
+                 "artist" if artists == 1 else "artists"]
         values = [f"{tracks:,}", f"{size_gb:.1f}", f"{artists:,}"]
-        units  = ["tracks", "GB", unit_label]
         for (num_lbl, unit_lbl), val, unit in zip(self._stat_widgets, values, units):
             num_lbl.setText(val)
-            unit_lbl.setText(f" {unit}")
+            unit_lbl.setText(unit)
 
     @property
     def library_path(self) -> str:
         return self._library_path
 
-    # ── Internal ──────────────────────────────────────────────────────────────
+    def search_field(self) -> QtWidgets.QLineEdit:
+        return self._search
+
+    # ── Internal ──────────────────────────────────────────────────────────
 
     def _clear_stats(self) -> None:
-        for (num_lbl, unit_lbl), unit in zip(self._stat_widgets, (" tracks", " GB", " artists")):
+        for (num_lbl, unit_lbl), unit in zip(self._stat_widgets, ("tracks", "GB", "artists")):
             num_lbl.setText("–")
             unit_lbl.setText(unit)
 
+    def path_colour(self) -> str:
+        t = get_manager().current
+        return t.text_primary if self._library_path else t.text_secondary
+
     def _apply_path_colour(self, tokens) -> None:
-        t = tokens
-        path_color = t.text_primary if self._library_path else t.text_secondary
-        self._path_label.setStyleSheet(f"color: {path_color};")
+        pal = self._path_label.palette()
+        pal.setColor(QtGui.QPalette.ColorRole.WindowText, QtGui.QColor(self.path_colour()))
+        self._path_label.setPalette(pal)
 
     def _apply_theme(self, tokens) -> None:
-        t = tokens
-        self._sep.set_color(t.card_border)
-
-        self._apply_path_colour(t)
-        self._folder_icon.setStyleSheet(f"color: {t.text_secondary};")
-
-        for num_lbl, unit_lbl in self._stat_widgets:
-            num_lbl.setStyleSheet(
-                f"color: {t.text_primary}; font-weight: 600;"
-            )
-            unit_lbl.setStyleSheet(f"color: {t.text_secondary};")
+        self._apply_path_colour(tokens)
+        self._search_action.setIcon(_search_icon(QtGui.QColor(tokens.text_secondary)))
+        self._chip.update()
 
     def _on_theme_changed(self, tokens) -> None:
         self._apply_theme(tokens)
 
-    # ── Slots ─────────────────────────────────────────────────────────────────
+    # ── Slots ─────────────────────────────────────────────────────────────
+
+    def _on_search(self) -> None:
+        text = self._search.text().strip()
+        if text:
+            self.search_requested.emit(text)
 
     def _on_change_library(self) -> None:
         start = self._library_path or str(Path.home())

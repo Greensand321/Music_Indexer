@@ -25,23 +25,167 @@ from gui.widgets.pill import ExperimentalPill
 
 
 class _SectionBar(QtWidgets.QWidget):
-    """The strip above a page's sections: tabs on the left, actions on the
-    right. Painted from tokens (content background, a hairline below)."""
+    """The strip above a page's sections: the segmented control on the left,
+    page actions on the right. Transparent: it sits on the backdrop."""
 
     def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("pageSectionBar")
-        get_manager().theme_changed.connect(self._repaint_on_theme)
+        self.setAutoFillBackground(False)
 
-    def _repaint_on_theme(self, _tokens=None) -> None:
+
+class SegmentedTabBar(QtWidgets.QTabBar):
+    """The page section tabs as a glass segmented control.
+
+    A pill track (the material's ``well``) holds every section; a raised
+    thumb sits behind the current one and *slides* to the next — its rect is
+    a painter value driven by ``motion.animate_value`` (``base`` duration,
+    ``standard`` easing), never widget geometry. Tab buttons (the
+    "Experimental" pills) keep their place at the right of their segment.
+    Keyboard focus draws an accent ring round the thumb.
+    """
+
+    PAD = 3          # track → thumb inset
+    HEIGHT = 40
+
+    def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("pageSectionTabs")
+        self.setDrawBase(False)
+        self.setExpanding(False)
+        self.setMouseTracking(True)
+        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_Hover, True)
+        self._thumb: QtCore.QRectF | None = None
+        self._from: QtCore.QRectF | None = None
+        self._to: QtCore.QRectF | None = None
+        self._hover = -1
+        self.currentChanged.connect(self._slide)
+
+    # ── Geometry ──────────────────────────────────────────────────────────
+
+    def tabSizeHint(self, index: int) -> QtCore.QSize:  # noqa: N802
+        s = super().tabSizeHint(index)
+        return QtCore.QSize(s.width() + 8, self.HEIGHT)
+
+    def minimumTabSizeHint(self, index: int) -> QtCore.QSize:  # noqa: N802
+        return self.tabSizeHint(index)
+
+    def _segment(self, index: int) -> QtCore.QRectF:
+        return QtCore.QRectF(self.tabRect(index)).adjusted(
+            self.PAD, self.PAD, -self.PAD, -self.PAD)
+
+    def thumb_rect(self) -> QtCore.QRectF | None:
+        """Where the thumb is painted now (mid-slide: in between)."""
+        if self._thumb is None and self.currentIndex() >= 0:
+            return self._segment(self.currentIndex())
+        return self._thumb
+
+    @property
+    def _thumb_anim(self):
+        from gui.themes import motion
+        return motion.animation_for(self, "thumb")
+
+    def _slide(self, index: int) -> None:
+        from gui.themes import motion
+
+        if index < 0:
+            return
+        target = self._segment(index)
+        start = self.thumb_rect()
+        if start is None or not self.isVisible():
+            motion.stop(self, "thumb")
+            self._thumb = None
+            self.update()
+            return
+        self._from, self._to = QtCore.QRectF(start), target
+        motion.animate_value(self, "thumb", 0.0, 1.0, self._on_thumb, duration="base",
+                             easing="standard", on_finished=self._on_thumb_done)
+
+    def _on_thumb(self, value: float) -> None:
+        a, b = self._from, self._to
+        if a is None or b is None:
+            return
+        v = float(value)
+        self._thumb = QtCore.QRectF(
+            a.x() + (b.x() - a.x()) * v, a.y() + (b.y() - a.y()) * v,
+            a.width() + (b.width() - a.width()) * v, a.height() + (b.height() - a.height()) * v,
+        )
         self.update()
 
+    def _on_thumb_done(self) -> None:
+        # Settle onto the tab itself (it may have moved meanwhile).
+        self._thumb = None
+        self._from = self._to = None
+        self.update()
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        if self._thumb_anim is None or self._thumb_anim.state() != QtCore.QAbstractAnimation.State.Running:
+            self._thumb = None
+
+    # ── Hover ─────────────────────────────────────────────────────────────
+
+    def mouseMoveEvent(self, event: QtGui.QMouseEvent) -> None:  # noqa: N802
+        index = self.tabAt(event.position().toPoint())
+        if index != self._hover:
+            self._hover = index
+            self.update()
+        super().mouseMoveEvent(event)
+
+    def leaveEvent(self, event) -> None:  # noqa: N802
+        self._hover = -1
+        self.update()
+        super().leaveEvent(event)
+
+    # ── Painting ──────────────────────────────────────────────────────────
+
     def paintEvent(self, event: QtGui.QPaintEvent) -> None:  # noqa: N802
+        from gui.themes.glass import current_material, paint_surface, qcolor
+
+        n = self.count()
+        if n == 0:
+            return
         t = get_manager().current
+        m = current_material()
         p = QtGui.QPainter(self)
-        p.fillRect(self.rect(), QtGui.QColor(t.content_bg))
-        p.fillRect(QtCore.QRect(0, self.height() - 1, self.width(), 1), QtGui.QColor(t.card_border))
-        p.end()
+        try:
+            p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+            p.setRenderHint(QtGui.QPainter.RenderHint.TextAntialiasing)
+            track = QtCore.QRectF(self.tabRect(0)).united(QtCore.QRectF(self.tabRect(n - 1)))
+            paint_surface(p, track, m.well, radius=track.height() / 2)
+            if 0 <= self._hover < n and self._hover != self.currentIndex():
+                seg = self._segment(self._hover)
+                path = QtGui.QPainterPath()
+                path.addRoundedRect(seg, seg.height() / 2, seg.height() / 2)
+                p.fillPath(path, qcolor(m.hover))
+            thumb = self.thumb_rect()
+            if thumb is not None:
+                paint_surface(p, thumb, m.raised, radius=thumb.height() / 2)
+                if self.hasFocus():
+                    p.setPen(QtGui.QPen(QtGui.QColor(t.input_focus), 1.5))
+                    p.setBrush(QtCore.Qt.BrushStyle.NoBrush)
+                    ring = thumb.adjusted(-1.5, -1.5, 1.5, 1.5)
+                    p.drawRoundedRect(ring, ring.height() / 2, ring.height() / 2)
+            base = QtGui.QFont(self.font())
+            for i in range(n):
+                rect = QtCore.QRectF(self.tabRect(i))
+                button = self.tabButton(i, QtWidgets.QTabBar.ButtonPosition.RightSide)
+                if button is not None and button.isVisible():
+                    rect.setRight(button.geometry().left() - 4)
+                active = i == self.currentIndex()
+                f = QtGui.QFont(base)
+                f.setWeight(QtGui.QFont.Weight.DemiBold if active else QtGui.QFont.Weight.Medium)
+                p.setFont(f)
+                if not self.isTabEnabled(i):
+                    colour = t.text_muted
+                elif active or i == self._hover:
+                    colour = t.text_primary
+                else:
+                    colour = t.text_secondary
+                p.setPen(QtGui.QColor(colour))
+                p.drawText(rect, int(QtCore.Qt.AlignmentFlag.AlignCenter), self.tabText(i))
+        finally:
+            p.end()
 
 
 class SectionedPage(QtWidgets.QWidget):
@@ -74,14 +218,16 @@ class SectionedPage(QtWidgets.QWidget):
         self._tabs: QtWidgets.QTabBar | None = None
         self._actions_layout: QtWidgets.QHBoxLayout | None = None
         if spec.has_sections:
+            from gui.themes.glass import font
+            from gui.themes.tokens import SPACE
+
             bar = _SectionBar()
             row = QtWidgets.QHBoxLayout(bar)
-            row.setContentsMargins(12, 10, 16, 0)
+            # Aligned with the cards below (the pages' gutter).
+            row.setContentsMargins(SPACE.gutter, 0, SPACE.gutter, SPACE.md)
             row.setSpacing(8)
-            tabs = QtWidgets.QTabBar()
-            tabs.setObjectName("pageSectionTabs")
-            tabs.setDrawBase(False)
-            tabs.setExpanding(False)
+            tabs = SegmentedTabBar()
+            tabs.setFont(font("label", weight=500))
             tabs.setUsesScrollButtons(True)
             tabs.setElideMode(QtCore.Qt.TextElideMode.ElideNone)
             tabs.setFocusPolicy(QtCore.Qt.FocusPolicy.TabFocus)
@@ -94,10 +240,10 @@ class SectionedPage(QtWidgets.QWidget):
                     tabs.setTabToolTip(index, f"{section.label}: experimental — not ready to test")
                     self._pills[section.key] = pill
             tabs.currentChanged.connect(self._on_tab_changed)
-            row.addWidget(tabs, 0, QtCore.Qt.AlignmentFlag.AlignBottom)
+            row.addWidget(tabs, 0, QtCore.Qt.AlignmentFlag.AlignVCenter)
             row.addStretch(1)
             self._actions_layout = QtWidgets.QHBoxLayout()
-            self._actions_layout.setContentsMargins(0, 0, 0, 6)
+            self._actions_layout.setContentsMargins(0, 0, 0, 0)
             self._actions_layout.setSpacing(8)
             row.addLayout(self._actions_layout)
             root.addWidget(bar)
@@ -206,7 +352,12 @@ class SectionedPage(QtWidgets.QWidget):
             set_section = getattr(panel, "set_section", None)
             if callable(set_section):
                 set_section(section.view)
+        switching = self._stack.currentWidget() is not panel
         self._stack.setCurrentWidget(panel)
+        if switching and emit and self.isVisible():
+            # Section transition: the new panel fades in (reduced motion: at once).
+            from gui.themes import motion
+            motion.reveal(panel, duration="fast")
         if activate and self.isVisible():
             self._activate_panel(panel)
         if emit and changed:

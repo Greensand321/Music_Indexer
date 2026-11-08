@@ -98,7 +98,7 @@ class AnimatedNavButton(HoverMixin, QtWidgets.QPushButton):
         self.setCheckable(False)
         self.setFlat(True)
         self.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
-        self.setFixedHeight(44)
+        self.setFixedHeight(40)
         self.setSizePolicy(
             QtWidgets.QSizePolicy.Policy.Expanding,
             QtWidgets.QSizePolicy.Policy.Fixed,
@@ -144,70 +144,67 @@ class AnimatedNavButton(HoverMixin, QtWidgets.QPushButton):
     # ── Internal ──────────────────────────────────────────────────────────
 
     def _update_text(self) -> None:
-        parts = []
-        if self._icon_text:
-            parts.append(self._icon_text)
-        parts.append(self._label)
+        # The accessible text. The item paints only the label (no icon) and
+        # the badge as a "N running" pill.
+        text = self._label
         if self._badge:
-            parts.append(f"  {self._badge}")
-        self.setText("  ".join(parts) if self._icon_text else self._label)
+            text += f" ({self._badge} running)"
+        self.setText(text)
 
     def paintEvent(self, event: QtGui.QPaintEvent) -> None:
+        """Glass nav item: a soft wash on hover, white 600 when active (the
+        sliding pill behind it is the sidebar's NavContainer), and the
+        "N running" pill for a badge."""
         try:
             from gui.themes.manager import get_manager
             from gui.themes.effects import lerp_color
+            from gui.themes.glass import qcolor
             t = get_manager().current
         except Exception:
             super().paintEvent(event)
             return
 
+        m = t.material
         p = QtGui.QPainter(self)
         p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
         p.setRenderHint(QtGui.QPainter.RenderHint.TextAntialiasing)
 
         r = QtCore.QRectF(self.rect())
+        path = QtGui.QPainterPath()
+        path.addRoundedRect(r, 14.0, 14.0)
 
-        # Hover tint — composites over the parent's pill or the sidebar bg.
-        # Exit button gets a danger-red tint; others use sidebar_hover.
-        if self._hover_p > 0:
+        # A running job tints the row faintly (the Activity entry).
+        if self._badge and not self._active:
+            p.fillPath(path, QtGui.QBrush(qcolor(m.hover, 0.75)))
+        # Hover wash: composites over the panel (the active item has the pill).
+        if self._hover_p > 0 and not self._active:
             if self._is_exit:
                 col = QtGui.QColor(t.danger)
                 col.setAlpha(int(self._hover_p * 45))
             else:
-                col = QtGui.QColor(t.sidebar_hover)
-                col.setAlpha(int(self._hover_p * (30 if self._active else 60)))
-            path = QtGui.QPainterPath()
-            path.addRoundedRect(r.adjusted(2.0, 1.0, -2.0, -1.0), 8.0, 8.0)
+                col = qcolor(m.hover, self._hover_p * 0.75)
             p.fillPath(path, QtGui.QBrush(col))
 
-        # Left accent bar — only on active nav item (not on exit button)
-        if self._active and not self._is_exit:
-            bar_h = 20.0
-            bar_y = (r.height() - bar_h) / 2.0
-            path = QtGui.QPainterPath()
-            path.addRoundedRect(QtCore.QRectF(3.0, bar_y, 4.0, bar_h), 2.0, 2.0)
-            p.fillPath(path, QtGui.QBrush(QtGui.QColor(t.accent)))
-
-        # Text — muted when idle, full brightness when active or hovered;
-        # exit button fades to danger red on hover.
+        idle = QtGui.QColor(t.sidebar_text if m.is_glass else t.text_secondary)
         if self._is_exit:
-            if self._hover_p > 0:
-                text_col = lerp_color(t.text_secondary, t.danger, self._hover_p)
-            else:
-                text_col = QtGui.QColor(t.text_secondary)
+            text_col = lerp_color(idle.name(), t.danger, self._hover_p) if self._hover_p > 0 else idle
         elif self._active:
             text_col = QtGui.QColor(t.text_primary)
         elif self._hover_p > 0:
-            text_col = lerp_color(t.text_secondary, t.text_primary, self._hover_p)
+            text_col = lerp_color(idle.name(), t.text_primary, self._hover_p)
         else:
-            text_col = QtGui.QColor(t.text_secondary)
+            text_col = idle
 
+        font = QtGui.QFont(self.font())
+        if self._active:
+            font.setWeight(QtGui.QFont.Weight.DemiBold)
+        p.setFont(font)
         p.setPen(text_col)
-        p.setFont(self.font())
+        badge_w = int(self._badge_rect().width()) + 8 if self._badge else 0
         p.drawText(
-            self.rect().adjusted(20, 0, -8, 0),
+            self.rect().adjusted(14, 0, -(14 + badge_w), 0),
             int(QtCore.Qt.AlignmentFlag.AlignVCenter | QtCore.Qt.AlignmentFlag.AlignLeft),
-            self.text(),
+            self._label,
         )
 
         if self._badge:
@@ -215,29 +212,43 @@ class AnimatedNavButton(HoverMixin, QtWidgets.QPushButton):
 
         p.end()
 
-    def _draw_badge(self, p: QtGui.QPainter) -> None:
-        text = str(min(self._badge, 99)) + ("+" if self._badge > 99 else "")
-        fm = QtGui.QFontMetrics(self.font())
-        tw = fm.horizontalAdvance(text)
-        bw = max(tw + 10, 20)
-        bh = 16
-        margin = 8
-        x = self.width() - bw - margin
-        y = (self.height() - bh) // 2
-        rect = QtCore.QRect(x, y, bw, bh)
+    def _badge_text(self) -> str:
+        n = min(self._badge, 99)
+        return f"{n}{'+' if self._badge > 99 else ''} running"
 
+    @staticmethod
+    def _badge_font() -> QtGui.QFont:
+        from gui.themes.glass import font
+        f = font("micro", weight=600)
+        f.setLetterSpacing(QtGui.QFont.SpacingType.AbsoluteSpacing, 0.0)
+        return f
+
+    def _badge_rect(self) -> QtCore.QRectF:
+        fm = QtGui.QFontMetrics(self._badge_font())
+        w = fm.horizontalAdvance(self._badge_text()) + 16
+        h = fm.height() + 4
+        return QtCore.QRectF(self.width() - 12 - w, (self.height() - h) / 2, w, h)
+
+    def _draw_badge(self, p: QtGui.QPainter) -> None:
+        """A "1 running" pill: the accent at .22 with the light accent text."""
         from gui.themes.manager import get_manager
+        from gui.themes.glass import qcolor
+        from gui.themes.tokens import mix, rgba
+
         t = get_manager().current
+        rect = self._badge_rect()
+        if t.material.is_glass:
+            fill, text = qcolor(rgba(t.accent, 0.22)), QtGui.QColor(t.accent_hover)
+        else:
+            fill, text = QtGui.QColor(mix(t.sidebar_bg, t.accent, 0.22)), QtGui.QColor(t.text_primary)
         p.save()
-        p.setBrush(QtGui.QColor(t.accent))
-        p.setPen(QtCore.Qt.PenStyle.NoPen)
         p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
         path = QtGui.QPainterPath()
-        path.addRoundedRect(QtCore.QRectF(rect), bh / 2, bh / 2)
-        p.drawPath(path)
-        p.setPen(QtGui.QColor(t.text_inverse))
-        p.setFont(self.font())
-        p.drawText(rect, QtCore.Qt.AlignmentFlag.AlignCenter, text)
+        path.addRoundedRect(rect, rect.height() / 2, rect.height() / 2)
+        p.fillPath(path, fill)
+        p.setFont(self._badge_font())
+        p.setPen(text)
+        p.drawText(rect, int(QtCore.Qt.AlignmentFlag.AlignCenter), self._badge_text())
         p.restore()
 
 
