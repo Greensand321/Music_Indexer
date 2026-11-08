@@ -27,7 +27,7 @@ from dataclasses import dataclass, field
 from typing import Callable, Dict, Iterable, List, Mapping, MutableMapping, Optional, Sequence
 from collections import defaultdict
 
-from config import PREVIEW_ARTWORK_MAX_DIM, PREVIEW_ARTWORK_QUALITY, load_config
+from config import FORMAT_PRIORITY, PREVIEW_ARTWORK_MAX_DIM, PREVIEW_ARTWORK_QUALITY, load_config
 from utils.path_helpers import ensure_long_path
 from utils.year_normalizer import UNKNOWN_YEAR, normalize_year
 from utils.audio_metadata_reader import read_metadata, read_sidecar_artwork_bytes
@@ -742,8 +742,16 @@ def _artwork_status(track: "DuplicateTrack", art_hash: int | None) -> Dict[str, 
     return {"status": "unknown", "reason": "art missing/unreadable (no artwork found)"}
 
 
+_NO_ARTWORK_STATES = {"deferred", "no artwork found", "no artwork tags"}
+
+
 def _has_artwork_error(track: "DuplicateTrack") -> bool:
-    return bool(track.artwork_error and track.artwork_error != "deferred")
+    """True when artwork could not be *read* — not when a file simply has none.
+
+    "No artwork found" counted as an error, so every group with an
+    artwork-less copy was flagged "Artwork present but unreadable".
+    """
+    return bool(track.artwork_error and track.artwork_error not in _NO_ARTWORK_STATES)
 
 
 def _load_artwork_for_track(track: "DuplicateTrack") -> None:
@@ -1064,9 +1072,14 @@ def _read_tags_and_artwork(
     return base, artwork, error, art_error, audio_props, metadata_trace
 
 
+_NOT_TAG_TEXT_KEYS = {"cover_hash", "artwork_hash"}
+
+
 def _placeholder_present(tags: Mapping[str, object]) -> bool:
     for key, value in tags.items():
-        if value is None:
+        if value is None or key in _NOT_TAG_TEXT_KEYS or _tag_value_missing(key, value):
+            # The normalised "Unknown" year means "no year tag"; it flagged
+            # every group with an undated copy as placeholder metadata.
             continue
         if isinstance(value, (list, tuple)):
             vals = value
@@ -1082,11 +1095,12 @@ def _placeholder_present(tags: Mapping[str, object]) -> bool:
 def _capture_library_state(path: str, *, quick: bool = False) -> Dict[str, object]:
     """Capture stable file attributes to detect changes between preview and execution."""
 
-    state: Dict[str, object] = {"exists": os.path.exists(path)}
+    safe = ensure_long_path(path)
+    state: Dict[str, object] = {"exists": os.path.exists(safe)}
     if not state["exists"]:
         return state
     try:
-        stat = os.stat(path)
+        stat = os.stat(safe)
         state["size"] = stat.st_size
         state["mtime"] = int(stat.st_mtime)
     except Exception as exc:  # pragma: no cover - depends on filesystem permissions
@@ -2304,15 +2318,93 @@ def _classify_context(track: DuplicateTrack) -> tuple[str, List[str]]:
     return "unknown", evidence
 
 
+def _format_rank(track: DuplicateTrack) -> int:
+    ext = (track.ext or os.path.splitext(track.path)[1]).lower()
+    if ext and not ext.startswith("."):
+        ext = f".{ext}"
+    return int(FORMAT_PRIORITY.get(ext, 0))
+
+
 def _quality_tuple(track: DuplicateTrack, context: str) -> tuple:
+    """Sort key for "which copy is better" (higher wins).
+
+    Lossless always beats lossy. Between lossless copies the bitrate only
+    measures compression (an uncompressed WAV "out-bitrates" the same audio as
+    FLAC), so resolution decides first and then the format priority from
+    ``config.FORMAT_PRIORITY`` (FLAC > WAV, as documented). Between lossy
+    copies the bitrate decides. The path breaks remaining ties deterministically.
+    """
+    if track.is_lossless:
+        return (
+            1,
+            track.sample_rate,
+            track.bit_depth,
+            track.channels,
+            _format_rank(track),
+            track.bitrate,
+            track.path.lower(),
+        )
     return (
-        1 if track.is_lossless else 0,
+        0,
         track.bitrate,
         track.sample_rate,
         track.bit_depth,
         track.channels,
+        _format_rank(track),
         track.path.lower(),
     )
+
+
+def _winner_key(track: DuplicateTrack, context: str, has_known_artwork: bool) -> tuple:
+    """Lossless first; readable cover art only decides between copies of the same class.
+
+    Artwork used to come first, so an MP3 with a cover beat the FLAC without
+    one and the lossless master was the copy quarantined (or deleted).
+    """
+    quality = _quality_tuple(track, context)
+    return (quality[0], 1 if has_known_artwork else 0, quality)
+
+
+def _file_identity(path: str) -> tuple[int, int] | None:
+    try:
+        stat = os.stat(ensure_long_path(path))
+    except OSError:
+        return None
+    if not stat.st_ino:  # some network file systems report no inode
+        return None
+    return stat.st_dev, stat.st_ino
+
+
+def _collapse_same_file_aliases(
+    tracks: Sequence[DuplicateTrack],
+) -> tuple[List[DuplicateTrack], List[str]]:
+    """Keep one path per underlying file; return ``(tracks, log notes)``.
+
+    A symlink (or hard link) to a library file fingerprints identically to it,
+    so the two were grouped as exact duplicates — and when the link won, the
+    real file was the "loser" that got quarantined or deleted, leaving the
+    kept copy a dangling link. They are one file, not duplicates: only the
+    real path (non-link, then shortest, then alphabetical) takes part.
+    """
+    by_identity: Dict[tuple[int, int], List[DuplicateTrack]] = defaultdict(list)
+    for track in tracks:
+        identity = _file_identity(track.path)
+        if identity is not None:
+            by_identity[identity].append(track)
+    dropped: set[int] = set()
+    notes: List[str] = []
+    for members in by_identity.values():
+        if len(members) < 2:
+            continue
+        ordered = sorted(members, key=lambda t: (os.path.islink(t.path), len(t.path), t.path))
+        keep = ordered[0]
+        for alias in ordered[1:]:
+            dropped.add(id(alias))
+            notes.append(
+                f"Same file reached through two paths; only {keep.path} is considered "
+                f"(ignoring alias {alias.path})."
+            )
+    return [t for t in tracks if id(t) not in dropped], notes
 
 
 def _stable_group_id(paths: Sequence[str]) -> str:
@@ -2421,6 +2513,15 @@ def _quality_rationale(winner: DuplicateTrack, runner_up: DuplicateTrack | None,
         reasons.append("Lossless encoding")
     if runner_up and winner.is_lossless and not runner_up.is_lossless:
         reasons.append(f"Lossless beats lossy ({fmt_codec(winner)} > {fmt_codec(runner_up)})")
+    if (
+        runner_up
+        and winner.is_lossless
+        and runner_up.is_lossless
+        and _format_rank(winner) > _format_rank(runner_up)
+        and (winner.sample_rate, winner.bit_depth, winner.channels)
+        == (runner_up.sample_rate, runner_up.bit_depth, runner_up.channels)
+    ):
+        reasons.append(f"Preferred lossless format at equal resolution ({fmt_codec(winner)} > {fmt_codec(runner_up)})")
     if runner_up and winner.bitrate != runner_up.bitrate:
         if winner.bitrate > runner_up.bitrate:
             reasons.append(f"Higher bitrate: {winner.bitrate} vs {runner_up.bitrate} kbps")
@@ -2868,6 +2969,9 @@ def build_consolidation_plan(
             review_flags.append(f"Truncated candidate set to {max_candidates} items to protect runtime.")
             break
     log(f"Grouping phase: normalized {len(normalized)} tracks.")
+    normalized, alias_notes = _collapse_same_file_aliases(normalized)
+    for note in alias_notes:
+        log(note)
 
     log("Grouping phase: running duplicate clustering...")
     clusters = _cluster_duplicates(
@@ -3019,10 +3123,7 @@ def build_consolidation_plan(
             known_group_paths = {p for p in group_paths if artwork_hashes.get(p) is not None}
             quality_sorted = sorted(
                 group_tracks,
-                key=lambda t: (
-                    1 if t.path in known_group_paths else 0,
-                    _quality_tuple(t, group_contexts[t.path]),
-                ),
+                key=lambda t: _winner_key(t, group_contexts[t.path], t.path in known_group_paths),
                 reverse=True,
             )
             winner = quality_sorted[0]
