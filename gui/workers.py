@@ -41,6 +41,11 @@ defines one (most do — they set a ``threading.Event``) and always calls
 
 The registry also exposes ``jobs_changed(int)`` — the number of running
 jobs — so the redesigned shell can show a global activity indicator.
+
+``quiet=True`` marks housekeeping work the user never asked for and would not
+recognise (composing the window backdrop): it is kept alive, cancelled and
+waited for on quit like any job, but ``listed_jobs()`` — what the Activity
+page and its sidebar badge show — leaves it out.
 """
 from __future__ import annotations
 
@@ -64,6 +69,8 @@ class Job:
     # Mutual-exclusion group, e.g. LIBRARY_WRITES: at most one running job per
     # group is the rule callers enforce via ``group_jobs`` before starting.
     group: str | None = None
+    # Housekeeping (e.g. the backdrop): not listed on the Activity page.
+    quiet: bool = False
 
     @property
     def running(self) -> bool:
@@ -100,6 +107,7 @@ class JobRegistry(QtCore.QObject):
         name: str = "",
         ask_before_quit: bool = True,
         group: str | None = None,
+        quiet: bool = False,
     ) -> QtCore.QThread:
         """Keep ``thread`` alive until it has finished. Idempotent."""
         key = id(thread)
@@ -107,7 +115,7 @@ class JobRegistry(QtCore.QObject):
             return thread
         owner_name = type(owner).__name__ if owner is not None else ""
         self._jobs[key] = Job(thread, name or type(thread).__name__, owner_name,
-                              time.monotonic(), ask_before_quit, group)
+                              time.monotonic(), ask_before_quit, group, quiet)
         # The C++ finished() signal, connected by signature so a Python
         # subclass that shadows ``finished`` cannot hide it. The watcher lives
         # in the GUI thread, so delivery is queued there, after run() returns.
@@ -127,9 +135,10 @@ class JobRegistry(QtCore.QObject):
         name: str = "",
         ask_before_quit: bool = True,
         group: str | None = None,
+        quiet: bool = False,
     ) -> QtCore.QThread:
         self.adopt(thread, owner=owner, name=name, ask_before_quit=ask_before_quit,
-                   group=group)
+                   group=group, quiet=quiet)
         # A QThread parented to a widget is destroyed with that widget — even
         # mid-run. The registry (plus the owner's attribute) keeps it alive
         # instead, so detach it from any QObject parent.
@@ -169,6 +178,10 @@ class JobRegistry(QtCore.QObject):
             owner_name = type(owner).__name__
             jobs = [j for j in jobs if j.owner_name == owner_name]
         return jobs
+
+    def listed_jobs(self) -> list[Job]:
+        """Running jobs the user should see (Activity page, sidebar badge)."""
+        return [j for j in self.jobs() if not j.quiet]
 
     def group_jobs(self, group: str) -> list[Job]:
         """Running jobs in ``group`` (e.g. ``LIBRARY_WRITES``)."""
@@ -261,12 +274,14 @@ def start_worker(
     name: str = "",
     ask_before_quit: bool = True,
     group: str | None = None,
+    quiet: bool = False,
 ) -> QtCore.QThread:
     """Start ``thread`` under the registry's protection (see module docstring).
 
     Pass ``ask_before_quit=False`` for read-only work (scans, previews, art
     loads): quitting then cancels it silently instead of asking the user.
     Anything that writes files keeps the default, so quitting mid-write asks.
+    ``quiet=True``: housekeeping the Activity page does not list.
     """
     return job_registry().start(thread, owner=owner, name=name,
-                                ask_before_quit=ask_before_quit, group=group)
+                                ask_before_quit=ask_before_quit, group=group, quiet=quiet)

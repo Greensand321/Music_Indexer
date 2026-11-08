@@ -187,8 +187,9 @@ class ActivityWorkspace(WorkspaceBase):
             self._jobs_stale = True
 
     def jobs(self) -> list:
+        """Running jobs to list (housekeeping such as the backdrop is not)."""
         from gui.workers import job_registry
-        return job_registry().jobs()
+        return job_registry().listed_jobs()
 
     def refresh_jobs(self) -> None:
         jobs = self.jobs()
