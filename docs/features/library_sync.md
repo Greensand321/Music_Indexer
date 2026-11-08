@@ -108,6 +108,21 @@ that; later scans read it back. Recompute Matches reuses the index outright. A t
 default (0.3 / 0.35, which meant something else on the old scale) is replaced by 0.2
 once, with a line in the log; any other saved value is kept.
 
+**A clip is not the song.** A fingerprint covers the first two minutes of a track,
+so a 30-second clip's fingerprint is the *beginning* of the full song's. Comparing only
+the part the two have in common scored the pair 0 — an exact match — so an incoming
+full song was "already in the library" when the library held only a clip of it, and a
+lossless clip of a lossy library song was offered as an upgrade (one Replace flag away
+from swapping the song for half a minute of it). The part of the longer fingerprint
+that has no counterpart now counts as unrelated audio. A clip shorter than about half
+of the song's fingerprinted length is **new**; around half it is **low confidence**
+(sent to review, never decided automatically); the same recording in another codec,
+or a copy a few seconds shorter or shifted, scores as before. The candidate search
+still finds the song for its clip — they share their sub-fingerprints — so the pair
+is compared; it is the distance that now tells them apart. Two tracks longer than two
+minutes are compared on their first two minutes either way, so a long edit of a long
+song still matches it.
+
 **Short tracks are fingerprinted as they are.** The fingerprint covers the first
 two minutes of a track (the fingerprint duration setting). A track shorter than that
 used to be padded with silence up to the full window, so the prints of two

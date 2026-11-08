@@ -181,6 +181,26 @@ Status legend: **Done** (in the code now) · **Pending owner** (decision needed;
 - `apply_genre_changes` now logs the writer's reason in the change log (for example a file open in another
   program), not just "write failed".
 
+### A23. Library Sync: a short clip no longer matches its full song; padded cache rows are redone — **Done**
+- **Was**: Library Sync's matcher scored pairs with the overlap-only `fingerprint_distance`. A 30 s clip's
+  print is a prefix of the full song's, so the pair scored 0.0 (exact match): an incoming full song was
+  "already in the library" when only a clip was there, and a lossless clip of a lossy song was a "possible
+  upgrade". `fingerprint_distance`'s root docstring said the vendored engine relied on the overlap-only
+  behaviour.
+- **Is**: `_match_tracks` scores with `library_sync.match_distance`, the vendored port of
+  `duplicate_fingerprint_distance` (unmatched length counts as unrelated audio). A clip under about half of
+  the song's printed length is NEW; around half is LOW_CONFIDENCE (review). `library_sync.fingerprint_distance`
+  is still bound to the overlap-only vendored metric, which stays identical to the root's
+  (`tests/test_vendored_fingerprint_distance.py` unchanged). Tests that fake the matcher's distance now
+  patch `library_sync.match_distance` (`tests/test_library_sync_matching.py`,
+  `tests/test_syncmatch_candidates.py`'s `distance_calls`): patching the old name would have silently
+  stopped reaching the matcher.
+- **Why**: the clip/song confusion could skip a full song or offer to replace it with a clip.
+- **Also**: Library Sync's vendored cache got the root's `fp_scheme`/padding check (see A15) and its
+  corrupt-file handling. The vendored generator's own reuse check is covered too: it used to hand back the
+  cached padded print even when the scan had rejected it.
+- **Undo**: point `match_distance` back at `idx_near_duplicate_detector.fingerprint_distance` in `library_sync.py`.
+
 ## B. Structure that changed (adopted IA) — **Done**
 
 ### B1. New page structure replaces the 13-page sidebar

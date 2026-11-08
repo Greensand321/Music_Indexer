@@ -31,7 +31,12 @@ from library_sync_indexer_engine import (
 from playlist_generator import update_playlists, write_playlist
 
 fingerprint_generator = idx_fingerprint_generator
+# The vendored engine's overlap-only metric (pinned to the root module's).
 fingerprint_distance = idx_near_duplicate_detector.fingerprint_distance
+# What the matcher scores pairs with: the same metric, but the part of the
+# longer print with no counterpart counts as unrelated audio, so a 30 s clip
+# is not "the same recording" as the full song whose print starts with it.
+match_distance = idx_near_duplicate_detector.duplicate_fingerprint_distance
 _ensure_db = idx_fingerprint_cache._ensure_db
 FORMAT_PRIORITY = idx_config.FORMAT_PRIORITY
 DEFAULT_FP_THRESHOLDS = idx_config.DEFAULT_FP_THRESHOLDS
@@ -542,7 +547,7 @@ def _print_info(
     * ``"chromaprint"`` — a compressed Chromaprint print (``str`` or ``bytes``)
       with enough content to identify a recording;
     * ``"plain"`` — anything else that is not empty (the ``"1,2,3"`` integer
-      lists of synthetic fixtures); compared with ``fingerprint_distance`` only;
+      lists of synthetic fixtures); compared with ``match_distance`` only;
     * ``"none"`` — missing, fpcalc's empty ``AQAAAA``, or shorter than
       ``MIN_MATCH_ITEMS`` / fewer than ``MIN_DISTINCT_ITEMS`` distinct items
       (silence): never a candidate, never a match.
@@ -902,7 +907,7 @@ def _match_tracks(
             statuses: List[MatchStatus] = []
             for i in indices:
                 cand = index.records[i]
-                dist = fingerprint_distance(inc.fingerprint, cand.fingerprint)
+                dist = match_distance(inc.fingerprint, cand.fingerprint)
                 thr, margin = pair(cand.ext)
                 status = _classify_distance(dist, thr, margin)
                 candidate_meta.append((cand, dist, thr, margin, status))

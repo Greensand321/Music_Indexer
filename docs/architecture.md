@@ -372,7 +372,12 @@ generator's own reuse check, and `fingerprint_cache.get_fingerprint` — and all
 use the same helpers (`row_is_current`, `fingerprint_trusted`, `store_fingerprint_row`,
 which also clears the row's `decoded` blob). There is no writer thread to kill, so the
 root's "one unbindable row stops every later write" bug never applied; a row that
-cannot be stored is now skipped instead of failing the scan. The
+cannot be stored is now skipped instead of failing the scan. The length-aware
+distance (`duplicate_fingerprint_distance`: the part of the longer print with no
+counterpart counts as unrelated audio, so a 30 s clip is not its full song) was ported
+too, and it is what Library Sync's matcher scores pairs with (`library_sync.match_distance`);
+the vendored `fingerprint_distance` itself still compares the overlap only, exactly
+like the root one. The
 vendored `music_indexer_api.py` is missing a few refinements (like richer
 collision-decision logging) that the root copy has picked up since.
 
