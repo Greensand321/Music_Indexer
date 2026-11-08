@@ -7,6 +7,9 @@ import webbrowser
 from pathlib import Path
 
 from gui.compat import QtCore, QtWidgets, Signal, Slot
+from gui.themes.tokens import SPACE
+from gui.widgets.dupes_parts import hero_title, section_card
+from gui.widgets.glyphs import set_glyph
 from gui.workers import start_worker
 
 
@@ -53,48 +56,60 @@ class BucketingPocDialog(QtWidgets.QDialog):
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Duplicate Bucketing POC")
-        # The Tools launcher creates one per click; don't keep each one alive.
+        # Its Duplicates-page launcher opens a fresh one each time; don't keep each one alive.
         self.setAttribute(QtCore.Qt.WidgetAttribute.WA_DeleteOnClose)
-        self.setMinimumWidth(480)
+        self.setMinimumWidth(520)
         self._worker: _BucketingWorker | None = None
         self._closing = False
         self._without_fingerprints = False
 
         root = QtWidgets.QVBoxLayout(self)
-        root.setSpacing(10)
+        root.setContentsMargins(SPACE.lg, SPACE.lg, SPACE.lg, SPACE.lg)
+        root.setSpacing(SPACE.md)
 
+        root.addWidget(hero_title("Duplicate buckets report"))
         desc = QtWidgets.QLabel(
-            "Select a folder to scan for duplicate bucketing. "
-            "An HTML report will be written to the Docs/ subfolder. "
-            "Read-only: no audio file is changed."
+            "Groups a folder's tracks into duplicate buckets and writes an HTML report to "
+            "its Docs/ subfolder. Read-only: no audio file is changed."
         )
         desc.setWordWrap(True)
+        desc.setObjectName("sectionSubtitle")
         root.addWidget(desc)
 
+        card = section_card("Folder")
         folder_row = QtWidgets.QHBoxLayout()
+        folder_row.setSpacing(SPACE.sm)
         self._folder_edit = QtWidgets.QLineEdit(library_path)
         self._folder_edit.setPlaceholderText("Library folder…")
+        self._folder_edit.setAccessibleName("Folder to scan")
         browse_btn = QtWidgets.QPushButton("Browse…")
+        set_glyph(browse_btn, "folder")
+        browse_btn.setAccessibleName("Browse for the folder")
         browse_btn.clicked.connect(self._browse)
         folder_row.addWidget(self._folder_edit, 1)
         folder_row.addWidget(browse_btn)
-        root.addLayout(folder_row)
+        card.layout().addLayout(folder_row)
 
         self._status_lbl = QtWidgets.QLabel("Idle")
-        self._status_lbl.setObjectName("sectionSubtitle")
+        self._status_lbl.setObjectName("statusHint")
         self._status_lbl.setWordWrap(True)
-        root.addWidget(self._status_lbl)
+        card.layout().addWidget(self._status_lbl)
+        root.addWidget(card)
 
         btn_row = QtWidgets.QHBoxLayout()
+        btn_row.setSpacing(SPACE.sm)
         self._run_btn = QtWidgets.QPushButton("Run")
         self._run_btn.setObjectName("primaryBtn")
+        set_glyph(self._run_btn, "play", role="inverse")
         self._run_btn.clicked.connect(self._run)
         close_btn = QtWidgets.QPushButton("Close")
+        close_btn.setFlat(True)
         close_btn.clicked.connect(self.close)
-        btn_row.addWidget(self._run_btn)
-        btn_row.addWidget(close_btn)
         btn_row.addStretch(1)
+        btn_row.addWidget(close_btn)
+        btn_row.addWidget(self._run_btn)
         root.addLayout(btn_row)
+        root.addStretch(1)
 
     @Slot()
     def _browse(self) -> None:

@@ -5,6 +5,12 @@ launchers in `gui/workspaces/tools.py` (Diagnostics tile); backend contracts in 
 `duplicate_consolidation_executor.py`, `duplicate_scan_engine.py`, `duplicate_bucketing_poc.py`,
 `near_duplicate_detector.py`, `chromaprint_utils.py`, `fingerprint_cache.py`. Date: 2026-11-07._
 
+> **Current state (2026-11-08, Liquid Glass R2).** This map was written on 2026-11-07, before the fix phase; the
+> 21 `DUP-` bugs below are all fixed (see `docs/redesign/README.md`), and the area now sits on the Duplicates page
+> as six sections: Find duplicates, Compare two files (formerly the Similarity page), Pair review, and the
+> Experimental Fuzzy finder, Scan engine and Bucketing (formerly Tools → Diagnostics). What each section looks like
+> now is in "Liquid Glass restyle (R2)" at the end, and control by control in `docs/gui_inventory.md` §6.5 and §7.5.
+
 Probe scripts that back every "confirmed-by-running" claim below are in
 `/tmp/claude-0/-home-user-Music-Indexer/4300de3c-51f6-599a-948e-c4bafb432735/scratchpad/dup/` (`probe_*.py`, with
 ffmpeg-generated fixtures in `audio/` and `audio2/`). All ran offscreen with `HOME` set to a fresh temp dir and
@@ -371,3 +377,31 @@ option actually quarantines (DUP-03). Changing the library or quitting while a r
 _Doc drift noticed:_ `docs/gui_inventory.md` §6.2 lists a "Library path entry", "Start Scan" and a `DupeScanWorker`.
 The workspace actually has no path entry (it uses the global library), the button is "Scan Library", and the workers
 are `DupeBuildWorker` / `DupeExecuteWorker`. It also lists Preview/Open Report/Cancel only implicitly.
+
+## Liquid Glass restyle (R2)
+_2026-11-08. Shared parts: `gui/widgets/dupes_parts.py` (tone pills, `ToneBadge`, `GlyphLabel`, `PathLabel`,
+`TileGrid`, the hero title, dialog section cards); styles in the `[area:duplicates]` block of `gui/themes/manager.py`.
+Tests: `tests/ui/test_ui_dupes_glass.py`._
+
+- **Find duplicates.** A hero card holds the library (elided path), **Find duplicates**, the three thresholds and the
+  real-state stepper as a compact pill row (Scan · Review · Execute); Cancel and the progress bar only appear while a
+  job runs. The results card starts as an empty state, then shows the plan as stat tiles (groups, duplicate files,
+  space reclaimable, flagged for review), a reason line and the groups as glass rows: the kept copy, each loser with
+  its disposition, format and bitrate pills, a Review pill. The per-group disposition combo sits under the list and
+  the rows and space tile follow it at once. After an execution a second tile row shows quarantined, deleted, left
+  in place for safety, not attempted and errors; `execution_counts` counts them from the same tally
+  `summarize_execution` uses, so its sentences did not change. "Apply the plan" keeps the quarantine default, the
+  permanent-delete choice (marked "Cannot be undone"), the always-on playlist rewrite, Preview and Report (glyphs, no
+  emoji) and Execute (danger) with all its confirmations.
+- **Compare two files.** Two glass file rows (Browse or drop a file), the verdict as a toned pill, the four distances
+  as tiles (fingerprint, **overlap-only**, effective threshold, exact threshold), a one-paragraph explanation, and
+  the full text report folded away. Advanced overrides fold away while off and name the Settings values in use.
+- **Pair review and the prototypes.** One card each, titled with what the tool is for (the section tab names it), with
+  the Experimental pill beside the title, the "not ready to test" note in a well, the points as rows and the Open
+  button. Their dialogs use glass section cards, captions above fields, glyph buttons; Pair review's sides are cards
+  with rounded cover tiles and a toned winner badge.
+- **Widths.** Every section fits 900 × 600 and 1300 × 860 with no horizontal scroll (tested with scan results on
+  screen).
+- **Still open (unchanged by the restyle):** the IA recommendation above (fold Compare and Pair review into a review
+  stage of Find duplicates, retire the prototypes) is the owner's decision; the group list still shows at most three
+  losers per row ("+ N more", all listed in the details when selected).

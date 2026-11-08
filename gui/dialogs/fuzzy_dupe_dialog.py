@@ -4,7 +4,7 @@ A proof of concept. It used to call ``find_near_duplicates`` with the wrong
 arguments (it always failed) and read result attributes that do not exist
 (it would always have found 0 pairs). It now runs the real
 ``near_duplicate_detector.find_near_duplicates`` over the fingerprints the
-Duplicate Finder has already cached, and only shows controls that do
+Duplicate Finder (Find duplicates) has already cached, and only shows controls that do
 something; the metadata word-overlap search it was designed around has no
 backend, so those controls are disabled and say so.
 """
@@ -15,6 +15,9 @@ import threading
 from pathlib import Path
 
 from gui.compat import QtCore, QtWidgets, Signal, Slot
+from gui.themes.tokens import SPACE
+from gui.widgets.dupes_parts import fields_row, hero_title, section_card
+from gui.widgets.glyphs import set_glyph
 from gui.workers import start_worker
 
 _AUDIO_EXTS = {".flac", ".m4a", ".aac", ".mp3", ".wav", ".ogg", ".opus"}
@@ -106,9 +109,9 @@ class FuzzyDupeDialog(QtWidgets.QDialog):
     def __init__(self, library_path: str = "", parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Fuzzy Duplicate Finder")
-        # The Tools launcher creates one per click; don't keep each one alive.
+        # Its Duplicates-page launcher opens a fresh one each time; don't keep each one alive.
         self.setAttribute(QtCore.Qt.WidgetAttribute.WA_DeleteOnClose)
-        self.resize(820, 640)
+        self.resize(880, 700)
         self._library_path = library_path
         self._worker: FuzzyDupeWorker | None = None
         self._closing = False
@@ -116,53 +119,28 @@ class FuzzyDupeDialog(QtWidgets.QDialog):
 
     def _build_ui(self) -> None:
         root = QtWidgets.QVBoxLayout(self)
-        root.setContentsMargins(16, 16, 16, 16)
-        root.setSpacing(12)
+        root.setContentsMargins(SPACE.lg, SPACE.lg, SPACE.lg, SPACE.lg)
+        root.setSpacing(SPACE.md)
 
+        head = QtWidgets.QHBoxLayout()
+        head.setSpacing(SPACE.sm)
+        head.addWidget(hero_title("Near-duplicate candidates"))
+        head.addStretch(1)
+        root.addLayout(head)
         intro = QtWidgets.QLabel(
-            "Lists near-duplicate candidates within each album, using the fingerprints the "
-            "Duplicate Finder has already cached (run a scan there first). Read-only."
+            "Lists near-duplicate candidates within each album, using the fingerprints "
+            "Find duplicates has already cached (run a scan there first). Read-only."
         )
         intro.setWordWrap(True)
         intro.setObjectName("sectionSubtitle")
         root.addWidget(intro)
 
-        # ── Metadata match settings (no backend: shown disabled) ──────────
-        meta_grp = QtWidgets.QGroupBox("Metadata Match Settings (not implemented)")
-        meta_grp.setToolTip(_NOT_IMPLEMENTED)
-        mf = QtWidgets.QFormLayout(meta_grp)
-        mf.setSpacing(8)
-        self._min_word_len = QtWidgets.QSpinBox()
-        self._min_word_len.setRange(1, 20)
-        self._min_word_len.setValue(4)
-        mf.addRow("Min word length:", self._min_word_len)
-
-        self._min_shared = QtWidgets.QSpinBox()
-        self._min_shared.setRange(1, 20)
-        self._min_shared.setValue(2)
-        mf.addRow("Min shared words:", self._min_shared)
-
-        self._ignore_common = QtWidgets.QSpinBox()
-        self._ignore_common.setRange(10, 10000)
-        self._ignore_common.setValue(200)
-        mf.addRow("Ignore words in > N tracks:", self._ignore_common)
-
-        fields_row = QtWidgets.QHBoxLayout()
-        self._field_cbs: list[QtWidgets.QCheckBox] = []
-        for field in ("Title", "Artist", "Album", "Genre", "Filename"):
-            cb = QtWidgets.QCheckBox(field)
-            cb.setChecked(True)
-            self._field_cbs.append(cb)
-            fields_row.addWidget(cb)
-        fields_row.addStretch(1)
-        mf.addRow("Search fields:", fields_row)
-        meta_grp.setEnabled(False)
-        root.addWidget(meta_grp)
+        settings = QtWidgets.QHBoxLayout()
+        settings.setSpacing(SPACE.md)
 
         # ── Fingerprint filter ─────────────────────────────────────────────
-        fp_grp = QtWidgets.QGroupBox("Fingerprint Filter")
-        ff = QtWidgets.QFormLayout(fp_grp)
-        ff.setSpacing(8)
+        fp_grp = section_card("Fingerprint filter")
+        ff = fp_grp.layout()
         from gui.workspaces.duplicates import _config_thresholds
 
         exact, near, boost = _config_thresholds()
@@ -172,30 +150,63 @@ class FuzzyDupeDialog(QtWidgets.QDialog):
         self._near_t.setToolTip("Maximum fingerprint distance for a candidate pair.")
         self._boost_t = QtWidgets.QLineEdit(f"{boost:g}")
         self._boost_t.setToolTip("Extra distance allowed between lossless and lossy files.")
-        ff.addRow("Exact threshold:", self._exact_t)
-        ff.addRow("Near threshold:", self._near_t)
-        ff.addRow("Mixed-codec boost:", self._boost_t)
+        ff.addLayout(fields_row([("Exact", self._exact_t), ("Near", self._near_t),
+                                  ("Mixed-codec boost", self._boost_t)]))
         self._no_fp_cb = QtWidgets.QCheckBox("Include pairs without fingerprints")
         self._skip_fp_cb = QtWidgets.QCheckBox("Skip fingerprint check (metadata only)")
         for cb in (self._no_fp_cb, self._skip_fp_cb):
             cb.setEnabled(False)
             cb.setToolTip(_NOT_IMPLEMENTED)
-        ff.addRow(self._no_fp_cb)
-        ff.addRow(self._skip_fp_cb)
-        root.addWidget(fp_grp)
+            ff.addWidget(cb)
+        ff.addStretch(1)
+        settings.addWidget(fp_grp, 1)
+
+        # ── Metadata match settings (no backend: shown disabled) ──────────
+        meta_grp = section_card("Metadata match", badge=("Not implemented", "warning"))
+        meta_grp.setToolTip(_NOT_IMPLEMENTED)
+        mf = meta_grp.layout()
+        self._min_word_len = QtWidgets.QSpinBox()
+        self._min_word_len.setRange(1, 20)
+        self._min_word_len.setValue(4)
+        self._min_shared = QtWidgets.QSpinBox()
+        self._min_shared.setRange(1, 20)
+        self._min_shared.setValue(2)
+        self._ignore_common = QtWidgets.QSpinBox()
+        self._ignore_common.setRange(10, 10000)
+        self._ignore_common.setValue(200)
+        mf.addLayout(fields_row([("Min word length", self._min_word_len),
+                                  ("Min shared words", self._min_shared),
+                                  ("Ignore words in > N tracks", self._ignore_common)]))
+        fields = QtWidgets.QGridLayout()
+        fields.setHorizontalSpacing(SPACE.md)
+        fields.setVerticalSpacing(SPACE.xxs)
+        self._field_cbs: list[QtWidgets.QCheckBox] = []
+        for i, field in enumerate(("Title", "Artist", "Album", "Genre", "Filename")):
+            cb = QtWidgets.QCheckBox(field)
+            cb.setChecked(True)
+            self._field_cbs.append(cb)
+            fields.addWidget(cb, i // 3, i % 3)
+        mf.addLayout(fields)
+        meta_grp.setEnabled(False)
+        settings.addWidget(meta_grp, 1)
+        root.addLayout(settings)
 
         # ── Buttons ────────────────────────────────────────────────────────
         btn_row = QtWidgets.QHBoxLayout()
+        btn_row.setSpacing(SPACE.sm)
         self._run_btn = QtWidgets.QPushButton("Run Scan")
         self._run_btn.setObjectName("primaryBtn")
+        set_glyph(self._run_btn, "search", role="inverse")
         self._run_btn.clicked.connect(self._on_run)
         self._cancel_btn = QtWidgets.QPushButton("Cancel")
+        set_glyph(self._cancel_btn, "close")
         self._cancel_btn.setEnabled(False)
         self._cancel_btn.clicked.connect(self._on_cancel)
         self._include_non_cb = QtWidgets.QCheckBox("Include non-matching FP pairs in review")
         self._include_non_cb.setEnabled(False)
         self._include_non_cb.setToolTip(_NOT_IMPLEMENTED)
         self._close_btn = QtWidgets.QPushButton("Close")
+        self._close_btn.setFlat(True)
         self._close_btn.clicked.connect(self.reject)
         btn_row.addWidget(self._run_btn)
         btn_row.addWidget(self._cancel_btn)
@@ -206,6 +217,7 @@ class FuzzyDupeDialog(QtWidgets.QDialog):
 
         # ── Progress ───────────────────────────────────────────────────────
         prog_row = QtWidgets.QHBoxLayout()
+        prog_row.setSpacing(SPACE.sm)
         self._prog_status = QtWidgets.QLabel("Idle")
         self._prog_status.setObjectName("statusHint")
         self._prog_bar = QtWidgets.QProgressBar()
@@ -213,41 +225,45 @@ class FuzzyDupeDialog(QtWidgets.QDialog):
         self._prog_bar.setVisible(False)
         self._prog_bar.setFixedHeight(6)
         self._prog_bar.setTextVisible(False)
-        prog_row.addWidget(self._prog_bar, 1)
         prog_row.addWidget(self._prog_status)
+        prog_row.addWidget(self._prog_bar, 1)
         root.addLayout(prog_row)
 
-        # ── Results table ──────────────────────────────────────────────────
+        # ── Results ────────────────────────────────────────────────────────
+        results = section_card("Candidate pairs")
+        rl = results.layout()
+        self._summary_lbl = QtWidgets.QLabel("")
+        self._summary_lbl.setObjectName("mutedLabel")
+        rl.itemAt(0).layout().addWidget(self._summary_lbl, 0, QtCore.Qt.AlignmentFlag.AlignVCenter)
         self._table = QtWidgets.QTreeWidget()
         self._table.setHeaderLabels(["Verdict", "Distance", "Track A (kept)", "Track B"])
-        self._table.setColumnWidth(0, 110)
-        self._table.setColumnWidth(1, 70)
+        self._table.setColumnWidth(0, 120)
+        self._table.setColumnWidth(1, 80)
         self._table.setColumnWidth(2, 260)
-        self._table.setAlternatingRowColors(True)
-        self._table.setMinimumHeight(160)
+        self._table.setRootIsDecorated(False)
+        self._table.setUniformRowHeights(True)
+        self._table.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        self._table.setMinimumHeight(140)
         self._table.currentItemChanged.connect(self._on_row_selected)
-        root.addWidget(self._table)
+        rl.addWidget(self._table, 1)
 
-        self._summary_lbl = QtWidgets.QLabel("")
-        self._summary_lbl.setObjectName("statusHint")
-        root.addWidget(self._summary_lbl)
-
-        # ── Details ────────────────────────────────────────────────────────
-        details_grp = QtWidgets.QGroupBox("Selected Pair Details")
-        det_l = QtWidgets.QVBoxLayout(details_grp)
         self._details_text = QtWidgets.QPlainTextEdit()
+        self._details_text.setObjectName("logText")
         self._details_text.setReadOnly(True)
-        self._details_text.setFixedHeight(80)
-        self._details_text.setStyleSheet("font-family: 'Consolas', monospace; font-size: 11px;")
-        det_l.addWidget(self._details_text)
+        self._details_text.setFixedHeight(72)
+        self._details_text.setPlaceholderText("Select a pair to see both paths and the exact distance.")
+        rl.addWidget(self._details_text)
 
         self._send_review_btn = QtWidgets.QPushButton("Send Matches to Duplicate Pair Review")
         self._send_review_btn.setEnabled(False)
         self._send_review_btn.setToolTip(
-            "Not implemented. Tools → Pair Review reviews the Duplicate Finder's plan instead."
+            "Not implemented. Duplicates → Pair review reviews the Find duplicates plan instead."
         )
-        det_l.addWidget(self._send_review_btn)
-        root.addWidget(details_grp)
+        send_row = QtWidgets.QHBoxLayout()
+        send_row.addStretch(1)
+        send_row.addWidget(self._send_review_btn)
+        rl.addLayout(send_row)
+        root.addWidget(results, 1)
 
     # ── Slots ─────────────────────────────────────────────────────────────
 

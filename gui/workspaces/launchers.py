@@ -2,8 +2,7 @@
 prototypes (Fuzzy finder, Scan engine, Bucketing).
 
 These tools still live in their own dialogs (``gui/dialogs/``); each section
-says what the tool is for and opens it. They used to be buttons in the
-Utilities page's "Diagnostics" tile. The prototypes carry an "Experimental"
+says what the tool is for and opens it. The prototypes carry an "Experimental"
 pill and a one-line "not ready to test" note: they are kept so the owner can
 see where they would live, not as part of the real duplicate workflow.
 
@@ -15,6 +14,11 @@ second, concurrent run.
 from __future__ import annotations
 
 from gui.compat import QtCore, QtWidgets, Slot
+from gui.themes.glass import apply_font
+from gui.themes.tokens import RADIUS, SPACE
+from gui.widgets.dupes_parts import GlyphLabel, hero_title
+from gui.widgets.glass import GlassPanel
+from gui.widgets.glyphs import set_glyph
 from gui.widgets.pill import ExperimentalPill
 from gui.workspaces.base import WorkspaceBase
 
@@ -48,7 +52,8 @@ class LauncherWorkspace(WorkspaceBase):
     """
 
     TITLE = ""
-    SUMMARY = ""           # what the tool is for (subtitle)
+    HEADLINE = ""          # the card title: what the tool is for (the tab names the tool)
+    SUMMARY = ""           # one line under it
     DETAILS: tuple[str, ...] = ()   # bullet points in the card
     OPEN_LABEL = "Open…"
     EXPERIMENTAL = False
@@ -63,44 +68,70 @@ class LauncherWorkspace(WorkspaceBase):
     # ── UI ────────────────────────────────────────────────────────────────
 
     def _build_ui(self) -> None:
+        """One glass card: what the tool is for, what it does (a row per
+        point), the Experimental marker where flagged, and Open. The section
+        tab already names the tool, so the card's title says what it is for."""
         cl = self.content_layout
+        card = self._make_card()
+        card.setObjectName("headerCard")
+        lay = QtWidgets.QVBoxLayout(card)
+        lay.setContentsMargins(16, 16, 16, 16)
+        lay.setSpacing(SPACE.md)
+
         title_row = QtWidgets.QHBoxLayout()
-        title_row.setSpacing(10)
-        title_row.addWidget(self._make_section_title(self.TITLE))
+        title_row.setSpacing(SPACE.sm)
+        title = hero_title(self.HEADLINE or self.TITLE)
+        title.setWordWrap(True)
+        title_row.addWidget(title)
         if self.EXPERIMENTAL:
             self.pill = ExperimentalPill()
             title_row.addWidget(self.pill, 0, QtCore.Qt.AlignmentFlag.AlignVCenter)
         title_row.addStretch(1)
-        cl.addLayout(title_row)
-        cl.addWidget(self._make_subtitle(self.SUMMARY))
+        lay.addLayout(title_row)
+        lay.addWidget(self._make_subtitle(self.SUMMARY))
 
         if self.EXPERIMENTAL:
+            well = GlassPanel("well", radius=RADIUS.sm)
+            well.setObjectName("experimentalWell")
+            wl = QtWidgets.QHBoxLayout(well)
+            wl.setContentsMargins(12, 10, 12, 10)
+            wl.setSpacing(SPACE.sm)
+            wl.addWidget(GlyphLabel("warning", role="warning"), 0, QtCore.Qt.AlignmentFlag.AlignTop)
             note = QtWidgets.QLabel(NOT_READY_NOTE)
             note.setObjectName("experimentalNote")
             note.setWordWrap(True)
-            cl.addWidget(note)
+            apply_font(note, "label")
+            wl.addWidget(note, 1)
+            lay.addWidget(well)
             self._note = note
 
-        card = self._make_card()
-        lay = QtWidgets.QVBoxLayout(card)
-        lay.setContentsMargins(16, 16, 16, 16)
-        lay.setSpacing(10)
-        lay.addWidget(self._make_card_title("What it does"))
         if self.DETAILS:
-            details = QtWidgets.QLabel("\n".join(f"•  {line}" for line in self.DETAILS))
-            details.setWordWrap(True)
-            lay.addWidget(details)
+            points = QtWidgets.QVBoxLayout()
+            points.setSpacing(SPACE.xs)
+            for line in self.DETAILS:
+                row = QtWidgets.QHBoxLayout()
+                row.setSpacing(SPACE.sm)
+                row.addWidget(GlyphLabel("chevron_right", role="accent"), 0, QtCore.Qt.AlignmentFlag.AlignTop)
+                text = QtWidgets.QLabel(line)
+                text.setWordWrap(True)
+                apply_font(text, "body")
+                row.addWidget(text, 1)
+                points.addLayout(row)
+            lay.addLayout(points)
+
         row = QtWidgets.QHBoxLayout()
-        self._open_btn = self._make_primary_button(self.OPEN_LABEL)
-        self._open_btn.setObjectName("launcherOpenBtn")
-        self._open_btn.clicked.connect(self.open_tool)
-        row.addWidget(self._open_btn)
-        row.addStretch(1)
-        lay.addLayout(row)
+        row.setSpacing(SPACE.sm)
         self._hint = QtWidgets.QLabel("The tool opens in its own window.")
         self._hint.setObjectName("statusHint")
         self._hint.setWordWrap(True)
-        lay.addWidget(self._hint)
+        row.addWidget(self._hint, 1)
+        self._open_btn = self._make_primary_button(self.OPEN_LABEL)
+        self._open_btn.setObjectName("launcherOpenBtn")
+        set_glyph(self._open_btn, "external")
+        self._open_btn.setToolTip(f"Open {self.TITLE} in its own window.")
+        self._open_btn.clicked.connect(self.open_tool)
+        row.addWidget(self._open_btn, 0, QtCore.Qt.AlignmentFlag.AlignVCenter)
+        lay.addLayout(row)
         cl.addWidget(card)
         cl.addStretch(1)
 
@@ -159,9 +190,9 @@ class LauncherWorkspace(WorkspaceBase):
 
 class PairReviewWorkspace(LauncherWorkspace):
     TITLE = "Pair review"
+    HEADLINE = "Decide pair by pair"
     SUMMARY = (
-        "Step through duplicate pairs side by side and decide, pair by pair, which "
-        "copy to keep."
+        "Step through duplicate pairs side by side and choose which copy to keep."
     )
     DETAILS = (
         "Reads the pairs from the duplicate preview in Docs/ (run Find duplicates first).",
@@ -180,7 +211,7 @@ class PairReviewWorkspace(LauncherWorkspace):
             QtWidgets.QMessageBox.information(
                 self, "Duplicate Pair Review",
                 "No duplicate preview found.\n\n"
-                "Run Duplicate Finder first to generate paired results.",
+                "Run Find duplicates first to generate paired results.",
             )
             return False
         return True
@@ -192,8 +223,9 @@ class PairReviewWorkspace(LauncherWorkspace):
 
 class FuzzyFinderWorkspace(LauncherWorkspace):
     TITLE = "Fuzzy finder"
+    HEADLINE = "Near-duplicate candidates"
     EXPERIMENTAL = True
-    SUMMARY = "Near-duplicate candidates from the fingerprints Find duplicates has already cached."
+    SUMMARY = "Lists likely duplicates using only the fingerprints Find duplicates has already cached."
     DETAILS = (
         "Runs the near-duplicate detector over cached fingerprints only; it does not "
         "fingerprint anything new.",
@@ -209,8 +241,9 @@ class FuzzyFinderWorkspace(LauncherWorkspace):
 
 class ScanEngineWorkspace(LauncherWorkspace):
     TITLE = "Scan engine"
+    HEADLINE = "A staged duplicate scan"
     EXPERIMENTAL = True
-    SUMMARY = "A staged duplicate scan: audio headers → fingerprint buckets → verification."
+    SUMMARY = "Audio headers first, then fingerprint buckets, then a verification pass."
     DETAILS = (
         "Writes its findings to a separate SQLite database; nothing in AlphaDEX reads "
         "that database yet, so its summary is the only output.",
@@ -225,6 +258,7 @@ class ScanEngineWorkspace(LauncherWorkspace):
 
 class BucketingWorkspace(LauncherWorkspace):
     TITLE = "Bucketing"
+    HEADLINE = "Duplicate buckets report"
     EXPERIMENTAL = True
     SUMMARY = "Groups a folder's tracks into duplicate buckets and writes an HTML report."
     DETAILS = (
