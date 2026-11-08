@@ -712,9 +712,13 @@ class PlayerWorkspace(WorkspaceBase):
     # ── Setup ──────────────────────────────────────────────────────────────
 
     def _setup_scroll(self) -> None:
-        """Override: no scroll area — player fills the viewport with a fixed layout."""
+        """Override: no scroll area — player fills the viewport with a fixed
+        layout. It still keeps the shell's room at the bottom, so the
+        floating Now Playing capsule never covers its controls."""
+        from gui.themes.tokens import SPACE
+
         outer = QtWidgets.QVBoxLayout(self)
-        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setContentsMargins(0, 0, 0, SPACE.page_bottom)
         outer.setSpacing(0)
         self._inner = GradientWidget()
         self._content_layout = QtWidgets.QVBoxLayout(self._inner)

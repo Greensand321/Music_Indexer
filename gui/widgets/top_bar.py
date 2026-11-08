@@ -118,8 +118,10 @@ class TopBar(QtWidgets.QWidget):
         line = QtWidgets.QHBoxLayout()
         line.setSpacing(10)
         line.setContentsMargins(0, 0, 0, 0)
-        self._path_label = QtWidgets.QLabel("No library selected")
+        from gui.widgets.glass import ElidedLabel
+        self._path_label = ElidedLabel("No library selected", QtCore.Qt.TextElideMode.ElideMiddle)
         self._path_label.setObjectName("libraryPath")
+        self._path_label.setMaximumWidth(self.PATH_MAX_WIDTH)
         self._path_label.setFont(font("label"))
         self._chip = _LibraryChip(self._path_label)
         line.addWidget(self._chip)
@@ -156,7 +158,7 @@ class TopBar(QtWidgets.QWidget):
         self._search.setToolTip("Press Enter to show matching tracks in the Player")
         self._search.setClearButtonEnabled(True)
         self._search.setFixedHeight(44)
-        self._search.setMinimumWidth(260)
+        self._search.setMinimumWidth(200)
         self._search.setMaximumWidth(300)
         self._search.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding,
                                    QtWidgets.QSizePolicy.Policy.Fixed)
@@ -190,9 +192,7 @@ class TopBar(QtWidgets.QWidget):
     def set_library(self, path: str) -> None:
         self._library_path = path
         if path:
-            fm = QtGui.QFontMetrics(self._path_label.font())
-            self._path_label.setText(
-                fm.elidedText(path, QtCore.Qt.TextElideMode.ElideMiddle, self.PATH_MAX_WIDTH))
+            self._path_label.setText(path)      # elided to fit when painted
             self._path_label.setToolTip(path)
         else:
             self._path_label.setText("No library selected")

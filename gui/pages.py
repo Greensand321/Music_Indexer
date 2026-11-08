@@ -59,6 +59,7 @@ class SegmentedTabBar(QtWidgets.QTabBar):
         self._from: QtCore.QRectF | None = None
         self._to: QtCore.QRectF | None = None
         self._hover = -1
+        self._last_index = -1     # the segment the thumb rests on
         self.currentChanged.connect(self._slide)
 
     # ── Geometry ──────────────────────────────────────────────────────────
@@ -90,9 +91,14 @@ class SegmentedTabBar(QtWidgets.QTabBar):
 
         if index < 0:
             return
+        previous, self._last_index = self._last_index, index
         target = self._segment(index)
-        start = self.thumb_rect()
-        if start is None or not self.isVisible():
+        # currentChanged arrives after the switch: start from where the thumb
+        # is painted now (mid-slide) or from the segment it rested on.
+        start = self._thumb
+        if start is None and 0 <= previous < self.count():
+            start = self._segment(previous)
+        if start is None or not self.isVisible() or start == target:
             motion.stop(self, "thumb")
             self._thumb = None
             self.update()

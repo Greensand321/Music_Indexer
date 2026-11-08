@@ -140,3 +140,33 @@ class ShadowLayer(QtWidgets.QWidget):
                          radius=self._radius, strength=self._strength)
         finally:
             p.end()
+
+
+class ElidedLabel(QtWidgets.QLabel):
+    """A label that shrinks with "…" instead of forcing its width.
+
+    ``text()`` stays the full text (tooltips, tests, accessibility); only the
+    painting elides. Colours come from the palette (the static stylesheet's
+    object-name roles), like any label."""
+
+    def __init__(self, text: str = "", mode: QtCore.Qt.TextElideMode = QtCore.Qt.TextElideMode.ElideRight,
+                 parent: QtWidgets.QWidget | None = None) -> None:
+        super().__init__(text, parent)
+        self._mode = mode
+        self.setSizePolicy(QtWidgets.QSizePolicy.Policy.Preferred,
+                           QtWidgets.QSizePolicy.Policy.Preferred)
+
+    def minimumSizeHint(self) -> QtCore.QSize:  # noqa: N802
+        hint = super().minimumSizeHint()
+        return QtCore.QSize(min(hint.width(), 48), hint.height())
+
+    def paintEvent(self, event: QtGui.QPaintEvent) -> None:  # noqa: N802
+        p = QtGui.QPainter(self)
+        try:
+            r = self.contentsRect()
+            fm = QtGui.QFontMetrics(self.font())
+            p.setFont(self.font())
+            p.setPen(self.palette().color(self.foregroundRole()))
+            p.drawText(r, int(self.alignment()), fm.elidedText(self.text(), self._mode, r.width()))
+        finally:
+            p.end()
