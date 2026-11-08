@@ -694,7 +694,9 @@ def _artwork_perceptual_hash(payload: bytes) -> int | None:
                 (ARTWORK_HASH_SIZE, ARTWORK_HASH_SIZE),
                 resample=_image_resample_filter(),
             )
-            pixels = list(resized.getdata())
+            # Mode "L" is one byte per pixel, row-major: the same values
+            # getdata() gave, without its Pillow 14 deprecation.
+            pixels = list(resized.tobytes())
     except Exception:
         return None
     if not pixels:
