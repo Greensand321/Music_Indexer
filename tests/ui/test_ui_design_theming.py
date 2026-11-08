@@ -220,7 +220,9 @@ def test_type_ramp_is_not_inverted(main_window):
         return size(w.font())
 
     body = size(QtWidgets.QApplication.font())
-    section, card = px("sectionTitle"), px("cardTitle")
+    # R2: the page no longer repeats its title in a "sectionTitle" label (the
+    # shell header shows it); the hero card's title is the top in-page heading.
+    section, card = px("organizeHeroTitle"), px("cardTitle")
     nav = size(main_window.findChild(QtWidgets.QPushButton, "navButton").font())
     assert min(section, card, body, nav) > 0, (section, card, body, nav)
     assert section > card >= body, (section, card, body)
