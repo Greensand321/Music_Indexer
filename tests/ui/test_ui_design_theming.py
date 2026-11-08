@@ -267,9 +267,10 @@ def test_log_drawer_follows_theme(qtbot):
         process_events(5)
         t = THEMES[key]
         assert drawer.status_colour() == t.log_warn
-        assert drawer._status_chip.palette().color(R.WindowText).name() == t.log_warn
-        assert drawer._log_body.sheet.palette().color(R.Window).name() == t.log_bg
-        assert drawer._toggle_icon.palette().color(R.WindowText).name() == t.log_text
+        # The status dot carries the colour; the captions stay muted.
+        assert drawer._status_dot.colour().name() == t.log_warn
+        assert drawer._status_chip.palette().color(R.WindowText).name() == t.text_secondary
+        assert drawer._toggle_icon.palette().color(R.WindowText).name() == t.text_secondary
         # The drawer is one surface (the material's card): opaque in classic themes.
         assert drawer.grab().toImage().pixelColor(drawer.width() // 2, 17).name() == t.card_bg
         doc = drawer._text.document()

@@ -237,10 +237,11 @@ def test_sidebar_pill_uses_slow_emphasis_and_is_reused(qtbot, motion):
 
 
 @pytest.mark.motion(time_scale=1.0)
-def test_log_drawer_slides_full_distance_without_per_frame_relayout(qtbot, motion):
-    """DS-18: the body takes its final height once, the sheet slides the full
-    height, and collapsing gives the height back at the end."""
-    from gui.widgets.log_drawer import LogDrawer, _DRAWER_EXPANDED
+def test_log_drawer_toggles_at_once_and_only_the_chevron_moves(qtbot, motion):
+    """DS-18 / R2: the body is shown at its full height (or hidden) in one
+    step, so the window is laid out once per toggle; nothing animates any
+    geometry. Only the chevron turns, painter-only."""
+    from gui.widgets.log_drawer import _DRAWER_EXPANDED, _HANDLE_HEIGHT, LogDrawer
 
     host = QtWidgets.QWidget()
     lay = QtWidgets.QVBoxLayout(host)
@@ -252,34 +253,31 @@ def test_log_drawer_slides_full_distance_without_per_frame_relayout(qtbot, motio
     host.show()
     process_events(20)
 
-    heights = []
-    original = drawer._on_reveal
-
-    def spy(v):
-        heights.append(drawer._log_body.height())
-        original(v)
-
-    drawer._on_reveal = spy
     drawer.toggle()
-    anim = mo.animation_for(drawer, "drawer")
-    assert anim.duration() == mo.BASE
-    motion.settle(2000)
-    process_events(10)
+    process_events(1)            # one layout pass, no animation frames
     body = drawer._log_body
-    assert body.height() == _DRAWER_EXPANDED
-    assert set(heights) == {_DRAWER_EXPANDED}, "the layout height must not change per frame"
-    assert body.sheet.y() == 0 and body.sheet.height() == _DRAWER_EXPANDED
-
-    drawer.toggle()
+    assert body.isVisible() and body.height() == _DRAWER_EXPANDED, "open at once"
+    anim = mo.animation_for(drawer, "chevron")
+    assert anim is not None and anim.duration() == mo.FAST
+    assert not [r for r in motion.records
+                if r.prop in ("geometry", "pos", "size", "minimumHeight", "maximumHeight")], \
+        "no geometry animation"
     motion.settle(2000)
     process_events(10)
-    assert drawer._log_body.height() == 0
+    assert drawer._chevron.turn == pytest.approx(1.0)
+    assert body.height() == _DRAWER_EXPANDED
+
+    drawer.toggle()
+    process_events(1)
+    assert not body.isVisible() and drawer.height() == _HANDLE_HEIGHT, "closed at once"
     assert not drawer.is_expanded()
+    motion.settle(2000)
+    assert drawer._chevron.turn == pytest.approx(0.0)
     assert motion.orphans() == []
 
 
 def test_log_drawer_toggle_spam_ends_consistent(qtbot, motion):
-    from gui.widgets.log_drawer import LogDrawer, _DRAWER_EXPANDED
+    from gui.widgets.log_drawer import _BODY_MIN, LogDrawer
 
     drawer = LogDrawer()
     qtbot.addWidget(drawer)
@@ -289,7 +287,7 @@ def test_log_drawer_toggle_spam_ends_consistent(qtbot, motion):
     motion.settle(2000)
     process_events(10)
     assert drawer.is_expanded()
-    assert drawer._log_body.height() == _DRAWER_EXPANDED
-    assert drawer._log_body.reveal == pytest.approx(1.0)
+    assert drawer._log_body.isVisible() and drawer._log_body.height() >= _BODY_MIN
+    assert drawer._chevron.turn == pytest.approx(1.0)
     assert len(_helper_children(drawer)) == 1
 
