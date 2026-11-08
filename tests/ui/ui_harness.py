@@ -355,7 +355,11 @@ class ThreadRecorder:
                 if app is not None:
                     app.processEvents()
                 if len(self._threads) == started:
-                    break
+                    # Done. Return without another processEvents: a timer
+                    # firing in it (e.g. the backdrop's 140 ms rebuild
+                    # debounce after set_library) would start a thread and
+                    # report it as "still running" although nobody waited.
+                    return []
                 continue
             if app is not None:
                 app.processEvents(QtCore.QEventLoop.ProcessEventsFlag.AllEvents, 20)
