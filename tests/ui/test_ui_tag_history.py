@@ -156,6 +156,50 @@ def test_selecting_another_apply_clears_a_stale_preview(make_workspace, changed_
     assert ws._plan is None and not ws._undo_btn.isEnabled()
 
 
+def test_glass_rows_pills_and_left_alone_rows(make_workspace, changed_library, dialogs, qtbot, threads):
+    """Liquid Glass (R2): the tool is a pill, "Left alone" rows are muted with
+    a pill and their reason, the value to restore is accent-tinted, and the
+    preview starts as an empty state."""
+    from gui.workspaces.metadata_views import DETAIL_ROLE, PILL_ROLE, TONE_ROLE, kind_of
+    from _helpers.meta_tags import set_genres
+
+    root, files, _log = changed_library
+    set_genres(files["edited.flac"], ["Edited By Hand"])
+    ws = make_workspace("tag_history", library_path=root)
+    first = ws._log_list.topLevelItem(0)
+    assert kind_of(first, 1) == "pill" and first.text(1) == "Normalize genres"
+    assert ws._preview_empty.isVisibleTo(ws) and not ws._preview.isVisibleTo(ws)
+    assert ws._refresh_btn.property("glyphName") == "refresh"
+    assert ws._refresh_btn.accessibleName() == "Refresh" and ws._refresh_btn.toolTip()
+    assert ws._undo_btn.property("glyphName") == "undo"
+
+    _preview(ws, qtbot, threads)
+    assert ws._preview.isVisibleTo(ws) and not ws._preview_empty.isVisibleTo(ws)
+    tree = ws._preview
+    by_file = {}
+    for i in range(tree.topLevelItemCount()):
+        by_file.setdefault(tree.topLevelItem(i).text(0), tree.topLevelItem(i))
+    restored = by_file["multi.flac"]
+    assert (kind_of(restored, 2), kind_of(restored, 3)) == ("muted", "accent")
+    edited = by_file["edited.flac"]
+    assert kind_of(edited, 0) == "muted" and kind_of(edited, 3) == "pill_reason"
+    assert edited.data(3, PILL_ROLE) == "Left alone"
+    assert edited.data(3, DETAIL_ROLE) == "edited since the apply"
+    assert edited.text(3) == "Left alone: edited since the apply"     # model text unchanged
+    stats = {k: ws._stats.tile(k).value() for k in ws._stats.keys()}
+    assert stats == {"fields": "2", "files": "2", "left": "1", "done": "0"}
+
+    # The undone apply is shown muted, its pill in the muted tone.
+    dialogs.answer_yes()
+    qtbot.mouseClick(ws._undo_btn, QtCore.Qt.MouseButton.LeftButton)
+    threads.wait_all()
+    qtbot.waitUntil(lambda: ws._apply_worker is None, timeout=20000)
+    undone = ws._log_list.topLevelItem(1)
+    assert kind_of(undone, 0) == "muted"
+    assert undone.data(1, TONE_ROLE) == "text_secondary"
+    assert ws._log_list.topLevelItem(0).data(1, TONE_ROLE) == "warning"   # an undo
+
+
 def test_undo_is_a_metadata_section(main_window):
     from gui import navigation as nav
 
