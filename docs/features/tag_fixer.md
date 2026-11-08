@@ -8,6 +8,11 @@ from the feature's name.*
 
 ---
 
+**Where to find it.** In the app the Tag Fixer is **Metadata → Tag Fixer**. The same
+page holds the two genre tools, **Metadata → Fill genres** and **Metadata → Normalize
+genres** (covered at the end of this document), and **Metadata → Undo changes**, which
+rolls back an earlier apply from any of the three.
+
 ## What it solves
 
 Ripped CDs, old downloads, and years of manual retagging leave a library full of
@@ -62,7 +67,7 @@ marked "applied". Every write — and every failure or skip — is recorded with
 before and after values in `Docs/tag_changes_tagfixer_<timestamp>.jsonl`. After
 applying, the written rows drop out of the table and the log is kept; there is no
 automatic re-scan. Only one tag-writing job runs at a time across the Tag Fixer and
-both Genre Normalizer tabs.
+both genre sections.
 
 **Undoing an apply.** Those logs are enough to put the old values back, and
 `controllers/tag_revert.py` does it the preview-first way: pick a log (newest first),
@@ -87,27 +92,26 @@ doesn't exist yet; every accepted change today goes through your review.
 ## Which online services actually answer
 
 The Tag Fixer can, in principle, ask five different services. Which ones a scan
-uses depends on what is installed and on Settings → Metadata Services:
+uses depends on what is installed and on **Settings → Metadata services**:
 
 - **AcoustID** always runs when it can. It fingerprints the audio itself (not just
   the existing tags) and, when it finds a MusicBrainz recording match, enriches the
   answer with that recording's album and genre tags. It needs fpcalc (Chromaprint)
   and the network; the key is the one in Settings, or the built-in key when that
   field is empty. If the enrichment step fails, the scan says so.
-- **MusicBrainz search** joins the scan when Settings → Service is set to
-  "MusicBrainz": each track is also looked up by its existing artist and title,
+- **MusicBrainz search** joins the scan when the Service in Settings → Metadata
+  services is set to "MusicBrainz": each track is also looked up by its existing artist and title,
   which mostly contributes album and genre proposals. MusicBrainz requests always
   use the app name / version / contact from Settings (blank fields fall back to
   "AlphaDEX 1.0"), so enrichment no longer depends on which page you opened first.
-- **Last.fm** joins only when a Last.fm API key is set in the `LASTFM_API_KEY`
-  environment variable. Settings does show an "API Key" field when you pick
-  "Last.fm", and "Test Connection" tests the key you type there, but the scan does
-  not read that field yet — and because it is the same saved field
-  (`metadata_api_key`) the AcoustID source reads, saving a Last.fm key there also
-  replaces your AcoustID key. Until this is fixed (see Known bugs in
-  **ROADMAP.md**), set the environment variable and leave the Settings field holding
-  your AcoustID key (or empty, for the built-in one). Picking "Last.fm" without the
-  variable makes the scan say where the key goes.
+- **Last.fm** joins only when a Last.fm API key is set: the one saved in Settings →
+  Metadata services, or the `LASTFM_API_KEY` environment variable, which wins when
+  both are set. Settings shows one key field for whichever service you pick, but each
+  service keeps its own key (`metadata_api_key` for AcoustID, `lastfm_api_key` for
+  Last.fm), so saving a Last.fm key no longer replaces your AcoustID key; "Test
+  Connection" tests the key you type. Picking "Last.fm" with no key set makes the scan
+  say where the key goes. (The field used to be shared, and the scan read the Last.fm
+  key from the environment variable only. Both are fixed.)
 - **Spotify** and **Gracenote** are honestly labeled as unavailable — see
   **architecture.md**'s note on this. They contribute nothing today.
 
@@ -123,12 +127,12 @@ wrong one, and it doesn't touch the genre at all when the lookup found none.
 The practical effect: running the Tag Fixer repeatedly on the same file can only ever
 *grow* its genre list, never correct a bad entry that's already present. If a track
 is mistagged as "Pop" and you'd like it purely as "Electronic," the Tag Fixer alone
-won't get you there — you'd need to clear the tag by hand first, or use the separate
-Genre Normalizer tooling (see below).
+won't get you there — you'd need to clear the tag by hand first, or use
+**Metadata → Normalize genres** (see below).
 
 ## The "dry run" checkbox — what it actually guards
 
-The Qt workspace has a "Dry run (propose only, do not write tags)" checkbox, checked
+The Tag Fixer section has a "Dry run (propose only, do not write tags)" checkbox, checked
 by default. It's worth understanding exactly what it does, because it's simpler than
 it sounds: it's a **pure interface gate**. If it's checked, clicking "Apply Selected"
 just shows a message telling you to uncheck it — the backend functions that actually
@@ -142,14 +146,14 @@ written to how many files.
 ## CLI vs. GUI: a real behavioral difference
 
 The Tag Fixer also has a command-line entry point (`python tag_fixer.py <folder>
-[--interactive]`), and it's worth knowing it behaves differently from the Qt
-workspace in two ways:
+[--interactive]`), and it's worth knowing it behaves differently from the Qt app's
+Tag Fixer in two ways:
 
 - **The CLI only ever writes artist and title**, even if a scan proposed album or
   genre changes too — those two fields are hard-coded into the CLI's apply call. Only
   the GUI paths (Qt and legacy Tkinter) can write album and genre corrections.
 - **The CLI skips files it already marked "applied" on a previous run** (and skips
-  anything that looks like a remix, by filename or title). The Qt workspace always
+  anything that looks like a remix, by filename or title). The Qt app always
   re-scans and re-queries every file, every time, regardless of prior status — so a
   fresh Qt scan re-hits AcoustID for files it already fixed last time.
 
@@ -173,25 +177,26 @@ app's "Reset Log" button for the Tag Fixer deletes this file outright — which 
 silently clears Library Sync's cache for that library. There's no warning that the
 two features share a database.)*
 
-## A quirk worth knowing: a test fixture ships live
+## Where the lookup sources come from
 
-The plugin system that powers the automatic scan discovers its lookup sources by
-scanning the `plugins/` folder for anything that looks like a plugin — including
-`plugins/test_plugin.py`, a fixture built for the automated test suite that returns a
-fake, perfect-confidence match for any file whose name starts with `dummy_`. It is
-not excluded from a normal run. In the extremely unlikely event you have a real file
-named `dummy_something.mp3`, it will get a fabricated tag proposal from this test
-fixture rather than a real lookup. Harmless in practice, but worth knowing if you
-ever see a suspiciously perfect, suspiciously generic match.
+The automatic scan loads its lookup sources from a fixed list of plugin modules in
+`plugins/` (AcoustID, Last.fm, MusicBrainz, and the shared service base class). It
+used to discover them by scanning the folder for anything that looked like a plugin,
+which also picked up `plugins/test_plugin.py` — a fixture for the automated test
+suite that returns a fake, perfect-confidence match for any file whose name starts
+with `dummy_` — and which could not find the plugins at all in a frozen (packaged)
+build. With the fixed list, the test fixture never runs in a real scan.
 
 ---
 
-## A related, differently-named feature: the Genre Normalizer
+## The genre tools: Metadata → Fill genres and Normalize genres
 
-The sidebar has a workspace called **Genre Normalizer**. It holds two genuinely
-different tools, and they are two tabs because they answer two different questions:
+The Metadata page has two genre sections. They are one panel underneath — still
+headed "Genre Normalizer", the name its sidebar entry had before the page structure
+changed — and two sections because they answer two genuinely different questions:
 
-- **Fill from MusicBrainz** — *"some of my tracks have no genre at all."* For each
+- **Fill genres** (the panel calls it "Fill from MusicBrainz") — *"some of my tracks
+  have no genre at all."* For each
   file with fewer than two existing genre values (every value is counted, not just
   the first), it looks the recording up on MusicBrainz by artist and title and takes
   the three most popular community tags. It is preview-first: **Look up genres**
@@ -206,7 +211,8 @@ different tools, and they are two tabs because they answer two different questio
   to write each file as soon as its lookup returned), writes exactly that list, and
   logs to `Docs/genre_update_log.txt` and `Docs/tag_changes_genre_fill_cli_*.jsonl`.
 
-- **Normalize with a mapping** — *"my genres are a mess of spellings."* This is the
+- **Normalize genres** ("Normalize with a mapping") — *"my genres are a mess of
+  spellings."* This is the
   canonical-mapping workflow: collapse "Hip Hop," "hip-hop," "hiphoprap," and "Rap"
   into whatever clean vocabulary *you* choose. It runs in four numbered steps on the
   screen, and the shape is deliberately preview-first:
@@ -232,8 +238,10 @@ different tools, and they are two tabs because they answer two different questio
      switching library throws the preview away. A file whose genres changed on disk
      since the preview is skipped.
 
-  Both tabs log every write with its previous value to
-  `Docs/tag_changes_genre_fill_*.jsonl` / `Docs/tag_changes_genre_normalize_*.jsonl`.
+  Both sections log every write with its previous value to
+  `Docs/tag_changes_genre_fill_*.jsonl` / `Docs/tag_changes_genre_normalize_*.jsonl`,
+  so either kind of apply can be rolled back from **Metadata → Undo changes**, the
+  same way as a Tag Fixer apply.
   An unsaved mapping in the editor is kept per library when you switch libraries,
   and "Load saved mapping" asks before replacing unsaved edits.
 
