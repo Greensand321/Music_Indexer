@@ -189,7 +189,11 @@ different tools, and they are two tabs because they answer two different questio
   that table is written. A genre the file already has is kept, with the new tags
   added after it. Files that already carry two or more genres are skipped, so this
   fills gaps rather than second-guessing choices you've already made. Opus files are
-  included, like everywhere else.
+  included, like everywhere else. The command-line version
+  (`python update_genres.py [folder] [--yes]`) follows the same rules and is now
+  preview-first too: it lists every planned change and asks before writing (it used
+  to write each file as soon as its lookup returned), writes exactly that list, and
+  logs to `Docs/genre_update_log.txt` and `Docs/tag_changes_genre_fill_cli_*.jsonl`.
 
 - **Normalize with a mapping** — *"my genres are a mess of spellings."* This is the
   canonical-mapping workflow: collapse "Hip Hop," "hip-hop," "hiphoprap," and "Rap"
