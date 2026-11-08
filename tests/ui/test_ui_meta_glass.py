@@ -16,10 +16,12 @@ def _hscroll_max(panel) -> int:
 
 
 @pytest.mark.parametrize("size", [(900, 600), (1300, 860), (1600, 1000)])
-def test_every_section_fits_without_horizontal_scroll(main_window, library, threads, size):
+def test_every_section_fits_without_horizontal_scroll(main_window, library, size):
     main_window.resize(*size)
-    main_window.set_library(str(library.root))
-    assert threads.wait_all(15_000) == []
+    # Only the Metadata panels get the library (a long path to elide); the
+    # window-wide library switch would also rebuild the album-art backdrop.
+    for panel in ("tag_fixer", "genres", "tag_history"):
+        main_window._workspaces[panel].set_library_path(str(library.root))
     for key in SECTIONS:
         main_window._on_nav_changed(key)
         process_events(30)

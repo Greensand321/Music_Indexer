@@ -38,7 +38,7 @@ _SOURCES_HINT = "Lookup sources come from Settings → Metadata services."
 _EMPTY_BEFORE = (
     "No fixes to review yet",
     "Find tag fixes looks each track up online and lists every proposed "
-    "change here, one row per field. Nothing is written until you apply.",
+    "change here, one row per field.",
 )
 _EMPTY_NONE = (
     "Nothing to fix",

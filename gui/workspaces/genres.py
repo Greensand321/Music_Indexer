@@ -46,14 +46,14 @@ _NORMALIZE_OWNER = "Genre normalize apply"
 _FILL_EMPTY = (
     "Nothing looked up yet",
     "Look up genres lists every track that would get genres added, with what "
-    "MusicBrainz matched. Nothing is written until you apply.",
+    "MusicBrainz matched.",
 )
 _FILL_NONE = ("No additions", "No track would get a genre added.")
-_FILL_READY = "Nothing is written until you apply."
+_FILL_READY = ""
 _NORMALIZE_EMPTY = (
     "Nothing previewed yet",
     "Preview changes lists every file whose genre tag the mapping would change, "
-    "before and after. Nothing is written until you apply.",
+    "before and after.",
 )
 _NORMALIZE_NONE = ("Nothing would change", "Every genre tag already matches the mapping.")
 # Width from which the mapping editor and its table sit side by side.
