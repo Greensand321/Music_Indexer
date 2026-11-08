@@ -544,3 +544,35 @@ short muted line saying what it is for, and buttons use painted glyphs instead o
   per-cell line.
 - **Genres, first load**: "Library changed — preview again" appears only when there was a plan or a lookup to drop.
 - **Motion**: switching between Fill and Normalize cross-fades. Since R1 it had been an instant swap.
+
+### G4. Organize (Indexer, Library Sync, File Cleanup, Exports)
+- **Library Sync no longer scrolls sideways.**
+  - One button row asked for about 1,090 px. The pickers are now a grid and the scan bars reflow.
+  - The review lists sit in a splitter: side by side when wide, stacked below about 880 px. The plan buttons wrap.
+  - Statuses read "Exact match" on screen; the engine value is unchanged underneath.
+- **Summaries**: the Indexer's and Library Sync's prose summaries → stat tiles plus a line saying what to do
+  next. The full sentences still go to the log and the Preview Ready box.
+- **Indexer**:
+  - The stepper tracks real state, so it is now a compact pill row.
+  - Phase C, Flush and Max workers sit in an Advanced well.
+  - Open report is a glyph button.
+- **File Cleanup and Exports tiles**:
+  - The cursor-following glow on a timer → static glass cards.
+  - The result area opened by animating its height → it fades in. The motion rule is never to animate geometry a
+    layout owns.
+  - The tile glyph badge and the unused text-scale API are removed.
+- **No emoji**: the Flag column and the right-click menu ("📋 Copy", "↻ Replace", "📝 Add note") use plain words
+  with painted icons. The threshold warning lost its "⚠" prefix; the warning colour carries it.
+- **Wording**:
+  - "Scan Both Libraries" → "Scan both folders";
+  - "Existing Library:" → "Library";
+  - "Export Logs…" → "Export log…";
+  - other labels changed only in casing.
+  - The codec status line no longer contains the full output path, which moved to an elided path row.
+- **File Cleanup preview dialog**:
+  - The confirm button's object name `cleanupConfirmBtn` → `primaryBtn`.
+  - Cancel is still the default button, so Enter never renames.
+- **Docs still using old labels**:
+  - `docs/library_sync_per_item_review_testing.md` (emoji labels);
+  - `docs/features/library_sync.md` (old capitalisation);
+  - `docs/architecture.md` ("Undo Last Cleanup").
