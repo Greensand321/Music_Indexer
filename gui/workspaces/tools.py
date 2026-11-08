@@ -1432,8 +1432,8 @@ class FileCleanupWorkspace(_ToolPanel):
         tile = ToolTile(
             "Clean up copy suffixes",
             "Remove the ‘ (1)’, ‘ - Copy’ and ‘ copy’ endings that "
-            "browsers, Windows Explorer and macOS Finder add. You review every rename first, "
-            "each one is logged to Docs/, and the last cleanup can be undone.",
+            "browsers, Explorer and Finder add. You review every rename first, and the last "
+            "cleanup can be undone.",
             hero=True,
             empty_title="Nothing previewed yet",
             empty_message="Preview cleanup checks every audio file outside the reserved "

@@ -546,6 +546,9 @@ class LibrarySyncWorkspace(WorkspaceBase):
                 self._exist_bar, self._exist_status = bar, status
             else:
                 self._incoming_bar, self._incoming_status = bar, status
+        # Shown from the first scan on (two empty bars before it say nothing).
+        self._scan_progress = sides
+        sides.setVisible(False)
         hl.addWidget(sides)
         cl.addWidget(hero)
 
@@ -1092,6 +1095,7 @@ class LibrarySyncWorkspace(WorkspaceBase):
         for bar in (self._exist_bar, self._incoming_bar):
             bar.setValue(0)
         self._exist_status.setText("Scanning…")
+        self._scan_progress.setVisible(True)
         self._incoming_status.setText("Waiting…")
         self._log("Starting library sync scan…", "info")
         self.status_changed.emit("Scanning…", _chip_colour("running"))
@@ -1508,6 +1512,7 @@ class LibrarySyncWorkspace(WorkspaceBase):
                     ", ".join(Path(m.incoming.path).name for m in matched),
                 ])
                 row.setToolTip(0, existing_path)
+                row.setToolTip(2, "\n".join(m.incoming.path for m in matched))
                 self._existing_table.addTopLevelItem(row)
 
     def _browse_folder(self, entry: QtWidgets.QLineEdit, title: str) -> None:

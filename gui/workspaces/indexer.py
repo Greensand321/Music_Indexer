@@ -41,8 +41,8 @@ _PLAN_TILES = (
     ("moves", "to move"),
     ("unchanged", "in place"),
     ("manual_review", "untagged"),
-    ("leftovers", "to tidy"),
-    ("empty_dirs", "to remove"),
+    ("leftovers", "non-audio"),
+    ("empty_dirs", "empty folders"),
 )
 _PLAN_TIPS = {
     "moves": "Audio files the plan moves or renames.",
@@ -406,7 +406,7 @@ class IndexerWorkspace(WorkspaceBase):
         sb.setSpacing(8)
         self._stats_caption = caption("Previewed plan")
         sb.addWidget(self._stats_caption)
-        self._stats = StatRow(list(_PLAN_TILES))
+        self._stats = StatRow(list(_PLAN_TILES), spacing=8)
         self._stats.setObjectName("indexerStats")
         sb.addWidget(self._stats)
         self._stats_box.setVisible(False)
