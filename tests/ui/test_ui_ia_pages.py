@@ -182,21 +182,24 @@ def test_home_scan_is_a_read_only_job(make_workspace, tmp_path, threads, monkeyp
     root = _home_library(tmp_path / "Lib")
     ws = make_workspace("home", library_path=root)
     assert started and started[0][0] == "HomeScanWorker"
-    kwargs = started[0][1]
-    assert kwargs["ask_before_quit"] is False and kwargs["group"] is None
+    # Both of Home's jobs (library health, albums to play) are read-only.
+    assert [name for name, _kw in started] == ["HomeScanWorker", "HomeAlbumScan"]
+    for _name, kwargs in started:
+        assert kwargs["ask_before_quit"] is False and kwargs["group"] is None
     assert wait_until(lambda: ws.health() is not None, 5000)
     assert threads.wait_all(5000) == []
     process_events(10)
-    texts = [w.text() for w in ws.findChildren(QtWidgets.QLabel)]
-    assert any("Manual Review/ — 2 tracks" in t for t in texts)
-    assert any(t.startswith("Indexer run — ") for t in texts)
-    assert ws._layout_label.text().startswith("✓")
+    assert ws._folder_tiles["Manual Review"].tile.value() == "2"
+    assert ws._folder_tiles["Quarantine"].tile.value() == "1"
+    assert "Indexer run" in [row.run.title for row in ws.run_rows()]
+    assert ws.layout_check() == (True, "matches the Indexer's layout")
 
 
 def test_home_without_a_library_starts_nothing(make_workspace, threads):
     ws = make_workspace("home")
     assert threads.started == []
-    assert ws._path_label.text() == "No library selected"
+    assert ws._spin_empty.isVisibleTo(ws) and ws._spin_empty.title() == "No library chosen"
+    assert ws.layout_check() == (None, "no library chosen")
     ws.on_activated()
     ws.refresh()
     assert threads.started == []
@@ -214,8 +217,13 @@ def test_home_handles_an_empty_library(make_workspace, tmp_path, threads):
     assert set(health.folder_counts.values()) == {None}
     texts = [w.text() for w in ws.findChildren(QtWidgets.QLabel)]
     assert any(t.startswith("No runs yet") for t in texts)
-    assert any("not created yet" in t for t in texts)
-    assert ws._layout_label.text().startswith("✗")
+    for folder in ws._folder_tiles.values():
+        assert folder.tile.value() == "–" and "has not been created yet" in folder.tile.toolTip()
+        assert not folder.open_btn.isVisibleTo(ws)
+    ok, text = ws.layout_check()
+    assert ok is False and text == "not organised by the Indexer yet"
+    assert ws._indexer_btn.isVisibleTo(ws)
+    assert ws._spin_empty.title() == "No albums to play yet"
 
 
 def test_home_ignores_a_stale_scan(make_workspace, tmp_path, threads):
@@ -240,11 +248,16 @@ def test_home_open_buttons_and_quick_actions(main_window, tmp_path, threads, mon
     assert wait_until(lambda: home.health() is not None, 5000)
     assert threads.wait_all(10_000) == []
     process_events(10)
-    assert "tracks" in home._stats_label.text(), "the top bar's stats reach Home"
+    # The top bar's stats reach Home, with the album count from the same walk.
+    shown = home.library_stats_shown()
+    assert (shown["tracks"], shown["artists"], shown["albums"]) == ("1", "1", "1")
 
-    open_buttons = [b for b in home.findChildren(QtWidgets.QPushButton) if b.property("openPath")]
-    open_buttons[0].click()
-    assert opened and os.path.exists(opened[0])
+    open_buttons = [b for b in home.findChildren(QtWidgets.QAbstractButton)
+                    if b.property("openPath") and b.isVisibleTo(home)]
+    assert len(open_buttons) >= 2       # Manual Review/, Quarantine/ and every run
+    for btn in open_buttons:
+        btn.click()
+    assert len(opened) == len(open_buttons) and all(os.path.exists(p) for p in opened)
 
     home._action_buttons["duplicates/find"].click()
     assert main_window.current_page().current_section() == "find"
