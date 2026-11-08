@@ -22,6 +22,41 @@ I stubbed `colorama` in-process for my probes. (I briefly `pip install`ed colora
 environment is back as I found it.) `hdbscan`, `librosa` and `umap` are also absent, so the real clustering, tempo and
 Auto-DJ paths cannot run here.
 
+## Sound Map now: the Liquid Glass restyle (R2, 2026-11-08)
+
+The audit below describes the pages as they were found. Clustered and Music Graph have since become the
+**Sound Map** page (Analyse · Map sections) and most of the bugs are fixed (see "Bugs found"). In R2 the Sound Map's
+contents moved onto the glass design system; `docs/gui_inventory.md` §6.8, §7.2, §7.3 and §7.6 have the details.
+
+- **Analyse** (`clustered_enhanced.py`): no repeated page title; one muted intro line and three cards.
+  - *Quick Start* is the hero card (`headerCard`): the fixed settings in one line, **Run Quick Start** (primary) and
+    **Guided setup…** (the wizard).
+  - *Results* shows an `EmptyState` before the first run, progress and Cancel during one, then a `StatRow`
+    (Clusters, Tracks, Unclustered, Not analysed, Silhouette toned good / fair / poor) with **Open the map**,
+    **Save cluster playlists…** (the page flow, mirrored) and **Quality report**.
+  - *Your own settings* replaces the read-only config text: the six `FEATURE_ORDER` blocks as pill toggles, the
+    algorithm and its parameters, the scaling and the playlist offer, all editable, and **Run with these settings**.
+    The wizard is now a guided way to fill this card in (it opens on the card's values and writes back), which
+    answers the "one form with presets" note above without removing the wizard.
+- **Map** (`graph.py`): the map is the hero card. Pan / Box / Lasso is a segmented control whose chosen mode is
+  raised (it used to look unchecked); Fit, Clear and Reload are glyph icon pills; the selection bar sits above the
+  plot so Play / Export stay in view. The legend and track details are glass side cards that move below the map in a
+  narrow window (no horizontal scroll at 900 px).
+- **Plot** (`interactive_scatter_plot.py`): no more opaque dark box. A transparent PyQtGraph view on the material's
+  well, a faint grid that moves with pan and zoom, and points as a vivid core with a soft ring. Each cluster has one
+  radial-gradient brush, so PyQtGraph's symbol atlas renders one sprite per cluster and every point is a cached pixmap
+  fragment (no per-point effects). Selection rings in the accent and dims the rest with a single item opacity; hover
+  is a one-point ring layer; the marquee is a dashed accent line. A theme switch repaints the well, grid and rings but
+  never re-sends the points. Measured with `FrameGapMeter` over pan, zoom and hover on 5,000 points: max ~30 ms,
+  p95 ~18 ms offscreen (`tests/ui/test_ui_sound_map_glass.py`).
+- **Legend and details** (`cluster_legend.py`, `track_details_panel.py`): glass rows whose colour dot is the
+  show/hide toggle (no per-row style sheets); an empty state, a rounded cover or music glyph, title / artist / album,
+  a genre / year / cluster strip, a middle-elided path and Play / Open folder.
+- **Dialogs**: the wizard has step pills that track the real step and a glass card per step; the quality report's
+  sections are `GlassCard`s (they used to be plain frames named `workspaceCard`) with a toned `StatRow`; the cluster
+  playlists preview puts options and table in one glass card, 34 px rows without grid lines, round colour dots and a
+  warnings well.
+
 ## Pages
 
 ### Playlist Generator (`gui/workspaces/playlists.py`, class `PlaylistsWorkspace`)
