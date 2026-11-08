@@ -820,6 +820,7 @@ class EnhancedClusteredWorkspace(WorkspaceBase):
 
         tiles: list[tuple[str, str]] = []
         values: dict[str, tuple[str, str]] = {}
+        noise_note = ""
         if "labels" in result:
             import numpy as np
             labels = np.asarray(result["labels"])
@@ -831,7 +832,7 @@ class EnhancedClusteredWorkspace(WorkspaceBase):
             if noise:
                 tiles.append(("noise", "Unclustered"))
                 values["noise"] = (f"{noise:,}", "")
-                self._noise_note = f"{noise / max(len(labels), 1):.0%} of the tracks"
+                noise_note = f"{noise / max(len(labels), 1):.0%} of the tracks"
         failed = result.get("failed") or {}
         if failed:
             tiles.append(("failed", "Not analysed"))
@@ -849,7 +850,7 @@ class EnhancedClusteredWorkspace(WorkspaceBase):
                 tile.set_value(value, tone=tone)
             if "noise" in values:
                 self._stats.tile("noise").setToolTip(
-                    f"Tracks HDBSCAN put in no cluster ({self._noise_note})")
+                    f"Tracks HDBSCAN put in no cluster ({noise_note})")
             if "failed" in values:
                 self._stats.tile("failed").setToolTip(
                     "Tracks that could not be analysed: left out, retried next run")

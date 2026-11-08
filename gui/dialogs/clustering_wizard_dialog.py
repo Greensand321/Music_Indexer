@@ -207,16 +207,19 @@ class _StepPills(QtWidgets.QWidget):
             p.setFont(self.font())
             for i, name in enumerate(self._names):
                 rect = QtCore.QRectF(i * (w + gap), 0, w, self.height())
+                done = i < self._current
+                check = 16 if done else 0          # room for the check glyph
                 if i == self._current:
                     paint_surface(p, rect, m.raised, radius=rect.height() / 2)
                     colour = qcolor(t.text_primary)
                 else:
                     paint_surface(p, rect, m.well, radius=rect.height() / 2)
-                    colour = qcolor(t.text_secondary if i < self._current else t.text_muted)
-                label = fm.elidedText(name, QtCore.Qt.TextElideMode.ElideRight, int(rect.width() - 14 - (16 if i < self._current else 0)))
+                    colour = qcolor(t.text_secondary if done else t.text_muted)
+                label = fm.elidedText(name, QtCore.Qt.TextElideMode.ElideRight,
+                                      int(rect.width() - 14 - check))
                 tw = fm.horizontalAdvance(label)
-                x = rect.center().x() - (tw + (16 if i < self._current else 0)) / 2
-                if i < self._current:
+                x = rect.center().x() - (tw + check) / 2
+                if done:
                     paint_glyph(p, QtCore.QRectF(x, rect.center().y() - 6, 12, 12), "check",
                                 qcolor(t.accent), weight=2.4)
                     x += 16
