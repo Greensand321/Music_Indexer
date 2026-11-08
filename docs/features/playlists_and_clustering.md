@@ -1,4 +1,4 @@
-# Feature — Playlists, Clustering & the Visual Music Graph
+# Feature — Playlists, Clustering & the Sound Map
 
 *This is the analytical heart of AlphaDEX: the part that doesn't just organize your
 music but listens to it and finds structure in it. It spans three connected ideas —
@@ -7,6 +7,12 @@ collection. This document explains all three in plain language, with the reasoni
 trade-offs behind each, and is honest about what is built today versus still planned.*
 
 ---
+
+**Where to find it.** All three live in the sidebar's **Listen** group. Rule-based
+playlists are the **Playlists** page (headed "Playlist Generator"). Clustering and the
+map share one page, the **Sound Map**, with two sections: **Sound Map → Analyse** runs
+the clustering, and **Sound Map → Map** shows the result. (Older material calls these
+the "Clustered" and "Music Graph" pages, or the "Visual Music Graph".)
 
 ## Three levels of "make me a playlist"
 
@@ -40,7 +46,7 @@ You can even combine dimensions — "slow but high-energy," for instance — to 
 specific moods. The tempo and energy *range* fields narrow this further: tracks
 outside the chosen BPM / energy window are left out of every bucket.
 
-**Nothing is written without your say-so.** Every mode of the Playlist Generator
+**Nothing is written without your say-so.** Every mode of the Playlists page
 (folder, tempo/energy, Auto-DJ and repair) first works out exactly which `.m3u`
 files it would write, then shows you that list — marking which existing playlists
 would be *replaced* — and only writes after you confirm. Any playlist it replaces is
@@ -106,10 +112,11 @@ more than a listener's ear might expect.
 **Genre normalization** tidies the messy, inconsistent genre labels in your files so
 your library moves toward fewer stray spellings of "Hip-Hop" — which matters here
 because clean genres make every genre-based view of the library (and any future
-genre playlists) more useful. The Genre Normalizer
-workspace offers two tools: filling *missing* genres from MusicBrainz, and collapsing
-whatever vocabulary your library has accumulated into a canonical one via a mapping
-you build once, preview, and apply. See **features/tag_fixer.md** for both.
+genre playlists) more useful. The **Metadata** page has two sections for this:
+**Metadata → Fill genres** fills *missing* genres from MusicBrainz, and
+**Metadata → Normalize genres** collapses whatever vocabulary your library has
+accumulated into a canonical one via a mapping you build once, preview, and apply.
+See **features/tag_fixer.md** for both.
 
 *(An earlier version of this document also described a "year-gap assistant" that
 built playlists telling a chronological story across your collection. That feature
@@ -192,8 +199,11 @@ there.
 
 ### The wizard: configuring without expertise
 
-Because these choices could overwhelm a newcomer, the enhanced clustering room wraps
-them in a **step-by-step wizard** that asks plain questions in sequence:
+Because these choices could overwhelm a newcomer, **Sound Map → Analyse** offers two
+ways in. Its **Quick Start** tab runs one fixed, sensible configuration (eight K-Means
+groups from tempo, timbre and energy). Its **Advanced** tab wraps every choice in a
+**step-by-step wizard** (**Configure with Wizard…**) that asks plain questions in
+sequence:
 
 1. **Which qualities of the sound should I pay attention to?** (feature selection,
    with friendly presets like "Fast," "Balanced," and "Complete")
@@ -285,10 +295,10 @@ You can still turn any hand-picked part of the map into one playlist: click a
 cluster in the legend (or lasso a region) and use **Export playlist…**. That export
 now goes through the same writer, so a playlist it replaces is backed up and logged.
 
-## Level 3: The Visual Music Graph
+## Level 3: The Sound Map
 
 Numbers and playlists are useful, but the most striking way to understand your
-collection is to **see** it. The Visual Music Graph turns your library into an
+collection is to **see** it. **Sound Map → Map** turns your library into an
 interactive picture: a scatter of dots where **each dot is a track**, and dots that
 sit near each other represent tracks that sound alike. Whole regions of the picture
 become visible "neighborhoods" of similar music. You can zoom and pan around it, hover
@@ -314,34 +324,12 @@ for this flattening (favoring a fast modern technique when it's available, and f
 back to a slower but vivid alternative otherwise), so the map you see is a faithful
 two-dimensional shadow of the true high-dimensional arrangement of your music.
 
-### What actually opens today: a 3-D browser view
-
-The "Music Graph" room in the sidebar is, today, a **launcher**: it checks whether
-cluster data is available, and when you click through, it opens a standalone web page
-in your default browser — a Three.js/WebGL 3-D scatter plot you can orbit, generated
-fresh from your most recent clustering run.
-
-Beyond orbiting and hovering, that page gives you: **spread control** (a slider plus
-1× / 10× / 30× / 50× / 100× presets) to pull the clusters apart until the structure
-is readable; **axes, grid, and orbit-ring toggles** for spatial reference; a
-click-to-select flow that exports a selection as CSV or an `.m3u` playlist; a legend
-that doubles as per-cluster show/hide switches; and an **Import JSON** button that
-lets you drop a different cluster file onto the same viewer without regenerating it
-from the app.
-
-> **A note if you used this before and found it dead.** For some time the generated
-> page was producing invalid JavaScript — the step that inlines your library's data
-> into the page left a stray token behind, which is a syntax error, so the whole
-> visualization silently failed to run. That's fixed. It went unnoticed for a while
-> because the automated tests only checked that certain *text* appeared in the
-> generated file, never that the file's code actually parsed; there's now a test that
-> checks the latter specifically.
-
 ### The in-app 2-D map
 
-The Music Graph workspace also draws the map **inside the app**, which is where the
-hands-on work happens. The window is split between the plot itself and a side column
-holding the cluster legend and a details panel.
+The Map section draws the map **inside the app**, which is where the hands-on work
+happens. The window is split between the plot itself and a side column holding the
+cluster legend and a details panel. With no analysis yet, it says to run one first
+(in the Analyse section).
 
 Three interaction modes sit above the plot:
 
@@ -372,30 +360,52 @@ listen to.
 > because one of its dependencies is missing), the plot area shows the actual reason,
 > the graph controls stay disabled, and the 3-D browser view keeps working regardless.
 
-The map refreshes itself: when you come to the Music Graph after a clustering run, it
+The map refreshes itself: when you come to the Map section after an analysis, it
 notices the new `cluster_info.json` and reloads (Reload is still there for edits
 made outside the app). A click *pins* a track in the details panel, so moving the
 mouse across other dots on the way to its Play button no longer swaps the track out.
 Hiding a cluster in the legend also removes its tracks from the current selection.
-The plot follows the app's light/dark theme.
+The plot follows the app's theme.
 
-The "Open Visual Graph" button in the clustering workspace's Results tab does now
-take you straight to the Music Graph room (it used to just show a message box asking
-you to click the sidebar yourself). Workspaces don't switch themselves — the button
-raises a `navigate_requested` signal and the main window performs the move, keeping
-navigation in one place.
+The **Open the map** button on Analyse's Results tab switches to Sound Map → Map (an
+older version only showed a message box asking you to click the sidebar yourself).
+Panels don't switch themselves — the button raises a `navigate_requested` signal and
+the main window performs the move, keeping navigation in one place.
 
-## Two workspaces exist; only one is live
+### The 3-D view, in your browser
 
-If you go looking at the code, you'll find two clustering workspaces:
-`clustered.py`, an older, simpler room, and `clustered_enhanced.py`, the
-three-tab (Quick Start / Advanced / Results) workspace this document has been
-describing. Only the enhanced one is reachable — the sidebar's "Clustered" entry
-is wired to it, and the older workspace is unreferenced dead code left in the
-repository. If you're reading the source to understand this feature, ignore
-`clustered.py`; it doesn't run.
+The Map's **Open 3D view** button opens a second, three-dimensional picture of the
+same analysis. It is not drawn inside the app: it is a standalone web page,
+`Docs/cluster_graph.html`, that `cluster_graph_3d.py` writes from your most recent
+analysis (each analysis writes it, and the button regenerates it if it is missing),
+and it opens in your default browser as a Three.js/WebGL 3-D scatter plot you can
+orbit.
 
-*(Historical note on the quality report: the dialog that displays your Silhouette /
+Beyond orbiting and hovering, that page gives you: **spread control** (a slider plus
+1× / 10× / 30× / 50× / 100× presets) to pull the clusters apart until the structure
+is readable; **axes, grid, and orbit-ring toggles** for spatial reference; a
+click-to-select flow that exports a selection as CSV or an `.m3u` playlist; a legend
+that doubles as per-cluster show/hide switches; and an **Import JSON** button that
+lets you drop a different cluster file onto the same viewer without regenerating it
+from the app.
+
+> **A note if you used this before and found it dead.** For some time the generated
+> page was producing invalid JavaScript — the step that inlines your library's data
+> into the page left a stray token behind, which is a syntax error, so the whole
+> visualization silently failed to run. That's fixed. It went unnoticed for a while
+> because the automated tests only checked that certain *text* appeared in the
+> generated file, never that the file's code actually parsed; there's now a test that
+> checks the latter specifically.
+
+## A few historical notes
+
+If you read older material or the git history: there used to be a second, simpler
+clustering panel (`clustered.py`) that nothing could reach, and an in-app 3-D plot
+widget that was built but never wired in. Both have been deleted. The Analyse section
+(`clustered_enhanced.py`) is the only clustering panel, and the browser page above is
+the only 3-D view.
+
+*(On the quality report: the dialog that displays your Silhouette /
 Davies-Bouldin / Calinski-Harabasz scores used to fail to render its per-cluster
 breakdown against any real result — it called an internal method that didn't exist
 under that name, and later rendered as three empty boxes because each section
@@ -415,9 +425,9 @@ density) with both K-Means and HDBSCAN; the five-step configuration wizard;
 the quality scores and the report dialog that displays them; **Save cluster
 playlists** — a previewed one-playlist-per-cluster export into a per-run folder,
 optionally offered right after an analysis; exporting a cluster or any selection
-as a playlist from the map; the 3-D browser visualization; and the in-app 2-D map with
+as a playlist from the map; the in-app 2-D map (Sound Map → Map) with
 pan/rectangle/lasso selection, hover and click inspection, legend-driven cluster
-visibility, and selection → Player / CSV / `.m3u`.
+visibility, and selection → Player / CSV / `.m3u`; and the 3-D view in the browser.
 
 **Still ahead (see ROADMAP.md):** a "smooth path through the cluster" playlist order,
 saving a cluster from the legend's right-click, playing a cluster from inside the save
