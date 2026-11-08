@@ -7,16 +7,26 @@ the main window then runs ``_on_settings_saved(panel)`` exactly as it did for
 the dialog (refresh cached appearance settings, tell every page, switch
 library if the default library changed here).
 
-Sections (switched by the page's tabs; the panel's own tab bar is hidden
-then): ``services`` · ``general`` · ``appearance``. Appearance embeds the
-theme picker (Liquid Glass, its accent, Reduce transparency and the classic
-themes: all apply instantly) and the backdrop / reduce-motion settings
-(applied on Save).
+Layout (Liquid Glass): one header action row (the page's purpose in one
+muted line, the save state, Revert and Save settings) above the sections,
+then one glass card per group of controls (``SECTION_GROUPS``):
+
+* ``services``: Lookup service (the service rows; Spotify and Gracenote
+  disabled with their tooltip) · Connection (keys, MusicBrainz identity,
+  Test connection);
+* ``general``: Default library · Duplicate thresholds · Motion (Reduce
+  motion);
+* ``appearance``: Theme (the theme picker: Liquid Glass with its accents and
+  Reduce transparency, Auto, the classic themes — all apply instantly) ·
+  Backdrop (Album art / Gradient / Plain, a segmented pill; applies on Save).
+
+Sections are switched by the page's tabs; the panel's own tab bar is hidden
+then.
 """
 from __future__ import annotations
 
 from gui.compat import QtCore, QtWidgets, Signal, Slot
-from gui.dialogs.settings_drawer import SettingsForm
+from gui.dialogs.settings_drawer import SECTION_GROUPS, SettingsForm
 from gui.workspaces.base import WorkspaceBase
 
 
@@ -40,76 +50,75 @@ class SettingsWorkspace(WorkspaceBase):
 
     # ── UI ────────────────────────────────────────────────────────────────
 
-    def _card(self, title: str, *widgets: QtWidgets.QWidget, hint: str = "") -> QtWidgets.QFrame:
+    def _card(self, title: str, body: QtWidgets.QWidget, subtitle: str = "") -> QtWidgets.QFrame:
+        from gui.themes.tokens import SPACE
+
         card = self._make_card()
         lay = QtWidgets.QVBoxLayout(card)
         lay.setContentsMargins(16, 16, 16, 16)
-        lay.setSpacing(12)
-        lay.addWidget(self._make_card_title(title))
-        if hint:
-            label = QtWidgets.QLabel(hint)
-            label.setObjectName("statusHint")
+        lay.setSpacing(SPACE.md)
+        head = QtWidgets.QVBoxLayout()
+        head.setSpacing(SPACE.xxs)
+        head.addWidget(self._make_card_title(title))
+        if subtitle:
+            label = QtWidgets.QLabel(subtitle)
+            label.setObjectName("mutedLabel")
             label.setWordWrap(True)
-            lay.addWidget(label)
-        for w in widgets:
-            lay.addWidget(w)
+            head.addWidget(label)
+        lay.addLayout(head)
+        lay.addWidget(body)
         return card
 
     def _view(self, *cards: QtWidgets.QWidget) -> QtWidgets.QWidget:
+        from gui.themes.tokens import SPACE
+
         page = QtWidgets.QWidget()
         lay = QtWidgets.QVBoxLayout(page)
-        lay.setContentsMargins(0, 12, 0, 0)
-        lay.setSpacing(16)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(SPACE.gutter)
         for card in cards:
             lay.addWidget(card)
         lay.addStretch(1)
         return page
 
+    def _group_cards(self, section: str) -> list[QtWidgets.QFrame]:
+        return [self._card(title, self.form.group(attr), subtitle)
+                for attr, title, subtitle in SECTION_GROUPS[section]]
+
     def _build_ui(self) -> None:
         from gui.themes.picker import ThemePickerPanel
+        from gui.themes.tokens import SPACE
 
         cl = self.content_layout
-        cl.addWidget(self._make_section_title("Settings"))
-        cl.addWidget(self._make_subtitle(
-            "Where metadata comes from, which library opens by default, the duplicate "
-            "thresholds, and how AlphaDEX looks. Themes apply as soon as you pick one; "
-            "everything else applies when you save."
-        ))
 
-        # Save / Revert sit above the sections, so they are in reach on all
-        # three (the Appearance section is taller than the window).
+        # Header action row: what the page is for, then Revert / Save, in
+        # reach on all three sections (Appearance is taller than the window).
         bar = QtWidgets.QHBoxLayout()
-        bar.setSpacing(8)
+        bar.setSpacing(SPACE.sm)
+        subtitle = self._make_subtitle(
+            "The look applies as you pick it; everything else when you save."
+        )
+        bar.addWidget(subtitle, 1)
         self._save_state = QtWidgets.QLabel("")
         self._save_state.setObjectName("statusHint")
-        bar.addWidget(self._save_state, 1)
+        bar.addWidget(self._save_state)
         self._revert_btn = QtWidgets.QPushButton("Revert")
         self._revert_btn.setToolTip("Show the saved settings again (drops unsaved changes)")
         self._revert_btn.clicked.connect(self._on_revert)
         bar.addWidget(self._revert_btn)
         self._save_btn = self._make_primary_button("Save settings")
-        self._save_btn.setObjectName("primaryBtn")
+        self._save_btn.setToolTip("Save every section's settings")
         self._save_btn.clicked.connect(self._on_save)
         bar.addWidget(self._save_btn)
         cl.addLayout(bar)
 
         self._tabs = QtWidgets.QTabWidget()
-        self._tabs.addTab(self._view(self._card(
-            "Metadata services", self.form.services_widget,
-            hint="Used by the Tag Fixer and the genre tools. An empty AcoustID key "
-                 "uses the built-in key.",
-        )), "Metadata services")
-        self._tabs.addTab(self._view(self._card(
-            "Library and duplicates", self.form.general_widget,
-            hint="The default library opens at start-up. The thresholds are the "
-                 "Duplicates page's starting values.",
-        )), "General")
+        self._tabs.addTab(self._view(*self._group_cards("services")), "Metadata services")
+        self._tabs.addTab(self._view(*self._group_cards("general")), "General")
         self.theme_picker = ThemePickerPanel()
         self._tabs.addTab(self._view(
-            self._card("Look", self.theme_picker,
-                       hint="Theme, accent and transparency apply as soon as you pick them."),
-            self._card("Backdrop and motion", self.form.appearance_widget,
-                       hint="Applies when you save."),
+            self._card("Theme", self.theme_picker, "Applies as soon as you pick it."),
+            *self._group_cards("appearance"),
         ), "Appearance")
         # A tab widget is as tall as its tallest page; size it to the one
         # shown instead, so short sections don't scroll into empty space.
