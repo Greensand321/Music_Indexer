@@ -110,7 +110,10 @@ app:
 - **Between lossy copies**, the higher bitrate wins, then sample rate and the rest.
 - **Readable cover art** only breaks a tie between copies of the same class (two
   FLACs, two MP3s). It used to come first, so an MP3 with a cover beat the FLAC
-  without one and the lossless master was the copy set aside.
+  without one and the lossless master was the copy set aside. OGG and Opus covers
+  (Vorbis `METADATA_BLOCK_PICTURE` comments, and the older `COVERART`) count as
+  readable: the shared reader used to miss them, so those files always looked
+  coverless — even right after the executor had embedded one.
 - Anything still tied is decided by the file path, deterministically — the same
   library always gives the same winner, whatever order the files were found in.
 

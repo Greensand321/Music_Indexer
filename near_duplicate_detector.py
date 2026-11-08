@@ -438,9 +438,10 @@ def duplicate_fingerprint_distance(fp1: str | bytes | None, fp2: str | bytes | N
     clip is far from its song, a copy missing its last tenth is only a near
     duplicate (review), and copies a few items apart still score 0.
 
-    (``fingerprint_distance`` keeps comparing the overlap only: the vendored
-    Library Sync engine and the Similarity page rely on that, see
-    tests/test_vendored_fingerprint_distance.py.)
+    (``fingerprint_distance`` keeps comparing the overlap only: the Similarity
+    page relies on that, and the vendored copy is pinned to it by
+    tests/test_vendored_fingerprint_distance.py. Library Sync's matcher uses
+    the vendored port of this function, ``library_sync.match_distance``.)
     """
     return fingerprint_distance(fp1, fp2, count_unmatched=True)
 

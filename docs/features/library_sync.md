@@ -108,15 +108,43 @@ that; later scans read it back. Recompute Matches reuses the index outright. A t
 default (0.3 / 0.35, which meant something else on the old scale) is replaced by 0.2
 once, with a line in the log; any other saved value is kept.
 
+**A clip is not the song.** A fingerprint covers the first two minutes of a track,
+so a 30-second clip's fingerprint is the *beginning* of the full song's. Comparing only
+the part the two have in common scored the pair 0 — an exact match — so an incoming
+full song was "already in the library" when the library held only a clip of it, and a
+lossless clip of a lossy library song was offered as an upgrade (one Replace flag away
+from swapping the song for half a minute of it). The part of the longer fingerprint
+that has no counterpart now counts as unrelated audio. A clip shorter than about half
+of the song's fingerprinted length is **new**; around half it is **low confidence**
+(sent to review, never decided automatically); the same recording in another codec,
+or a copy a few seconds shorter or shifted, scores as before. The candidate search
+still finds the song for its clip — they share their sub-fingerprints — so the pair
+is compared; it is the distance that now tells them apart. Two tracks longer than two
+minutes are compared on their first two minutes either way, so a long edit of a long
+song still matches it.
+
 **Short tracks are fingerprinted as they are.** The fingerprint covers the first
 two minutes of a track (the fingerprint duration setting). A track shorter than that
 used to be padded with silence up to the full window, so the prints of two
 *different* short tracks agreed on all that silence: unrelated 5-second clips scored
 about 0.01 (an "exact match"), 20-second clips about 0.05 and 40-second clips about
 0.1 — so interludes, intros and short songs of similar length were matched to each
-other. Nothing is padded now (`audio_norm.normalize_for_fp`). Fingerprints already in
-the cache from before this change are still padded until those files are
-fingerprinted again.
+other. Nothing is padded now (`audio_norm.normalize_for_fp`), and Library Sync's
+cache no longer reuses the padded fingerprints it already holds: a cached fingerprint
+from before the fix whose end is a run of padding silence (about 5 seconds of one
+repeated value) is a cache miss, so that track is fingerprinted once more on the next
+scan. Every other cached fingerprint stays valid, so only short tracks are redone —
+the stored duration could not tell them apart (it equals the window either way), the
+fingerprint itself can. Fingerprints written now are marked as made without padding
+and are always trusted, so a short track that really ends in silence is redone once,
+not on every scan. The decoded copy kept next to a fingerprint (see *Finding
+candidates*) is cleared whenever the fingerprint is rewritten.
+
+**A damaged cache is rebuilt, not fatal.** If Library Sync's fingerprint cache file is
+unreadable ("file is not a database"), it is renamed to `….corrupt-<date>` — not
+deleted — and a fresh cache is started; that scan simply fingerprints everything. A
+single unreadable row is a cache miss, and a fingerprint the cache cannot store is
+still used for the scan.
 
 Alongside the match, Library Sync also weighs **quality**: it compares the incoming
 file's format and bitrate against the existing one and labels the pairing as a

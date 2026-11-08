@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import shutil
+import sqlite3
 import struct
 import threading
 import time
@@ -30,7 +31,12 @@ from library_sync_indexer_engine import (
 from playlist_generator import update_playlists, write_playlist
 
 fingerprint_generator = idx_fingerprint_generator
+# The vendored engine's overlap-only metric (pinned to the root module's).
 fingerprint_distance = idx_near_duplicate_detector.fingerprint_distance
+# What the matcher scores pairs with: the same metric, but the part of the
+# longer print with no counterpart counts as unrelated audio, so a 30 s clip
+# is not "the same recording" as the full song whose print starts with it.
+match_distance = idx_near_duplicate_detector.duplicate_fingerprint_distance
 _ensure_db = idx_fingerprint_cache._ensure_db
 FORMAT_PRIORITY = idx_config.FORMAT_PRIORITY
 DEFAULT_FP_THRESHOLDS = idx_config.DEFAULT_FP_THRESHOLDS
@@ -389,19 +395,35 @@ def _scan_folder(
     conn = _ensure_db(db_path)
     to_compute: List[str] = []
     entry_map = {e["path"]: e for e in entries}
+    fc = idx_fingerprint_cache
 
     for entry in entries:
-        row = conn.execute(
-            "SELECT mtime, size, duration, fingerprint FROM fingerprints WHERE path=?",
-            (entry["path"],),
-        ).fetchone()
+        try:
+            row = conn.execute(
+                "SELECT mtime, size, duration, fingerprint, fp_scheme FROM fingerprints WHERE path=?",
+                (entry["path"],),
+            ).fetchone()
+        except sqlite3.DatabaseError as exc:  # an unreadable row is a cache miss
+            _dlog(f"DEBUG: cache row unreadable for {entry['path']}: {exc}", log_callback)
+            row = None
         cached_mtime = row[0] if row else None
         cached_size = row[1] if row else None
-        if row and abs(cached_mtime - entry["mtime"]) < 1e-6 and int(cached_size or 0) == int(entry["size"]):
+        current = bool(row) and fc.row_is_current(cached_mtime, cached_size, entry["mtime"], entry["size"])
+        # Older caches stored pyacoustid's ``bytes`` as a BLOB; records
+        # always carry text (signature(), to_dict() / JSON reports).
+        cached_fp = idx_near_duplicate_detector._fp_text(row[3]) if current else None
+        if current and not fc.fingerprint_trusted(cached_fp, row[4]):
+            # A short track fingerprinted before padding was dropped: its
+            # print is mostly padding silence and matches other short tracks.
+            if log_callback:
+                log_callback(json.dumps(
+                    {"event": "cache_miss", "path": entry["path"], "reason": "silence_padding"}
+                ))
+            _dlog(f"DEBUG: re-fingerprinting {entry['path']}: cached print is silence-padded", log_callback)
+            to_compute.append(entry["path"])
+        elif current:
             entry["duration"] = row[2]
-            # Older caches stored pyacoustid's ``bytes`` as a BLOB; records
-            # always carry text (signature(), to_dict() / JSON reports).
-            entry["fingerprint"] = idx_near_duplicate_detector._fp_text(row[3])
+            entry["fingerprint"] = cached_fp
             _dlog(f"DEBUG: cache hit {entry['path']}", log_callback)
             if log_callback:
                 log_callback(json.dumps({"event": "cache_hit", "path": entry["path"]}))
@@ -474,14 +496,18 @@ def _scan_folder(
                 continue
             entry["fingerprint"] = fp
             entry["duration"] = duration
-            conn.execute(
-                "INSERT OR REPLACE INTO fingerprints (path, mtime, size, duration, fingerprint) VALUES (?, ?, ?, ?, ?)",
-                (path, entry["mtime"], entry["size"], duration, fp),
-            )
+            try:
+                # A new print: stamped as unpadded, its old decoded blob cleared.
+                fc.store_fingerprint_row(conn, path, entry["mtime"], entry["size"], duration, fp)
+            except sqlite3.Error as exc:  # the cache is a speed-up only
+                _dlog(f"DEBUG: could not cache fingerprint for {path}: {exc}", log_callback)
             if cancel_event.is_set():
                 _dlog(f"DEBUG: cancellation after fingerprinting {path}", log_callback)
                 break
-        conn.commit()
+        try:
+            conn.commit()
+        except sqlite3.Error as exc:
+            _dlog(f"DEBUG: could not commit fingerprint cache: {exc}", log_callback)
     conn.close()
 
     records: List[TrackRecord] = []
@@ -521,7 +547,7 @@ def _print_info(
     * ``"chromaprint"`` — a compressed Chromaprint print (``str`` or ``bytes``)
       with enough content to identify a recording;
     * ``"plain"`` — anything else that is not empty (the ``"1,2,3"`` integer
-      lists of synthetic fixtures); compared with ``fingerprint_distance`` only;
+      lists of synthetic fixtures); compared with ``match_distance`` only;
     * ``"none"`` — missing, fpcalc's empty ``AQAAAA``, or shorter than
       ``MIN_MATCH_ITEMS`` / fewer than ``MIN_DISTINCT_ITEMS`` distinct items
       (silence): never a candidate, never a match.
@@ -585,9 +611,12 @@ class _DecodedPrintStore:
 
     def _decoded(self, rec: TrackRecord, text: str) -> Tuple[int, bytes] | None:
         fc = idx_fingerprint_cache
-        row = self._conn.execute(
-            "SELECT mtime, size, decoded FROM fingerprints WHERE path=?", (rec.path,)
-        ).fetchone()
+        try:
+            row = self._conn.execute(
+                "SELECT mtime, size, decoded FROM fingerprints WHERE path=?", (rec.path,)
+            ).fetchone()
+        except sqlite3.DatabaseError:  # an unreadable row: decode here, store nothing
+            row = None
         row_valid = bool(
             row
             and row[0] is not None
@@ -878,7 +907,7 @@ def _match_tracks(
             statuses: List[MatchStatus] = []
             for i in indices:
                 cand = index.records[i]
-                dist = fingerprint_distance(inc.fingerprint, cand.fingerprint)
+                dist = match_distance(inc.fingerprint, cand.fingerprint)
                 thr, margin = pair(cand.ext)
                 status = _classify_distance(dist, thr, margin)
                 candidate_meta.append((cand, dist, thr, margin, status))

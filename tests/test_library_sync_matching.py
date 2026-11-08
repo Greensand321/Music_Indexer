@@ -33,7 +33,7 @@ def test_classification_rules_and_best_match(monkeypatch):
     def fake_distance(fp1, fp2):
         return dist_map.get((fp1, fp2), 1.0)
 
-    monkeypatch.setattr(library_sync, "fingerprint_distance", fake_distance)
+    monkeypatch.setattr(library_sync, "match_distance", fake_distance)
 
     lib = [
         _record("lib-exact", "lib-exact"),
@@ -69,7 +69,7 @@ def test_classification_rules_and_best_match(monkeypatch):
 
 def test_threshold_precedence_and_margin_floor(monkeypatch):
     dist_map = {("inc-wav", "lib-wav"): 0.025}
-    monkeypatch.setattr(library_sync, "fingerprint_distance", lambda a, b: dist_map.get((a, b), 1.0))
+    monkeypatch.setattr(library_sync, "match_distance", lambda a, b: dist_map.get((a, b), 1.0))
 
     matches = library_sync._match_tracks(
         [_record("inc-wav", "inc-wav", ext=".wav")],
@@ -85,7 +85,7 @@ def test_threshold_precedence_and_margin_floor(monkeypatch):
 
 def test_quality_score_fallback_paths(monkeypatch):
     fmt_priority = {".flac": 3, ".mp3": 1}
-    monkeypatch.setattr(library_sync, "fingerprint_distance", lambda *_a, **_k: 0.2)
+    monkeypatch.setattr(library_sync, "match_distance", lambda *_a, **_k: 0.2)
 
     match = library_sync._match_tracks(
         [_record("upgrade", "inc", ext=".flac", bitrate=None)],

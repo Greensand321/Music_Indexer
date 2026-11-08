@@ -125,9 +125,10 @@ Status legend: **Done** (in the code now) · **Pending owner** (decision needed;
 - **Why**: measured with real Chromaprint, two *unrelated* 5 s clips scored 0.011–0.014 (under the 0.02
   exact-duplicate threshold). 20 s clips scored about 0.05 and 40 s clips about 0.1, both under Library Sync's
   0.2. So intros, skits and interludes could be matched to each other as duplicates.
-- **Old cached fingerprints**: the root cache marks rows with a new `fp_scheme`, and old rows whose fingerprint
-  ends in silence padding are recomputed (only those; see A30). Library Sync's separate cache gets the same
-  treatment (A31).
+- **Old cached fingerprints**: both caches now treat an old row (no `fp_scheme`) whose fingerprint ends in a
+  run of padding silence as a cache miss, and recompute only those. That covers the root cache (A30) and
+  Library Sync's vendored cache (A31). Library Sync's cache is the one that actually held padded prints,
+  because only its generator fingerprinted through `normalize_for_fp`.
 
 ### A16. M4A track and disc numbers read as "3/12", not the integer 3 — **Done**
 - `test_audio_metadata_reader.py` asserted an integer. Every other format already returned "N/T", and the M4A
@@ -255,6 +256,31 @@ Status legend: **Done** (in the code now) · **Pending owner** (decision needed;
     depend on it;
   - the planner limits (20,000 candidates, 500,000 comparisons, 120 s) still truncate very large libraries.
     It is now logged and flagged.
+
+### A31. Library Sync: a short clip no longer matches its full song; padded cache rows are redone — **Done**
+- **Was**: Library Sync's matcher scored pairs with the overlap-only `fingerprint_distance`. A 30 s clip's
+  print is a prefix of the full song's, so the pair scored 0.0 (exact match): an incoming full song was
+  "already in the library" when only a clip was there, and a lossless clip of a lossy song was a "possible
+  upgrade". `fingerprint_distance`'s root docstring said the vendored engine relied on the overlap-only
+  behaviour.
+- **Is**: `_match_tracks` scores with `library_sync.match_distance`, the vendored port of
+  `duplicate_fingerprint_distance` (unmatched length counts as unrelated audio). A clip under about half of
+  the song's printed length is NEW; around half is LOW_CONFIDENCE (review). `library_sync.fingerprint_distance`
+  is still bound to the overlap-only vendored metric, which stays identical to the root's
+  (`tests/test_vendored_fingerprint_distance.py` unchanged). Tests that fake the matcher's distance now
+  patch `library_sync.match_distance` (`tests/test_library_sync_matching.py`,
+  `tests/test_syncmatch_candidates.py`'s `distance_calls`): patching the old name would have silently
+  stopped reaching the matcher.
+- **Why**: the clip/song confusion could skip a full song or offer to replace it with a clip.
+- **Also**: Library Sync's vendored cache got the root's `fp_scheme`/padding check (see A15) and its
+  corrupt-file handling. The vendored generator's own reuse check is covered too: it used to hand back the
+  cached padded print even when the scan had rejected it.
+- **Undo**: point `match_distance` back at `idx_near_duplicate_detector.fingerprint_distance` in `library_sync.py`.
+- **Still open, for the owner**:
+  - an edit longer than 120 s (for example a 2:30 edit of a 5:00 song) still matches the full song, because both
+    fingerprints cover the same first 120 s. The track lengths could tell them apart; that is a policy choice;
+  - if re-fingerprinting a padded row fails, the track has no fingerprint and is planned as a COPY. It used to be
+    matched by the padded print.
 
 ## B. Structure that changed (adopted IA) — **Done**
 

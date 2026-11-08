@@ -213,6 +213,51 @@ def is_empty_chromaprint(fp: object) -> bool:
     return bool(data) and len(data) == 4 and data[1:4] == b"\x00\x00\x00"
 
 
+#: Trailing run of one repeated sub-fingerprint (~0.124 s each) that marks a
+#: print as made from silence-padded audio: ~5 s. Chromaprint turns digital
+#: silence into a single constant item (627964279 for the default algorithm,
+#: whatever the sample rate or channel count), so a short track padded to the
+#: fingerprint window ends in a long run of it. (Ported from the root module.)
+SILENCE_PADDING_MIN_ITEMS = 40
+# After its first item, a run of N equal items compresses to N - 1 zero
+# 3-bit codes, i.e. at least (3(N - 1) - 7) // 8 consecutive zero bytes: a
+# cheap test that rules out almost every print without decoding it.
+_PADDING_ZERO_BYTES = b"\x00" * ((3 * (SILENCE_PADDING_MIN_ITEMS - 1) - 7) // 8)
+
+
+def has_silence_padding(fp: object, *, min_items: int = SILENCE_PADDING_MIN_ITEMS) -> bool:
+    """True when a compressed print ends in ``min_items`` or more identical items.
+
+    That is the signature of the silence padding ``audio_norm.normalize_for_fp``
+    used to add to tracks shorter than the fingerprint window — which Library
+    Sync's generator always used (its default window is 120 s): the prints of
+    two *different* short tracks then agreed on the padding. Library Sync's
+    cache uses it to stop reusing such prints. Plain integer lists and anything
+    that is not a compressed Chromaprint fingerprint return False.
+    """
+    text = _fp_text(fp)
+    if not text:
+        return False
+    text = text.strip()
+    data = _b64decode_strict(text)
+    if not data or (min_items >= SILENCE_PADDING_MIN_ITEMS and _PADDING_ZERO_BYTES not in data):
+        return False
+    decoded = _decoded_packed(text)
+    if decoded is None:
+        return False
+    packed = decoded[1]
+    count = len(packed) // 4
+    if count < min_items:
+        return False
+    last = packed[-4:]
+    run = 1
+    while run < count and packed[-4 * (run + 1):-4 * run] == last:
+        run += 1
+        if run >= min_items:
+            return True
+    return run >= min_items
+
+
 def decode_chromaprint(fp: object) -> tuple[int, List[int]] | None:
     """Decode a compressed Chromaprint fingerprint (str or bytes).
 
@@ -240,11 +285,19 @@ def _pack_items(items: Sequence[int]) -> bytes:
     return struct.pack(f"<{len(items)}I", *(int(x) & 0xFFFFFFFF for x in items))
 
 
-def _packed_distance(pa: bytes, pb: bytes) -> float:
+def _packed_distance(pa: bytes, pb: bytes, *, count_unmatched: bool = False) -> float:
+    """Best bit error rate over the alignments within ``RAW_MAX_ALIGN_OFFSET``.
+
+    With ``count_unmatched`` the items of the longer print that have no
+    counterpart — beyond what the alignment window explains — count as
+    unrelated audio (half their bits differ) instead of being ignored (see
+    ``duplicate_fingerprint_distance``). Ported from the root module.
+    """
     len_a, len_b = len(pa) // 4, len(pb) // 4
     if not len_a or not len_b:
         return 1.0
     shortest = min(len_a, len_b)
+    longest = max(len_a, len_b)
     max_offset = RAW_MAX_ALIGN_OFFSET if shortest >= RAW_MIN_ALIGN_ITEMS else 0
     min_overlap = max(1, shortest - max_offset)
     best = 1.0
@@ -256,7 +309,8 @@ def _packed_distance(pa: bytes, pb: bytes) -> float:
             continue
         xa = int.from_bytes(pa[sa * 4:(sa + n) * 4], "little")
         xb = int.from_bytes(pb[sb * 4:(sb + n) * 4], "little")
-        ber = (xa ^ xb).bit_count() / (32 * n)
+        unmatched = max(0, longest - n - max_offset) if count_unmatched else 0
+        ber = ((xa ^ xb).bit_count() + 16 * unmatched) / (32 * (n + unmatched))
         if ber < best:
             best = ber
             if best == 0.0:
@@ -264,14 +318,16 @@ def _packed_distance(pa: bytes, pb: bytes) -> float:
     return best
 
 
-def raw_fingerprint_distance(a: Sequence[int], b: Sequence[int]) -> float:
+def raw_fingerprint_distance(
+    a: Sequence[int], b: Sequence[int], *, count_unmatched: bool = False
+) -> float:
     """Bit error rate between two raw Chromaprint fingerprints (0.0 – ~0.5).
 
     Identical audio scores 0.0; transcodes of the same recording score a few
     thousandths; unrelated recordings sit around 0.5 (random bits). The best
     of the alignments within ``RAW_MAX_ALIGN_OFFSET`` items is used.
     """
-    return _packed_distance(_pack_items(a), _pack_items(b))
+    return _packed_distance(_pack_items(a), _pack_items(b), count_unmatched=count_unmatched)
 
 
 def _parse_fp(fp: str) -> tuple[str, List[int] | bytes] | None:
@@ -323,7 +379,12 @@ def _hamming_bytes(a: bytes, b: bytes) -> float:
     return diff / (n * 8)
 
 
-def fingerprint_distance(fp1: str | bytes | None, fp2: str | bytes | None) -> float:
+def fingerprint_distance(
+    fp1: str | bytes | None,
+    fp2: str | bytes | None,
+    *,
+    count_unmatched: bool = False,
+) -> float:
     """Return a normalized distance between two fingerprints (0.0 = identical).
 
     * Compressed Chromaprint fingerprints (what fpcalc ``-json``, pyacoustid
@@ -356,11 +417,11 @@ def fingerprint_distance(fp1: str | bytes | None, fp2: str | bytes | None) -> fl
         if raw1 is not None and raw2 is not None:
             if raw1[0] != raw2[0]:
                 return 1.0  # different Chromaprint algorithms are not comparable
-            return _packed_distance(raw1[1], raw2[1])
+            return _packed_distance(raw1[1], raw2[1], count_unmatched=count_unmatched)
         ints = _plain_ints(fp2 if raw1 is not None else fp1)
         if ints is not None:
             packed = raw1[1] if raw1 is not None else raw2[1]
-            return _packed_distance(packed, _pack_items(ints))
+            return _packed_distance(packed, _pack_items(ints), count_unmatched=count_unmatched)
     p1 = _parse_fp(fp1)
     p2 = _parse_fp(fp2)
     if not p1 or not p2 or p1[0] != p2[0]:
@@ -371,6 +432,26 @@ def fingerprint_distance(fp1: str | bytes | None, fp2: str | bytes | None) -> fl
         return _hamming_ints(a, b)  # type: ignore[arg-type]
     else:
         return _hamming_bytes(a, b)  # type: ignore[arg-type]
+
+
+def duplicate_fingerprint_distance(fp1: str | bytes | None, fp2: str | bytes | None) -> float:
+    """``fingerprint_distance`` with the unmatched length counted (root port).
+
+    A print covers the first 120 s of a track, so a 30-second clip's print is
+    a prefix of the full song's, and the overlap-only distance scored the pair
+    0.0. Library Sync matched the clip to the song — "already in the library"
+    for an incoming full song when the library held only the clip, or a
+    "possible upgrade" offering to replace the song with a lossless clip.
+    Here the part of the longer print beyond the alignment window counts as
+    unrelated audio (half its bits differ): a clip under half its song's
+    printed length scores above 0.25 (new at the default threshold), about
+    half is borderline (review), and a copy a few seconds shorter, or a few
+    items shifted, scores as before.
+
+    ``fingerprint_distance`` keeps comparing the overlap only (and is pinned
+    to the root module by tests/test_vendored_fingerprint_distance.py).
+    """
+    return fingerprint_distance(fp1, fp2, count_unmatched=True)
 
 
 def _has_exclusion(info: Dict[str, str | None]) -> bool:

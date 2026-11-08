@@ -56,13 +56,13 @@ def _match(incoming, library, thresholds=None, **kw):
 def distance_calls(monkeypatch):
     """Count the exact fingerprint comparisons the matcher makes."""
     calls = []
-    real = library_sync.fingerprint_distance
+    real = library_sync.match_distance
 
     def counting(a, b):
         calls.append((a, b))
         return real(a, b)
 
-    monkeypatch.setattr(library_sync, "fingerprint_distance", counting)
+    monkeypatch.setattr(library_sync, "match_distance", counting)
     return calls
 
 
