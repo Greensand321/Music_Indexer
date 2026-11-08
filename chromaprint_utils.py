@@ -46,6 +46,13 @@ def _is_empty_compressed_fingerprint(fp: object) -> bool:
     return len(data) == 4 and data[1:4] == b"\x00\x00\x00"
 
 
+def _remove_quietly(path: str) -> None:
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+
+
 def missing_tools(names: tuple[str, ...] = ("fpcalc", "ffmpeg")) -> list[str]:
     """Names of the external tools ``fingerprint_fpcalc`` needs that are absent."""
     return [name for name in names if shutil.which(name) is None]
@@ -57,6 +64,13 @@ def ensure_tool(name: str) -> None:
         raise FingerprintError(f"Required tool '{name}' not found")
 
 
+def _subprocess_timeout() -> float:
+    try:
+        return float(load_config().get("fingerprint_subprocess_timeout_sec", FP_SUBPROCESS_TIMEOUT_SEC))
+    except (TypeError, ValueError):
+        return float(FP_SUBPROCESS_TIMEOUT_SEC)
+
+
 def trim_silence(
     input_path: str,
     *,
@@ -64,8 +78,15 @@ def trim_silence(
     min_silence_duration: float = 0.5,
     sample_rate: int = 44100,
     channels: int = 1,
+    timeout_sec: float | None = None,
 ) -> str:
-    """Use FFmpeg to trim leading and trailing silence."""
+    """Use FFmpeg to trim leading and trailing silence.
+
+    Bounded by the fingerprint subprocess timeout like the other two calls:
+    this one had none, so one file ffmpeg chokes on stalled the whole scan
+    (cancel could not interrupt it). ffmpeg gets no stdin, so it can never sit
+    waiting for keyboard input.
+    """
     if not os.path.exists(input_path):
         raise FingerprintError(f"file missing: {input_path}")
     ensure_tool("ffmpeg")
@@ -91,9 +112,25 @@ def trim_silence(
         str(channels),
         output_path,
     ]
+    if timeout_sec is None:
+        timeout_sec = _subprocess_timeout()
     start = time.perf_counter()
     _logger.info("Trim silence ffmpeg start: path=%s cmd=%s", input_path, cmd)
-    proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    try:
+        proc = subprocess.run(
+            cmd,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=timeout_sec,
+        )
+    except subprocess.TimeoutExpired as exc:
+        _remove_quietly(output_path)
+        _logger.error("Trim silence ffmpeg timeout: path=%s timeout=%.2fs", input_path, timeout_sec)
+        raise FingerprintError("Fingerprint timeout") from exc
+    except OSError as exc:
+        _remove_quietly(output_path)
+        raise FingerprintError(f"FFmpeg could not run: {exc}") from exc
     elapsed = time.perf_counter() - start
     _logger.info(
         "Trim silence ffmpeg end: path=%s returncode=%s elapsed=%.2fs",
@@ -102,7 +139,7 @@ def trim_silence(
         elapsed,
     )
     if proc.returncode != 0:
-        os.remove(output_path)
+        _remove_quietly(output_path)
         msg = _tail_stderr(proc.stderr.decode(errors="ignore"))
         _logger.error(
             "Trim silence ffmpeg failed: path=%s returncode=%s stderr_tail=%s",
@@ -132,13 +169,13 @@ def fingerprint_fpcalc(
     tmp2 = None
     to_process = path
     try:
-        cfg = load_config()
-        timeout_sec = float(cfg.get("fingerprint_subprocess_timeout_sec", FP_SUBPROCESS_TIMEOUT_SEC))
+        timeout_sec = _subprocess_timeout()
         if trim:
             tmp1 = trim_silence(
                 path,
                 threshold_db=threshold_db,
                 min_silence_duration=min_silence_duration,
+                timeout_sec=timeout_sec,
             )
         else:
             tmp1 = path
@@ -171,6 +208,7 @@ def fingerprint_fpcalc(
             subprocess.run(
                 ffmpeg_cmd,
                 check=True,
+                stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 timeout=timeout_sec,
@@ -212,6 +250,7 @@ def fingerprint_fpcalc(
             start = time.perf_counter()
             proc = subprocess.run(
                 cmd,
+                stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
