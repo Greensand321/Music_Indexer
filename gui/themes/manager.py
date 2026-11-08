@@ -237,6 +237,44 @@ QLabel#sidebarSectionLabel {{
     color: palette(placeholder-text);
 }}
 
+/* ── Page roles (R2). One block per area so parallel edits merge cleanly;
+   add rules for your area's objectNames inside your own block only. ── */
+
+/* [area:home] begin */
+
+/* [area:home] end */
+
+
+/* [area:organize] begin */
+
+/* [area:organize] end */
+
+
+/* [area:duplicates] begin */
+
+/* [area:duplicates] end */
+
+
+/* [area:metadata] begin */
+
+/* [area:metadata] end */
+
+
+/* [area:player] begin */
+
+/* [area:player] end */
+
+
+/* [area:sound_map] begin */
+
+/* [area:sound_map] end */
+
+
+/* [area:takeaway_settings] begin */
+
+/* [area:takeaway_settings] end */
+
+
 /* ── Menus and the menu bar (popups: opaque) ── */
 QMenuBar {{
     background: transparent;
@@ -284,7 +322,31 @@ _THEMED_OBJECT_NAMES = frozenset({
     "mutedLabel", "headerStats", "capsuleMeta", "capsuleTime", "landingHint",
     "landingFolderStats", "pageTitle", "brandName", "capsuleTitle", "landingTitle",
     "sidebarSectionLabel",
-})
+}) | frozenset().union(*(
+    # Page roles (R2): add an area's objectNames to its own set only, so
+    # parallel edits merge cleanly. Keep in step with the QSS blocks above.
+
+    # [area:home]
+    frozenset(),
+
+    # [area:organize]
+    frozenset(),
+
+    # [area:duplicates]
+    frozenset(),
+
+    # [area:metadata]
+    frozenset(),
+
+    # [area:player]
+    frozenset(),
+
+    # [area:sound_map]
+    frozenset(),
+
+    # [area:takeaway_settings]
+    frozenset(),
+))
 _THEMED_TYPES = (
     QtWidgets.QAbstractScrollArea,   # item views, headers, text edits, scroll areas
     QtWidgets.QStatusBar,
