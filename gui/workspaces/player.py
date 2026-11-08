@@ -63,13 +63,6 @@ _PENDING = "_pending"   # row-dict key: tags not read yet (placeholder row)
 # Helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _fmt_ms(ms: int) -> str:
-    """Format milliseconds as M:SS."""
-    ms = max(0, ms)
-    m, s = divmod(ms // 1000, 60)
-    return f"{m}:{s:02d}"
-
-
 def _load_row(path: str) -> dict:
     """Read tags for one audio file and return a row dict.  Never raises.
 
