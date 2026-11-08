@@ -488,3 +488,31 @@ short muted line saying what it is for, and buttons use painted glyphs instead o
 - **Scan engine dialog**: the log uses the shared mono log style (`logBox` → `logText`).
 - **Wording**: "Run Duplicate Finder first" → "Run Find duplicates first". The job name "Similarity" → "Compare
   two files".
+
+### G2. Sound Map
+- **Analyse: own settings**:
+  - **Was**: a read-only text summary that only the wizard could change ("Please configure with the wizard
+    first").
+  - **Is**: an editable "Your own settings" card: feature pills, algorithm, scaling, K or the HDBSCAN sizes, and
+    the playlist offer. The wizard pre-fills it and writes back to it.
+  - The "Output" lines CP-43 required in that summary are gone. The results hint and the offer checkbox carry
+    that wording now.
+- **Analyse: save button**: Save cluster playlists… also appears on the results card. It starts the same flow as
+  the page button and is enabled and disabled with it. CP-43 had kept it off the analysis page.
+- **Quality report**:
+  - **Was**: the silhouette verdict was normalised over −1…1, so 0.42 read "good" next to "Moderate silhouette
+    score".
+  - **Is**: good above 0.5 and fair above 0.3, the same as the Analyse tile and the report's own suggestions.
+- **Map**:
+  - The plot is transparent on a glass well with a faint hairline grid. It used to sit on `card_bg`, which PL-21
+    asserted.
+  - The selection outline is the accent colour (was `text_primary`), and the rest of the map dims.
+  - The selection bar moved above the plot.
+  - Labels:
+    - "Rectangle" → **Box**;
+    - "Open 3D view" → **3-D view**;
+    - "Export CSV…" → **CSV…**;
+    - "View Quality Report" → **Quality report**.
+  - The "Track Details" title became an empty state until a track is hovered or pinned.
+- **Legend**: the colour dot is the show/hide toggle (still exposed as `.checkbox`).
+- **Wizard**: the thin progress bar became step pills.
