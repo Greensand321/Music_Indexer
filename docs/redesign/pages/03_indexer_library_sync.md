@@ -11,6 +11,42 @@ This area is the "ORGANIZE" section of the sidebar (Ctrl+1, Ctrl+2). It contains
 
 Both pages follow a "preview, then confirm, then execute" shape. The flaw is that what gets executed is not what was previewed: both backends recompute the plan, and Library Sync drops the user's flags at execution time. Both backends also ignore the reserved-folder contract (they scan `Quarantine/` and `Trash/`), and both pages can abort the whole process because of how they manage QThread lifetime.
 
+## Status after the Liquid Glass restyle (R2, 2026-11-08)
+
+The intent map below is the 2026-11-07 analysis; the LIB bugs it lists were fixed
+in the phase-2 fixes (see the bug table). R2 then restyled both pages into the
+"Refined Liquid Glass" look without changing any behaviour, confirmation or safety
+path. Current screens: `docs/gui_inventory.md` §6.2 and §6.3.
+
+- **Library Sync no longer scrolls sideways (LIB-25, fixed).** One button row (Build,
+  Preview, Copy/Move, Execute, Export, playlist checkbox) gave the page a minimum
+  width of ~1090 px, so it scrolled horizontally even in the default 1300 × 860
+  window, and by ~440 px at the 900 × 600 minimum. Now the folder pickers are a grid
+  with round glyph Browse buttons, the plan buttons wrap (`FlowLayout`), the two
+  scan bars and the two review lists reflow (`ReflowBox`, `ReflowSplitter`: side by
+  side when there is room, stacked below ~880 px of card width) and nothing asks
+  for its side-by-side width as a minimum.
+  `tests/ui/test_ui_organize_glass.py` pins it at both sizes, empty and with
+  results and a plan.
+- **Steppers show real state as pills.** The old text steppers already advanced
+  (DS-22); they are now compact numbered `StepPills` (done steps get a check).
+- **Hero card per page** with the page's purpose as one line: the Indexer's holds
+  the library (middle-elided), the step pills, Dry run and Run / Cancel / Open report;
+  Library Sync's holds the two folders, the scan and its progress. The in-page titles
+  that repeated the shell header are gone.
+- **Numbers are stat tiles.** Indexer: the previewed plan (to move, in place,
+  untagged, non-audio, empty folders), relabelled after Execute (moved, in place,
+  problems, tidied, removed). Library Sync: the scan (incoming, new, in library,
+  upgrades, uncertain) and the plan (to add, to replace, skipped, need review; shown
+  only while the plan is up to date). Prose lines now say what to do next. Before a
+  run, an `EmptyState` says what will appear.
+- **Glass item views.** The review lists are transparent on the card with 34 px rows
+  and a rounded selection band; statuses read "Exact match" (the items keep the
+  engine names); the Flag column and the right-click menu use words and painted
+  glyphs instead of emoji. The logs use a mono role instead of an inline stylesheet.
+- Still decorative and still disabled, as before: Phase C, Flush (the Indexer's
+  Advanced well, with Max workers) and Preset name.
+
 ## Pages
 
 ### Indexer (`gui/workspaces/indexer.py`, class `IndexerWorkspace`; worker `IndexerWorker`)
@@ -185,6 +221,7 @@ Both pages follow a "preview, then confirm, then execute" shape. The flaw is tha
 | LIB-22 | UX | `music_indexer_api.py:1062-1263` | Indexer Execute | No record of the moves actually performed is written to `Docs/` (only the pre-move decision log). The run log lives only in the widget. This breaks CLAUDE.md's "log every action to Docs/" rule | confirmed-by-running (Docs held only `MusicIndex.html` and `indexer_log.txt`) | Write an executed-moves audit (JSON + HTML) like Library Sync's |
 | LIB-23 | UX | `gui/workspaces/library_sync.py:512-514` | Re-scan after flagging | All flags are dropped with no warning. `ReviewStateStore.reconcile_best_matches` exists, and the docs promise warnings, but it is never called | traced-in-code | Reconcile and report, or confirm before discarding |
 | LIB-24 | UX | `gui/workspaces/indexer.py:271-279` | Execute without ever running a preview | Allowed. The only gate is a "Have you reviewed…?" honour-system dialog | traced-in-code | Enable Apply only when a fresh preview exists for this library |
+| LIB-25 | layout | `gui/workspaces/library_sync.py` (plan button row) | Open Library Sync in the default 1300 × 860 window, or at the 900 × 600 minimum | The page is wider than the window (minimum ~1090 px) and scrolls sideways | confirmed-by-running (R2) | **Fixed in R2:** buttons wrap, folders and lists reflow; `test_library_sync_fits_without_horizontal_scroll` |
 
 ## Most important redesign insights
 1. **"What you preview is what executes" is broken on both pages.** The fix is architectural, not cosmetic: one persisted plan object, rendered in-app, executed verbatim, and invalidated by any input change. The UI should be built around that plan view.

@@ -148,6 +148,8 @@ def test_scan_through_the_page_recognises_every_copy(make_workspace, tmp_path, m
         "shifted.mp3": "COLLISION",
         "brand_new.flac": "NEW",
     }
-    summary = ws._match_summary_lbl.text()
-    assert "1 new" in summary and "3 already in library (1 possible upgrade(s))" in summary
-    assert "0 low confidence" in summary
+    # The scan summary is a row of stat tiles (the redesign moved the counts
+    # out of the prose line).
+    stats = ws.scan_stats()
+    assert stats["new"] == "1" and stats["matched"] == "3" and stats["upgrades"] == "1"
+    assert stats["low_confidence"] == "0" and stats["incoming"] == "4"

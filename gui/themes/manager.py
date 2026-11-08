@@ -246,7 +246,15 @@ QLabel#sidebarSectionLabel {{
 
 
 /* [area:organize] begin */
-
+/* Hero card titles (font: the title role, set in code). */
+QLabel#organizeHeroTitle {{
+    color: palette(window-text);
+}}
+/* Run logs on the Organize pages and Exports: mono, on the normal field. */
+QPlainTextEdit#organizeLog {{
+    font-family: {MONO_STACK};
+    font-size: {caption}px;
+}}
 /* [area:organize] end */
 
 
@@ -376,7 +384,7 @@ _THEMED_OBJECT_NAMES = frozenset({
     frozenset(),
 
     # [area:organize]
-    frozenset(),
+    frozenset({"organizeHeroTitle"}),
 
     # [area:duplicates]
     frozenset({"dupStepRow", "dupGroupList", "dupHeroTitle", "experimentalNote"}),

@@ -81,6 +81,36 @@ This area holds the app's catch-all screens. **Utilities** (sidebar key `tools`,
   - Attributes to latch onto: `_exclude_flac_cb`, `_dupe_tracks_cb` (`_PillToggle`, use `setChecked`), `_codec_ext_cbs[ext]`, `_omit_paths_cb`, `_codec_status`, `_at_status`, `_at_log`, `_at_prog`, `_at_open`, `_at_folder`, `_cleanup_run_btn`, `_cleanup_log`, `_cleanup_status`, `_val_log`, plus tiles via `findChildren(ToolTile)`. The diag buttons have no objectName or text (text is in a child QLabel), so tests must call `_on_m4a_tester()` etc. directly. **Add objectNames.**
   - Patch the dialog classes in their modules (`gui.dialogs.*`), since the slots import them lazily.
 
+### File Cleanup and Exports after the Liquid Glass restyle (R2, 2026-11-08)
+
+The Utilities page described above was split by the information architecture into
+**Organize → File Cleanup** (`FileCleanupWorkspace`) and **Take away → Exports**
+(`ExportsWorkspace`), both still in `tools.py`. R2 restyled both without changing a
+worker, a confirmation or a library-write lock. Current screens:
+`docs/gui_inventory.md` §6.4, §6.11 and §7.7.
+
+- **`ToolTile` is a `GlassCard`.** It paints the theme's card surface (opaque in
+  classic themes and with Reduce transparency) and its shadow is painted by the page
+  like any card's. The cursor-following hover glow and its timer are gone (the DS-09
+  timer test now checks that hovering starts no timer or animation; the DS-08 tint
+  test checks that a light theme gives a light tile). `_GlassBadge` (a text glyph in
+  an accent square) and the unused text-scale API went with it.
+- Each tile: a title, one muted line, a **status pill** (Ready / Running… / Done /
+  Error / Cancelled, tinted by tone, with a check or warning glyph; no ⧖ ✓ ✗
+  characters), an **EmptyState before the first run**, pill buttons with painted
+  glyphs, and a result area that fades in (opacity) instead of animating its height,
+  which a layout owns. The written file shows as a middle-elided path with the full
+  path in its tooltip, instead of being pasted into the status line.
+- File Cleanup is one **hero** tile ("Clean up copy suffixes"). Exports keeps two
+  tiles under a one-line purpose; the codec chips are painted toggles (they used to
+  restyle themselves with an inline stylesheet on every toggle and theme change).
+- The preview dialog's contents (the window chrome is the shell's): a title, the
+  counts as stat tiles, the plan as a glass list on a card, a muted note, and the
+  confirm button as the one primary button. Cancel stays the default button, so
+  Enter never renames.
+- In-page titles that repeated the shell header are gone; the hygiene counts for
+  this file dropped by four inline stylesheets and two `font-size` literals.
+
 ### Artist / Title Export (tile; `ArtistTitleWorker`)
 - **Intent:** produce a plain-text "what's in my library" list (e.g. to share or diff against a wishlist).
 - Reads tags on a worker thread. Missing title falls back to the filename stem, and missing artist becomes "Unknown Artist". Includes files in reserved folders such as `Quarantine/` (confirmed: a quarantined `loser.mp3` appears as "Unknown Artist - loser"; TOOL-14). Output path is fixed, so each run overwrites the previous file silently (acceptable for a report). Both toggles are read (`tools.py:1180-1181`) and functional.

@@ -14,12 +14,64 @@ import webbrowser
 from pathlib import Path
 
 from gui.compat import QtCore, QtWidgets, Signal, Slot
+from gui.themes import motion
+from gui.themes.glass import apply_font
 from gui.themes.manager import get_manager
+from gui.widgets.glass import ElidedLabel, GlassPanel
+from gui.widgets.glass_parts import EmptyState, StatRow
 from gui.workspaces.base import WorkspaceBase
+from gui.workspaces.organize_parts import (
+    FlowLayout, StepPills, caption, glyph_button, hero_title, path_well, thin_bar,
+)
 
-_STEPS = ("1. Preview (dry run)", "2. Review HTML report", "3. Execute changes")
-_RUN_PREVIEW_TEXT = "▶  Run Preview"
-_RUN_EXECUTE_TEXT = "▶  Execute Previewed Plan"
+# The step pills show real state: no preview → 0, a preview of this library
+# → 1 (review its report), Execute selected or running → 2.
+_STEPS = ("Preview", "Review the report", "Execute")
+_RUN_PREVIEW_TEXT = "Run preview"
+_RUN_EXECUTE_TEXT = "Execute previewed plan"
+_PHASES = (
+    ("Phase A — Scanning", "Find audio files (reserved folders are skipped)."),
+    ("Phase B — Planning", "Read tags, build the rename/move plan and the HTML report."),
+    ("Phase C — Applying changes", "Move files into place (Execute only)."),
+)
+# Results tiles: the previewed plan, then (relabelled) what the execute did.
+# Labels stay short (five tiles share 560 px at the minimum window); each
+# tile's tooltip says it in full.
+_PLAN_TILES = (
+    ("moves", "to move"),
+    ("unchanged", "in place"),
+    ("manual_review", "untagged"),
+    ("leftovers", "non-audio"),
+    ("empty_dirs", "empty folders"),
+)
+_PLAN_TIPS = {
+    "moves": "Audio files the plan moves or renames.",
+    "unchanged": "Audio files already where they belong.",
+    "manual_review": "Files missing the tags the layout needs: they go to Manual Review/.",
+    "leftovers": "Non-audio files swept into Trash/ or Docs/ (their folders are kept).",
+    "empty_dirs": "Folders left empty by the moves, removed afterwards.",
+}
+_EXECUTE_LABELS = {
+    "moves": "moved",
+    "unchanged": "in place",
+    "manual_review": "problems",
+    "leftovers": "tidied",
+    "empty_dirs": "removed",
+}
+_EXECUTE_TIPS = {
+    "moves": "Audio files moved or renamed (Manual Review/ included).",
+    "unchanged": "Audio files that were already where they belong.",
+    "manual_review": "Files that could not be moved; they were left in place, nothing was "
+                     "overwritten. The status line names the first one.",
+    "leftovers": "Non-audio files moved into Trash/ or Docs/.",
+    "empty_dirs": "Empty folders removed.",
+}
+_NO_LIBRARY = "No library selected. Choose one with Change library."
+_NO_PREVIEW = (
+    "No preview yet",
+    "Run preview to see how many files would move, which go to Manual Review and "
+    "what gets tidied. Nothing changes until you execute.",
+)
 _PHASE_C_TIP = (
     "Not used: the current indexer engine has no cross-album phase, so it ignores "
     "this option (kept visible until the redesign decides its fate)."
@@ -204,7 +256,6 @@ class IndexerWorkspace(WorkspaceBase):
         self._report_path: str = ""
         self._plan = None              # IndexerPlan from the last successful preview
         self._plan_library: str = ""   # library the plan belongs to
-        self._step_labels: list[QtWidgets.QLabel] = []
         self._current_step = 0
         self._build_ui()
         self._refresh_controls()
@@ -212,172 +263,211 @@ class IndexerWorkspace(WorkspaceBase):
     def _build_ui(self) -> None:
         cl = self.content_layout
 
-        # ── Header card — title + description + workflow steps ─────────────
-        header_card = self._make_card()
-        header_card.setObjectName("headerCard")
-        hl = QtWidgets.QVBoxLayout(header_card)
-        hl.setContentsMargins(20, 16, 16, 16)
-        hl.setSpacing(8)
-        hl.addWidget(self._make_section_title("Indexer"))
-        hl.addWidget(self._make_subtitle(
-            "Scan your library, preview the rename/move plan as HTML, then execute when ready. "
-            "Execute applies exactly the previewed plan — run a preview first."
+        # ── Hero: the library, the mode and the main action ───────────────
+        hero = self._make_card()
+        hero.setObjectName("headerCard")
+        hl = QtWidgets.QVBoxLayout(hero)
+        hl.setContentsMargins(16, 16, 16, 16)
+        hl.setSpacing(12)
+        title_box = QtWidgets.QVBoxLayout()
+        title_box.setSpacing(4)
+        title_box.addWidget(hero_title("Organize this library"))
+        title_box.addWidget(self._make_subtitle(
+            "Rename and file every track into By Artist/ and By Year/. Preview first: "
+            "nothing moves until you execute the plan you reviewed."
         ))
+        hl.addLayout(title_box)
 
-        stepper = QtWidgets.QFrame()
-        stepper.setObjectName("workflowStepper")
-        sl = QtWidgets.QHBoxLayout(stepper)
-        sl.setContentsMargins(12, 8, 12, 8)
-        sl.setSpacing(4)
-        for i, step in enumerate(_STEPS):
-            lbl = QtWidgets.QLabel(step)
-            lbl.setObjectName("stepActive" if i == 0 else "stepInactive")
-            sl.addWidget(lbl)
-            self._step_labels.append(lbl)
-            if i < len(_STEPS) - 1:
-                arr = QtWidgets.QLabel("→")
-                arr.setObjectName("stepArrow")
-                sl.addWidget(arr)
-        sl.addStretch(1)
-        hl.addWidget(stepper)
-        cl.addWidget(header_card)
+        self._steps = StepPills(_STEPS)
+        hl.addWidget(self._steps)
 
-        # ── Options card ──────────────────────────────────────────────────
-        opt_card = self._make_card()
-        opt_layout = QtWidgets.QVBoxLayout(opt_card)
-        opt_layout.setContentsMargins(16, 16, 16, 16)
-        opt_layout.setSpacing(12)
-        opt_layout.addWidget(self._make_card_title("Options"))
+        self._library_lbl = ElidedLabel("", QtCore.Qt.TextElideMode.ElideMiddle)
+        self._library_lbl.setObjectName("indexerLibraryPath")
+        hl.addWidget(path_well(self._library_lbl))
+        self._show_library(self._library_path)
 
-        row1 = QtWidgets.QHBoxLayout()
-        self._dry_run_cb = QtWidgets.QCheckBox("Dry run (preview only — no files moved)")
+        self._dry_run_cb = QtWidgets.QCheckBox("Dry run: preview only, nothing is moved")
         self._dry_run_cb.setChecked(True)
         self._dry_run_cb.setToolTip(
-            "When checked, generates Docs/MusicIndex.html and Docs/indexer_log.txt "
-            "without moving or renaming any files. Uncheck to execute the last preview."
+            "When checked, Run writes Docs/MusicIndex.html and Docs/indexer_log.txt "
+            "without moving or renaming any file. Uncheck to execute the last preview."
         )
         self._dry_run_cb.toggled.connect(self._on_mode_toggled)
-        row1.addWidget(self._dry_run_cb)
-        row1.addStretch(1)
-        opt_layout.addLayout(row1)
+        hl.addWidget(self._dry_run_cb)
 
-        row2 = QtWidgets.QHBoxLayout()
+        btn_row = QtWidgets.QHBoxLayout()
+        btn_row.setSpacing(10)
+        self._run_btn = glyph_button(_RUN_PREVIEW_TEXT, "play", object_name="primaryBtn")
+        self._run_btn.clicked.connect(self._on_run)
+        self._cancel_btn = glyph_button("Cancel", "close")
+        self._cancel_btn.setEnabled(False)
+        self._cancel_btn.clicked.connect(self._on_cancel)
+        self._report_btn = glyph_button(
+            "Open report", "external",
+            tooltip="Open the HTML preview (Docs/MusicIndex.html) in your browser.",
+        )
+        self._report_btn.setEnabled(False)
+        self._report_btn.clicked.connect(self._on_open_report)
+        btn_row.addWidget(self._run_btn)
+        btn_row.addWidget(self._cancel_btn)
+        btn_row.addStretch(1)
+        btn_row.addWidget(self._report_btn)
+        hl.addLayout(btn_row)
+        cl.addWidget(hero)
+
+        # ── Options ───────────────────────────────────────────────────────
+        opt_card = self._make_card()
+        ol = QtWidgets.QVBoxLayout(opt_card)
+        ol.setContentsMargins(16, 16, 16, 16)
+        ol.setSpacing(12)
+        ol.addWidget(self._make_card_title("Options"))
+
         self._playlists_cb = QtWidgets.QCheckBox("Create playlists after execution")
         self._playlists_cb.setChecked(True)
+        self._playlists_cb.setToolTip(
+            "Checked: regenerate playlists after the moves. Unchecked: only update the "
+            "paths in existing playlists."
+        )
+        ol.addWidget(self._playlists_cb)
+
+        # Advanced. Phase C and Flush stay visible but disabled (the engine
+        # ignores them), each saying why in its tooltip.
+        adv = GlassPanel(surface="well", radius=16)
+        adv.setObjectName("indexerAdvanced")
+        al = QtWidgets.QVBoxLayout(adv)
+        al.setContentsMargins(14, 12, 14, 12)
+        al.setSpacing(8)
+        al.addWidget(caption("Advanced"))
+        flow = FlowLayout(hspacing=24, vspacing=8)
         self._cross_album_cb = QtWidgets.QCheckBox("Cross-album scan (Phase C)")
         self._cross_album_cb.setEnabled(False)
         self._cross_album_cb.setToolTip(_PHASE_C_TIP)
-        row2.addWidget(self._playlists_cb)
-        row2.addWidget(self._cross_album_cb)
-        row2.addStretch(1)
-        opt_layout.addLayout(row2)
-
-        # Advanced options. Flush is shown disabled (there is no cache to flush;
-        # a checkable group box would re-enable it when ticked).
-        adv_group = QtWidgets.QGroupBox("Advanced")
-        adv_form = QtWidgets.QFormLayout(adv_group)
-        adv_form.setContentsMargins(8, 4, 8, 8)
-
+        flow.addWidget(self._cross_album_cb)
         self._flush_cache_cb = QtWidgets.QCheckBox("Flush fingerprint cache before scan")
         self._flush_cache_cb.setEnabled(False)
         self._flush_cache_cb.setToolTip(_FLUSH_TIP)
-        adv_form.addRow(self._flush_cache_cb)
-
+        flow.addWidget(self._flush_cache_cb)
+        workers = QtWidgets.QWidget()
+        workers_row = QtWidgets.QHBoxLayout(workers)
+        workers_row.setContentsMargins(0, 0, 0, 0)
+        workers_row.setSpacing(10)
+        workers_lbl = QtWidgets.QLabel("Max workers")
+        workers_lbl.setToolTip(_WORKERS_TIP)
         self._max_workers_spin = QtWidgets.QSpinBox()
         self._max_workers_spin.setRange(1, 32)
         self._max_workers_spin.setValue(1)
         self._max_workers_spin.setToolTip(_WORKERS_TIP)
-        adv_form.addRow("Max workers:", self._max_workers_spin)
-
-        opt_layout.addWidget(adv_group)
+        self._max_workers_spin.setFixedWidth(96)
+        workers_lbl.setBuddy(self._max_workers_spin)
+        workers_row.addWidget(workers_lbl)
+        workers_row.addWidget(self._max_workers_spin)
+        flow.addWidget(workers)
+        al.addLayout(flow)
+        ol.addWidget(adv)
         cl.addWidget(opt_card)
+        # ── Progress and results ──────────────────────────────────────────
+        res_card = self._make_card()
+        rl = QtWidgets.QVBoxLayout(res_card)
+        rl.setContentsMargins(16, 16, 16, 16)
+        rl.setSpacing(12)
+        rl.addWidget(self._make_card_title("Progress and results"))
 
-        # ── Action card ───────────────────────────────────────────────────
-        action_card = self._make_card()
-        action_card.setObjectName("actionCard")
-        action_layout = QtWidgets.QVBoxLayout(action_card)
-        action_layout.setContentsMargins(16, 14, 16, 14)
-        action_layout.setSpacing(10)
-        action_layout.addWidget(self._make_card_title("Actions"))
-
-        btn_row = QtWidgets.QHBoxLayout()
-        self._run_btn = self._make_primary_button(_RUN_PREVIEW_TEXT)
-        self._run_btn.setMinimumWidth(140)
-        self._run_btn.clicked.connect(self._on_run)
-
-        self._report_btn = QtWidgets.QPushButton("📄  Open Report")
-        self._report_btn.setEnabled(False)
-        self._report_btn.clicked.connect(self._on_open_report)
-
-        self._cancel_btn = QtWidgets.QPushButton("✕  Cancel")
-        self._cancel_btn.setEnabled(False)
-        self._cancel_btn.clicked.connect(self._on_cancel)
-
-        btn_row.addWidget(self._run_btn)
-        btn_row.addWidget(self._report_btn)
-        btn_row.addWidget(self._cancel_btn)
-        btn_row.addStretch(1)
-        action_layout.addLayout(btn_row)
-        cl.addWidget(action_card)
-
-        # ── Progress card ─────────────────────────────────────────────────
-        prog_card = self._make_card()
-        prog_layout = QtWidgets.QVBoxLayout(prog_card)
-        prog_layout.setContentsMargins(16, 16, 16, 16)
-        prog_layout.setSpacing(10)
-        prog_layout.addWidget(self._make_card_title("Progress"))
-
+        # One thin pill per phase, side by side (Phase C only runs on Execute).
+        phases = QtWidgets.QHBoxLayout()
+        phases.setSpacing(12)
         self._phase_bars: list[tuple[QtWidgets.QLabel, QtWidgets.QProgressBar]] = []
-        phases = [
-            ("Phase A — Scanning", "Find audio files (reserved folders are skipped)"),
-            ("Phase B — Planning", "Read metadata, build the rename/move plan and HTML report"),
-            ("Phase C — Applying changes", "Move files into place (Execute only)"),
-        ]
-        for title, desc in phases:
-            phase_lbl = QtWidgets.QLabel(title)
-            phase_lbl.setObjectName("phaseLabel")
-            desc_lbl = QtWidgets.QLabel(desc)
-            desc_lbl.setObjectName("phaseDesc")
-            bar = QtWidgets.QProgressBar()
-            bar.setValue(0)
-            bar.setFixedHeight(6)
-            bar.setTextVisible(False)
-            prog_layout.addWidget(phase_lbl)
-            prog_layout.addWidget(desc_lbl)
-            prog_layout.addWidget(bar)
+        for title, desc in _PHASES:
+            col = QtWidgets.QVBoxLayout()
+            col.setSpacing(6)
+            bar = thin_bar()
+            bar.setToolTip(desc)
+            phase_lbl = ElidedLabel(title)
+            phase_lbl.setObjectName("mutedLabel")
+            phase_lbl.setToolTip(f"{title}: {desc}")
+            apply_font(phase_lbl, "caption")
+            col.addWidget(bar)
+            col.addWidget(phase_lbl)
+            phases.addLayout(col, 1)
             self._phase_bars.append((phase_lbl, bar))
+        rl.addLayout(phases)
 
         self._status_lbl = QtWidgets.QLabel("Ready to preview.")
         self._status_lbl.setObjectName("statusHint")
         self._status_lbl.setWordWrap(True)
-        prog_layout.addWidget(self._status_lbl)
-        cl.addWidget(prog_card)
+        rl.addWidget(self._status_lbl)
 
-        # ── Log card ──────────────────────────────────────────────────────
+        self._results_empty = EmptyState(*_NO_PREVIEW)
+        self._results_empty.setObjectName("indexerResultsEmpty")
+        rl.addWidget(self._results_empty)
+
+        self._stats_box = QtWidgets.QWidget()
+        sb = QtWidgets.QVBoxLayout(self._stats_box)
+        sb.setContentsMargins(0, 0, 0, 0)
+        sb.setSpacing(8)
+        self._stats_caption = caption("Previewed plan")
+        sb.addWidget(self._stats_caption)
+        self._stats = StatRow(list(_PLAN_TILES), spacing=8)
+        self._stats.setObjectName("indexerStats")
+        sb.addWidget(self._stats)
+        self._stats_box.setVisible(False)
+        rl.addWidget(self._stats_box)
+        cl.addWidget(res_card)
+
+        # ── Run log ───────────────────────────────────────────────────────
         log_card = self._make_card()
-        log_layout = QtWidgets.QVBoxLayout(log_card)
-        log_layout.setContentsMargins(16, 16, 16, 16)
-        log_layout.setSpacing(6)
-        log_layout.addWidget(self._make_card_title("Run log"))
-
+        ll = QtWidgets.QVBoxLayout(log_card)
+        ll.setContentsMargins(16, 16, 16, 16)
+        ll.setSpacing(8)
+        ll.addWidget(self._make_card_title("Run log"))
+        notes = caption(
+            "Written to Docs/: MusicIndex.html and indexer_log.txt on preview, "
+            "indexer_executed_*.txt / .json after Execute. Files missing tags go to "
+            "Manual Review/; playlists to Playlists/ when enabled."
+        )
+        notes.setWordWrap(True)
+        ll.addWidget(notes)
         self._log_area = QtWidgets.QPlainTextEdit()
         self._log_area.setReadOnly(True)
         self._log_area.setMinimumHeight(160)
-        self._log_area.setPlaceholderText("Output will appear here…")
-        log_layout.addWidget(self._log_area)
+        self._log_area.setPlaceholderText("Each run's log lines appear here.")
+        self._log_area.setObjectName("organizeLog")
+        ll.addWidget(self._log_area)
         cl.addWidget(log_card)
 
-        # ── Output notes ──────────────────────────────────────────────────
-        notes = QtWidgets.QLabel(
-            "Outputs: Docs/MusicIndex.html  ·  Docs/indexer_log.txt  ·  "
-            "Docs/indexer_executed_*.txt/.json (after Execute)  ·  "
-            "Manual Review/ for missing metadata  ·  Playlists/ when enabled"
-        )
-        notes.setObjectName("notesHint")
-        notes.setWordWrap(True)
-        cl.addWidget(notes)
-
         cl.addStretch(1)
+
+    # ── Results ───────────────────────────────────────────────────────────
+
+    def _show_library(self, path: str) -> None:
+        self._library_lbl.setText(path or _NO_LIBRARY)
+        self._library_lbl.setToolTip(path or "")
+
+    def _show_results_empty(self, title: str, message: str) -> None:
+        self._results_empty.set_text(title, message)
+        self._results_empty.setVisible(True)
+        self._stats_box.setVisible(False)
+
+    def _show_stats(self, caption_text: str, values: dict, labels: dict | None = None,
+                    tones: dict | None = None, tips: dict | None = None) -> None:
+        labels = labels or {}
+        tones = tones or {}
+        tips = tips or _PLAN_TIPS
+        self._stats_caption.setText(caption_text)
+        for key, default_label in _PLAN_TILES:
+            tile = self._stats.tile(key)
+            tile.set_label(labels.get(key, default_label))
+            tile.set_value(values.get(key, "–"), tone=tones.get(key, ""))
+            tile.setToolTip(tips.get(key, ""))
+        was_hidden = self._stats_box.isHidden()
+        self._results_empty.setVisible(False)
+        self._stats_box.setVisible(True)
+        if was_hidden and self._stats_box.isVisible():
+            motion.reveal(self._stats_box)
+
+    def stats(self) -> dict[str, tuple[str, str]]:
+        """``{key: (value, label)}`` of the results tiles (tests, accessibility)."""
+        return {k: (self._stats.tile(k).value(), self._stats.tile(k).label())
+                for k, _ in _PLAN_TILES}
 
     # ── State helpers ─────────────────────────────────────────────────────
 
@@ -395,12 +485,7 @@ class IndexerWorkspace(WorkspaceBase):
 
     def _set_step(self, index: int) -> None:
         self._current_step = index
-        for i, lbl in enumerate(self._step_labels):
-            name = "stepActive" if i == index else "stepInactive"
-            if lbl.objectName() != name:
-                lbl.setObjectName(name)
-                lbl.style().unpolish(lbl)
-                lbl.style().polish(lbl)
+        self._steps.set_current(index)
 
     def _refresh_controls(self) -> None:
         busy = self._busy()
@@ -573,6 +658,20 @@ class IndexerWorkspace(WorkspaceBase):
                 self._report_btn.setEnabled(bool(self._report_path))
                 for _, bar in self._phase_bars[:2]:
                     bar.setValue(100)
+                counts = self._plan.counts()
+                if counts.get("audio_files"):
+                    self._show_stats("Previewed plan", counts)
+                    # The tiles carry the numbers; the line says what to do next.
+                    self._status_lbl.setText(
+                        "Preview ready. Open the report to check every move, then untick "
+                        "Dry run to execute exactly this plan."
+                    )
+                else:
+                    self._show_results_empty(
+                        "Nothing to organise",
+                        "No audio files were found outside the reserved folders, so the "
+                        "preview has nothing to move.",
+                    )
                 self._log(message, "ok")
                 self.status_changed.emit("Preview ready", _chip_colour("ok"))
                 QtWidgets.QMessageBox.information(self, "Preview Ready", message)
@@ -590,6 +689,7 @@ class IndexerWorkspace(WorkspaceBase):
             self._plan_library = ""
             if self._library_path and (Path(self._library_path) / "Docs" / "MusicIndex.html").exists():
                 self._report_btn.setEnabled(True)
+            self._show_execute_results(worker, outcome)
             if outcome == "ok":
                 for _, bar in self._phase_bars:
                     bar.setValue(100)
@@ -622,7 +722,33 @@ class IndexerWorkspace(WorkspaceBase):
         for _, bar in self._phase_bars:
             bar.setValue(0)
 
+    def _show_execute_results(self, worker: IndexerWorker, outcome: str) -> None:
+        """Relabel the results tiles with what the execute did (the plan is
+        used up either way, so its counts would mislead)."""
+        summary = worker.summary
+        if not summary:
+            self._show_results_empty(
+                "Preview again",
+                "The previewed plan was not applied (see the status above). Run a new "
+                "preview before executing.",
+            )
+            return
+        errors = list(summary.get("errors", []) or [])
+        planned = worker.plan.counts() if worker.plan is not None else {}
+        values = {
+            "moves": summary.get("moved", 0),
+            "unchanged": planned.get("unchanged", "–"),
+            "manual_review": len(errors),
+            "leftovers": summary.get("leftovers_moved", 0),
+            "empty_dirs": len(summary.get("removed_dirs", []) or []),
+        }
+        title = {"ok": "Last execution", "cancelled": "Last execution (cancelled part-way)",
+                 "partial": "Last execution (finished with problems)"}.get(outcome, "Last execution")
+        self._show_stats(title, values, _EXECUTE_LABELS,
+                         {"manual_review": "danger" if errors else ""}, _EXECUTE_TIPS)
+
     def _on_library_changed(self, path: str) -> None:
+        self._show_library(path)
         running = self._worker if self._busy() else None
         if running is not None and running.mode == IndexerWorker.PREVIEW:
             # A preview of the old library is useless now: stop it and ignore
@@ -648,6 +774,7 @@ class IndexerWorkspace(WorkspaceBase):
             self._status_lbl.setText("Ready to preview.")
             self._reset_progress()
             self._log_area.clear()
+            self._show_results_empty(*_NO_PREVIEW)
             candidate = Path(path) / "Docs" / "MusicIndex.html" if path else None
             if candidate is not None and candidate.exists():
                 self._report_path = str(candidate)

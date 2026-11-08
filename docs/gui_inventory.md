@@ -397,21 +397,26 @@ Without a library it starts no job and says "No library selected".
 
 ### 6.2 Indexer (`indexer.py`)
 
-Preview first; Execute applies **that** preview.
+Preview first; Execute applies **that** preview. Liquid Glass layout (R2): one hero
+card, an Options card, a Progress-and-results card and the Run log. The page does not
+repeat its title (the shell header shows it). The glass parts it uses live in
+`gui/workspaces/organize_parts.py`.
 
 | Element | Type | Purpose |
 |---|---|---|
-| Workflow stepper | Header | 1. Preview (dry run) → 2. Review HTML report → 3. Execute changes |
-| Dry run | Checkbox | Checked by default. Unchecking switches the Run button to Execute. |
-| Create playlists after execution | Checkbox | Checked: regenerate playlists after the moves. Unchecked: only update existing playlists' paths. |
-| Cross-album scan (Phase C) | Checkbox | **Disabled**, tooltip: the engine has no cross-album phase. |
-| Flush fingerprint cache before scan | Checkbox | **Disabled**, tooltip: the Indexer keeps no cache, so there is nothing to flush. |
-| Max workers | SpinBox | 1–32, default **1**. How many files have their tags read at once during a preview. 1 is fastest on a local disk; more helps on a network share or slow drive. Locked while a run is going. |
-| Run | Button (primary) | "▶ Run Preview" while Dry run is checked; "▶ Execute Previewed Plan" otherwise, enabled only while a preview of the current library exists. |
-| Open Report | Button | Opens `Docs/MusicIndex.html` |
-| Cancel | Button | Cancels the running preview or execute (the worker has its own cancel event) |
-| Progress | Three bars | Phase A — Scanning, Phase B — Planning, Phase C — Applying changes (Execute only) |
-| Status label + Run log | Label + text | Current step and the run's log lines |
+| Hero: "Organize this library" | Hero card (`headerCard`) | Title, one-line purpose, the step pills, the library, the mode and the main action |
+| Step pills | `StepPills` | Preview → Review the report → Execute. **Real state**: 0 without a preview of this library, 1 once one exists, 2 while Execute is selected or running |
+| Library | Path well (`ElidedLabel`, middle elide) | The current library; full path in the tooltip. "No library selected…" without one |
+| Dry run: preview only, nothing is moved | Checkbox | Checked by default. Unchecking switches the Run button to Execute. |
+| Run | Button (primary, play glyph) | "Run preview" while Dry run is checked; "Execute previewed plan" otherwise, enabled only while a preview of the current library exists |
+| Cancel | Button (close glyph) | Cancels the running preview or execute (the worker has its own cancel event) |
+| Open report | Button (external glyph) | Opens `Docs/MusicIndex.html` |
+| Create playlists after execution | Checkbox (Options) | Checked: regenerate playlists after the moves. Unchecked: only update existing playlists' paths. |
+| Advanced | Well in Options | **Cross-album scan (Phase C)** and **Flush fingerprint cache before scan**: disabled, each tooltip says why (no cross-album phase; no cache to flush). **Max workers**: 1–32, default **1** (how many files have their tags read at once during a preview; more helps on a network share or slow drive). Locked while a run is going. The row wraps on a narrow window. |
+| Progress | Three thin pills | Phase A — Scanning, Phase B — Planning, Phase C — Applying changes (Execute only); each pill's tooltip describes its phase |
+| Status line | Label | What is happening, or what to do next ("Preview ready. Open the report…") |
+| Results | `StatRow` / `EmptyState` | Before a preview: "No preview yet". After one: **Previewed plan** tiles: to move · in place · untagged (go to Manual Review/) · non-audio · empty folders. After Execute, the same tiles relabelled: moved · in place · problems (red when any) · tidied · removed. A library change goes back to the empty state. Each tile's tooltip says it in full. |
+| Run log | Mono text | The run's log lines; a caption lists the Docs/ outputs |
 
 Execute shows a confirmation with the plan's counts (files moved or renamed, how many
 go to Manual Review, leftovers moved to Trash/Docs, folders removed, playlist mode).
@@ -425,30 +430,42 @@ Worker: `IndexerWorker` computes `music_indexer_api.IndexerPlan` (preview) or ca
 ### 6.3 Library Sync (`library_sync.py`)
 
 Scan both folders → review matches and flag → build plan → preview → execute that
-plan. Stepper: 1. Configure paths → 2. Scan & match → 3. Build & execute plan.
+plan. **It fits the window** at 1300 × 860 and at the 900 × 600 minimum with no
+horizontal scrolling (it used to need ~1090 px): the folder grid, the scan progress
+and the review lists reflow, and the plan buttons wrap
+(`tests/ui/test_ui_organize_glass.py`).
 
 | Element | Type | Purpose |
 |---|---|---|
-| Existing library / Incoming folder | Entry + Browse… | Validated before a scan: both set, both exist, not the same, not nested. Folders are never created. |
-| Global threshold | Input | 0–1, validated |
-| Preset name | Input | **Disabled**, tooltip "Not used yet: presets are not implemented." |
-| Format overrides | Text | `.ext=value` per line; validated, extensions normalised to `.ext` |
-| Recompute Matches | Button | **Wired:** re-matches the last scan with the current thresholds, without re-reading or re-fingerprinting files |
-| Save Session | Button | Saves the existing/incoming paths and threshold (`sync_existing`, `sync_incoming`, `sync_threshold`); they are **restored** next time. Flags are not saved. |
-| Scan Both Libraries / Cancel | Buttons | `SyncScanWorker`; Cancel stops a scan, plan build or execute |
-| State label | Label | Idle / Scanning… / Re-matching… / Cancelling… |
-| Existing Library / Incoming Folder | Two progress bars + status | Real progress from the scan |
-| Incoming Tracks | Tree | Track, Status, Distance, **Flag**, **Note**; right-click: 📋 Copy, ↻ Replace, ✕ Clear flag, 📝 Add note |
-| Matched Existing Tracks | Tree | **Populated:** each library track an incoming one matched — Track, Status ("Matched" / "Upgrade available"), Best Matches |
-| Match Inspector | Text + summary | The selected match: paths, status, distance, confidence, quality scores, candidates, your flag and note, and its planned decision once a plan exists |
-| Build Plan | Button | Builds the plan **from the reviewed matches and flags**, plus its HTML preview (`Docs/LibrarySyncPreview.html`) |
-| Preview Plan | Button | Opens that preview |
-| Copy Originals / Move | Toggle | Transfer mode; changing it requires rebuilding the plan |
-| Execute Plan | Button (danger) | Runs the plan verbatim (a `LIBRARY_WRITES` job) |
-| Export Report | Button | Matches, flags and notes as HTML, JSON or CSV |
+| Hero: "Merge an incoming folder" | Hero card | Title, one-line purpose, step pills, the two folders, the scan |
+| Step pills | `StepPills` | Choose folders → Scan and match → Build and execute. Real state: 0 until a scan of the current folders exists, 1 while reviewing it, 2 while a plan is built, fresh or running |
+| Library / Incoming | Entry + folder glyph button | Validated before a scan: both set, both exist, not the same, not nested. Folders are never created. |
+| Scan both folders / Cancel | Buttons (search / close glyphs) | `SyncScanWorker`; Cancel stops a scan, plan build or execute |
+| State label | Label | Idle / Scanning… / Re-matching… / Cancelling… / Complete / Cancelled / Error |
+| Library / Incoming progress | Two thin pills + status | Shown from the first scan on; side by side when wide, stacked when narrow |
+| Matching card | Form | **Threshold** (0–1, validated, warns in the warning tone when unrelated tracks would match) · **Format overrides** (`.ext=value` per line; extensions normalised to `.ext`) · **Preset name** (disabled, "Not used yet: presets are not implemented.") |
+| Recompute matches | Button (refresh glyph) | **Wired:** re-matches the last scan with the current thresholds, without re-reading or re-fingerprinting files |
+| Save session | Button (save glyph) | Saves the existing/incoming paths and threshold (`sync_existing`, `sync_incoming`, `sync_threshold`); they are **restored** next time. Flags are not saved. |
+| Review matches | Card | Before a scan: `EmptyState` "No matches yet". After one: the tiles, the two lists and Match details |
+| Scan summary | `StatRow` | incoming · new · in library · upgrades (accent when any) · uncertain (low confidence; warning tone when any); tooltips say it in full |
+| Export report | Button (download glyph) | Matches, flags and notes as HTML, JSON or CSV |
+| Incoming tracks | Glass list (`QTreeWidget`) | Track, Status (shown in words, e.g. "Exact match"; the item keeps the engine name), Distance, **Flag** (Copy / Replace), **Note**; right-click: Copy, Replace, Clear flag, Add note… |
+| Matched in your library | Glass list | **Populated:** each library track an incoming one matched — Track, Status ("Matched" / "Upgrade available"), Best matches |
+| (the two lists) | `ReflowSplitter` | Side by side (with a drag grip) from ~880 px of card width, stacked below |
+| Match details | Text | The selected match: paths, status, distance, confidence, quality scores, candidates, your flag and note, and its planned decision once a plan exists |
+| Summary line | Label | What to do next, and how many earlier flags could not be carried over |
+| Build plan | Button (primary, list glyph) | Builds the plan **from the reviewed matches and flags**, plus its HTML preview (`Docs/LibrarySyncPreview.html`) |
+| Preview plan | Button (external glyph) | Opens that preview |
+| Copy originals / Move originals | Toggle | Transfer mode; changing it requires rebuilding the plan |
 | Write transfer playlist (.m3u8) | Checkbox | Passed to execute |
-| Plan status + plan bar | Label + bar | Build and execute progress |
-| Log + Export Logs… | Text + button | Humanised, batched log; lines from abandoned workers are dropped |
+| Execute plan | Button (danger, play glyph) | Runs the plan verbatim (a `LIBRARY_WRITES` job) after its confirmation |
+| Plan summary | `StatRow` | to add · to replace · skipped · need review; shown only while the plan is up to date |
+| Plan status + plan bar | Label + thin pill | Build and execute progress, out-of-date reasons, results |
+| Log + Export log… | Mono text + button | Humanised, batched log; lines from abandoned workers are dropped |
+
+Item lists here are "glass" views: transparent on the card, 34 px rows, a rounded
+hover/selection band from the theme's material, muted 12 px headers, no grid, no
+inline stylesheet (`organize_parts.style_item_view`).
 
 **The plan is tied to its inputs.** Changing a path, the transfer mode, a flag, or
 re-scanning or switching library marks the plan out of date and disables Execute,
@@ -460,19 +477,22 @@ rest are listed in a notice.
 
 ### 6.4 File Cleanup (`tools.py`, `FileCleanupWorkspace`)
 
-Moved out of Utilities onto its own page. One full-width tile (`ToolTile`) whose status
-chip reports running / done / error / cancelled.
+Moved out of Utilities onto its own page. One hero glass tile (`ToolTile`, a
+`GlassCard`) titled "Clean up copy suffixes", whose status pill reports Ready /
+Running… / Done / Error / Cancelled. Before the first preview the tile shows an
+`EmptyState` ("Nothing previewed yet"); after it, a result area fades in (status line
+and the rename log).
 
-**Preview Cleanup…** plans in a worker, then opens a **preview dialog** (folder, current
+**Preview cleanup…** (primary, search glyph) plans in a worker, then opens a **preview
+dialog** (§7.7) with the counts as stat tiles and the plan as a list (folder, current
 name → new name, collisions flagged and skipped); on confirm it renames exactly the
 previewed rows, writes `Docs/file_cleanup_<timestamp>.jsonl` and updates playlists.
-**Undo Last Cleanup…** previews the newest cleanup log in the same dialog, confirms,
-restores the original names and points the changed playlists back. Only true OS copy
-artifacts are stripped (` (1)`…` (99)`, ` - Copy`, Finder ` copy N`); reserved folders
-are skipped; nothing is ever overwritten. Both are library writes. **Cancel** stops the
-preview or the renames. A library change cancels a preview; a confirmed cleanup or undo
-finishes.
-
+**Undo last cleanup…** (undo glyph) previews the newest cleanup log in the same
+dialog, confirms, restores the original names and points the changed playlists back.
+Only true OS copy artifacts are stripped (` (1)`…` (99)`, ` - Copy`, Finder ` copy N`);
+reserved folders are skipped; nothing is ever overwritten. Both are library writes.
+**Cancel** stops the preview or the renames. A library change cancels a preview and
+resets the tile; a confirmed cleanup or undo finishes.
 ### 6.5 Duplicates
 
 Six sections (§3.2). The first two are the real workflow; Pair review and the three
@@ -830,15 +850,21 @@ side as `MediaTesterPanel`s: Browse… a file and see what `utils.audio_metadata
 
 ### 6.11 Exports (`tools.py`, `ExportsWorkspace`)
 
-Two tiles from the old Utilities page. Each tile's status chip reports running / done /
-error / cancelled; both jobs run in workers with Cancel, skip Quarantine/, Trash/, Docs/
-and Playlists/, and are cancelled by a library change (an export that finishes after a
-library change does not re-enable Open buttons for the old library).
+Two glass tiles (`ToolTile`, a `GlassCard` with a painted shadow) from the old
+Utilities page, under a one-line purpose. Each tile's status pill reports Ready /
+Running… / Done / Error / Cancelled. Before the first export a tile shows an
+`EmptyState` ("No list yet"); an export fades in the result area: a thin progress pill,
+the status line, the **written file as a middle-elided path** (full path in the
+tooltip) and, for Artist / Title, the log. Both jobs run in workers with Cancel, skip
+Quarantine/, Trash/, Docs/ and Playlists/, and are cancelled by a library change, which
+also resets the tiles (an export that finishes after a library change does not
+re-enable Open buttons for the old library). Two tiles side by side from ~1000 px of
+page width, stacked below.
 
 | Tile | Contents |
 |---|---|
-| Artist / Title Export | "Exclude FLAC files" and "Include per-album duplicate titles" toggles; Export, Cancel, Open File, open-folder. Writes `Docs/artist_title_list.txt`. |
-| Codec List Export | Per-extension chips, "Filenames only (no full paths)"; Export, Cancel, Open File, open-folder. Writes `Docs/codec_file_list.txt`. |
+| Artist / Title list | "Exclude FLAC files" and "Include per-album duplicate titles" switches; Export (primary, download glyph), Cancel, Open file, a round folder button ("Show the exported file in its folder"). Writes `Docs/artist_title_list.txt`. |
+| Codec list | Per-extension chips (painted toggles: accent and a check when included), "Filenames only (no full paths)"; the same four buttons. Writes `Docs/codec_file_list.txt`. |
 
 ### 6.12 Activity (`activity.py`)
 
@@ -969,6 +995,20 @@ Every option, checkbox and committed name edit re-plans on the GUI thread with t
 `plan_cluster_playlists`. After Save the flow asks once if anything would be replaced
 ("K existing files … will be replaced (backed up first …)") and then writes exactly
 `dialog.plan()`.
+
+### 7.7 FileCleanupPreviewDialog (`gui/dialogs/file_cleanup_preview_dialog.py`)
+
+The preview-and-confirm step of Organize → File Cleanup and of its undo. An opaque
+window (the shell styles its chrome) whose contents use the glass parts:
+
+| Element | Purpose |
+|---|---|
+| Title | "Review the renames" / "Restore the original names" |
+| Stat tiles | to rename (or to restore) · skipped (collisions; warning tone when any) · files checked · kept (title) — the last two only for a cleanup, "kept" only when some suffixes are part of a title tag |
+| Summary line | What happens (renamed in place, collisions skipped, nothing overwritten, reserved folders untouched; for an undo, which log it undoes) |
+| Plan list | On a card: Folder, Current name, New/Original name, Action; renames first, then the skipped rows; 34 px glass rows, long values middle-elided with the full text in the tooltip |
+| Note | Where the log goes and how playlists are updated (and backed up) |
+| Rename N file(s) / Restore N name(s) | The one primary button; disabled when there is nothing to rename. **Cancel is the default button**, so Enter never renames. |
 
 ---
 

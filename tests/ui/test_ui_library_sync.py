@@ -90,8 +90,9 @@ def test_scan_flag_build_execute_end_to_end(make_workspace, env, dialogs, qtbot,
             for i in range(ws._incoming_table.topLevelItemCount())}
     assert rows["new_track.flac"] == "NEW"                                  # not matched to Quarantine/ (LIB-06)
     assert rows["loose_wire_copy.mp3"] == "EXACT_MATCH"
-    summary = ws._match_summary_lbl.text()
-    assert "1 new" in summary and "2 already in library" in summary         # LIB-20
+    stats = ws.scan_stats()                                                  # LIB-20
+    assert stats["new"] == "1" and stats["matched"] == "2" and stats["incoming"] == "3"
+    assert ws._review_box.isVisible() and not ws._review_empty.isVisible()
     assert '"event"' not in ws._log_area.toPlainText()                      # no raw JSON
     assert ws._existing_table.topLevelItemCount() == 2                      # LIB-17
     assert ws._recompute_btn.isEnabled()
