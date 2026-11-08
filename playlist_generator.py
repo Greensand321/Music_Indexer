@@ -534,15 +534,32 @@ class PlannedPlaylist:
     #: Encoding the file is written with. A repaired playlist keeps the
     #: encoding it was read with (``.m3u8`` is always UTF-8).
     encoding: str = "utf-8"
+    #: ``(st_mtime_ns, st_size)`` of the file this item overwrites, as seen
+    #: when the preview was made. Only the cluster playlist planner sets it
+    #: (``plan_playlist`` does not); ``write_playlist_plan(verify=True)``
+    #: skips an overwrite whose file no longer matches it.
+    snapshot: tuple | None = None
 
     @property
     def action(self) -> str:
         return "overwrite" if self.exists else "new"
 
 
-def _relative_lines(tracks, outfile) -> list:
+def relative_playlist_lines(tracks, outfile) -> list:
+    """The entry lines a playlist at ``outfile`` gets for ``tracks``.
+
+    Relative to the playlist's folder with native separators, and absolute
+    only when no relative path exists (another drive on Windows): the rule
+    every generated playlist follows. :func:`plan_playlist` and the cluster
+    playlist export (``cluster_playlist_export``) both use it, so their
+    entries can never differ.
+    """
     base = os.path.dirname(os.path.abspath(outfile))
     return [safe_relpath(p, base) for p in tracks]
+
+
+#: Backwards-compatible private name of :func:`relative_playlist_lines`.
+_relative_lines = relative_playlist_lines
 
 
 def plan_playlist(tracks, outfile) -> PlannedPlaylist:
@@ -550,7 +567,7 @@ def plan_playlist(tracks, outfile) -> PlannedPlaylist:
     tracks = list(tracks)
     return PlannedPlaylist(
         path=os.path.abspath(outfile),
-        lines=_relative_lines(tracks, outfile),
+        lines=relative_playlist_lines(tracks, outfile),
         exists=os.path.exists(outfile),
         entries=len(tracks),
     )
@@ -673,7 +690,41 @@ def _backup_path(path: str) -> str:
     return candidate
 
 
-def write_playlist_plan(plan, backup=True, log_callback=None, log_dir=None) -> dict:
+#: Reason ``write_playlist_plan(verify=True)`` reports for a skipped item.
+CHANGED_SINCE_PREVIEW = "changed since the preview"
+
+
+class _ChangedSincePreview(Exception):
+    """Internal: the file an item targets is no longer what the preview saw."""
+
+
+def _file_stamp(path: str):
+    """``(st_mtime_ns, st_size)`` of ``path``, or None when it does not exist."""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    return (st.st_mtime_ns, st.st_size)
+
+
+def _verify_item(item) -> None:
+    """Raise :class:`_ChangedSincePreview` when ``item``'s file changed since
+    the preview: a "new" file that now exists, or an overwrite whose stamp no
+    longer equals its ``snapshot``. A vanished overwrite is fine (written as
+    new)."""
+    now = _file_stamp(item.path)
+    if now is None:
+        return
+    if not item.exists:
+        raise _ChangedSincePreview()
+    snapshot = getattr(item, "snapshot", None)
+    if snapshot is not None and tuple(snapshot) != now:
+        raise _ChangedSincePreview()
+
+
+def write_playlist_plan(
+    plan, backup=True, log_callback=None, log_dir=None, *, verify=False, cancel_event=None,
+) -> dict:
     """Write each :class:`PlannedPlaylist` in ``plan`` exactly as planned.
 
     Any file that exists at write time is first copied to
@@ -683,14 +734,32 @@ def write_playlist_plan(plan, backup=True, log_callback=None, log_dir=None) -> d
     ``encoding``; an item whose lines can't be encoded that way is reported in
     ``errors`` and left untouched.
 
-    Returns ``{"written": [...], "backups": [...], "errors": [(path, msg)]}``.
+    ``verify=True`` re-checks each item against what the preview saw: an item
+    planned as new whose file now exists, and an overwrite whose
+    ``(st_mtime_ns, st_size)`` no longer equals its ``snapshot``, are skipped
+    and reported as ``(path, "changed since the preview")``. An overwrite
+    whose file has disappeared is written as new (nothing can be lost).
+
+    ``cancel_event`` (a ``threading.Event``) stops writing *between* files:
+    the files already written stay written, and the log lines gathered so far
+    are still appended to ``playlist_writes.log``.
+
+    Returns ``{"written": [...], "backups": [...], "errors": [(path, msg)],
+    "cancelled": bool}``. With the defaults the behaviour is unchanged.
     """
     if log_callback is None:
         log_callback = lambda msg: None
     written, backups, errors, log_lines = [], [], [], []
+    cancelled = False
     for item in plan:
+        if cancel_event is not None and cancel_event.is_set():
+            cancelled = True
+            log_callback("! Cancelled: the remaining playlists were not written.")
+            break
         path = item.path
         try:
+            if verify:
+                _verify_item(item)
             os.makedirs(os.path.dirname(path), exist_ok=True)
             encoding =_write_encoding(path, getattr(item, "encoding", "") or "utf-8")
             try:
@@ -714,9 +783,13 @@ def write_playlist_plan(plan, backup=True, log_callback=None, log_dir=None) -> d
             log_callback(
                 f"✓ Wrote {item.entries} entr{'y' if item.entries == 1 else 'ies'} → {path}"
             )
+        except _ChangedSincePreview:
+            errors.append((path, CHANGED_SINCE_PREVIEW))
+            log_lines.append(f"ERROR {path}: {CHANGED_SINCE_PREVIEW}")
+            log_callback(f"! Skipped {path}: {CHANGED_SINCE_PREVIEW}")
         except OSError as exc:
             errors.append((path, str(exc)))
             log_lines.append(f"ERROR {path}: {exc}")
             log_callback(f"! Could not write {path}: {exc}")
     _append_write_log(log_dir, log_lines, log_callback)
-    return {"written": written, "backups": backups, "errors": errors}
+    return {"written": written, "backups": backups, "errors": errors, "cancelled": cancelled}
