@@ -6,8 +6,18 @@ import threading
 import webbrowser
 from pathlib import Path
 
-from gui.compat import QtCore, QtWidgets, Signal, Slot
+from gui.compat import QtCore, QtGui, QtWidgets, Signal, Slot
+from gui.themes import motion
+from gui.themes.glass import apply_font, current_material, font, paint_surface, qcolor
 from gui.themes.manager import get_manager
+from gui.themes.tokens import RADIUS, SPACE
+from gui.widgets.dupes_parts import (
+    GlyphLabel, PathLabel, TileGrid, ToneBadge, hero_title, paint_tone_pill, pill_font,
+    tone_pill_size,
+)
+from gui.widgets.glass import ElidedLabel, GlassPanel
+from gui.widgets.glass_parts import EmptyState
+from gui.widgets.glyphs import set_glyph
 from gui.workspaces.base import WorkspaceBase
 from utils.reserved_folders import iter_library_files
 
@@ -206,14 +216,63 @@ _SAFETY_REFUSALS = {
 }
 
 
+def _tally_execution(result) -> dict:
+    """What an ``ExecutionResult`` did, counted once for the summary text
+    (``summarize_execution``) and the page's stat tiles
+    (``execution_counts``)."""
+    actions = list(getattr(result, "actions", []) or [])
+    blocked = [a for a in actions if a.step == "preflight" and a.status in ("blocked", "failed")]
+    cleanup = [a for a in actions if a.step == "loser_cleanup"]
+    # Safety refusals: the executor left the loser untouched on purpose (its
+    # winner vanished, it is the winner through a link, or it changed since the
+    # preview). They are recorded as "failed" but are not I/O errors.
+    refused = [a for a in cleanup if a.status == "failed"
+               and a.metadata.get("skip_reason") in _SAFETY_REFUSALS]
+    refused_ids = {id(a) for a in refused}
+    return {
+        "actions": actions,
+        "blocked": blocked,
+        "quarantined": sum(
+            1 for a in cleanup if a.status == "success" and a.metadata.get("disposition") == "quarantine"
+        ),
+        "deleted": sum(
+            1 for a in cleanup if a.status == "success" and a.metadata.get("disposition") == "delete"
+        ),
+        "retained": sum(1 for a in cleanup if a.metadata.get("skip_reason") == "retain"),
+        "refused": refused,
+        "not_attempted": sum(1 for a in actions if a.metadata.get("skip_reason") == "not_attempted"),
+        "cancelled": any(a.status == "cancelled" for a in actions),
+        "failures": [a for a in actions if a.status == "failed" and id(a) not in refused_ids],
+    }
+
+
+def execution_counts(result) -> dict[str, object]:
+    """The numbers behind ``summarize_execution``'s sentence, for stat tiles:
+    quarantined, deleted, retained, refused (left in place for safety, with
+    ``refusal_reasons``), not_attempted, errors, plus ``blocked`` (a
+    preflight refusal: nothing was changed) and ``cancelled``."""
+    tally = _tally_execution(result)
+    return {
+        "blocked": bool(tally["blocked"]),
+        "quarantined": tally["quarantined"],
+        "deleted": tally["deleted"],
+        "retained": tally["retained"],
+        "refused": len(tally["refused"]),
+        "refusal_reasons": sorted({_SAFETY_REFUSALS[a.metadata["skip_reason"]] for a in tally["refused"]}),
+        "not_attempted": tally["not_attempted"],
+        "errors": 0 if tally["blocked"] else len(tally["failures"]),
+        "cancelled": tally["cancelled"],
+    }
+
+
 def summarize_execution(result) -> tuple[bool, str]:
     """(success, one-line message) describing an ``ExecutionResult`` honestly.
 
     Preflight refusals used to surface only as "Execution completed with
     errors." — their reason lived in the report JSON.
     """
-    actions = list(getattr(result, "actions", []) or [])
-    blocked = [a for a in actions if a.step == "preflight" and a.status in ("blocked", "failed")]
+    tally = _tally_execution(result)
+    blocked = tally["blocked"]
     if blocked:
         details: list[str] = []
         for action in blocked:
@@ -225,29 +284,19 @@ def summarize_execution(result) -> tuple[bool, str]:
         more = f" (+{len(details) - 3} more)" if len(details) > 3 else ""
         return False, "Execution blocked — nothing was changed. " + "; ".join(details[:3]) + more
 
-    cleanup = [a for a in actions if a.step == "loser_cleanup"]
-    quarantined = sum(
-        1 for a in cleanup if a.status == "success" and a.metadata.get("disposition") == "quarantine"
-    )
-    deleted = sum(1 for a in cleanup if a.status == "success" and a.metadata.get("disposition") == "delete")
-    retained = sum(1 for a in cleanup if a.metadata.get("skip_reason") == "retain")
+    quarantined, deleted, retained = tally["quarantined"], tally["deleted"], tally["retained"]
     counts = f"{quarantined} quarantined, {deleted} deleted, {retained} kept in place"
-    # Safety refusals: the executor left the loser untouched on purpose (its
-    # winner vanished, it is the winner through a link, or it changed since the
-    # preview). They are recorded as "failed" but are not I/O errors.
-    refused = [a for a in cleanup if a.status == "failed"
-               and a.metadata.get("skip_reason") in _SAFETY_REFUSALS]
-    not_attempted = sum(1 for a in actions if a.metadata.get("skip_reason") == "not_attempted")
+    refused = tally["refused"]
+    not_attempted = tally["not_attempted"]
     if refused:
         reasons = sorted({_SAFETY_REFUSALS[a.metadata["skip_reason"]] for a in refused})
         counts += f", {len(refused)} left in place for safety ({'; '.join(reasons)})"
     if not_attempted:
         counts += f", {not_attempted} not attempted"
 
-    if any(a.status == "cancelled" for a in actions):
+    if tally["cancelled"]:
         return False, f"Execution cancelled at a safe point ({counts} before stopping). See the report."
-    refused_ids = {id(a) for a in refused}
-    failures = [a for a in actions if a.status == "failed" and id(a) not in refused_ids]
+    failures = tally["failures"]
     if failures:
         return False, (
             f"Execution finished with {len(failures)} error(s): {failures[0].detail} ({counts}). "
@@ -372,7 +421,7 @@ class DupeBuildWorker(QtCore.QThread):
                 _log(f"Preview written → {html_path}")
             except Exception as exc:
                 _log(f"Warning: could not write HTML preview: {exc}")
-            # The JSON plan is what Tools → Pair Review reads.
+            # The JSON plan is what Duplicates → Pair review reads.
             try:
                 export_consolidation_preview(plan, str(docs / "duplicate_preview.json"))
             except Exception as exc:
@@ -407,6 +456,8 @@ class DupeExecuteWorker(QtCore.QThread):
         self.allow_deletion = allow_deletion
         self.confirm_operation_overage = confirm_operation_overage
         self._cancel_event = threading.Event()
+        # Set before ``done`` is emitted; read by the workspace's slot.
+        self.counts: dict[str, object] | None = None
 
     def cancel(self) -> None:
         self._cancel_event.set()
@@ -440,10 +491,155 @@ class DupeExecuteWorker(QtCore.QThread):
 
             result = execute_consolidation_plan(self.plan, config)
             report_html = result.report_paths.get("html_report", "")
+            self.counts = execution_counts(result)
             ok, message = summarize_execution(result)
             self.done.emit(ok, message, str(report_html or ""))
         except Exception as exc:  # noqa: BLE001
             self.done.emit(False, str(exc), "")
+
+
+# ── Group rows ────────────────────────────────────────────────────────────────
+
+_LOSSLESS_EXTS = {'.flac', '.wav', '.alac', '.ape', '.aiff', '.aif'}
+
+#: How each disposition is named on a loser's tag pill, and its tone.
+_DISPOSITION_TAGS: dict[str, tuple[str, str]] = {
+    "quarantine": ("Quarantine", ""),
+    "delete": ("Delete", "danger"),
+    "retain": ("Keep in place", "accent"),
+}
+_KEEP_TAG = ("Keep", "success")
+_MAX_LOSER_LINES = 3
+
+
+def _format_bytes(size: int) -> str:
+    value = float(max(0, size))
+    for unit in ("B", "KB", "MB", "GB"):
+        if value < 1024 or unit == "GB":
+            return f"{value:.0f} {unit}" if unit == "B" else f"{value:.1f} {unit}"
+        value /= 1024
+    return f"{value:.1f} TB"  # pragma: no cover - unreachable
+
+
+def quality_pills(group, path: str) -> list[tuple[str, str]]:
+    """``(text, tone)`` pills for one file of a group: its format (lossless in
+    the success tone) and, when known, its bitrate."""
+    quality = (getattr(group, "track_quality", None) or {}).get(path) or {}
+    ext = os.path.splitext(path)[1].lower()
+    label = ext.lstrip(".").upper() or str(quality.get("container") or "?").upper()
+    lossless = quality.get("is_lossless")
+    if lossless is None:
+        lossless = ext in _LOSSLESS_EXTS
+    pills = [(label, "success" if lossless else "")]
+    try:
+        bitrate = int(quality.get("bitrate") or 0)
+    except (TypeError, ValueError):
+        bitrate = 0
+    if bitrate > 0:
+        kbps = bitrate // 1000 if bitrate >= 1000 else bitrate
+        pills.append((f"{kbps:,} kbps", ""))
+    return pills
+
+
+class _GroupRowDelegate(QtWidgets.QStyledItemDelegate):
+    """Paints one duplicate group as a glass row: the copy that is kept on
+    the first line, then each loser with its disposition, each with its
+    format and bitrate pills on the right. Row height follows the number of
+    losers (at most three lines, then "+ N more")."""
+
+    ROW_GAP = 6
+    PAD_X = 12
+    PAD_Y = 7
+    WINNER_LINE = 26
+    LOSER_LINE = 22
+
+    def __init__(self, workspace: "DuplicatesWorkspace", parent: QtCore.QObject) -> None:
+        super().__init__(parent)
+        self._ws = workspace
+
+    def _group(self, index: QtCore.QModelIndex):
+        i = index.data(QtCore.Qt.ItemDataRole.UserRole)
+        groups = self._ws._groups
+        return groups[i] if isinstance(i, int) and 0 <= i < len(groups) else None
+
+    @classmethod
+    def row_height(cls, losers: int) -> int:
+        lines = min(losers, _MAX_LOSER_LINES) + (1 if losers > _MAX_LOSER_LINES else 0)
+        return cls.ROW_GAP + 2 * cls.PAD_Y + cls.WINNER_LINE + lines * cls.LOSER_LINE
+
+    def sizeHint(self, option, index) -> QtCore.QSize:  # noqa: N802
+        group = self._group(index)
+        return QtCore.QSize(max(option.rect.width(), 200),
+                            self.row_height(len(group.losers) if group else 0))
+
+    def paint(self, painter: QtGui.QPainter, option, index) -> None:
+        group = self._group(index)
+        if group is None:
+            return
+        t = get_manager().current
+        m = current_material()
+        state = option.state
+        selected = bool(state & QtWidgets.QStyle.StateFlag.State_Selected)
+        hovered = bool(state & QtWidgets.QStyle.StateFlag.State_MouseOver)
+        rect = QtCore.QRectF(option.rect).adjusted(0, self.ROW_GAP / 2, 0, -self.ROW_GAP / 2)
+        fill = m.selection if selected else (m.pressed if hovered else m.well.fill)
+        paint_surface(painter, rect, m.well, radius=RADIUS.sm, fill=fill)
+
+        primary = qcolor(m.selection_text if selected else t.text_primary)
+        muted = qcolor(m.selection_text, 0.78) if selected else qcolor(t.text_secondary)
+        pfont = pill_font()
+        tags = [_KEEP_TAG[0]] + [label for label, _tone in _DISPOSITION_TAGS.values()]
+        tag_w = max(tone_pill_size(text, pfont).width() for text in tags)
+
+        left = int(rect.left()) + self.PAD_X
+        right = int(rect.right()) - self.PAD_X
+        y = int(rect.top()) + self.PAD_Y
+        extra = [("Review", "warning")] if group.review_flags else []
+        self._line(painter, left, right, y, self.WINNER_LINE, _KEEP_TAG, tag_w,
+                   Path(group.winner_path).name, font("body", weight=600), primary,
+                   quality_pills(group, group.winner_path) + extra, pfont)
+        y += self.WINNER_LINE
+        disposition = self._ws._group_disposition(group)
+        tag = _DISPOSITION_TAGS.get(disposition, _DISPOSITION_TAGS["quarantine"])
+        for loser in group.losers[:_MAX_LOSER_LINES]:
+            self._line(painter, left, right, y, self.LOSER_LINE, tag, tag_w,
+                       Path(loser).name, font("label"), muted, quality_pills(group, loser), pfont)
+            y += self.LOSER_LINE
+        more = len(group.losers) - _MAX_LOSER_LINES
+        if more > 0:
+            painter.save()
+            painter.setFont(font("caption"))
+            painter.setPen(muted)
+            painter.drawText(QtCore.QRect(left + tag_w + 10, y, max(0, right - left - tag_w - 10),
+                                          self.LOSER_LINE),
+                             int(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter),
+                             f"+ {more} more (all listed below when selected)")
+            painter.restore()
+
+    @staticmethod
+    def _line(painter: QtGui.QPainter, left: int, right: int, top: int, height: int,
+              tag: tuple[str, str], tag_w: int, name: str, name_font: QtGui.QFont,
+              colour: QtGui.QColor, pills: list[tuple[str, str]], pfont: QtGui.QFont) -> None:
+        pill_h = tone_pill_size("X", pfont).height()
+        pill_y = top + (height - pill_h) // 2
+        tag_size = tone_pill_size(tag[0], pfont)
+        paint_tone_pill(painter, QtCore.QRect(left, pill_y, tag_size.width(), pill_h), tag[0], tag[1], pfont)
+        x_right = right
+        for text, tone in reversed(pills):
+            w = tone_pill_size(text, pfont).width()
+            x_right -= w
+            paint_tone_pill(painter, QtCore.QRect(x_right, pill_y, w, pill_h), text, tone, pfont)
+            x_right -= 6
+        name_left = left + tag_w + 10
+        width = max(0, x_right - 6 - name_left)
+        painter.save()
+        painter.setFont(name_font)
+        painter.setPen(colour)
+        fm = QtGui.QFontMetrics(name_font)
+        painter.drawText(QtCore.QRect(name_left, top, width, height),
+                         int(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter),
+                         fm.elidedText(name, QtCore.Qt.TextElideMode.ElideMiddle, width))
+        painter.restore()
 
 
 # ── Workspace ─────────────────────────────────────────────────────────────────
@@ -470,53 +666,60 @@ class DuplicatesWorkspace(WorkspaceBase):
         self._build_ui()
         self._load_thresholds_from_config(force=True)
         self._last_report_path = _latest_execution_report(library_path)
+        self._show_empty(*self._initial_empty_text(library_path))
         self._refresh_buttons()
+
+    @staticmethod
+    def _initial_empty_text(library_path: str) -> tuple[str, str]:
+        if not library_path:
+            return ("No library selected",
+                    "Choose a library folder first; Find duplicates then scans it.")
+        return ("No scan yet",
+                "Find duplicates fingerprints the library and lists each group of copies here, "
+                "with the copy it keeps.")
 
     def _build_ui(self) -> None:
         cl = self.content_layout
 
-        # ── Header card ───────────────────────────────────────────────────
-        header_card = self._make_card()
-        header_card.setObjectName("headerCard")
-        hl = QtWidgets.QVBoxLayout(header_card)
-        hl.setContentsMargins(20, 16, 16, 16)
-        hl.setSpacing(8)
-        hl.addWidget(self._make_section_title("Duplicate Finder"))
-        hl.addWidget(self._make_subtitle(
-            "Fingerprint your library, group duplicate tracks, preview the plan, "
-            "then quarantine or delete losers. "
-            "Scan → Preview → Execute."
+        # ── Hero: the library, the scan and its options ───────────────────
+        hero = self._make_card()
+        hero.setObjectName("headerCard")
+        hl = QtWidgets.QVBoxLayout(hero)
+        hl.setContentsMargins(16, 16, 16, 16)
+        hl.setSpacing(SPACE.md)
+
+        top = QtWidgets.QHBoxLayout()
+        top.setSpacing(SPACE.md)
+        titles = QtWidgets.QVBoxLayout()
+        titles.setSpacing(SPACE.xxs)
+        title = hero_title("Scan your library")
+        titles.addWidget(title)
+        titles.addWidget(self._make_subtitle(
+            "Fingerprints every track and groups copies of the same recording, keeping the "
+            "best one. Nothing moves until you execute."
         ))
+        top.addLayout(titles, 1)
+        self._scan_btn = self._make_primary_button("Find duplicates")
+        set_glyph(self._scan_btn, "search", role="inverse")
+        self._scan_btn.setToolTip("Fingerprint the library and build a duplicate plan (read-only).")
+        self._scan_btn.clicked.connect(self._on_scan)
+        top.addWidget(self._scan_btn, 0, QtCore.Qt.AlignmentFlag.AlignTop)
+        hl.addLayout(top)
 
-        stepper = QtWidgets.QFrame()
-        stepper.setObjectName("workflowStepper")
-        sl = QtWidgets.QHBoxLayout(stepper)
-        sl.setContentsMargins(12, 8, 12, 8)
-        sl.setSpacing(4)
-        for i, step in enumerate(["1. Scan & fingerprint", "2. Review groups", "3. Execute plan"]):
-            lbl = QtWidgets.QLabel(step)
-            lbl.setObjectName("stepActive" if i == 0 else "stepInactive")
-            self._step_labels.append(lbl)
-            sl.addWidget(lbl)
-            if i < 2:
-                arr = QtWidgets.QLabel("→")
-                arr.setObjectName("stepArrow")
-                sl.addWidget(arr)
-        sl.addStretch(1)
-        hl.addWidget(stepper)
-        cl.addWidget(header_card)
+        lib_row = GlassPanel("well", radius=RADIUS.sm)
+        lib_row.setObjectName("dupLibraryRow")
+        lrl = QtWidgets.QHBoxLayout(lib_row)
+        lrl.setContentsMargins(12, 8, 12, 8)
+        lrl.setSpacing(SPACE.sm)
+        lrl.addWidget(GlyphLabel("folder"), 0, QtCore.Qt.AlignmentFlag.AlignVCenter)
+        self._library_lbl = PathLabel(self._library_path, "No library selected")
+        self._library_lbl.setObjectName("dupLibraryPath")
+        lrl.addWidget(self._library_lbl, 1)
+        hl.addWidget(lib_row)
 
-        # ── Config card ────────────────────────────────────────────────────
-        cfg_card = self._make_card()
-        cfg_layout = QtWidgets.QVBoxLayout(cfg_card)
-        cfg_layout.setContentsMargins(16, 16, 16, 16)
-        cfg_layout.setSpacing(12)
-        cfg_layout.addWidget(self._make_card_title("Thresholds"))
-
-        thresh_form = QtWidgets.QFormLayout()
-        thresh_form.setContentsMargins(0, 0, 0, 0)
-        thresh_form.setSpacing(6)
-
+        # Scan options: the three thresholds, label above field.
+        opts = QtWidgets.QHBoxLayout()
+        opts.setSpacing(SPACE.lg)
         self._exact_spin = QtWidgets.QDoubleSpinBox()
         self._exact_spin.setRange(0.0, 1.0)
         self._exact_spin.setSingleStep(0.005)
@@ -542,13 +745,208 @@ class DuplicatesWorkspace(WorkspaceBase):
         self._boost_spin.setToolTip(
             "Extra distance allowance when comparing lossless vs. lossy files."
         )
+        for caption, spin in (("Exact duplicate", self._exact_spin),
+                              ("Near duplicate", self._near_spin),
+                              ("Mixed-codec boost", self._boost_spin)):
+            field = QtWidgets.QVBoxLayout()
+            field.setSpacing(SPACE.xxs)
+            lbl = QtWidgets.QLabel(caption)
+            lbl.setObjectName("mutedLabel")
+            apply_font(lbl, "caption")
+            lbl.setToolTip(spin.toolTip())
+            lbl.setBuddy(spin)
+            spin.setMinimumWidth(104)
+            spin.setAccessibleName(f"{caption} threshold")
+            field.addWidget(lbl)
+            field.addWidget(spin)
+            opts.addLayout(field)
+        opts.addStretch(1)
+        hl.addLayout(opts)
 
-        thresh_form.addRow("Exact duplicate threshold:", self._exact_spin)
-        thresh_form.addRow("Near duplicate threshold:", self._near_spin)
-        thresh_form.addRow("Mixed-codec boost:", self._boost_spin)
-        cfg_layout.addLayout(thresh_form)
+        # Status: the step the flow is at, progress, and Cancel while busy.
+        status = QtWidgets.QHBoxLayout()
+        status.setSpacing(SPACE.sm)
+        stepper = QtWidgets.QFrame()
+        stepper.setObjectName("dupStepRow")
+        sl = QtWidgets.QHBoxLayout(stepper)
+        sl.setContentsMargins(0, 0, 0, 0)
+        sl.setSpacing(SPACE.xs)
+        for i, step in enumerate(["Scan", "Review", "Execute"]):
+            lbl = QtWidgets.QLabel(step)
+            lbl.setObjectName("stepActive" if i == 0 else "stepInactive")
+            lbl.setToolTip("Where the duplicate workflow is: scan, review the groups, execute the plan.")
+            self._step_labels.append(lbl)
+            sl.addWidget(lbl)
+        status.addWidget(stepper, 0, QtCore.Qt.AlignmentFlag.AlignVCenter)
+        self._prog_status = QtWidgets.QLabel("Idle")
+        self._prog_status.setObjectName("statusHint")
+        self._prog_status.setWordWrap(True)
+        self._prog_status.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored,
+                                        QtWidgets.QSizePolicy.Policy.Preferred)
+        status.addWidget(self._prog_status, 1)
+        self._cancel_btn = QtWidgets.QPushButton("Cancel")
+        set_glyph(self._cancel_btn, "close")
+        self._cancel_btn.setToolTip("Stop the scan, or stop the execution at the next safe point.")
+        self._cancel_btn.setEnabled(False)
+        self._cancel_btn.setVisible(False)
+        self._cancel_btn.clicked.connect(self._on_cancel)
+        status.addWidget(self._cancel_btn, 0, QtCore.Qt.AlignmentFlag.AlignVCenter)
+        hl.addLayout(status)
 
-        opts_row = QtWidgets.QHBoxLayout()
+        self._prog_bar = QtWidgets.QProgressBar()
+        self._prog_bar.setValue(0)
+        self._prog_bar.setTextVisible(False)
+        self._prog_bar.setFixedHeight(6)
+        self._prog_bar.setAccessibleName("Duplicate scan progress")
+        hl.addWidget(self._prog_bar)
+        cl.addWidget(hero)
+
+        # ── Results: summary, groups, the selected group ──────────────────
+        results = self._make_card()
+        results.setObjectName("workspaceCard")
+        rl = QtWidgets.QVBoxLayout(results)
+        rl.setContentsMargins(16, 16, 16, 16)
+        rl.setSpacing(SPACE.md)
+        head = QtWidgets.QHBoxLayout()
+        head.setSpacing(SPACE.sm)
+        head.addWidget(self._make_card_title("Duplicate groups"))
+        head.addStretch(1)
+        self._fp_status_lbl = QtWidgets.QLabel("")
+        self._fp_status_lbl.setObjectName("mutedLabel")
+        apply_font(self._fp_status_lbl, "caption")
+        head.addWidget(self._fp_status_lbl, 0, QtCore.Qt.AlignmentFlag.AlignVCenter)
+        rl.addLayout(head)
+
+        self._results_stack = QtWidgets.QStackedWidget()
+        self._empty = EmptyState(
+            "No scan yet",
+            "Find duplicates fingerprints the library and lists each group of copies here, "
+            "with the copy it keeps.",
+        )
+        self._results_stack.addWidget(self._empty)
+
+        page = QtWidgets.QWidget()
+        self._results_page = page
+        pl = QtWidgets.QVBoxLayout(page)
+        pl.setContentsMargins(0, 0, 0, 0)
+        pl.setSpacing(SPACE.sm)
+        self._plan_stats = TileGrid([
+            ("groups", "Groups"),
+            ("files", "Duplicate files"),
+            ("space", "Space reclaimable"),
+            ("flagged", "Flagged for review"),
+        ])
+        self._plan_stats.tile("space").setToolTip(
+            "Size of the copies that leave the library (quarantined or deleted). "
+            "Quarantined files still use disk space until you empty Quarantine/."
+        )
+        self._plan_stats.tile("flagged").setToolTip(
+            "Groups the planner wants you to look at. Execute lists them and asks before running them."
+        )
+        pl.addWidget(self._plan_stats)
+        self._outcome_stats = TileGrid([
+            ("quarantined", "Quarantined"),
+            ("deleted", "Deleted"),
+            ("refused", "Left in place for safety"),
+            ("not_attempted", "Not attempted"),
+            ("errors", "Errors"),
+        ])
+        self._outcome_stats.tile("refused").setToolTip(
+            "Copies the executor left untouched on purpose: their winner was missing or "
+            "unreadable, or the file changed since the preview."
+        )
+        self._outcome_stats.setVisible(False)
+        pl.addWidget(self._outcome_stats)
+        self._summary_reason = QtWidgets.QLabel("")
+        self._summary_reason.setObjectName("mutedLabel")
+        self._summary_reason.setWordWrap(True)
+        apply_font(self._summary_reason, "label")
+        pl.addWidget(self._summary_reason)
+
+        self._groups_table = QtWidgets.QTreeWidget()
+        self._groups_table.setObjectName("dupGroupList")
+        self._groups_table.setColumnCount(1)
+        self._groups_table.setHeaderHidden(True)
+        self._groups_table.setRootIsDecorated(False)
+        self._groups_table.setIndentation(0)
+        self._groups_table.setUniformRowHeights(False)
+        self._groups_table.setAlternatingRowColors(False)
+        self._groups_table.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        self._groups_table.setMouseTracking(True)
+        self._groups_table.setVerticalScrollMode(QtWidgets.QAbstractItemView.ScrollMode.ScrollPerPixel)
+        self._groups_table.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._groups_table.setAccessibleName("Duplicate groups")
+        self._groups_table.setItemDelegate(_GroupRowDelegate(self, self._groups_table))
+        self._groups_table.currentItemChanged.connect(self._on_group_selected)
+        pl.addWidget(self._groups_table)
+
+        inspector = GlassPanel("well", radius=RADIUS.sm)
+        inspector.setObjectName("dupGroupInspector")
+        il = QtWidgets.QHBoxLayout(inspector)
+        il.setContentsMargins(12, 6, 8, 6)
+        il.setSpacing(SPACE.sm)
+        self._selected_lbl = ElidedLabel("Select a group to choose what happens to its copies.")
+        self._selected_lbl.setObjectName("mutedLabel")
+        il.addWidget(self._selected_lbl, 1)
+        disp_lbl = QtWidgets.QLabel("Losers")
+        disp_lbl.setObjectName("mutedLabel")
+        apply_font(disp_lbl, "caption")
+        il.addWidget(disp_lbl)
+        self._disposition_combo = QtWidgets.QComboBox()
+        for label, value in _DISPOSITION_CHOICES:
+            self._disposition_combo.addItem(label, value)
+        self._disposition_combo.setEnabled(False)
+        self._disposition_combo.setToolTip(
+            "What happens to this group's losers. \"Default\" follows the "
+            "Quarantine / Delete choice below."
+        )
+        self._disposition_combo.setAccessibleName("Disposition for the selected group")
+        disp_lbl.setBuddy(self._disposition_combo)
+        self._disposition_combo.currentIndexChanged.connect(self._on_disposition_changed)
+        il.addWidget(self._disposition_combo)
+        pl.addWidget(inspector)
+
+        self._group_details = QtWidgets.QPlainTextEdit()
+        self._group_details.setObjectName("logText")
+        self._group_details.setReadOnly(True)
+        self._group_details.setFixedHeight(96)
+        self._group_details.setPlaceholderText("Select a group to see its files and review flags…")
+        self._group_details.setAccessibleName("Selected group details")
+        pl.addWidget(self._group_details)
+        self._results_stack.addWidget(page)
+        rl.addWidget(self._results_stack)
+        cl.addWidget(results)
+
+        # ── Apply the plan ────────────────────────────────────────────────
+        apply_card = self._make_card()
+        apply_card.setObjectName("actionCard")
+        al = QtWidgets.QVBoxLayout(apply_card)
+        al.setContentsMargins(16, 16, 16, 16)
+        al.setSpacing(SPACE.sm)
+        al.addWidget(self._make_card_title("Apply the plan"))
+        al.addWidget(self._make_subtitle(
+            "Execute shows exactly what will change and asks first. Every action is logged to Docs/."
+        ))
+
+        self._quarantine_rb = QtWidgets.QRadioButton("Quarantine duplicates (safe default)")
+        self._quarantine_rb.setChecked(True)
+        self._quarantine_rb.setToolTip("Losers are moved to the library's Quarantine/ folder.")
+        self._delete_rb = QtWidgets.QRadioButton("Delete losers permanently")
+        self._delete_rb.setObjectName("dupDeleteChoice")
+        self._delete_rb.setToolTip(
+            "Losers are deleted, not moved. Execute asks you to type DELETE to confirm."
+        )
+        self._quarantine_rb.toggled.connect(self._on_global_disposition_changed)
+        al.addWidget(self._quarantine_rb)
+        delete_row = QtWidgets.QHBoxLayout()
+        delete_row.setSpacing(SPACE.sm)
+        delete_row.addWidget(self._delete_rb)
+        self._delete_badge = ToneBadge("Cannot be undone", "danger")
+        self._delete_badge.setToolTip(self._delete_rb.toolTip())
+        delete_row.addWidget(self._delete_badge, 0, QtCore.Qt.AlignmentFlag.AlignVCenter)
+        delete_row.addStretch(1)
+        al.addLayout(delete_row)
+
         self._playlists_cb = QtWidgets.QCheckBox("Update playlists after execution")
         # The executor always rewrites playlist entries that point at a moved
         # loser (it would otherwise leave broken entries), so this is not a
@@ -559,142 +957,48 @@ class DuplicatesWorkspace(WorkspaceBase):
             "Always on: playlists that reference a duplicate that is moved or deleted are "
             "rewritten to point at the kept copy (backups are saved with the execution report)."
         )
-        opts_row.addWidget(self._playlists_cb)
-        opts_row.addStretch(1)
-        cfg_layout.addLayout(opts_row)
-
-        action_row = QtWidgets.QHBoxLayout()
-        self._quarantine_rb = QtWidgets.QRadioButton("Quarantine duplicates (safe default)")
-        self._quarantine_rb.setChecked(True)
-        self._quarantine_rb.setToolTip("Losers are moved to the library's Quarantine/ folder.")
-        self._delete_rb = QtWidgets.QRadioButton("Delete losers permanently (cannot be undone)")
-        self._delete_rb.setToolTip(
-            "Losers are deleted, not moved. Execute asks you to type DELETE to confirm."
-        )
-        action_row.addWidget(self._quarantine_rb)
-        action_row.addWidget(self._delete_rb)
-        action_row.addStretch(1)
-        cfg_layout.addLayout(action_row)
-        cl.addWidget(cfg_card)
-
-        # ── Action card ────────────────────────────────────────────────────
-        action_card = self._make_card()
-        action_card.setObjectName("actionCard")
-        ac_layout = QtWidgets.QVBoxLayout(action_card)
-        ac_layout.setContentsMargins(16, 14, 16, 14)
-        ac_layout.setSpacing(10)
-        ac_layout.addWidget(self._make_card_title("Actions"))
+        al.addWidget(self._playlists_cb)
 
         btn_row = QtWidgets.QHBoxLayout()
-        self._scan_btn = self._make_primary_button("🔍  Scan Library")
-        self._scan_btn.clicked.connect(self._on_scan)
-
-        self._preview_btn = QtWidgets.QPushButton("📄  Preview")
+        btn_row.setSpacing(SPACE.sm)
+        self._preview_btn = QtWidgets.QPushButton("Preview")
+        set_glyph(self._preview_btn, "external")
+        self._preview_btn.setToolTip("Open the plan (Docs/duplicate_preview.html) in your browser.")
         self._preview_btn.setEnabled(False)
         self._preview_btn.clicked.connect(self._on_preview)
 
-        self._execute_btn = QtWidgets.QPushButton("▶  Execute")
-        self._execute_btn.setEnabled(False)
-        self._execute_btn.setObjectName("dangerBtn")
-        self._execute_btn.clicked.connect(self._on_execute)
-
-        self._report_btn = QtWidgets.QPushButton("📊  Open Report")
+        self._report_btn = QtWidgets.QPushButton("Report")
+        set_glyph(self._report_btn, "file")
         self._report_btn.setEnabled(False)
         self._report_btn.setToolTip("Open the most recent execution report.")
         self._report_btn.clicked.connect(self._on_open_report)
 
-        self._cancel_btn = QtWidgets.QPushButton("✕  Cancel")
-        self._cancel_btn.setEnabled(False)
-        self._cancel_btn.clicked.connect(self._on_cancel)
+        self._execute_btn = QtWidgets.QPushButton("Execute…")
+        self._execute_btn.setEnabled(False)
+        self._execute_btn.setObjectName("dangerBtn")
+        set_glyph(self._execute_btn, "check", role="inverse")
+        self._execute_btn.setToolTip("Confirm, then quarantine (or delete) the losers as previewed.")
+        self._execute_btn.clicked.connect(self._on_execute)
 
-        btn_row.addWidget(self._scan_btn)
         btn_row.addWidget(self._preview_btn)
-        btn_row.addWidget(self._execute_btn)
         btn_row.addWidget(self._report_btn)
-        btn_row.addWidget(self._cancel_btn)
         btn_row.addStretch(1)
-        ac_layout.addLayout(btn_row)
-        cl.addWidget(action_card)
-
-        # ── Progress ───────────────────────────────────────────────────────
-        prog_card = self._make_card()
-        prog_layout = QtWidgets.QVBoxLayout(prog_card)
-        prog_layout.setContentsMargins(16, 12, 16, 12)
-        prog_layout.setSpacing(6)
-
-        self._prog_bar = QtWidgets.QProgressBar()
-        self._prog_bar.setValue(0)
-        self._prog_bar.setTextVisible(False)
-        self._prog_bar.setFixedHeight(6)
-        self._prog_status = QtWidgets.QLabel("Idle")
-        self._prog_status.setObjectName("statusHint")
-        self._prog_status.setWordWrap(True)
-        prog_layout.addWidget(self._prog_bar)
-        prog_layout.addWidget(self._prog_status)
-        cl.addWidget(prog_card)
-
-        # ── Results: groups list + inspector ──────────────────────────────
-        results_card = self._make_card()
-        results_layout = QtWidgets.QHBoxLayout(results_card)
-        results_layout.setContentsMargins(16, 16, 16, 16)
-        results_layout.setSpacing(12)
-
-        # Left: groups table
-        left = QtWidgets.QVBoxLayout()
-        self._fp_status_lbl = QtWidgets.QLabel("")
-        self._fp_status_lbl.setObjectName("statusHint")
-        left.addWidget(self._fp_status_lbl)
-
-        self._groups_table = QtWidgets.QTreeWidget()
-        self._groups_table.setHeaderLabels(["#", "Winner", "Losers", "Review"])
-        self._groups_table.setColumnWidth(0, 40)
-        self._groups_table.setColumnWidth(1, 220)
-        self._groups_table.setColumnWidth(2, 55)
-        self._groups_table.setColumnWidth(3, 60)
-        self._groups_table.setMinimumHeight(220)
-        self._groups_table.setAlternatingRowColors(True)
-        self._groups_table.currentItemChanged.connect(self._on_group_selected)
-        left.addWidget(self._groups_table)
-
-        # Right: inspector
-        right = QtWidgets.QVBoxLayout()
-        right.addWidget(QtWidgets.QLabel("Group details"))
-
-        disp_row = QtWidgets.QHBoxLayout()
-        disp_row.addWidget(QtWidgets.QLabel("Disposition:"))
-        self._disposition_combo = QtWidgets.QComboBox()
-        for label, value in _DISPOSITION_CHOICES:
-            self._disposition_combo.addItem(label, value)
-        self._disposition_combo.setEnabled(False)
-        self._disposition_combo.setToolTip(
-            "What happens to this group's losers. \"Default\" follows the "
-            "Quarantine / Delete choice above."
-        )
-        self._disposition_combo.currentIndexChanged.connect(self._on_disposition_changed)
-        disp_row.addWidget(self._disposition_combo)
-        disp_row.addStretch(1)
-        right.addLayout(disp_row)
-
-        self._group_details = QtWidgets.QPlainTextEdit()
-        self._group_details.setReadOnly(True)
-        self._group_details.setMinimumHeight(200)
-        self._group_details.setStyleSheet("font-family: 'Consolas', monospace; font-size: 11px;")
-        self._group_details.setPlaceholderText("Select a group to see details…")
-        right.addWidget(self._group_details)
-
-        results_layout.addLayout(left, 2)
-        results_layout.addLayout(right, 3)
-        cl.addWidget(results_card)
+        btn_row.addWidget(self._execute_btn)
+        al.addLayout(btn_row)
+        cl.addWidget(apply_card)
 
         # ── Log ────────────────────────────────────────────────────────────
         log_card = self._make_card()
         log_layout = QtWidgets.QVBoxLayout(log_card)
         log_layout.setContentsMargins(16, 16, 16, 16)
+        log_layout.setSpacing(SPACE.sm)
         log_layout.addWidget(self._make_card_title("Log"))
         self._log_area = QtWidgets.QPlainTextEdit()
+        self._log_area.setObjectName("logText")
         self._log_area.setReadOnly(True)
         self._log_area.setMinimumHeight(120)
-        self._log_area.setStyleSheet("font-family: 'Consolas', monospace; font-size: 12px;")
+        self._log_area.setPlaceholderText("Scan and execution messages appear here.")
+        self._log_area.setAccessibleName("Duplicate finder log")
         log_layout.addWidget(self._log_area)
         cl.addWidget(log_card)
 
@@ -730,6 +1034,8 @@ class DuplicatesWorkspace(WorkspaceBase):
         busy = self._scan_running or self._exec_running
         self._scan_btn.setEnabled(not busy)
         self._cancel_btn.setEnabled(busy)
+        self._cancel_btn.setVisible(busy)
+        self._prog_bar.setVisible(busy)
         self._preview_btn.setEnabled(
             not busy and bool(self._preview_html_path) and Path(self._preview_html_path).exists()
         )
@@ -761,6 +1067,81 @@ class DuplicatesWorkspace(WorkspaceBase):
 
     def _global_disposition(self) -> str:
         return "delete" if self._delete_rb.isChecked() else "quarantine"
+
+    def _group_disposition(self, group) -> str:
+        """What Execute will do with ``group``'s losers (its override, else the global choice)."""
+        return self._group_overrides.get(group.group_id) or self._global_disposition()
+
+    # ── Results view ──────────────────────────────────────────────────────
+
+    def _show_empty(self, title: str, message: str) -> None:
+        self._empty.set_text(title, message)
+        self._results_stack.setCurrentWidget(self._empty)
+
+    def _show_results(self) -> None:
+        if self._results_stack.currentWidget() is not self._results_page:
+            self._results_stack.setCurrentWidget(self._results_page)
+            motion.reveal(self._results_page)
+
+    def _fit_list_height(self) -> None:
+        """The group list is as tall as its rows, up to a cap (then it scrolls)."""
+        total = sum(_GroupRowDelegate.row_height(len(g.losers)) for g in self._groups[:40])
+        self._groups_table.setFixedHeight(max(_GroupRowDelegate.row_height(1), min(total + 2, 420)))
+
+    def _refresh_plan_stats(self) -> None:
+        groups = self._groups
+        files = sum(len(g.losers) for g in groups)
+        flagged = sum(1 for g in groups if g.review_flags)
+        leaving = 0
+        for group in groups:
+            if self._group_disposition(group) == "retain":
+                continue
+            state = getattr(group, "library_state", None) or {}
+            for loser in group.losers:
+                try:
+                    leaving += int((state.get(loser) or {}).get("size") or 0)
+                except (TypeError, ValueError):
+                    pass
+        stats = self._plan_stats
+        stats.tile("groups").set_value(f"{len(groups):,}")
+        stats.tile("files").set_value(f"{files:,}")
+        stats.tile("space").set_value(_format_bytes(leaving))
+        stats.tile("flagged").set_value(f"{flagged:,}", tone="warning" if flagged else "")
+        if self._plan_executed:
+            return
+        if flagged:
+            reason = (f"{flagged} group(s) are flagged for review: Execute lists them and asks "
+                      "before running them. Nothing has moved yet.")
+        else:
+            reason = "Nothing has moved yet. Preview opens the plan; Execute asks before it changes anything."
+        self._summary_reason.setText(reason)
+
+    def _show_outcome(self, counts: dict | None, message: str) -> None:
+        """Fill the execution tiles from ``DupeExecuteWorker.counts``."""
+        tiles = self._outcome_stats
+        if counts is None:
+            for key in tiles.keys():
+                tiles.tile(key).set_value("–", tone="")
+        else:
+            tones = {"refused": "warning", "not_attempted": "warning", "errors": "danger"}
+            for key in tiles.keys():
+                value = int(counts.get(key) or 0)
+                tiles.tile(key).set_value(f"{value:,}", tone=tones.get(key, "") if value else "")
+        tiles.setVisible(True)
+        self._summary_reason.setText(message)
+
+    @Slot(bool)
+    def _on_global_disposition_changed(self, _checked: bool = False) -> None:
+        """The Quarantine / Delete choice applies to every group without an
+        override: repaint the rows, the totals and the selected group."""
+        self._groups_table.viewport().update()
+        if self._groups:
+            self._refresh_plan_stats()
+        item = self._groups_table.currentItem()
+        if item is not None:
+            index = item.data(0, QtCore.Qt.ItemDataRole.UserRole)
+            if isinstance(index, int) and 0 <= index < len(self._groups):
+                self._group_details.setPlainText(self._group_detail_text(self._groups[index]))
 
     def _effective_dispositions(self) -> dict[str, str]:
         if self._plan is None:
@@ -843,7 +1224,7 @@ class DuplicatesWorkspace(WorkspaceBase):
                 self,
                 "Fingerprinting tools not found",
                 f"{names} could not be found on PATH.\n\n"
-                "The Duplicate Finder fingerprints audio with fpcalc (Chromaprint — "
+                "Find duplicates fingerprints audio with fpcalc (Chromaprint — "
                 "https://acoustid.org/chromaprint) and decodes it with FFmpeg "
                 "(https://ffmpeg.org). Install them, make sure they are on PATH, "
                 "then scan again.\n\n"
@@ -865,6 +1246,9 @@ class DuplicatesWorkspace(WorkspaceBase):
         self._plan = None
         self._plan_executed = False
         self._group_overrides.clear()
+        self._fp_status_lbl.setText("")
+        self._outcome_stats.setVisible(False)
+        self._show_empty("Scanning…", "Groups appear here when the scan finishes.")
         self._prog_bar.setValue(0)
         self._prog_status.setText("Scanning…")
         self._set_step(self._STEP_SCAN)
@@ -1079,6 +1463,7 @@ class DuplicatesWorkspace(WorkspaceBase):
         if current is None:
             self._group_details.clear()
             self._disposition_combo.setEnabled(False)
+            self._selected_lbl.setText("Select a group to choose what happens to its copies.")
             return
         index = current.data(0, QtCore.Qt.ItemDataRole.UserRole)
         group = self._groups[index] if isinstance(index, int) and 0 <= index < len(self._groups) else None
@@ -1086,6 +1471,10 @@ class DuplicatesWorkspace(WorkspaceBase):
             self._group_details.setPlainText(f"Group: {current.text(0)}")
             self._disposition_combo.setEnabled(False)
             return
+        self._selected_lbl.setText(
+            f"Group {index + 1} of {len(self._groups)} · {Path(group.winner_path).name}"
+        )
+        self._selected_lbl.setToolTip(group.winner_path)
         override = self._group_overrides.get(group.group_id)
         combo_index = next(
             (i for i, (_label, value) in enumerate(_DISPOSITION_CHOICES) if value == override), 0
@@ -1111,6 +1500,8 @@ class DuplicatesWorkspace(WorkspaceBase):
         else:
             self._group_overrides.pop(group.group_id, None)
         self._group_details.setPlainText(self._group_detail_text(group))
+        self._groups_table.viewport().update()
+        self._refresh_plan_stats()
 
     @Slot(int)
     def _on_scan_progress(self, value: int) -> None:
@@ -1142,14 +1533,19 @@ class DuplicatesWorkspace(WorkspaceBase):
             self._log(message, "ok")
             self._status("Scan complete", "ok")
             self._set_step(self._STEP_REVIEW if self._groups else self._STEP_SCAN)
+            if not self._groups:
+                self._show_empty("No duplicates found",
+                                 "Every track in this library is unique at these thresholds.")
         elif message == "Cancelled.":
             self._log(message, "warn")
             self._status("Cancelled", "warn")
             self._plan = None
+            self._show_empty("Scan cancelled", "Nothing was changed. Find duplicates starts a fresh scan.")
         else:
             self._log(message, "error")
             self._status("Error", "error")
             self._plan = None
+            self._show_empty("No groups", "The scan did not finish: the status above and the log say why.")
         self._refresh_buttons()
 
     @Slot(bool, str, str)
@@ -1163,6 +1559,8 @@ class DuplicatesWorkspace(WorkspaceBase):
         self._exec_running = False
         self._plan_executed = True
         self._prog_status.setText(f"{message} Scan again to build a fresh plan.")
+        counts = getattr(worker if worker is not None else self._exec_worker, "counts", None)
+        self._show_outcome(counts, message)
 
         if success:
             self._log(message, "ok")
@@ -1187,19 +1585,27 @@ class DuplicatesWorkspace(WorkspaceBase):
             return
         self._groups = list(groups)
         self._groups_table.clear()
+        items = []
         for i, group in enumerate(self._groups):
-            winner_name = Path(group.winner_path).name
-            review = "⚑" if group.review_flags else ""
-            item = QtWidgets.QTreeWidgetItem([str(i + 1), winner_name[:80], str(len(group.losers)), review])
+            item = QtWidgets.QTreeWidgetItem([Path(group.winner_path).name])
             item.setData(0, QtCore.Qt.ItemDataRole.UserRole, i)
+            tip = [f"Keeps: {group.winner_path}"]
+            tip += [f"Loser: {loser}" for loser in group.losers]
             if group.review_flags:
-                item.setToolTip(3, "\n".join(group.review_flags))
-            self._groups_table.addTopLevelItem(item)
+                tip.append("Flagged for review: " + "; ".join(group.review_flags))
+            item.setToolTip(0, "\n".join(tip))
+            items.append(item)
+        self._groups_table.addTopLevelItems(items)
         flagged = sum(1 for g in self._groups if g.review_flags)
-        text = f"{len(self._groups)} duplicate group(s) found"
+        text = f"{len(self._groups):,} group(s)"
         if flagged:
-            text += f" — {flagged} flagged for review (⚑)"
+            text += f" · {flagged:,} flagged for review"
         self._fp_status_lbl.setText(text)
+        self._outcome_stats.setVisible(False)
+        self._refresh_plan_stats()
+        if self._groups:
+            self._fit_list_height()
+            self._show_results()
 
     def _abandon_running_jobs(self, reason: str, *, keep_confirmed_writes: bool = False) -> None:
         """Detach running jobs from the page; their late results are ignored.
@@ -1234,10 +1640,13 @@ class DuplicatesWorkspace(WorkspaceBase):
 
     def _on_library_changed(self, path: str) -> None:
         self._abandon_running_jobs("Library changed", keep_confirmed_writes=True)
+        self._library_lbl.setText(path)
         self._groups_table.clear()
         self._group_details.clear()
         self._log_area.clear()
         self._fp_status_lbl.setText("")
+        self._outcome_stats.setVisible(False)
+        self._show_empty(*self._initial_empty_text(path))
         self._groups = []
         self._plan = None
         self._plan_executed = False
