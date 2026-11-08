@@ -147,6 +147,24 @@ def fields_row(fields: list[tuple[str, QtWidgets.QWidget]], *, spacing: int = 14
     return row
 
 
+def fit_stack_to_current(stack: QtWidgets.QStackedWidget) -> QtWidgets.QStackedWidget:
+    """Make ``stack`` as tall as its *current* page, not its tallest one (an
+    empty state would otherwise sit in the results page's height).
+    ``QStackedLayout`` leaves pages with an Ignored size policy out of its
+    size hints, so every other page is set to Ignored on each switch."""
+    def _fit(index: int) -> None:
+        for i in range(stack.count()):
+            page = stack.widget(i)
+            policy = (QtWidgets.QSizePolicy.Policy.Preferred if i == index
+                      else QtWidgets.QSizePolicy.Policy.Ignored)
+            page.setSizePolicy(policy, policy)
+        stack.updateGeometry()
+
+    stack.currentChanged.connect(_fit)
+    _fit(stack.currentIndex())
+    return stack
+
+
 def pill_font() -> QtGui.QFont:
     """The small pill font: caption size, semibold, no extra tracking."""
     return font("caption", weight=600)

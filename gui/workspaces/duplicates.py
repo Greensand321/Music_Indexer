@@ -12,8 +12,8 @@ from gui.themes.glass import apply_font, current_material, font, paint_surface, 
 from gui.themes.manager import get_manager
 from gui.themes.tokens import RADIUS, SPACE
 from gui.widgets.dupes_parts import (
-    GlyphLabel, PathLabel, TileGrid, ToneBadge, hero_title, paint_tone_pill, pill_font,
-    tone_pill_size,
+    GlyphLabel, PathLabel, TileGrid, ToneBadge, fit_stack_to_current, hero_title, paint_tone_pill,
+    pill_font, tone_pill_size,
 )
 from gui.widgets.glass import ElidedLabel, GlassPanel
 from gui.widgets.glass_parts import EmptyState
@@ -929,6 +929,7 @@ class DuplicatesWorkspace(WorkspaceBase):
         self._group_details.setAccessibleName("Selected group details")
         pl.addWidget(self._group_details)
         self._results_stack.addWidget(page)
+        fit_stack_to_current(self._results_stack)
         rl.addWidget(self._results_stack)
         cl.addWidget(results)
 

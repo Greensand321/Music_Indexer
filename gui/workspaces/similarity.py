@@ -10,7 +10,7 @@ from gui.themes import motion
 from gui.themes.glass import apply_font
 from gui.themes.manager import get_manager
 from gui.themes.tokens import RADIUS, SPACE
-from gui.widgets.dupes_parts import PathLabel, TileGrid, ToneBadge, hero_title
+from gui.widgets.dupes_parts import PathLabel, TileGrid, ToneBadge, fit_stack_to_current, hero_title
 from gui.widgets.glass import GlassPanel
 from gui.widgets.glass_parts import EmptyState
 from gui.widgets.glyphs import set_glyph
@@ -394,6 +394,7 @@ class SimilarityWorkspace(WorkspaceBase):
         self._results_text.setVisible(False)
         pl.addWidget(self._results_text)
         self._result_stack.addWidget(page)
+        fit_stack_to_current(self._result_stack)
         rl.addWidget(self._result_stack)
         cl.addWidget(result_card)
 

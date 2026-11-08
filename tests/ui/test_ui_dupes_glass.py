@@ -66,9 +66,14 @@ def test_empty_state_before_the_first_scan_then_results(dupes, qtbot):
     assert ws._empty.title() == "No scan yet"
     assert ws._library_lbl.text() == str(ws._library_path)
     assert ws._library_lbl.toolTip() == str(ws._library_path)
+    process_events(5)
+    # The card is as tall as the empty state, not as the results page it replaces.
+    assert ws._results_stack.height() < ws._empty.sizeHint().height() + 24
 
     run_scan(ws, qtbot)
+    process_events(5)
     assert ws._results_stack.currentWidget() is ws._results_page
+    assert ws._results_stack.height() > ws._empty.sizeHint().height() + 100
     stats = ws._plan_stats
     assert stats.tile("groups").value() == "1"
     assert stats.tile("files").value() == "1"
