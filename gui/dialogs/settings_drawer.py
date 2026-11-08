@@ -193,7 +193,7 @@ class _ServiceRow(QtWidgets.QAbstractButton):
             if self.isChecked():
                 paint_surface(p, rect, m.raised, radius=RADIUS.sm)
             else:
-                paint_surface(p, rect, Surface(m.well.fill, radius=RADIUS.sm),
+                paint_surface(p, rect, Surface(m.well.fill, m.well.border, radius=RADIUS.sm),
                               opacity=1.0 if enabled else 0.6)
                 if enabled and self.underMouse():
                     path = QtGui.QPainterPath()

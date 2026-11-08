@@ -160,7 +160,8 @@ class ProblemRow(QtWidgets.QWidget):
         well = current_material().well
         p = QtGui.QPainter(self)
         try:
-            paint_surface(p, QtCore.QRectF(self.rect()), Surface(well.fill, radius=RADIUS.sm))
+            paint_surface(p, QtCore.QRectF(self.rect()),
+                          Surface(well.fill, well.border, radius=RADIUS.sm))
         finally:
             p.end()
 
