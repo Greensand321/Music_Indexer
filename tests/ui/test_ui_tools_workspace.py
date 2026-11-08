@@ -312,23 +312,32 @@ def test_status_chip_survives_repeated_transitions(make_workspace, qtbot, motion
     assert chip.text == "final" and chip.state == chip.SUCCESS
 
 
-def test_tile_hover_timers_stop_when_idle_or_hidden(make_workspace, qtbot):
+def test_tiles_are_static_glass_with_no_hover_timers(make_workspace, qtbot):
+    """DS-09: the old tiles ran a 60 Hz hover-glow timer (forever, until it was
+    made to stop). The glass tiles paint a static card surface: hovering
+    starts no timer and no animation, and their shadow is painted by the
+    page like every other card's."""
+    from gui.widgets.glass import GlassCard
     from gui.workspaces.tools import ToolTile
 
     ws = make_workspace("exports")
     tiles = ws.findChildren(ToolTile)
     assert len(tiles) == 2      # Artist/Title export, Codec list export
-    assert not any(t.glow_animating for t in tiles), "no timer may run without hover"
+    assert all(isinstance(t, GlassCard) for t in tiles)
+    assert set(map(id, tiles)) <= set(map(id, ws._inner.elevated_widgets()))
+
+    def busy(tile):
+        timers = [t for t in tile.findChildren(QtCore.QTimer) if t.isActive()]
+        anims = [a for a in tile.findChildren(QtCore.QAbstractAnimation)
+                 if a.state() == QtCore.QAbstractAnimation.State.Running]
+        return timers + anims
 
     tile = tiles[0]
     QtWidgets.QApplication.sendEvent(tile, QtGui.QEnterEvent(
         QtCore.QPointF(10, 10), QtCore.QPointF(10, 10), QtCore.QPointF(10, 10)))
-    assert tile.glow_animating
-    qtbot.waitUntil(lambda: not tile.glow_animating, timeout=3000)   # converges, then stops
+    assert busy(tile) == []
     QtWidgets.QApplication.sendEvent(tile, QtCore.QEvent(QtCore.QEvent.Type.Leave))
-    assert tile.glow_animating
-    ws.hide()
-    assert not any(t.glow_animating for t in tiles), "hidden page: no timers"
+    assert busy(tile) == []
 
 
 def _mean_lightness(widget) -> float:
@@ -341,22 +350,24 @@ def _mean_lightness(widget) -> float:
     return total / max(n, 1)
 
 
-def test_light_theme_tiles_use_the_light_tint(make_workspace, qtbot, monkeypatch):
+def test_light_theme_tiles_paint_the_light_card_surface(make_workspace, qtbot):
     """DS-08: tiles read the nonexistent tokens.is_dark, so light themes got
-    the dark (black) tint and looked muddy grey."""
+    the dark (black) tint and looked muddy grey. They now paint the theme's
+    own card surface, so a light theme gives a light tile."""
+    from ui_harness import process_events
+
     from gui.themes.manager import get_manager
     from gui.workspaces.tools import ToolTile
 
     get_manager().apply("pearl")
     ws = make_workspace("exports")
     tile = ws.findChildren(ToolTile)[0]
+    process_events(10)
     light = _mean_lightness(tile)
-    tokens = get_manager().current
-    import dataclasses
-    forced_dark = dataclasses.replace(tokens, variant="dark")
-    monkeypatch.setattr(type(get_manager()), "current", property(lambda self: forced_dark))
-    dark_tinted = _mean_lightness(tile)
-    assert light > dark_tinted, (light, dark_tinted)
+    get_manager().apply("midnight")
+    process_events(10)
+    dark = _mean_lightness(tile)
+    assert light > 200 and light > dark + 80, (light, dark)
 
 
 def test_colour_flash_reuses_one_animation_and_never_restyles(make_workspace, qtbot, motion):

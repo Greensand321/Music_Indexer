@@ -20,25 +20,20 @@ from collections import Counter
 from pathlib import Path
 
 from gui.compat import QtCore, QtGui, QtWidgets, Signal, Slot
+from gui.themes import motion
+from gui.themes.glass import apply_font as glass_apply_font
+from gui.themes.glass import current_material, qcolor
+from gui.themes.glass import font as glass_font
 from gui.themes.manager import get_manager
+from gui.widgets.glass import ElidedLabel, GlassCard
+from gui.widgets.glass_parts import EmptyState
+from gui.widgets.glyphs import paint_glyph, set_glyph
 from gui.workspaces.base import WorkspaceBase
 from gui.workspaces.label_tone import flash_tone, refresh_tones, set_tone
+from gui.workspaces.organize_parts import FlowLayout, hero_title, path_well, thin_bar
 from utils.reserved_folders import NON_LIBRARY_FOLDERS, walk_library
 
 _SUPPORTED_EXTS = {".mp3", ".flac", ".m4a", ".aac", ".ogg", ".wav", ".opus"}
-
-
-# ── Helpers ────────────────────────────────────────────────────────────────────
-
-def _rgba(hex_color: str, alpha: float) -> str:
-    """Convert a 6-digit hex colour + alpha float to a CSS rgba() string.
-
-    Qt stylesheets do not reliably support 8-digit hex (#rrggbbaa), so
-    this helper is used everywhere an alpha-tinted colour is needed.
-    """
-    h = hex_color.lstrip("#")
-    r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
-    return f"rgba({r}, {g}, {b}, {alpha:.2f})"
 
 
 # ── Background workers ─────────────────────────────────────────────────────────
@@ -343,109 +338,67 @@ class CodecExportWorker(QtCore.QThread):
         self.finished.emit(str(out), total)
 
 
-class _GlassBadge(QtWidgets.QWidget):
-    def __init__(self, icon: str, size: int = 40, parent=None):
-        super().__init__(parent)
-        self._icon = icon
-        self.setFixedSize(size, size)
-        from gui.themes.manager import get_manager
-        # Bound method (not a lambda) so the singleton drops the connection
-        # when this widget is destroyed.
-        get_manager().theme_changed.connect(self._repaint_on_theme)
-
-
-    def _repaint_on_theme(self, _tokens=None) -> None:
-        self.update()
-    def set_size(self, size: int) -> None:
-        self.setFixedSize(size, size)
-        self.update()
-
-    def paintEvent(self, e):  # noqa: N802
-        t = get_manager().current
-        p = QtGui.QPainter(self)
-        p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
-        sz  = float(self.width())
-        r   = QtCore.QRectF(0, 0, sz, sz)
-        rad = sz * 0.28
-        ac  = QtGui.QColor(t.accent)
-
-        fill = QtGui.QColor(ac.red(), ac.green(), ac.blue(), 55)
-        p.setBrush(fill); p.setPen(QtCore.Qt.PenStyle.NoPen)
-        p.drawRoundedRect(r, rad, rad)
-
-        spec = QtGui.QLinearGradient(0, 0, 0, sz * 0.55)
-        s1 = QtGui.QColor(255, 255, 255); s1.setAlphaF(0.38)
-        s2 = QtGui.QColor(255, 255, 255); s2.setAlphaF(0.0)
-        spec.setColorAt(0.0, s1); spec.setColorAt(1.0, s2)
-        p.setBrush(spec)
-        p.drawRoundedRect(r, rad, rad)
-
-        tint = QtGui.QColor(ac.red(), ac.green(), ac.blue(), 70)
-        p.setBrush(tint)
-        p.drawRoundedRect(r, rad, rad)
-
-        rim = QtGui.QLinearGradient(0, 0, 0, sz)
-        r1 = QtGui.QColor(255, 255, 255); r1.setAlphaF(0.65)
-        r2 = QtGui.QColor(ac.red(), ac.green(), ac.blue()); r2.setAlphaF(0.35)
-        rim.setColorAt(0.0, r1); rim.setColorAt(1.0, r2)
-        p.setBrush(QtCore.Qt.BrushStyle.NoBrush)
-        p.setPen(QtGui.QPen(QtGui.QBrush(rim), 1.1))
-        p.drawRoundedRect(r.adjusted(0.55, 0.55, -0.55, -0.55), rad, rad)
-
-        p.setPen(QtGui.QColor(t.text_inverse))
-        font = QtGui.QFont(self.font().family(), int(sz * 0.42))
-        font.setBold(True)
-        p.setFont(font)
-        p.drawText(self.rect(), QtCore.Qt.AlignmentFlag.AlignCenter, self._icon)
-        p.end()
-
-
 class _GlassResultChip(QtWidgets.QWidget):
+    """The tile's status pill: "Ready", "Running…", "Done", "Error",
+    "Cancelled". Neutral states sit on a well; done and error are tinted with
+    their theme tone and carry a glyph. Text changes cross-fade (painter
+    opacity only, two parented animations reused for every change)."""
+
     NEUTRAL = 0
     SUCCESS = 1
     ERROR   = 2
 
     # Theme token per state (read at paint time, so theme switches apply).
     _TOKEN = {
-        NEUTRAL: "text_muted",
+        NEUTRAL: "text_secondary",
         SUCCESS: "success",
         ERROR:   "danger",
     }
+    _GLYPH = {SUCCESS: "check", ERROR: "warning"}
+    _H = 26
+    _PAD = 11
+    _GLYPH_W = 12
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._text  = "\u29d6  Idle"
+        self.setObjectName("toolStatusPill")
+        self._text  = "Ready"
         self._state = self.NEUTRAL
         self._opacity = 1.0
         self._pending: tuple[str, int] | None = None
         # Two long-lived, parented animations reused for every transition.
         # (A stored reference to a DeleteWhenStopped animation dangled after
-        # the first transition, so the second one raised RuntimeError \u2014 DS-06.)
+        # the first transition, so the second one raised RuntimeError — DS-06.)
         self._fade_out = QtCore.QVariantAnimation(self)
         self._fade_out.setEndValue(0.0)
-        self._fade_out.setDuration(160)
+        self._fade_out.setDuration(motion.duration("micro"))
         self._fade_out.setEasingCurve(QtCore.QEasingCurve.Type.OutCubic)
         self._fade_out.valueChanged.connect(self._on_opacity)
         self._fade_out.finished.connect(self._swap)
         self._fade_in = QtCore.QVariantAnimation(self)
         self._fade_in.setStartValue(0.0)
         self._fade_in.setEndValue(1.0)
-        self._fade_in.setDuration(260)
+        self._fade_in.setDuration(motion.duration("base"))
         self._fade_in.setEasingCurve(QtCore.QEasingCurve.Type.OutCubic)
         self._fade_in.valueChanged.connect(self._on_opacity)
-        self.setFixedHeight(26)
+        self.setFixedHeight(self._H)
         self._resize()
-        from gui.themes.manager import get_manager
         # Bound method (not a lambda) so the singleton drops the connection
         # when this widget is destroyed.
         get_manager().theme_changed.connect(self._repaint_on_theme)
 
-
     def _repaint_on_theme(self, _tokens=None) -> None:
         self.update()
+
+    @staticmethod
+    def _font() -> QtGui.QFont:
+        return glass_font("caption", weight=600)
+
     def _resize(self):
-        fm = QtGui.QFontMetrics(self.font())
-        self.setFixedWidth(fm.horizontalAdvance(self._text) + 34)
+        fm = QtGui.QFontMetrics(self._font())
+        glyph = self._GLYPH_W + 5 if self._state in self._GLYPH else 0
+        self.setFixedWidth(fm.horizontalAdvance(self._text) + glyph + 2 * self._PAD)
+        self.setAccessibleName(f"Status: {self._text}")
 
     def set_text_fast(self, text: str, state: int | None = None):
         self._text = text
@@ -454,13 +407,13 @@ class _GlassResultChip(QtWidgets.QWidget):
         self._resize()
         self.update()
 
-    def show_neutral(self, text: str = "\u29d6  Idle"):
+    def show_neutral(self, text: str = "Ready"):
         self._transition(text, self.NEUTRAL)
 
-    def show_success(self, text: str = "\u2713  Done"):
+    def show_success(self, text: str = "Done"):
         self._transition(text, self.SUCCESS)
 
-    def show_error(self, text: str = "\u2717  Error"):
+    def show_error(self, text: str = "Error"):
         self._transition(text, self.ERROR)
 
     @property
@@ -477,7 +430,7 @@ class _GlassResultChip(QtWidgets.QWidget):
         self._fade_in.stop()
         if self._fade_out.state() == QtCore.QAbstractAnimation.State.Running:
             return  # the running fade-out will swap in the newest text
-        if not self.isVisible():
+        if not self.isVisible() or motion.reduced_motion():
             self._swap()        # nothing to animate on a hidden chip
             self._set_op(1.0)
             return
@@ -490,7 +443,7 @@ class _GlassResultChip(QtWidgets.QWidget):
         self._text, self._state = self._pending
         self._pending = None
         self._resize()
-        if self.isVisible():
+        if self.isVisible() and not motion.reduced_motion():
             self._fade_in.start()
         else:
             self._set_op(1.0)
@@ -503,324 +456,200 @@ class _GlassResultChip(QtWidgets.QWidget):
         self.update()
 
     def paintEvent(self, e):  # noqa: N802
+        t = get_manager().current
+        m = current_material()
         p = QtGui.QPainter(self)
-        p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
-        p.setOpacity(self._opacity)
-
-        w, h = float(self.width()), float(self.height())
-        r    = QtCore.QRectF(0, 0, w, h)
-        rad  = h / 2.0
-        ac   = QtGui.QColor(getattr(get_manager().current, self._TOKEN[self._state]))
-
-        fill = QtGui.QColor(ac.red(), ac.green(), ac.blue(), 38)
-        p.setBrush(fill); p.setPen(QtCore.Qt.PenStyle.NoPen)
-        p.drawRoundedRect(r, rad, rad)
-
-        spec = QtGui.QLinearGradient(0, 0, 0, h * 0.58)
-        s1 = QtGui.QColor(255, 255, 255); s1.setAlphaF(0.28)
-        s2 = QtGui.QColor(255, 255, 255); s2.setAlphaF(0.0)
-        spec.setColorAt(0.0, s1); spec.setColorAt(1.0, s2)
-        p.setBrush(spec)
-        p.drawRoundedRect(r, rad, rad)
-
-        bdr = QtGui.QColor(ac.red(), ac.green(), ac.blue(), 170)
-        p.setBrush(QtCore.Qt.BrushStyle.NoBrush)
-        p.setPen(QtGui.QPen(bdr, 1.0))
-        p.drawRoundedRect(r.adjusted(0.5, 0.5, -0.5, -0.5), rad, rad)
-
-        p.setPen(ac)
-        f = p.font(); f.setPointSize(10); f.setBold(True); p.setFont(f)
-        p.drawText(self.rect(), QtCore.Qt.AlignmentFlag.AlignCenter, self._text)
-        p.end()
+        try:
+            p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+            p.setOpacity(self._opacity)
+            rect = QtCore.QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+            rad = rect.height() / 2.0
+            tone = getattr(t, self._TOKEN[self._state])
+            if self._state == self.NEUTRAL:
+                fill, border, ink = qcolor(m.well.fill), qcolor(m.well.border), qcolor(tone)
+            else:
+                fill, border, ink = qcolor(tone, 0.16), qcolor(tone, 0.45), qcolor(tone)
+            p.setPen(QtGui.QPen(border, 1.0))
+            p.setBrush(fill)
+            p.drawRoundedRect(rect, rad, rad)
+            x = float(self._PAD)
+            glyph = self._GLYPH.get(self._state)
+            if glyph:
+                g = QtCore.QRectF(x, (self.height() - self._GLYPH_W) / 2, self._GLYPH_W, self._GLYPH_W)
+                paint_glyph(p, g, glyph, ink, weight=2.2)
+                x += self._GLYPH_W + 5
+            p.setPen(ink)
+            p.setFont(self._font())
+            p.drawText(QtCore.QRectF(x, 0, self.width() - x, self.height()),
+                       int(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter),
+                       self._text)
+        finally:
+            p.end()
 
 
 # ── ToolTile ───────────────────────────────────────────────────────────────────
 
-class ToolTile(QtWidgets.QFrame):
-    """Self-contained tool card: header ▸ options ▸ footer ▸ animated drawer.
+class ToolTile(GlassCard):
+    """A tool's glass card: header ▸ options ▸ empty state ▸ footer ▸ result.
 
     Usage
     -----
-    tile = ToolTile("↗", "My Tool", "Short description.")
-    tile.add_option(some_checkbox)
-    tile.set_run_button("Run", self._my_slot)
-    secondary = tile.add_secondary_button("Open File")
+    tile = ToolTile("My tool", "One line on what it does.",
+                    empty_title="Nothing yet", empty_message="What appears here.")
+    tile.add_option(some_toggle)
+    tile.set_run_button("Run", self._my_slot, glyph="play")
+    secondary = tile.add_secondary_button("Open file", glyph="external")
     tile.finish_footer()
 
-    When an operation starts call tile.open_drawer() to reveal the progress
-    area and tile.set_running(True/False) to lock/unlock footer buttons.
+    When an operation starts call ``tile.open_drawer()`` to swap the empty
+    state for the result area (progress pill, status line, output path, log)
+    and ``tile.set_running(True/False)`` to lock/unlock the footer buttons.
+    ``hero=True`` makes it the page's hero card (radius 30, title role).
     """
 
     def __init__(
         self,
-        icon: str,
         title: str,
         description: str,
         *,
+        hero: bool = False,
+        empty_title: str = "",
+        empty_message: str = "",
         log_height: int = 110,
         parent: QtWidgets.QWidget | None = None,
     ) -> None:
         super().__init__(parent)
-        self.setObjectName("liquidGlassTile")
-        self.setStyleSheet("QFrame#liquidGlassTile { background: transparent; border: none; }")
-        self.setMouseTracking(True)
-        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_Hover, True)
-        self._hover_t = 0.0
-        self._time = 0.0
-        self._target_pos = QtCore.QPointF(200, 100)
-        self._glow_pos = QtCore.QPointF(200, 100)
-        self._is_hovered = False
-
+        if hero:
+            self.setObjectName("headerCard")
         self._footer_buttons: list[QtWidgets.QPushButton] = []
         self._drawer_open = False
 
-        # Hover-glow animation timer. It only runs while the glow is actually
-        # moving (hover, mouse move, settling back after leave) and never while
-        # the tile is hidden — it used to tick at 60 Hz forever (DS-09/TOOL-18).
-        self._timer = QtCore.QTimer(self)
-        self._timer.setInterval(16)
-        self._timer.timeout.connect(self._tick)
-
         outer = QtWidgets.QVBoxLayout(self)
-        outer.setContentsMargins(0, 0, 0, 0)
-        outer.setSpacing(0)
+        outer.setContentsMargins(16, 16, 16, 16)
+        outer.setSpacing(12)
 
         # ── Header ────────────────────────────────────────────────────────
-        header = QtWidgets.QWidget()
-        header_l = QtWidgets.QVBoxLayout(header)
-        header_l.setContentsMargins(18, 16, 18, 12)
-        header_l.setSpacing(4)
-
-        title_row = QtWidgets.QHBoxLayout()
-        title_row.setSpacing(12)
-        
-        self._badge = _GlassBadge(icon, size=40)
-        title_row.addWidget(self._badge, 0, QtCore.Qt.AlignmentFlag.AlignTop)
-        
+        head = QtWidgets.QHBoxLayout()
+        head.setSpacing(12)
         info = QtWidgets.QVBoxLayout()
-        info.setSpacing(6)
-        
-        self._title_lbl = QtWidgets.QLabel(title)
-        self._title_lbl.setObjectName("cardTitle")
+        info.setSpacing(4)
+        if hero:
+            self._title_lbl = hero_title(title)
+        else:
+            self._title_lbl = QtWidgets.QLabel(title)
+            self._title_lbl.setObjectName("cardTitle")
         info.addWidget(self._title_lbl)
-
         self._desc_lbl: QtWidgets.QLabel | None = None
         if description:
             self._desc_lbl = QtWidgets.QLabel(description)
             self._desc_lbl.setObjectName("sectionSubtitle")
             self._desc_lbl.setWordWrap(True)
-            self._desc_lbl.setContentsMargins(0, 2, 0, 2)
             info.addWidget(self._desc_lbl)
-            
-        title_row.addLayout(info, 1)
-
+        head.addLayout(info, 1)
         self.status_chip = _GlassResultChip()
-        self.status_chip.show_neutral("Ready.")
-        title_row.addWidget(self.status_chip, 0, QtCore.Qt.AlignmentFlag.AlignTop)
+        self.status_chip.show_neutral("Ready")
+        head.addWidget(self.status_chip, 0, QtCore.Qt.AlignmentFlag.AlignTop)
+        outer.addLayout(head)
 
-        header_l.addLayout(title_row)
-        outer.addWidget(header)
-
-        # ── Options area ──────────────────────────────────────────────────
+        # ── Options (shown once something is added) ───────────────────────
         self._options = QtWidgets.QWidget()
         self._opts_l = QtWidgets.QVBoxLayout(self._options)
-        self._opts_l.setContentsMargins(18, 0, 18, 12)
-        self._opts_l.setSpacing(8)
+        self._opts_l.setContentsMargins(0, 0, 0, 0)
+        self._opts_l.setSpacing(10)
+        self._options.setVisible(False)
         outer.addWidget(self._options)
+
+        # ── Before the first run ──────────────────────────────────────────
+        self.empty_state: EmptyState | None = None
+        if empty_title:
+            self.empty_state = EmptyState(empty_title, empty_message)
+            outer.addWidget(self.empty_state)
 
         # ── Footer ────────────────────────────────────────────────────────
         self._footer = QtWidgets.QWidget()
         self._footer_l = QtWidgets.QHBoxLayout(self._footer)
-        self._footer_l.setContentsMargins(18, 8, 18, 16)
-        self._footer_l.setSpacing(8)
+        self._footer_l.setContentsMargins(0, 0, 0, 0)
+        self._footer_l.setSpacing(10)
         outer.addWidget(self._footer)
 
-        # ── Separator (hidden until drawer opens) ─────────────────────────
-        self._sep = QtWidgets.QFrame()
-        self._sep.setFrameShape(QtWidgets.QFrame.Shape.HLine)
-        self._sep.setFrameShadow(QtWidgets.QFrame.Shadow.Plain)
-        self._sep.setVisible(False)
-        outer.addWidget(self._sep)
-
-        # ── Drawer ────────────────────────────────────────────────────────
+        # ── Result area ("drawer"; hidden until a run starts) ─────────────
         self._drawer = QtWidgets.QWidget()
         drawer_l = QtWidgets.QVBoxLayout(self._drawer)
-        drawer_l.setContentsMargins(18, 10, 18, 16)
-        drawer_l.setSpacing(6)
+        drawer_l.setContentsMargins(0, 4, 0, 0)
+        drawer_l.setSpacing(8)
 
-        self.progress_bar = QtWidgets.QProgressBar()
-        self.progress_bar.setFixedHeight(6)
-        self.progress_bar.setTextVisible(False)
+        self.progress_bar = thin_bar()
 
-        # Hidden but retained so existing tool logic doesn't crash on .setText()
+        # Prose about the run (tests and slots read it). No role name: its
+        # colour is a palette tone (label_tone), which a QSS role would mask.
         self.status_label = QtWidgets.QLabel("Ready.")
-        self.status_label.setVisible(False)
+        self.status_label.setWordWrap(True)
+        glass_apply_font(self.status_label, "label")
+
+        self._output_lbl = ElidedLabel("", QtCore.Qt.TextElideMode.ElideMiddle)
+        self._output_lbl.setObjectName("toolOutputPath")
+        self._output_row = path_well(self._output_lbl, "file")
+        self._output_row.setVisible(False)
 
         self.log_box = QtWidgets.QPlainTextEdit()
         self.log_box.setReadOnly(True)
         self.log_box.setFixedHeight(log_height)
-        self.log_box.setObjectName("logBox")
-        self.log_box.setStyleSheet("QPlainTextEdit { background: rgba(0, 0, 0, 0.1); border-radius: 6px; }")
+        self.log_box.setObjectName("organizeLog")
 
         drawer_l.addWidget(self.progress_bar)
         drawer_l.addWidget(self.status_label)
+        drawer_l.addWidget(self._output_row)
         drawer_l.addWidget(self.log_box)
-
-        self._drawer.setMinimumHeight(0)
-        self._drawer.setMaximumHeight(0)
+        self._drawer.setVisible(False)
         outer.addWidget(self._drawer)
-
-        # ── Theme ─────────────────────────────────────────────────────────
-        self._apply_sep_color(get_manager().current)
-        get_manager().theme_changed.connect(self._on_theme_changed)
-
-    def mouseMoveEvent(self, e):
-        self._target_pos = e.position()
-        self._ensure_ticking()
-        super().mouseMoveEvent(e)
-
-    def enterEvent(self, e):
-        self._is_hovered = True
-        self._ensure_ticking()
-        super().enterEvent(e)
-
-    def leaveEvent(self, e):
-        self._is_hovered = False
-        self._ensure_ticking()
-        super().leaveEvent(e)
-
-    def hideEvent(self, e):  # noqa: N802
-        self._timer.stop()
-        self._is_hovered = False
-        super().hideEvent(e)
-
-    def showEvent(self, e):  # noqa: N802
-        super().showEvent(e)
-        # Resume settling if the glow was left mid-way when the page was hidden.
-        if self._hover_t > 0.001:
-            self._ensure_ticking()
-
-    def _ensure_ticking(self) -> None:
-        if self.isVisible() and not self._timer.isActive():
-            self._timer.start()
-
-    @property
-    def glow_animating(self) -> bool:
-        return self._timer.isActive()
-
-    def _tick(self):
-        target_h = 1.0 if self._is_hovered else 0.0
-        hover_delta = (target_h - self._hover_t) * 0.15
-        self._hover_t += hover_delta
-
-        if not self._is_hovered:
-            self._target_pos = QtCore.QPointF(self.width() / 2, self.height() / 2)
-
-        dx = self._target_pos.x() - self._glow_pos.x()
-        dy = self._target_pos.y() - self._glow_pos.y()
-        self._glow_pos.setX(self._glow_pos.x() + dx * 0.15)
-        self._glow_pos.setY(self._glow_pos.y() + dy * 0.15)
-
-        # Converged: snap to the target and stop the timer until the next
-        # enter / move / leave event.
-        if abs(hover_delta) < 0.001 and abs(dx) < 0.5 and abs(dy) < 0.5:
-            self._hover_t = target_h
-            self._glow_pos = QtCore.QPointF(self._target_pos)
-            self._timer.stop()
-        self.update()
-
-    def paintEvent(self, e):  # noqa: N802
-        t = get_manager().current
-        p = QtGui.QPainter(self)
-        p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
-        p.setRenderHint(QtGui.QPainter.RenderHint.SmoothPixmapTransform)
-        rect = QtCore.QRectF(self.rect())
-        inner = rect.adjusted(2, 2, -2, -2)
-        radius = 16.0
-        ht = self._hover_t
-        ac = QtGui.QColor(t.accent)
-
-        path = QtGui.QPainterPath()
-        path.addRoundedRect(inner, radius, radius)
-        p.save()
-        p.setClipPath(path)
-
-        p.setPen(QtCore.Qt.PenStyle.NoPen)
-        bg_alpha = 0.05 + ht * 0.03
-        p.setBrush(QtGui.QColor(255, 255, 255, int(bg_alpha * 255)))
-        p.drawRect(inner)
-
-        t_alpha = 0.1 + ht * 0.05
-        # ThemeTokens has ``variant`` ("dark"/"light"), not ``is_dark``: the old
-        # getattr fallback gave every light theme the dark tint (DS-08/TOOL-15).
-        if t.variant == "dark":
-            tint_color = QtGui.QColor(0, 0, 0, int(t_alpha * 255))
-        else:
-            tint_color = QtGui.QColor(255, 255, 255, int(t_alpha * 255))
-        p.setBrush(tint_color)
-        p.drawRect(inner)
-
-        glow_rad = inner.width() * 0.8
-        glow = QtGui.QRadialGradient(self._glow_pos, glow_rad)
-        c1 = QtGui.QColor(ac); c1.setAlphaF(0.15 + ht * 0.15)
-        c2 = QtGui.QColor(ac); c2.setAlphaF(0.0)
-        glow.setColorAt(0.0, c1)
-        glow.setColorAt(1.0, c2)
-        p.setBrush(glow)
-        p.drawRect(inner)
-
-        spec = QtGui.QLinearGradient(0, inner.top(), 0, inner.bottom())
-        spec.setColorAt(0.0, QtGui.QColor(255, 255, 255, int((0.15 + ht * 0.05) * 255)))
-        spec.setColorAt(0.4, QtGui.QColor(255, 255, 255, 0))
-        p.setBrush(spec)
-        p.drawRect(inner)
-        p.restore()
-        
-        p.end()
 
     # ── Public API ────────────────────────────────────────────────────────
 
     def add_option(self, widget: QtWidgets.QWidget) -> None:
         """Add a widget to the options section."""
         self._opts_l.addWidget(widget)
+        self._options.setVisible(True)
 
     def add_option_layout(self, layout: QtWidgets.QLayout) -> None:
         """Add a sub-layout to the options section."""
         self._opts_l.addLayout(layout)
+        self._options.setVisible(True)
 
-    def set_run_button(self, label: str, slot) -> QtWidgets.QPushButton:
+    def _add_footer_button(self, btn: QtWidgets.QPushButton) -> QtWidgets.QPushButton:
+        btn.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
+        self._footer_l.addWidget(btn)
+        self._footer_buttons.append(btn)
+        return btn
+
+    def set_run_button(self, label: str, slot, glyph: str = "") -> QtWidgets.QPushButton:
         """Add the primary (accent-coloured) action button and return it."""
         from gui.themes.animations import AnimatedButton
         btn = AnimatedButton(label)
         btn.setObjectName("primaryBtn")
-        btn.setMinimumHeight(34)
-        btn.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
+        if glyph:
+            set_glyph(btn, glyph, role="inverse")
         btn.clicked.connect(slot)
-        self._footer_l.addWidget(btn)
-        self._footer_buttons.append(btn)
-        return btn
+        return self._add_footer_button(btn)
 
-    def add_secondary_button(self, label: str) -> QtWidgets.QPushButton:
-        """Add a secondary (default-style) button and return it."""
+    def add_secondary_button(self, label: str, glyph: str = "") -> QtWidgets.QPushButton:
+        """Add a secondary (glass pill) button and return it."""
         from gui.themes.animations import AnimatedButton
         btn = AnimatedButton(label)
-        btn.setMinimumHeight(34)
-        btn.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
-        self._footer_l.addWidget(btn)
-        self._footer_buttons.append(btn)
-        return btn
+        if glyph:
+            set_glyph(btn, glyph)
+        btn.setAccessibleName(label)
+        return self._add_footer_button(btn)
 
-    def add_icon_button(self, icon: str, tooltip: str = "") -> QtWidgets.QPushButton:
-        """Add a small square icon-only button and return it."""
+    def add_icon_button(self, glyph: str, tooltip: str) -> QtWidgets.QPushButton:
+        """Add a round, icon-only button (a painted glyph) and return it; the
+        tooltip is also its accessible name."""
         from gui.themes.animations import AnimatedButton
-        btn = AnimatedButton(icon)
-        btn.setFixedSize(34, 34)
-        btn.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
-        if tooltip:
-            btn.setToolTip(tooltip)
-        self._footer_l.addWidget(btn)
-        self._footer_buttons.append(btn)
-        return btn
+        btn = AnimatedButton("")
+        set_glyph(btn, glyph)
+        btn.setFixedSize(36, 36)
+        btn.setToolTip(tooltip)
+        btn.setAccessibleName(tooltip)
+        return self._add_footer_button(btn)
 
     def finish_footer(self) -> None:
         """Add trailing stretch after all buttons. Call last."""
@@ -830,20 +659,40 @@ class ToolTile(QtWidgets.QFrame):
         """Hide the footer row entirely (e.g. for tiles with no run action)."""
         self._footer.setVisible(False)
 
+    def drawer_open(self) -> bool:
+        return self._drawer_open
+
     def open_drawer(self) -> None:
-        """Animate the log drawer from 0 → its natural height (once)."""
+        """Swap the empty state for the result area, with a short fade
+        (opacity only: nothing animates layout-owned geometry)."""
         if self._drawer_open:
             return
         self._drawer_open = True
-        self._sep.setVisible(True)
-        target = max(self._drawer.sizeHint().height(), 100)
-        anim = QtCore.QPropertyAnimation(self._drawer, b"maximumHeight", self)
-        anim.setDuration(250)
-        anim.setStartValue(0)
-        anim.setEndValue(target)
-        anim.setEasingCurve(QtCore.QEasingCurve.Type.OutCubic)
-        anim.finished.connect(lambda: self._drawer.setMaximumHeight(16777215))
-        anim.start(QtCore.QAbstractAnimation.DeletionPolicy.DeleteWhenStopped)
+        if self.empty_state is not None:
+            self.empty_state.setVisible(False)
+        self._drawer.setVisible(True)
+        if self._drawer.isVisible():
+            motion.reveal(self._drawer)
+
+    def reset_view(self) -> None:
+        """Back to the state before the first run (a library change)."""
+        self._drawer_open = False
+        self._drawer.setVisible(False)
+        self.set_output(None)
+        self.log_box.clear()
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        if self.empty_state is not None:
+            self.empty_state.setVisible(True)
+
+    def set_output(self, path: str | None) -> None:
+        """Show the file a run wrote (middle-elided; full path in the tooltip)."""
+        self._output_lbl.setText(path or "")
+        self._output_lbl.setToolTip(path or "")
+        self._output_row.setVisible(bool(path))
+
+    def output_path(self) -> str:
+        return self._output_lbl.text() if not self._output_row.isHidden() else ""
 
     def set_running(self, running: bool) -> None:
         """Enable or disable all footer buttons (call during long operations)."""
@@ -863,48 +712,20 @@ class ToolTile(QtWidgets.QFrame):
         """
         chip = self.status_chip
         if state == "ok":
-            chip.show_success("✓  Done")
+            chip.show_success("Done")
         elif state == "error":
-            chip.show_error("✗  Error")
+            chip.show_error("Error")
         elif state == "running":
-            chip.show_neutral("⧖  Running…")
+            chip.show_neutral("Running…")
         elif state == "cancelled":
             chip.show_neutral("Cancelled")
         else:
-            chip.show_neutral("Ready.")
+            chip.show_neutral("Ready")
         self.status_label.setText(text)
         if tone:
             self.flash_status(tone)
         else:
             set_tone(self.status_label, "secondary")
-
-    # ── Text scale ────────────────────────────────────────────────────────
-
-    _TITLE_PT = {1: 10, 2: 11, 3: 12, 4: 14, 5: 16}
-    _DESC_PT  = {1:  8, 2:  9, 3: 10, 4: 11, 5: 13}
-    _BADGE_SZ = {1: 30, 2: 34, 3: 40, 4: 46, 5: 52}
-
-    def set_text_scale(self, level: int) -> None:
-        """Adjust font sizes and badge icon to match the given 1–5 level."""
-        if level not in self._TITLE_PT:
-            return
-        f = self._title_lbl.font()
-        f.setPointSize(self._TITLE_PT[level])
-        self._title_lbl.setFont(f)
-        if self._desc_lbl is not None:
-            f2 = self._desc_lbl.font()
-            f2.setPointSize(self._DESC_PT[level])
-            self._desc_lbl.setFont(f2)
-        self._badge.set_size(self._BADGE_SZ[level])
-
-    # ── Internal ──────────────────────────────────────────────────────────
-
-    def _apply_sep_color(self, tokens) -> None:
-        self._sep.setStyleSheet(f"QFrame {{ color: {tokens.card_border}; }}")
-
-    def _on_theme_changed(self, tokens) -> None:
-        self._apply_sep_color(tokens)
-
 
 
 # ── TileGrid ───────────────────────────────────────────────────────────────────
@@ -927,7 +748,7 @@ class TileGrid(QtWidgets.QWidget):
         self._current_cols: int = 2                      # default; updated on resize
 
         self._grid = QtWidgets.QGridLayout(self)
-        self._grid.setSpacing(16)
+        self._grid.setSpacing(18)
         self._grid.setContentsMargins(0, 0, 0, 0)
 
     def add_tile(self, tile: ToolTile, full_width: bool = False) -> None:
@@ -935,9 +756,8 @@ class TileGrid(QtWidgets.QWidget):
         self._tiles.append((tile, full_width))
         self._reflow()
 
-    def set_size_level(self, level: int) -> None:
-        for tile, _ in self._tiles:
-            tile.set_text_scale(level)
+    def tiles(self) -> list[ToolTile]:
+        return [tile for tile, _ in self._tiles]
 
     def resizeEvent(self, event: QtGui.QResizeEvent) -> None:  # noqa: N802
         new_cols = max(1, event.size().width() // self._TILE_MIN_WIDTH)
@@ -963,7 +783,7 @@ class TileGrid(QtWidgets.QWidget):
                 self._grid.addWidget(tile, row, 0, 1, cols)
                 row += 1
             else:
-                self._grid.addWidget(tile, row, col)
+                self._grid.addWidget(tile, row, col, QtCore.Qt.AlignmentFlag.AlignTop)
                 col += 1
                 if col >= cols:
                     col = 0
@@ -976,10 +796,10 @@ class TileGrid(QtWidgets.QWidget):
             self._grid.setColumnStretch(c, 1 if c < cols else 0)
 
 
-# ── _PillToggle ────────────────────────────────────────────────────────────────
+# ── Toggles ────────────────────────────────────────────────────────────────────
 
 class _PillToggle(QtWidgets.QAbstractButton):
-    """Animated iOS-style pill toggle switch.
+    """Animated pill switch with a label.
 
     Drop-in replacement for QCheckBox for single on/off options.
     isChecked() / toggled signal / setChecked() all work identically.
@@ -994,11 +814,12 @@ class _PillToggle(QtWidgets.QAbstractButton):
         super().__init__(parent)
         self.setCheckable(True)
         self.setText(label)
+        self.setAccessibleName(label)
         self._knob_x: float = 0.0          # 0.0 = off, 1.0 = on
         self._anim = QtCore.QVariantAnimation(self)
-        self._anim.setDuration(150)
+        self._anim.setDuration(motion.duration("fast"))
         self._anim.setEasingCurve(QtCore.QEasingCurve.Type.OutCubic)
-        self._anim.valueChanged.connect(lambda v: self._set_knob(float(v)))
+        self._anim.valueChanged.connect(self._on_knob)
         self.toggled.connect(self._start_anim)
         self.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
         # Bound method (not a lambda) so the singleton drops the connection
@@ -1007,14 +828,21 @@ class _PillToggle(QtWidgets.QAbstractButton):
 
     # ── Animation ──────────────────────────────────────────────────────────
 
-
     def _repaint_on_theme(self, _tokens=None) -> None:
         self.update()
+
     def _start_anim(self, checked: bool) -> None:
         self._anim.stop()
+        end = 1.0 if checked else 0.0
+        if motion.reduced_motion() or not self.isVisible():
+            self._set_knob(end)
+            return
         self._anim.setStartValue(self._knob_x)
-        self._anim.setEndValue(1.0 if checked else 0.0)
+        self._anim.setEndValue(end)
         self._anim.start()
+
+    def _on_knob(self, v) -> None:
+        self._set_knob(float(v))
 
     def _set_knob(self, v: float) -> None:
         self._knob_x = v
@@ -1028,7 +856,7 @@ class _PillToggle(QtWidgets.QAbstractButton):
         h = self._TRACK_H
         if label:
             fm = self.fontMetrics()
-            w += self._GAP + fm.horizontalAdvance(label)
+            w += self._GAP + fm.horizontalAdvance(label) + 2
             h = max(h, fm.height() + 4)
         return QtCore.QSize(w, h)
 
@@ -1039,47 +867,116 @@ class _PillToggle(QtWidgets.QAbstractButton):
 
     def paintEvent(self, e) -> None:  # noqa: N802
         t = get_manager().current
+        m = current_material()
         p = QtGui.QPainter(self)
-        p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
-
-        tw = float(self._TRACK_W)
-        th = float(self._TRACK_H)
-        kd = float(self._KNOB_D)
-        cy = self.height() / 2.0
-
-        # Track
-        tr = QtCore.QRectF(0, cy - th / 2, tw, th)
-        if self.isChecked():
-            ac = QtGui.QColor(t.accent)
-            track_col = QtGui.QColor(ac.red(), ac.green(), ac.blue(), 220)
-        else:
-            track_col = QtGui.QColor(t.card_border)
-        p.setBrush(track_col)
-        p.setPen(QtCore.Qt.PenStyle.NoPen)
-        p.drawRoundedRect(tr, th / 2, th / 2)
-
-        # Knob (white circle)
-        margin = (th - kd) / 2.0
-        travel = tw - kd - 2 * margin
-        kx = margin + self._knob_x * travel
-        ky = cy - kd / 2.0
-        p.setBrush(QtGui.QColor(255, 255, 255))
-        p.drawEllipse(QtCore.QRectF(kx, ky, kd, kd))
-
-        # Label text
-        label = self.text()
-        if label:
-            p.setPen(QtGui.QColor(t.text_primary))
-            f = p.font()
-            f.setPointSize(10)
-            p.setFont(f)
-            lx = int(tw) + self._GAP
-            p.drawText(
-                lx, 0, self.width() - lx, self.height(),
-                int(QtCore.Qt.AlignmentFlag.AlignVCenter | QtCore.Qt.AlignmentFlag.AlignLeft),
-                label,
+        try:
+            p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+            tw, th, kd = float(self._TRACK_W), float(self._TRACK_H), float(self._KNOB_D)
+            cy = self.height() / 2.0
+            tr = QtCore.QRectF(0.5, cy - th / 2, tw - 1, th)
+            on = qcolor(t.accent)
+            off = qcolor(m.well.fill)
+            fill = QtGui.QColor(
+                round(off.red() + (on.red() - off.red()) * self._knob_x),
+                round(off.green() + (on.green() - off.green()) * self._knob_x),
+                round(off.blue() + (on.blue() - off.blue()) * self._knob_x),
+                round(off.alpha() + (255 - off.alpha()) * self._knob_x),
             )
-        p.end()
+            p.setPen(QtGui.QPen(qcolor(m.well.border), 1.0) if self._knob_x < 0.5
+                     else QtCore.Qt.PenStyle.NoPen)
+            p.setBrush(fill)
+            p.drawRoundedRect(tr, th / 2, th / 2)
+
+            margin = (th - kd) / 2.0
+            travel = tw - kd - 2 * margin
+            kx = margin + self._knob_x * travel
+            p.setPen(QtCore.Qt.PenStyle.NoPen)
+            p.setBrush(QtGui.QColor(255, 255, 255))
+            p.drawEllipse(QtCore.QRectF(kx, cy - kd / 2.0, kd, kd))
+            if self.hasFocus():
+                p.setPen(QtGui.QPen(qcolor(t.accent, 0.8), 1.5))
+                p.setBrush(QtCore.Qt.BrushStyle.NoBrush)
+                p.drawRoundedRect(tr.adjusted(-2, -2, 2, 2), th / 2 + 2, th / 2 + 2)
+
+            label = self.text()
+            if label:
+                p.setPen(qcolor(t.text_primary if self.isEnabled() else t.text_muted))
+                p.setFont(self.font())
+                lx = int(tw) + self._GAP
+                p.drawText(
+                    lx, 0, self.width() - lx, self.height(),
+                    int(QtCore.Qt.AlignmentFlag.AlignVCenter | QtCore.Qt.AlignmentFlag.AlignLeft),
+                    label,
+                )
+        finally:
+            p.end()
+
+
+class _ChipToggle(QtWidgets.QAbstractButton):
+    """A checkable pill for one choice in a set (the codec chips): tinted
+    with the accent and a check when on, a hairline outline when off.
+    Painted from the theme (no per-chip stylesheet)."""
+
+    _H = 30
+    _PAD = 12
+    _GLYPH_W = 12
+
+    def __init__(self, label: str, parent: QtWidgets.QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setCheckable(True)
+        self.setText(label)
+        self.setAccessibleName(label)
+        self.setFont(glass_font("label", weight=600))
+        self.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
+        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_Hover, True)
+        get_manager().theme_changed.connect(self._repaint_on_theme)
+
+    def _repaint_on_theme(self, _tokens=None) -> None:
+        self.update()
+
+    def sizeHint(self) -> QtCore.QSize:  # noqa: N802
+        fm = QtGui.QFontMetrics(self.font())
+        return QtCore.QSize(2 * self._PAD + self._GLYPH_W + 6 + fm.horizontalAdvance(self.text()),
+                            self._H)
+
+    def minimumSizeHint(self) -> QtCore.QSize:  # noqa: N802
+        return self.sizeHint()
+
+    def event(self, e: QtCore.QEvent) -> bool:
+        if e.type() in (QtCore.QEvent.Type.HoverEnter, QtCore.QEvent.Type.HoverLeave):
+            self.update()
+        return super().event(e)
+
+    def paintEvent(self, e) -> None:  # noqa: N802
+        t = get_manager().current
+        m = current_material()
+        p = QtGui.QPainter(self)
+        try:
+            p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+            rect = QtCore.QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+            rad = rect.height() / 2
+            if self.isChecked():
+                fill, border, ink = qcolor(t.accent, 0.18), qcolor(t.accent, 0.60), qcolor(t.text_primary)
+            else:
+                fill, border, ink = QtGui.QColor(0, 0, 0, 0), qcolor(m.well.border), qcolor(t.text_secondary)
+            if self.underMouse():
+                fill = qcolor(t.accent, 0.26) if self.isChecked() else qcolor(m.hover)
+            if self.hasFocus():
+                border = qcolor(t.accent)
+            p.setPen(QtGui.QPen(border, 1.0))
+            p.setBrush(fill)
+            p.drawRoundedRect(rect, rad, rad)
+            g = QtCore.QRectF(self._PAD, (self.height() - self._GLYPH_W) / 2, self._GLYPH_W, self._GLYPH_W)
+            paint_glyph(p, g, "check" if self.isChecked() else "plus",
+                        qcolor(t.accent) if self.isChecked() else qcolor(t.text_muted), weight=2.2)
+            p.setPen(ink)
+            p.setFont(self.font())
+            x = self._PAD + self._GLYPH_W + 6
+            p.drawText(QtCore.QRectF(x, 0, self.width() - x, self.height()),
+                       int(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter),
+                       self.text())
+        finally:
+            p.end()
 
 
 # ── Shared base for the tool pages ────────────────────────────────────────────
@@ -1100,6 +997,15 @@ class _ToolPanel(WorkspaceBase):
     def _on_theme_changed_base(self, tokens: object) -> None:
         super()._on_theme_changed_base(tokens)
         refresh_tones(self, tokens)
+
+    def _adopt_tile(self, tile: "ToolTile") -> "ToolTile":
+        """Register a tile like a ``_make_card`` card: the scroll surface
+        paints its shadow (it is a GlassCard, so it paints its own glass)."""
+        self._cards.append(tile)
+        surface = getattr(self, "_inner", None)
+        if hasattr(surface, "add_elevated"):
+            surface.add_elevated(tile)
+        return tile
 
     def _require_library(self) -> bool:
         if not self._library_path:
@@ -1156,142 +1062,109 @@ class ExportsWorkspace(_ToolPanel):
         self._at_tile: ToolTile | None = None
         self._codec_tile: ToolTile | None = None
         # Codec chip checkboxes for theme-refresh
-        self._codec_chips: dict[str, QtWidgets.QCheckBox] = {}
+        self._codec_chips: dict[str, _ChipToggle] = {}
         self._build_ui()
 
     # ── Build ─────────────────────────────────────────────────────────────
 
     def _build_ui(self) -> None:
         cl = self.content_layout
-        cl.addWidget(self._make_section_title("Exports"))
         cl.addWidget(self._make_subtitle(
-            "Lists of what is in your library, for use elsewhere. Reserved folders "
-            "(Quarantine/, Trash/, Docs/, …) are skipped, and every export file lands "
-            "in Docs/ inside your library folder. Nothing in the library is changed."
+            "Lists of what is in your library, written to Docs/ inside it. Reserved "
+            "folders are skipped and nothing in the library changes."
         ))
 
         grid = TileGrid()
-        grid.add_tile(self._build_at_tile())
-        grid.add_tile(self._build_codec_tile())
+        grid.add_tile(self._adopt_tile(self._build_at_tile()))
+        grid.add_tile(self._adopt_tile(self._build_codec_tile()))
         cl.addWidget(grid, 1)
         cl.addStretch(1)
 
+    def _export_footer(self, tile: ToolTile, run_slot, cancel_slot, cancel_name: str,
+                       out_attr: str) -> tuple:
+        """Export · Cancel · Open file · show-in-folder, the same on both tiles."""
+        run = tile.set_run_button("Export", run_slot, glyph="download")
+        cancel = tile.add_secondary_button("Cancel", glyph="close")
+        cancel.setObjectName(cancel_name)
+        cancel.setEnabled(False)
+        cancel.clicked.connect(cancel_slot)
+        open_btn = tile.add_secondary_button("Open file", glyph="external")
+        open_btn.setToolTip("Open the exported list in your text editor.")
+        open_btn.setEnabled(False)
+        open_btn.clicked.connect(lambda: self._open_file(getattr(self, out_attr)))
+        folder = tile.add_icon_button("folder", "Show the exported file in its folder")
+        folder.setEnabled(False)
+        folder.clicked.connect(lambda: self._open_folder(getattr(self, out_attr)))
+        tile.finish_footer()
+        return run, cancel, open_btn, folder
+
     def _build_at_tile(self) -> ToolTile:
         tile = ToolTile(
-            "\u2197", "Artist / Title Export",
-            "Scan the library and write Docs/artist_title_list.txt "
-            "with every Artist \u2013 Title pair.",
+            "Artist / Title list",
+            "Every Artist – Title pair, written to Docs/artist_title_list.txt.",
+            empty_title="No list yet",
+            empty_message="Export reads every track's tags. Files that cannot be read "
+                          "are skipped and counted.",
         )
         self._at_tile = tile
 
         self._exclude_flac_cb = _PillToggle("Exclude FLAC files")
         self._dupe_tracks_cb  = _PillToggle("Include per-album duplicate titles")
-        tile.add_option(self._exclude_flac_cb)
-        tile.add_option(self._dupe_tracks_cb)
+        toggles = FlowLayout(hspacing=24, vspacing=10)
+        toggles.addWidget(self._exclude_flac_cb)
+        toggles.addWidget(self._dupe_tracks_cb)
+        tile.add_option_layout(toggles)
 
-        # Wire drawer widgets to the same attribute names used by the slots
-        tile.status_label.setVisible(True)
+        # Wire the result area to the attribute names the slots use
         self._at_status = tile.status_label
         self._at_log    = tile.log_box
+        self._at_log.setPlaceholderText("The export's progress and any unreadable files appear here.")
         self._at_prog   = tile.progress_bar
 
-        self._at_run_btn = tile.set_run_button("Export", self._on_export_at)
-        self._at_cancel_btn = tile.add_secondary_button("Cancel")
-        self._at_cancel_btn.setObjectName("atCancelBtn")
-        self._at_cancel_btn.setEnabled(False)
-        self._at_cancel_btn.clicked.connect(self._on_cancel_at)
-        self._at_open = tile.add_secondary_button("Open File")
-        self._at_open.setEnabled(False)
-        self._at_open.clicked.connect(lambda: self._open_file(self._at_out_path))
-        self._at_folder = tile.add_icon_button("\U0001f4c1", "Open folder")
-        self._at_folder.setEnabled(False)
-        self._at_folder.clicked.connect(lambda: self._open_folder(self._at_out_path))
-        tile.finish_footer()
+        (self._at_run_btn, self._at_cancel_btn, self._at_open,
+         self._at_folder) = self._export_footer(tile, self._on_export_at, self._on_cancel_at,
+                                                "atCancelBtn", "_at_out_path")
         return tile
 
     def _build_codec_tile(self) -> ToolTile:
         tile = ToolTile(
-            "\u2261", "Codec List Export",
-            "Export a grouped list of all tracks by codec format.",
+            "Codec list",
+            "Every track grouped by format, written to Docs/codec_file_list.txt.",
+            empty_title="No list yet",
+            empty_message="Pick the formats to include, then export.",
+            log_height=0,
         )
         self._codec_tile = tile
+        tile.log_box.setVisible(False)      # one file, one line: no log to show
 
-        chips_row = QtWidgets.QHBoxLayout()
-        chips_row.setSpacing(6)
-        self._codec_ext_cbs: dict[str, QtWidgets.QCheckBox] = {}
+        chips = FlowLayout(hspacing=8, vspacing=8)
+        self._codec_ext_cbs: dict[str, _ChipToggle] = {}
         for ext in (".flac", ".mp3", ".m4a", ".aac", ".wav", ".opus", ".ogg"):
             cb = self._make_chip(ext)
             self._codec_ext_cbs[ext] = cb
-            chips_row.addWidget(cb)
-        chips_row.addStretch(1)
-        tile.add_option_layout(chips_row)
+            chips.addWidget(cb)
+        tile.add_option_layout(chips)
 
         self._omit_paths_cb = _PillToggle("Filenames only (no full paths)")
         tile.add_option(self._omit_paths_cb)
 
-        # Status label always visible in the options area
-        self._codec_status = QtWidgets.QLabel("Ready.")
-        self._codec_status.setObjectName("statusLabel")
-        tile.add_option(self._codec_status)
-        self._codec_prog = tile.progress_bar   # available but drawer stays closed
+        self._codec_status = tile.status_label
+        self._codec_prog = tile.progress_bar
 
-        self._codec_run_btn = tile.set_run_button("Export", self._on_export_codec)
-        self._codec_cancel_btn = tile.add_secondary_button("Cancel")
-        self._codec_cancel_btn.setObjectName("codecCancelBtn")
-        self._codec_cancel_btn.setEnabled(False)
-        self._codec_cancel_btn.clicked.connect(self._on_cancel_codec)
-        self._codec_open = tile.add_secondary_button("Open File")
-        self._codec_open.setEnabled(False)
-        self._codec_open.clicked.connect(lambda: self._open_file(self._codec_out_path))
-        self._codec_folder = tile.add_icon_button("\U0001f4c1", "Open folder")
-        self._codec_folder.setEnabled(False)
-        self._codec_folder.clicked.connect(lambda: self._open_folder(self._codec_out_path))
-        tile.finish_footer()
+        (self._codec_run_btn, self._codec_cancel_btn, self._codec_open,
+         self._codec_folder) = self._export_footer(tile, self._on_export_codec,
+                                                   self._on_cancel_codec, "codecCancelBtn",
+                                                   "_codec_out_path")
         return tile
 
-    # ── Codec chip helpers ─────────────────────────────────────────────────
+    # ── Codec chips ────────────────────────────────────────────────────────
 
-    def _make_chip(self, label: str) -> QtWidgets.QCheckBox:
-        cb = QtWidgets.QCheckBox(label)
-        cb.setChecked(True)
-        self._codec_chips[label] = cb
-        self._refresh_chip(cb)
-        cb.stateChanged.connect(lambda _s, c=cb: self._refresh_chip(c))
-        return cb
-
-    def _refresh_chip(self, cb: QtWidgets.QCheckBox) -> None:
-        t = get_manager().current
-        if cb.isChecked():
-            style = (
-                f"QCheckBox {{"
-                f" background: {_rgba(t.accent, 0.16)};"
-                f" border: 1px solid {t.accent};"
-                f" border-radius: 11px;"
-                f" padding: 4px 12px;"
-                f" color: {t.accent};"
-                f" font-size: 13px;"
-                f"}}"
-                f"QCheckBox::indicator {{ width: 0; height: 0; }}"
-            )
-        else:
-            style = (
-                f"QCheckBox {{"
-                f" background: transparent;"
-                f" border: 1px solid {t.card_border};"
-                f" border-radius: 11px;"
-                f" padding: 4px 12px;"
-                f" color: {t.text_secondary};"
-                f" font-size: 13px;"
-                f"}}"
-                f"QCheckBox::indicator {{ width: 0; height: 0; }}"
-            )
-        cb.setStyleSheet(style)
-
-    def _on_theme_changed_base(self, tokens: object) -> None:
-        super()._on_theme_changed_base(tokens)
-        for cb in self._codec_chips.values():
-            self._refresh_chip(cb)
-
+    def _make_chip(self, label: str) -> "_ChipToggle":
+        chip = _ChipToggle(label)
+        chip.setChecked(True)
+        chip.setToolTip(f"Include {label} files in the list")
+        self._codec_chips[label] = chip
+        return chip
     # ── Library change ─────────────────────────────────────────────────────
 
     def _on_library_changed(self, path: str) -> None:
@@ -1308,6 +1181,7 @@ class ExportsWorkspace(_ToolPanel):
         for tile in (self._at_tile, self._codec_tile):
             if tile is not None:
                 tile.report("idle", "Ready.")
+                tile.reset_view()
         self._codec_status.setText("Ready.")
         set_tone(self._codec_status, "secondary")
 
@@ -1343,6 +1217,7 @@ class ExportsWorkspace(_ToolPanel):
         self._at_run_btn.setEnabled(False)
         self._at_cancel_btn.setEnabled(True)
         if self._at_tile is not None:
+            self._at_tile.set_output(None)
             self._at_tile.report("running", "Scanning…")
             self._at_tile.open_drawer()
 
@@ -1399,6 +1274,7 @@ class ExportsWorkspace(_ToolPanel):
             self._at_log.appendPlainText(f"Skipped {error_count} files due to read errors.")
         if self._at_tile is not None:
             self._at_tile.report("ok", f"Done — {entry_count} entries written{note}", "success")
+            self._at_tile.set_output(out_path)
         self._at_out_path = out_path
         self._at_open.setEnabled(True)
         self._at_folder.setEnabled(True)
@@ -1443,7 +1319,7 @@ class ExportsWorkspace(_ToolPanel):
             QtWidgets.QMessageBox.warning(self, "No Codecs", "Select at least one codec.")
             return
 
-        self._codec_prog.setValue(0)
+        self._codec_prog.setRange(0, 0)      # busy: the walk reports no progress
         self._codec_status.setText("Scanning…")
         set_tone(self._codec_status, "secondary")
         self._codec_open.setEnabled(False)
@@ -1451,7 +1327,9 @@ class ExportsWorkspace(_ToolPanel):
         self._codec_run_btn.setEnabled(False)
         self._codec_cancel_btn.setEnabled(True)
         if self._codec_tile is not None:
-            self._codec_tile.status_chip.show_neutral("⧖  Running…")
+            self._codec_tile.set_output(None)
+            self._codec_tile.status_chip.show_neutral("Running…")
+            self._codec_tile.open_drawer()
         self._log("Starting codec list export…", "info")
 
         worker = CodecExportWorker(
@@ -1473,6 +1351,8 @@ class ExportsWorkspace(_ToolPanel):
         self._codec_worker = None
         self._codec_run_btn.setEnabled(True)
         self._codec_cancel_btn.setEnabled(False)
+        self._codec_prog.setRange(0, 100)
+        self._codec_prog.setValue(0)
 
     @Slot(str, int)
     def _on_codec_finished(self, out_path: str, total: int) -> None:
@@ -1484,10 +1364,12 @@ class ExportsWorkspace(_ToolPanel):
             self._log(f"Codec list export for the previous library finished: {out_path}", "info")
             return
         self._codec_prog.setValue(100)
-        self._codec_status.setText(f"Written: {out_path}  ({total} files)")
+        # The path is shown (elided) in the output row, not in this line.
+        self._codec_status.setText(f"Done — {total} files listed.")
         self._flash_label(self._codec_status, "success")
         if self._codec_tile is not None:
-            self._codec_tile.status_chip.show_success("✓  Done")
+            self._codec_tile.status_chip.show_success("Done")
+            self._codec_tile.set_output(out_path)
         self._codec_out_path = out_path
         self._codec_open.setEnabled(True)
         self._codec_folder.setEnabled(True)
@@ -1505,7 +1387,7 @@ class ExportsWorkspace(_ToolPanel):
         self._codec_status.setText(message)
         self._flash_label(self._codec_status, "danger")
         if self._codec_tile is not None:
-            self._codec_tile.status_chip.show_error("✗  Error")
+            self._codec_tile.status_chip.show_error("Error")
         self._log(message, "error")
 
     @Slot()
@@ -1541,43 +1423,45 @@ class FileCleanupWorkspace(_ToolPanel):
 
     def _build_ui(self) -> None:
         cl = self.content_layout
-        cl.addWidget(self._make_section_title("File Cleanup"))
-        cl.addWidget(self._make_subtitle(
-            "Tidy file names that browsers, Windows Explorer and macOS Finder left "
-            "behind. Nothing is renamed until you have reviewed the plan, every rename "
-            "is logged to Docs/, and the last cleanup can be undone."
-        ))
-
         grid = TileGrid()
-        grid.add_tile(self._build_cleanup_tile(), full_width=True)
+        grid.add_tile(self._adopt_tile(self._build_cleanup_tile()), full_width=True)
         cl.addWidget(grid, 1)
         cl.addStretch(1)
 
     def _build_cleanup_tile(self) -> ToolTile:
         tile = ToolTile(
-            "\u2736", "File Cleanup",
-            "Remove trailing \u2018 (1)\u2019, \u2018 - Copy\u2019, \u2018 copy\u2019 suffixes "
-            "left by browsers, Windows Explorer and macOS Finder. You review every "
-            "rename before anything changes; reserved folders are skipped, a log "
-            "is written to Docs/, and playlists are updated. \u2018Undo Last "
-            "Cleanup\u2019 previews, then restores, the original names (and "
-            "playlist entries).",
+            "Clean up copy suffixes",
+            "Remove the ‘ (1)’, ‘ - Copy’ and ‘ copy’ endings that "
+            "browsers, Windows Explorer and macOS Finder add. You review every rename first, "
+            "each one is logged to Docs/, and the last cleanup can be undone.",
+            hero=True,
+            empty_title="Nothing previewed yet",
+            empty_message="Preview cleanup checks every audio file outside the reserved "
+                          "folders and lists the renames. Nothing is renamed until you confirm; "
+                          "playlists that point at a renamed file are updated.",
         )
         self._cleanup_tile = tile
 
-        tile.status_label.setVisible(True)
         self._cleanup_status = tile.status_label
         self._cleanup_log    = tile.log_box
+        self._cleanup_log.setPlaceholderText("Each rename is listed here as it happens.")
+        # Planning and renaming report no progress: no bar that never moves.
+        tile.progress_bar.setVisible(False)
 
-        self._cleanup_run_btn = tile.set_run_button("Preview Cleanup\u2026", self._on_file_cleanup)
-        self._cleanup_cancel_btn = tile.add_secondary_button("Cancel")
+        self._cleanup_run_btn = tile.set_run_button(
+            "Preview cleanup…", self._on_file_cleanup, glyph="search")
+        self._cleanup_run_btn.setToolTip(
+            "Find the copy suffixes and show every planned rename. Nothing is renamed yet."
+        )
+        self._cleanup_cancel_btn = tile.add_secondary_button("Cancel", glyph="close")
         self._cleanup_cancel_btn.setObjectName("cleanupCancelBtn")
         self._cleanup_cancel_btn.setEnabled(False)
         self._cleanup_cancel_btn.clicked.connect(self._on_cancel_cleanup)
-        self._cleanup_undo_btn = tile.add_secondary_button("Undo Last Cleanup\u2026")
+        self._cleanup_undo_btn = tile.add_secondary_button("Undo last cleanup…", glyph="undo")
         self._cleanup_undo_btn.setObjectName("cleanupUndoBtn")
         self._cleanup_undo_btn.setToolTip(
-            "Preview and restore the original names from the newest cleanup log in Docs/"
+            "Preview and restore the original names from the newest cleanup log in Docs/ "
+            "(playlist entries are pointed back too)."
         )
         self._cleanup_undo_btn.clicked.connect(self._on_undo_cleanup)
         tile.finish_footer()
@@ -1601,6 +1485,7 @@ class FileCleanupWorkspace(_ToolPanel):
             self._cleanup_log.clear()
             if self._cleanup_tile is not None:
                 self._cleanup_tile.report("idle", "Ready.")
+                self._cleanup_tile.reset_view()
         else:
             self._cleanup_log.appendPlainText(
                 "Library changed \u2014 the confirmed renames in the previous library "
