@@ -56,7 +56,7 @@ PREVIOUS_THEME_KEY = "theme_before_glass"
 #   midlight -> material.hover   light -> material.hairline
 #   shadow -> text_secondary     placeholder-text -> text_muted
 #   highlight -> material.selection    highlighted-text -> its text
-#   link -> accent               tool-tip-base / -text -> log_bg / log_text
+#   link -> accent               tooltip-base / -text -> log_bg / log_text
 #
 # Order matters: rules of equal specificity resolve by position, so the
 # general scroll-area rule comes before the item-view and text-area rules.
@@ -77,8 +77,8 @@ def _static_qss() -> str:
 
     return f"""
 QToolTip {{
-    background: palette(tool-tip-base);
-    color: palette(tool-tip-text);
+    background: palette(tooltip-base);
+    color: palette(tooltip-text);
     border: 1px solid palette(mid);
     border-radius: 8px;
     padding: 5px 9px;
@@ -155,8 +155,8 @@ QPlainTextEdit, QTextEdit {{
     font-size: {label}px;
 }}
 QPlainTextEdit#logText, QTextEdit#logText {{
-    background: palette(tool-tip-base);
-    color: palette(tool-tip-text);
+    background: palette(tooltip-base);
+    color: palette(tooltip-text);
     border: none;
     border-radius: 12px;
     font-family: {MONO_STACK};

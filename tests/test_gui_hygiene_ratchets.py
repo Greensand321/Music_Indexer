@@ -39,9 +39,9 @@ CEILINGS = {
     "hex_colours_outside_tokens": 60,
     # Inline stylesheets outside gui/themes bypass the design system and are
     # re-parsed on every theme switch.
-    "inline_setStyleSheet_calls": 74,
+    "inline_setStyleSheet_calls": 47,
     # Type sizes belong in the type ramp (gui/fonts/loader.py TypeScale).
-    "font_size_literals_outside_themes": 28,
+    "font_size_literals_outside_themes": 12,
     # Zero tolerance since every page moved onto the JobRegistry: start QThreads
     # via WorkspaceBase._start_worker / gui.workers.start_worker so they are
     # kept alive until finished and stopped on quit.

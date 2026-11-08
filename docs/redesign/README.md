@@ -377,14 +377,14 @@ GUI concurrency) turned up further real bugs. The serious ones:
 "After" is the end of the fix phase. The ceilings have kept going down since (the Liquid Glass work lowered them
 again); the live values are the `CEILINGS` in `tests/test_gui_hygiene_ratchets.py`, which wins over this table.
 
-| Metric | Before | After the fix phase | Ceiling on 2026-11-08 |
-|---|---|---|---|
-| Hard-coded hex colours outside tokens | 237 | 116 | 60 |
-| Inline `setStyleSheet` calls | 168 | 94 | 74 |
-| `font-size` literals outside the theme | 81 | 38 | 28 |
-| Direct `QThread.start()` (bypassing the JobRegistry) | 28 | **0** (now zero tolerance) | 0 |
-| Unparented animations | 7 | 2 (both in the Tk-only `qt_launcher.py`) | 2 |
-| Lambdas connected to the theme singleton | 3 | 0 (zero tolerance) | 0 |
+| Metric | Before | After the fix phase | Ceiling after R1 | Ceiling after R2 (2026-11-08) |
+|---|---|---|---|---|
+| Hard-coded hex colours outside tokens | 237 | 116 | 60 | 60 |
+| Inline `setStyleSheet` calls | 168 | 94 | 74 | 47 |
+| `font-size` literals outside the theme | 81 | 38 | 28 | 12 |
+| Direct `QThread.start()` (bypassing the JobRegistry) | 28 | **0** (now zero tolerance) | 0 | 0 |
+| Unparented animations | 7 | 2 (both in the Tk-only `qt_launcher.py`) | 2 | 2 |
+| Lambdas connected to the theme singleton | 3 | 0 (zero tolerance) | 0 | 0 |
 
 ### Tests
 

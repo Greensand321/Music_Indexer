@@ -453,7 +453,7 @@ The owner chose "Refined Liquid Glass" (docs/redesign). Everything below is undo
 - **Was**: config key / environment variable only.
 - **Is**: Settings → Appearance → Reduce motion (same key).
 
-## G. Page contents in Liquid Glass (redesign R2) — **In progress**
+## G. Page contents in Liquid Glass (redesign R2) — **Done**
 
 Every page drops its in-page title. The shell header and the section tabs already name it. Each page keeps one
 short muted line saying what it is for, and buttons use painted glyphs instead of emoji. Shared parts:
@@ -640,3 +640,47 @@ short muted line saying what it is for, and buttons use painted glyphs instead o
     "&Yes"). The shortcuts still work.
 - **SettingsDrawer** (not opened by the app; see B3): its inline-styled header and "✕" button → a title plus a
   footer button box.
+
+### G7. Home, Activity, Help and the log strip
+- **Home**: built like the mockup, from real data only.
+  - **Spin something**: six random albums from the library. Click one to play it. "Shuffle again" shows every
+    album once before repeating. Up to 24 albums are kept per library.
+  - **Library health**:
+    - stat tiles for tracks, size, artists, albums, Manual Review, Quarantine and Not Sorted, each folder with an
+      "Open folder" button;
+    - a one-line layout check;
+    - the Validator's full prose now sits in a tooltip.
+  - **Recent runs**: at most six rows. Before, it showed every kind, up to about nine.
+  - **Duplicates card**: reads the summary of the last scan that the Duplicates page saves in
+    `Docs/duplicate_preview.json`. Without one it says "No duplicate scan yet". "Find duplicates" moved here from
+    Quick actions.
+  - The "Library" card with the full selectable path is gone, because the page header shows the path.
+- **Fixed in passing**: Home merged Fill genres and Normalize genres runs into one "genre" row. They are separate
+  rows now.
+- **Activity**: the jobs table → glass rows with thin progress bars. New "Earlier this session" list shows the last
+  eight jobs that ended.
+- **Help**:
+  - Links are renamed to the current pages.
+  - Ctrl+Q and the Player's keys are added to the shortcuts.
+  - The "PySide6 Qt Widgets interface" line in About is dropped.
+- **Log strip**:
+  - The sliding sheet (DS-18) → instant open and close, with only the chevron turning, painted. The motion rule is
+    never to animate geometry a layout owns.
+  - The status shows as a coloured dot with muted text.
+  - In a short window the open log shrinks to a 96 px minimum. At 900×600 it used to run past the window.
+- **`library_stats()`** remembers the last full count per library, so Home shows albums without walking the
+  library a second time.
+
+### G8. Fixes found during R2
+- **Log boxes**: the stylesheet asked for `palette(tool-tip-base)` / `palette(tool-tip-text)`. Qt only knows
+  `tooltip-base` / `tooltip-text`, so those rules were silently ignored. Every log box (the strip, Activity,
+  Playlists, Analyse, the media tester) painted the ordinary field colour instead of the dark log inset, and in
+  light classic themes the coloured log lines were hard to read. Tooltips were affected the same way.
+- **Indexer Cancel**: Cancel only acted while the preview thread was running. A click that landed after the
+  thread finished, but before its result was shown, was ignored, and the cancelled preview appeared anyway. A
+  late-cancelled preview is now dropped. Previews write nothing, so nothing needs undoing. This was the
+  intermittent LIB-07 test failure.
+- **Test harness**: `wait_all` ran one extra event pass after every thread had finished. The backdrop's 140 ms
+  rebuild timer could fire in it and start a thread that was then reported as left running.
+- **Hygiene ceilings after R2**: inline `setStyleSheet` 74 → 47, `font-size` literals 28 → 12. Hex colours stay
+  at 60.
