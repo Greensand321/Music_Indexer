@@ -231,9 +231,9 @@ roadmap, but the current trade-off favors safety and simplicity.
 ## A note on the two interfaces
 
 Library Sync actually has **two separate front-end implementations** that both drive
-the same backend engine described above: the modern Qt workspace
-(`gui/workspaces/library_sync.py`, described throughout this document, reached from
-the sidebar) and an older, feature-flagged Tkinter panel
+the same backend engine described above: the modern Qt app's **Library Sync** page
+(in the sidebar's Organize group; `gui/workspaces/library_sync.py`, described
+throughout this document) and an older, feature-flagged Tkinter panel
 (`library_sync_review.py`) that still exists in the legacy app. They are structurally
 independent pieces of UI code, not a shared component — if you're debugging a
 Library Sync issue, first confirm which of the two interfaces you're actually
@@ -294,7 +294,7 @@ libraries.
 Library Sync can produce a standalone, shareable **report of the review** — a summary
 of every match, its status, the distance and confidence, the quality verdict, and any
 flags or notes you added, available as a web page, a JSON file, or a CSV file. An
-**Export Report** button in the Qt workspace's Plan & Execution panel lets you save
+**Export Report** button on the Library Sync page's Plan & Execution card lets you save
 one as soon as a scan has finished; it opens a save dialog defaulting into the
 library's `Docs/` folder and writes whichever format you choose based on the file
 extension you pick.
