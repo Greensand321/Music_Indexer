@@ -14,6 +14,7 @@ from near_duplicate_detector import (
     duplicate_fingerprint_distance as fingerprint_distance,
 )
 import chromaprint_utils
+from utils.reserved_folders import walk_library
 from config import load_config, FP_DURATION_MS, FP_OFFSET_MS, FP_SILENCE_MIN_LEN_MS, FP_SILENCE_THRESHOLD_DB
 
 SUPPORTED_EXTS = {".flac", ".m4a", ".aac", ".mp3", ".wav", ".ogg", ".opus"}
@@ -94,14 +95,12 @@ def _walk_audio_files(
     cancel_event: Optional[threading.Event] = None,
 ) -> Iterator[str]:
     found = 0
-    for dirpath, _dirs, files in os.walk(root):
+    # The reserved top-level folders (Quarantine/, Trash/, Docs/, …): only
+    # "Not Sorted"/"Playlists" were skipped, so quarantined losers came back
+    # as duplicates of their own winners.
+    for dirpath, _dirs, files in walk_library(root):
         _dlog("WALK", f"enter {dirpath}")
-        rel = os.path.relpath(dirpath, root)
-        parts = {p.lower() for p in rel.split(os.sep)}
-        if {"not sorted", "playlists"} & parts:
-            _dlog("WALK", f"skip dir {dirpath}")
-            continue
-        for fname in files:
+        for fname in sorted(files):
             ext = os.path.splitext(fname)[1].lower()
             if ext in SUPPORTED_EXTS:
                 path = os.path.join(dirpath, fname)
@@ -122,11 +121,7 @@ def _walk_audio_files(
 
 def _count_audio_files(root: str, cancel_event: Optional[threading.Event] = None) -> int:
     count = 0
-    for dirpath, _dirs, files in os.walk(root):
-        rel = os.path.relpath(dirpath, root)
-        parts = {p.lower() for p in rel.split(os.sep)}
-        if {"not sorted", "playlists"} & parts:
-            continue
+    for dirpath, _dirs, files in walk_library(root):
         for fname in files:
             if os.path.splitext(fname)[1].lower() in SUPPORTED_EXTS:
                 count += 1

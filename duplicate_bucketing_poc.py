@@ -12,6 +12,7 @@ from typing import Callable, Dict, Iterable, List, Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import chromaprint_utils
+from utils.reserved_folders import is_reserved_path
 from config import (
     EXACT_DUPLICATE_THRESHOLD,
     FP_DURATION_MS,
@@ -91,13 +92,13 @@ def _cover_data_uri(payload: bytes, max_bytes: int = 500_000) -> str | None:
     return f"data:{mime};base64,{encoded}"
 
 
-EXCLUDED_DIRS = {"not sorted", "playlists"}
-
-
 def _is_excluded_path(path: str, root: str) -> bool:
-    rel_path = os.path.relpath(path, root)
-    parts = {part.lower() for part in rel_path.split(os.sep)}
-    return bool(EXCLUDED_DIRS & parts)
+    """True inside a reserved top-level folder (Quarantine/, Trash/, Docs/, …).
+
+    Only "Not Sorted"/"Playlists" were excluded, so quarantined losers were
+    reported as duplicates of the winners they had been consolidated into.
+    """
+    return is_reserved_path(path, root)
 
 
 class BucketingCancelled(Exception):

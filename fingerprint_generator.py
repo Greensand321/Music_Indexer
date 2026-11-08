@@ -17,6 +17,7 @@ def _with_thresh(func, *args, silence_threshold_db: float = SILENCE_THRESH, **kw
 from concurrent.futures import ProcessPoolExecutor
 import acoustid
 from utils.path_helpers import ensure_long_path
+from utils.reserved_folders import walk_library
 import audio_norm
 
 SUPPORTED_EXTS = {".flac", ".m4a", ".aac", ".mp3", ".wav", ".ogg"}
@@ -117,11 +118,9 @@ def _gather_audio_files(root_path: str | Iterable[str]) -> List[str]:
 
     if isinstance(root_path, str):
         audio_files: List[str] = []
-        for dirpath, _, files in os.walk(root_path):
-            rel_dir = os.path.relpath(dirpath, root_path)
-            if {"not sorted", "playlists"} & {p.lower() for p in rel_dir.split(os.sep)}:
-                continue
-            for fname in files:
+        # Skips every reserved top-level folder (Quarantine/, Trash/, Docs/…).
+        for dirpath, _, files in walk_library(root_path):
+            for fname in sorted(files):
                 ext = os.path.splitext(fname)[1].lower()
                 if ext in SUPPORTED_EXTS:
                     audio_files.append(os.path.join(dirpath, fname))
@@ -218,7 +217,13 @@ def compute_fingerprints_parallel(
         if cancel_event.is_set():
             log_callback("Cancellation requested before fingerprint scheduling")
             break
-        mtime = os.path.getmtime(ensure_long_path(path))
+        try:
+            mtime = os.path.getmtime(ensure_long_path(path))
+        except OSError as exc:  # vanished since the walk: skip it, don't abort the run
+            log_callback(f"   ! Skipped {path}: {exc}")
+            completed += 1
+            progress_callback(completed, total, path, phase)
+            continue
         cache_entry = cached.get(path)
         if cache_entry and cache_entry[2] is not None and cache_entry[0] == mtime:
             duration, fp_hash = cache_entry[1], cache_entry[2]
@@ -250,7 +255,13 @@ def compute_fingerprints_parallel(
                     if cancel_event.is_set():
                         break
                     continue
-                mtime = os.path.getmtime(ensure_long_path(path))
+                try:
+                    mtime = os.path.getmtime(ensure_long_path(path))
+                except OSError as exc:
+                    log_callback(f"   ! Not cached (file vanished): {path}: {exc}")
+                    results.append((path, duration, fp_hash))
+                    progress_callback(completed, total, path, phase)
+                    continue
                 conn.execute(
                     "INSERT OR REPLACE INTO fingerprints (path, mtime, duration, fingerprint) VALUES (?, ?, ?, ?)",
                     (path, mtime, duration, fp_hash),
