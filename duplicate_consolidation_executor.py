@@ -199,7 +199,7 @@ def _atomic_write_text(path: str, content: str, *, encoding: str = "utf-8") -> N
 
 
 def _atomic_write_json(path: str, payload: Mapping[str, object]) -> None:
-    text = json.dumps(payload, indent=2, sort_keys=True)
+    text = json.dumps(payload, indent=2, sort_keys=True, default=str)
     _atomic_write_text(path, text)
 
 
@@ -2318,8 +2318,11 @@ def execute_consolidation_plan(
 
         try:
             _atomic_write_json(consolidated_report_path, consolidated_payload)
-        except Exception:
-            pass
+        except Exception as exc:
+            # This JSON is the machine-readable record of every move/delete;
+            # never lose it silently.
+            log(f"Report write failed: unable to write {consolidated_report_path} ({exc})")
+            logger.error("Duplicate execution audit JSON not written: %s", exc)
 
         try:
             actions_by_group: Dict[str, List[ExecutionAction]] = {}

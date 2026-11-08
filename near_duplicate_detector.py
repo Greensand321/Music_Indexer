@@ -597,6 +597,15 @@ def _scan_paths(
                     comp.add(nb)
                     stack.append(nb)
         if len(comp) > 1:
+            # Members join through *any* matching pair, so A~B and B~C put
+            # A and C together even when A~C is far apart. Measure every pair
+            # so the reported maximum is the truth, not just the best links.
+            for a, b in combinations(sorted(comp), 2):
+                key = frozenset({a, b})
+                if key not in pair_distances:
+                    pair_distances[key] = duplicate_fingerprint_distance(
+                        file_infos[a].get("fp"), file_infos[b].get("fp")
+                    )
             max_distance = _cluster_max_distance(comp, pair_distances)
             clusters.append((comp, max_distance))
     return clusters, comparisons, metadata_blocked, coarse_blocked
@@ -761,6 +770,11 @@ def find_near_duplicates(
                 f"Near-duplicate of {os.path.basename(keep)} "
                 f"(max fingerprint distance {max_distance:.3f}); review required"
             )
+            if max_distance > threshold + mixed_codec_boost:
+                reason += (
+                    " — chained match: some members are only similar through a third "
+                    "track, not to each other"
+                )
             result.review_groups.append(
                 NearDuplicateGroup(
                     winner=keep,

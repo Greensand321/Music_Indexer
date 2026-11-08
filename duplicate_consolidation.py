@@ -19,6 +19,7 @@ import json
 import os
 import platform
 import re
+import tempfile
 import threading
 import time
 import logging
@@ -269,13 +270,33 @@ def _metadata_cache_path_for_tracks(tracks: Sequence[Mapping[str, object]]) -> s
     return os.path.join(docs_dir, METADATA_CACHE_FILENAME)
 
 
+def _atomic_write_text(path: str, text: str) -> None:
+    """Write ``path`` via a temporary file + rename, so a crash or full disk
+    mid-write never leaves a truncated preview/cache behind."""
+    safe = ensure_long_path(path)
+    directory = os.path.dirname(safe) or "."
+    os.makedirs(directory, exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(prefix=".alphadex-", suffix=".tmp", dir=directory)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+        os.replace(tmp_path, safe)
+        tmp_path = ""
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+
+
 def _load_metadata_cache(cache_path: str) -> Dict[str, object]:
     if not cache_path or not os.path.exists(cache_path):
         return {"version": METADATA_CACHE_VERSION, "entries": {}}
     try:
         with open(cache_path, "r", encoding="utf-8") as handle:
             payload = json.load(handle)
-    except (OSError, json.JSONDecodeError):
+    except (OSError, ValueError):  # ValueError: bad JSON *or* bytes that are not UTF-8
         return {"version": METADATA_CACHE_VERSION, "entries": {}}
     if not isinstance(payload, Mapping):
         return {"version": METADATA_CACHE_VERSION, "entries": {}}
@@ -289,10 +310,11 @@ def _save_metadata_cache(cache_path: str, cache: Mapping[str, object]) -> None:
     if not cache_path:
         return
     try:
-        os.makedirs(os.path.dirname(cache_path), exist_ok=True)
-        with open(cache_path, "w", encoding="utf-8") as handle:
-            json.dump(cache, handle, indent=2)
-    except OSError:
+        # default=str: a tag value json cannot encode used to raise TypeError
+        # here, after all the work, and crash the whole plan build.
+        _atomic_write_text(cache_path, json.dumps(cache, indent=2, default=str))
+    except (OSError, TypeError, ValueError) as exc:
+        logger.warning("Could not save the duplicate metadata cache %s: %s", cache_path, exc)
         return
 
 
@@ -3583,8 +3605,7 @@ def export_consolidation_preview(
     if preview_settings:
         payload["preview_settings"] = dict(preview_settings)
 
-    with open(output_json_path, "w", encoding="utf-8") as f:
-        json.dump(payload, f, indent=2)
+    _atomic_write_text(output_json_path, json.dumps(payload, indent=2))
     try:
         output_size = os.path.getsize(output_json_path)
     except OSError:
@@ -3755,8 +3776,7 @@ def export_duplicate_pair_report_html(report: DuplicatePairReport, output_html_p
 
     html_lines.extend(["</body>", "</html>"])
 
-    with open(output_html_path, "w", encoding="utf-8") as handle:
-        handle.write("\n".join(html_lines))
+    _atomic_write_text(output_html_path, "\n".join(html_lines))
     return output_html_path
 
 
@@ -5183,8 +5203,7 @@ def export_consolidation_preview_html(
     )
     html_lines.append("</body></html>")
 
-    with open(ensure_long_path(output_html_path), "w", encoding="utf-8") as handle:
-        handle.write("\n".join(html_lines))
+    _atomic_write_text(output_html_path, "\n".join(html_lines))
     try:
         output_size = os.path.getsize(output_html_path)
     except OSError:
