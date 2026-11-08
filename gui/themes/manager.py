@@ -71,6 +71,7 @@ def _static_qss() -> str:
 
     title = TYPE["title"].px
     heading = TYPE["heading"].px
+    body = TYPE["body"].px
     label = TYPE["label"].px
     caption = TYPE["caption"].px
 
@@ -103,6 +104,40 @@ QAbstractItemView {{
 QAbstractItemView::item:hover {{
     background: palette(midlight);
 }}
+
+/* ── Dialogs (QDialog, QMessageBox, QFileDialog, QInputDialog,
+   QProgressDialog). Top-level windows stay opaque: palette(window) is the
+   material's backdrop_base. AlphaDEXStyle paints the rest of the chrome
+   (gui/themes/style.py): the raised content surface over that fill with the
+   button row on a footer band, pill buttons with the default one primary,
+   and the message-box icons. These rules add the type and the wells. They
+   sit before the combo-popup rule so a popup inside a dialog keeps its own
+   look (equal specificity: the later rule wins). ── */
+QDialog QAbstractItemView {{
+    border: 1px solid palette(mid);
+    border-radius: 12px;
+}}
+QMessageBox QLabel#qt_msgbox_label {{
+    color: palette(window-text);
+    font-size: {body}px;
+    padding: 9px 2px 2px 0;
+}}
+QMessageBox QLabel#qt_msgbox_informativelabel {{
+    color: palette(shadow);
+    font-size: {label}px;
+    padding: 0 2px 2px 0;
+}}
+QInputDialog QLabel, QProgressDialog QLabel {{
+    color: palette(window-text);
+    font-size: {body}px;
+}}
+QFileDialog QLabel {{
+    color: palette(shadow);
+}}
+QDialogButtonBox {{
+    dialogbuttonbox-buttons-have-icons: 0;
+}}
+
 QComboBox QAbstractItemView, QCompleter QAbstractItemView {{
     background: palette(window);
     border: 1px solid palette(mid);
@@ -271,7 +306,18 @@ QLabel#sidebarSectionLabel {{
 
 
 /* [area:takeaway_settings] begin */
-
+/* Text on a painted well (a GlassPanel "well" behind it): the panel draws
+   the rounded surface, so the editor itself stays transparent (an editor's
+   own background fills its viewport square, past its rounded border). */
+QPlainTextEdit#wellText, QPlainTextEdit#wellMono {{
+    background: transparent;
+    border: none;
+    padding: 0;
+}}
+QPlainTextEdit#wellMono {{
+    font-family: {MONO_STACK};
+    font-size: {caption}px;
+}}
 /* [area:takeaway_settings] end */
 
 
@@ -344,8 +390,8 @@ _THEMED_OBJECT_NAMES = frozenset({
     # [area:sound_map]
     frozenset(),
 
-    # [area:takeaway_settings]
-    frozenset(),
+    # [area:takeaway_settings]  (message-box labels: the global dialog rules)
+    frozenset({"qt_msgbox_label", "qt_msgbox_informativelabel"}),
 ))
 _THEMED_TYPES = (
     QtWidgets.QAbstractScrollArea,   # item views, headers, text edits, scroll areas
