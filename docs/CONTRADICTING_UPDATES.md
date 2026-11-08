@@ -606,5 +606,7 @@ short muted line saying what it is for, and buttons use painted glyphs instead o
     button.
   - The always-visible Log card → behind "Details".
   - The plan shows as glass rows with new / replace / written / failed pills.
-- **Found, not changed**: the folder-playlist plan names the library root's loose tracks `Playlists/..m3u`
-  (`playlist_generator.plan_folder_playlists`). The new preview rows make it visible.
+- **Fixed (found through the new preview rows)**: tracks sitting directly in the library folder went into a playlist
+  called `Playlists/..m3u`, because `os.path.relpath(root, root)` is ".". They now go into `root.m3u`, the
+  fallback `_sanitize_name` always meant to use. This applies to both `plan_folder_playlists` and
+  `generate_playlists`.

@@ -85,6 +85,15 @@ def test_folder_plan_is_per_album_and_skips_reserved_folders(tmp_path):
     assert not (tmp_path / "Playlists" / "Artist A_Album 1.m3u").exists(), "planning must not write"
 
 
+def test_tracks_in_the_library_folder_itself_get_a_real_playlist_name(tmp_path):
+    # relpath(root, root) is "."; it used to produce a playlist called "..m3u".
+    _touch(tmp_path, "loose.mp3")
+    _touch(tmp_path, "Artist A/Album 1/01 a.mp3")
+    plan = pg.plan_folder_playlists(str(tmp_path))
+    names = sorted(os.path.basename(p.path) for p in plan)
+    assert names == ["Artist A_Album 1.m3u", "root.m3u"]
+
+
 # ── PL-11: writing is exactly what was planned, with backups ─────────────
 
 

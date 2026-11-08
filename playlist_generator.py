@@ -123,6 +123,10 @@ def _sanitize_name(rel_path, existing):
     Replaces path separators with underscores and appends a short hash if
     the sanitized name already exists in ``existing``.
     """
+    # ``os.path.relpath(root, root)`` is ".", which used to give "..m3u" for
+    # tracks sitting directly in the library folder.
+    if rel_path in ("", os.curdir):
+        rel_path = ""
     base = rel_path.replace(os.sep, "_") or "root"
     if base not in existing:
         return base
