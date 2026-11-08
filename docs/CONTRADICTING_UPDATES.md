@@ -256,3 +256,71 @@ Status legend: **Done** (in the code now) · **Pending owner** (decision needed;
 ## E. Process / tooling
 - **E1.** Windows CI is a required job (it was informational).
 - **E2.** `CLAUDE.md`'s "Library sync default" constant was updated to match A2.
+
+## F. The look and the shell (redesign R1: Liquid Glass) — **Done**
+
+The owner chose "Refined Liquid Glass" (docs/redesign). Everything below is undoable per item.
+
+### F1. Default theme: Midnight → Liquid Glass, with a one-time migration
+- **Was**: `DEFAULT_DARK = "midnight"`; a saved theme was always honoured.
+- **Is**: `DEFAULT_THEME = DEFAULT_DARK = "glass"`. A saved theme other than Liquid Glass (Auto included) is
+  switched to it **once**: the old key is kept as `theme_before_glass`, `theme_glass_migrated` stops it from
+  happening again, and the main window logs a line. Choosing a classic theme afterwards sticks.
+- **Undo**: `gui/themes/tokens.py` (`DEFAULT_THEME`, `DEFAULT_DARK`), `ThemeManager._migrate`.
+
+### F2. "Background gradient" switch → Backdrop (Album art / Gradient / Plain)
+- **Was**: a checkbox (`bg_gradient_enabled`) for two accent glows painted by every page and the sidebar.
+- **Is**: `backdrop_mode`, painted once by the window's backdrop; Album art (a blurred wall of the library's
+  covers, Liquid Glass only) is the default. `bg_gradient_enabled` is still read when `backdrop_mode` is absent
+  (False = Plain) and is kept in step on save. `GradientWidget` no longer paints a background.
+- **Undo**: `gui/themes/appearance.py`, `gui/widgets/backdrop.py`, `SettingsForm._build_appearance`.
+
+### F3. Top bar → page header
+- **Was**: a 64 px bar with the "AlphaDEX" brand, the path (last two segments), stats, and Change Library /
+  Theme / Settings buttons.
+- **Is**: no bar: the page title (34 px), a library chip (full path, elided), the stats, a search pill (Enter
+  shows the Player filtered to the text) and Change library. The brand is in the sidebar; Theme and Settings
+  buttons are gone (Settings: sidebar and Ctrl+,; theme: Settings → Appearance). The signals remain.
+
+### F4. Sidebar: 360 px panel with icons and Exit → floating 250 px glass panel
+- **Was**: emoji icons, an accent bar on the active item, an Exit item; item height stretched to fill.
+- **Is**: text-only 40 px items (32 px minimum), a raised pill that slides between items, a "N running" badge;
+  **no Exit item** — Ctrl+Q (new) and the window's close button quit through the same close protocol.
+
+### F5. Status bar hidden
+- **Was**: a visible status bar ("Page · Section", library, stopping messages).
+- **Is**: still written (code and tests read `currentMessage()`), not shown; the header shows the page, the
+  log strip's status chip shows status and the stopping message.
+
+### F6. Now Playing: strip → floating capsule
+- **Was**: a full-width strip above the log drawer.
+- **Is**: a floating glass capsule at the bottom centre of the page area, with the same controls and signals,
+  still hidden until something plays. Pages keep 104 px of room under their content; the Player page (which has
+  its own transport) now reserves it too, so its own controls end 104 px higher.
+
+### F7. Cards, controls and type
+- Cards: opaque 12 px frames with accent strips on header/action cards → translucent glass (radius 26, hero 30),
+  no accent strips, 8 / 6 px more padding, softer and larger painted shadows.
+- Buttons, line edits, combo and spin boxes are pills; checkboxes 18 px; scroll bars thin on a transparent track;
+  sliders a 5 px track with a white knob; tabs pills, page sections a segmented control; under glass a table
+  selection is the translucent accent with white text.
+- Type: Inter-first, point-based sizes → one px ramp (display 34 · title 20 · heading 16 · body 14 · label 13 ·
+  caption 12 · micro 11 · mono) preferring Segoe UI Variable, then Segoe UI, SF Pro, the bundled Inter. The app
+  font is 14 px (was 11 pt ≈ 14.7 px).
+
+### F8. Landing
+- **Was**: 110 px tiles in a centred grid around a reserved block; one button; no quit; ignored reduced motion.
+- **Is**: a full-window 7 × 5 grid, a frosted glass card with the library's path and counts (a read-only count
+  runs while the landing is up), **Choose another folder** (new link), a **quit** button (new), hover
+  lift/ring/caption chip (album and artist read with the cover), and reduced motion skips the fly-in and the
+  scatter. The covers found are handed to the main window's backdrop.
+
+### F9. Transitions and housekeeping jobs
+- Page and section switches were instant; they now cross-fade (opacity, `base` / `fast`; instant with reduced
+  motion).
+- Housekeeping jobs (backdrop build, landing frost) are `quiet`: kept alive and cancelled on quit like any job,
+  but not listed on the Activity page or counted in its badge.
+
+### F10. Reduce motion has a control
+- **Was**: config key / environment variable only.
+- **Is**: Settings → Appearance → Reduce motion (same key).
