@@ -454,8 +454,10 @@ def test_activity_lists_finished_jobs_newest_first(main_window, threads):
     for name in ("First", "Second"):
         worker = _PercentWorker()
         worker.go.set()
-        worker.stop.set()
         start_worker(worker, owner=main_window._workspaces["indexer"], name=name)
+        process_events(10)
+        assert name in [r.job.name for r in activity.job_rows()]
+        worker.stop.set()           # ends by itself: not a cancel
         assert threads.wait_all(5000) == []
         process_events(20)
     names = [f.name for f in activity.finished_jobs()]
