@@ -24,6 +24,8 @@ ROLES = (
     QtGui.QPalette.ColorRole.Text,
     QtGui.QPalette.ColorRole.Base,
     QtGui.QPalette.ColorRole.ButtonText,
+    QtGui.QPalette.ColorRole.Highlight,     # selection (the accent under glass)
+    QtGui.QPalette.ColorRole.Link,          # accent text
 )
 
 
@@ -50,16 +52,20 @@ def QtCore_direct():  # noqa: N802 - tiny helper for readability above
     return QtCore.Qt.FindChildOption.FindDirectChildrenOnly
 
 
-@pytest.mark.parametrize("start,target", [("midnight", "pearl"), ("pearl", "midnight")])
+@pytest.mark.parametrize("start,target", [
+    ("midnight", "pearl"), ("pearl", "midnight"),
+    ("glass", "midnight"), ("midnight", "glass"), ("pearl", "glass"),
+])
 def test_live_switch_matches_fresh_start(qtbot, start, target):
     import config
     from gui.main_window import AlphaDEXWindow
-    from gui.themes.manager import get_manager
+    from gui.themes.manager import MIGRATION_MARKER, get_manager
 
     mgr = get_manager()
 
     cfg = config.load_config()
     cfg["theme"] = start
+    cfg[MIGRATION_MARKER] = True        # start where we say, not migrated to glass
     config.save_config(cfg)
     switched = AlphaDEXWindow()
     qtbot.addWidget(switched)
@@ -83,3 +89,33 @@ def test_live_switch_matches_fresh_start(qtbot, start, target):
         f"{len(stale)} widget(s) kept colours from '{start}' after switching to "
         f"'{target}' (first 15):\n  " + "\n  ".join(stale[:15])
     )
+
+
+def test_live_accent_change_matches_fresh_start(qtbot):
+    """An accent change goes through the same fast path as a theme switch."""
+    import config
+    from gui.main_window import AlphaDEXWindow
+    from gui.themes.manager import MIGRATION_MARKER, get_manager
+
+    mgr = get_manager()
+    cfg = config.load_config()
+    cfg.update({"theme": "glass", MIGRATION_MARKER: True, "glass_accent": "blue"})
+    config.save_config(cfg)
+    switched = AlphaDEXWindow()
+    qtbot.addWidget(switched)
+    switched.show()
+    process_events(20)
+    mgr.set_accent("peach")
+    process_events(20)
+    a = _signature(switched)
+
+    fresh = AlphaDEXWindow()     # load_persisted() reads the peach accent
+    qtbot.addWidget(fresh)
+    fresh.show()
+    process_events(20)
+    assert mgr.current.accent == "#ffb37a"
+    b = _signature(fresh)
+    common = sorted(set(a) & set(b))
+    assert len(common) > 200
+    stale = [p for p in common if a[p] != b[p]]
+    assert not stale, f"{len(stale)} widget(s) kept the old accent:\n  " + "\n  ".join(stale[:15])
