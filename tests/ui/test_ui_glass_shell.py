@@ -477,7 +477,7 @@ def test_capsule_drives_the_player_and_floats_over_the_pages(main_window, monkey
     bar._seek_slider.triggerAction(QtWidgets.QAbstractSlider.SliderAction.SliderPageStepAdd)
     assert fake.calls[-1][0] == "set_time"
     bar._vol_slider.setValue(42)
-    assert ws._vol_slider.value() == 42 and fake.calls[-1] == ("volume", 42)
+    assert ws.volume() == 42 and fake.calls[-1] == ("volume", 42)
 
     ws._clear_queue()
     assert not bar.isVisible() and not shadow.isVisible()

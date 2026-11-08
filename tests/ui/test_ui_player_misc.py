@@ -14,7 +14,8 @@ from gui.themes.tokens import THEMES
 from gui.widgets.now_playing_bar import NowPlayingBar
 from gui.workspaces import player as player_mod
 from library_factory import TrackSpec, build_library
-from player_helpers import FakeBackend, make_player, make_tracks, wait_scan
+from player_helpers import (FakeBackend, make_player, make_player_with_bar, make_tracks,
+                            wait_scan)
 
 Act = QtWidgets.QAbstractSlider.SliderAction
 
@@ -26,31 +27,34 @@ def _logs(ws):
 
 
 # ── PLY-09: sliders reach the backend for every kind of input ──────────────
+# The capsule is the Player's only transport (its volume and seek sliders).
 
-def test_page_volume_slider_keys_and_groove_reach_backend(qtbot):
-    ws, fake = make_player(qtbot)
+def test_volume_slider_keys_and_groove_reach_backend(qtbot):
+    ws, fake, bar = make_player_with_bar(qtbot)
     seen = []
     ws.volume_changed.connect(seen.append)
-    ws._vol_slider.triggerAction(Act.SliderSingleStepAdd)     # arrow key / wheel
+    bar._vol_slider.triggerAction(Act.SliderSingleStepAdd)     # arrow key / wheel
     assert fake.volume == 81
-    ws._vol_slider.triggerAction(Act.SliderPageStepSub)       # groove click / PageDown
+    bar._vol_slider.triggerAction(Act.SliderPageStepSub)       # groove click / PageDown
     assert fake.volume == 71
     assert seen == [81, 71]
-    ws.set_volume(30)                                         # public API
-    assert fake.volume == 30 and ws._vol_slider.value() == 30
+    ws.set_volume(30)                                          # public API
+    assert fake.volume == 30 and ws.volume() == 30
+    assert bar._vol_slider.value() == 30                       # the knob follows
 
 
-def test_page_seek_slider_keys_seek_and_ticks_do_not(qtbot, tmp_path):
-    ws, fake = make_player(qtbot)
+def test_seek_slider_keys_seek_and_ticks_do_not(qtbot, tmp_path):
+    ws, fake, bar = make_player_with_bar(qtbot)
     ws.load_tracks_and_play(make_tracks(tmp_path, 1))
     fake._time = 60_000
     before = fake.count("set_time")
     ws._tick_position()                       # programmatic update: no seek
     assert fake.count("set_time") == before
-    assert ws._seek_slider.value() == int(60_000 / fake.length * 1000)
-    ws._seek_slider.triggerAction(Act.SliderPageStepAdd)
+    assert bar._seek_slider.value() == int(60_000 / fake.length * 1000)
+    assert bar._pos_lbl.text() == "1:00"
+    bar._seek_slider.triggerAction(Act.SliderPageStepAdd)
     assert fake.calls[-1][0] == "set_time"
-    assert fake.calls[-1][1] == int(ws._seek_slider.value() / 1000 * fake.length)
+    assert fake.calls[-1][1] == int(bar._seek_slider.value() / 1000 * fake.length)
 
 
 def test_bar_sliders_emit_for_keys_and_groove_without_echo(qtbot):
@@ -71,18 +75,13 @@ def test_bar_sliders_emit_for_keys_and_groove_without_echo(qtbot):
     assert seeks == [int(bar._seek_slider.value() / 1000 * 100_000)]
 
 
-def test_bar_and_page_volume_stay_in_sync_without_loops(qtbot):
-    ws, fake = make_player(qtbot)
-    bar = NowPlayingBar()
-    qtbot.addWidget(bar)
-    # main_window wiring (bar → page) plus the page → bar link it should add
-    bar.volume_changed.connect(ws.set_volume)
-    ws.volume_changed.connect(bar.set_volume)
+def test_bar_and_player_volume_stay_in_sync_without_loops(qtbot):
+    ws, fake, bar = make_player_with_bar(qtbot)
 
     bar._vol_slider.triggerAction(Act.SliderPageStepSub)
-    assert ws._vol_slider.value() == bar._vol_slider.value() == 70
+    assert ws.volume() == bar._vol_slider.value() == 70
     assert fake.volume == 70
-    ws._vol_slider.triggerAction(Act.SliderSingleStepAdd)
+    ws.set_volume(71)                          # e.g. from another page
     assert bar._vol_slider.value() == 71 and fake.volume == 71
     assert fake.count("volume") < 10
 
@@ -121,26 +120,41 @@ def test_clear_queue_resets_and_hides_the_bar(main_window, qtbot, tmp_path, monk
     ws._on_stop()
     assert bar._play_btn.text() == "▶"
     ws._clear_queue()
-    assert not bar.isVisible()
-    assert bar._title_lbl.text() == "—"
+    assert not bar.isVisible()                 # not on the Player page: hidden
+    assert not bar.is_loaded()
+    assert bar._title_lbl.text() == "Nothing playing"
     assert bar._art_lbl.pixmap().isNull()
+
+    # On the Player page the capsule is its transport: it stays, idle.
+    main_window._on_nav_changed("player")
+    ws.load_tracks_and_play(make_tracks(tmp_path, 2), "Album")
+    ws._clear_queue()
+    assert bar.isVisible() and not bar.is_loaded()
+    assert bar._title_lbl.text() == "Nothing playing"
+    assert not bar._play_btn.isEnabled()       # nothing to play any more
     assert threads.wait_all(5000) == []
 
 
 # ── PLY-16 / DS-13: light themes ────────────────────────────────────────────
 
-def test_library_table_follows_a_light_theme(qtbot):
+def test_library_table_follows_a_light_theme(qtbot, tmp_path):
+    """No inline sheet: the table is a transparent item view on the card,
+    its rows painted from the live theme (dark text on a light card)."""
     ws, _ = make_player(qtbot)
-    pearl = THEMES["pearl"]
+    rows = [player_mod._load_row(p) for p in make_tracks(tmp_path, 2)]
+    ws._on_tracks_ready(ws._scan_gen, rows)
+    ws._on_scan_complete(ws._scan_gen, len(rows))
     get_manager().apply("pearl")
-    qss = ws._lib_table.styleSheet()
-    assert player_mod._rgba(pearl.content_bg, 210) in qss
-    assert "13,17,23" not in qss
-    assert pearl.text_primary in qss
-    assert pearl.card_bg in ws._hover_popup.styleSheet()
+    assert ws._lib_table.styleSheet() == "" and ws._hover_popup.styleSheet() == ""
     img = ws._bg_art.grab().toImage()
     centre = QtGui.QColor(img.pixel(img.width() // 2, img.height() // 2))
     assert centre.lightness() > 180            # not a black slab
+    # Row text is drawn in the theme's dark text colour.
+    table_img = ws._lib_table.viewport().grab().toImage()
+    rect = ws._lib_table.visualItemRect(ws._lib_table.item(0, 1))
+    darkest = min(QtGui.QColor(table_img.pixel(x, rect.center().y())).lightness()
+                  for x in range(rect.left(), min(rect.right(), rect.left() + 120)))
+    assert darkest < 110
 
 
 # ── PLY-17: default sort and numeric columns ───────────────────────────────
