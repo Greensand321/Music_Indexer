@@ -165,6 +165,7 @@ def test_cancel_during_extraction_writes_no_artefacts(tmp_path, fake_engine, mon
 
     assert len(calls) < len(tracks), "extraction kept going after cancel"
     assert not (tmp_path / "Docs" / "cluster_info.json").exists()
+    assert not (tmp_path / "Docs" / cp.CLUSTER_MEMBERS_FILE).exists()
     # Work done before the cancel is kept, so the next run resumes.
     cache = cp._load_feature_cache(str(tmp_path / "Docs" / cp.feature_cache_name(None)))
     assert 0 < len(cache) < len(tracks)
@@ -266,3 +267,141 @@ def test_written_payload_loads_through_the_graph_data_layer(tmp_path, fake_engin
     xy, labels, out_tracks = cgd.graph_points(data)
     assert len(xy) == len(labels) == len(out_tracks) == 9
     assert not os.path.exists(tmp_path / "Docs" / "cluster_info.json.tmp")
+
+
+# ── Cluster membership for cluster playlists (spec CP-1…CP-6) ─────────────
+
+
+def _members(root: Path) -> dict:
+    return json.loads((root / "Docs" / cp.CLUSTER_MEMBERS_FILE).read_text(encoding="utf-8"))
+
+
+def _payload(root: Path) -> dict:
+    return json.loads((root / "Docs" / "cluster_info.json").read_text(encoding="utf-8"))
+
+
+def test_members_file_is_written_with_the_run_block(tmp_path, fake_engine):
+    import cluster_graph_data as cgd
+
+    tracks = _tracks(tmp_path, 9)
+    _calls, failing = fake_engine
+    failing.add(tracks[4])
+    result = _run(tmp_path, tracks, params={"n_clusters": 3},
+                  features={"mfcc": True, "tempo": True, "energy": True})
+
+    path = tmp_path / "Docs" / cp.CLUSTER_MEMBERS_FILE
+    assert result["members_file"] == str(path)
+    raw = path.read_text(encoding="utf-8")
+    assert "\n" not in raw and ", " not in raw, "the members file is written compact"
+    members = cgd.load_cluster_members(tmp_path)
+    run = members["run"]
+    assert result["run"] == run
+    assert run["schema"] == 1
+    assert run["method"] == "kmeans" and run["params"] == {"n_clusters": 3}
+    assert run["features"] == "mfcc-tempo-energy"
+    assert run["feature_engine"] == "librosa" and run["normalization"] == "standard"
+    assert run["library_root"] == os.path.abspath(tmp_path)
+    assert run["track_count"] == 8 and run["failed_count"] == 1
+    stamp, _, token = run["run_id"].rpartition("-")
+    assert len(token) == 6 and int(token, 16) >= 0
+    assert run["created"].replace("-", "").replace("T", "-").replace(":", "")[:15] == stamp
+    # Index-aligned with the run's returned arrays, failed listed separately.
+    assert members["tracks"] == result["tracks"]
+    assert members["labels"] == [int(v) for v in result["labels"]]
+    assert len(members["centroid_distance"]) == 8
+    assert all(isinstance(d, float) for d in members["centroid_distance"])
+    assert members["failed"] == [tracks[4]]
+    assert not path.with_name(path.name + ".tmp").exists()
+
+
+def test_members_file_is_full_length_when_the_map_is_downsampled(tmp_path, fake_engine, monkeypatch):
+    import cluster_graph_data as cgd
+
+    monkeypatch.setattr(cp, "MAX_VISUALIZATION_POINTS", 10)
+    monkeypatch.setattr(cp, "MIN_VISUALIZATION_POINTS", 5)
+    tracks = _tracks(tmp_path, 30)
+    _run(tmp_path, tracks, params={"n_clusters": 3})
+    payload = cgd.load_cluster_data(tmp_path)
+    members = cgd.load_cluster_members(tmp_path)
+    assert payload["X_downsampled"] is True and len(payload["tracks"]) == 10
+    assert len(members["tracks"]) == len(members["labels"]) == len(members["centroid_distance"]) == 30
+    cgd.check_members_match_payload(payload, members)
+
+
+def test_both_files_share_one_run_id(tmp_path, fake_engine):
+    tracks = _tracks(tmp_path, 6)
+    first = _run(tmp_path, tracks)
+    assert _payload(tmp_path)["run"] == _members(tmp_path)["run"] == first["run"]
+    second = _run(tmp_path, tracks)
+    assert second["run"]["run_id"] != first["run"]["run_id"], "two runs must never share an id"
+    assert _payload(tmp_path)["run"]["run_id"] == _members(tmp_path)["run"]["run_id"] == second["run"]["run_id"]
+
+
+def test_cancel_writes_neither_file(tmp_path, fake_engine, monkeypatch):
+    """A cancel after extraction (the last check before the artefacts) leaves
+    neither the members file nor the map."""
+    tracks = _tracks(tmp_path, 6)
+    cancel = threading.Event()
+    real = cp.compute_3d_embedding
+
+    def cancel_during_embedding(X, log=None):
+        cancel.set()
+        return real(X, log)
+
+    monkeypatch.setattr(cp, "compute_3d_embedding", cancel_during_embedding)
+    with pytest.raises(cp.ClusteringCancelled):
+        _run(tmp_path, tracks, cancel_event=cancel)
+    assert not (tmp_path / "Docs" / cp.CLUSTER_MEMBERS_FILE).exists()
+    assert not (tmp_path / "Docs" / "cluster_info.json").exists()
+
+
+def test_members_write_failure_is_logged_and_map_still_written(tmp_path, fake_engine):
+    tracks = _tracks(tmp_path, 6)
+    blocker = tmp_path / "Docs" / cp.CLUSTER_MEMBERS_FILE
+    blocker.mkdir(parents=True)          # a folder where the file should go
+    logs: list[str] = []
+    result = _run(tmp_path, tracks, log_callback=logs.append)
+    assert result["members_file"] is None
+    assert any(m.startswith("! Could not save cluster membership (cluster playlists "
+                            "unavailable for this run):") for m in logs)
+    assert _payload(tmp_path)["run"] == result["run"]
+    assert not any(p.name.endswith(".tmp") for p in (tmp_path / "Docs").iterdir())
+
+
+def test_centroid_distance_on_a_toy_matrix():
+    X = np.array([[0.0, 0.0], [2.0, 0.0], [10.0, 10.0], [10.0, 14.0], [99.0, 99.0]])
+    labels = np.array([0, 0, 1, 1, -1])
+    d = cp.cluster_centroid_distances(X, labels)
+    assert d[:4] == pytest.approx([1.0, 1.0, 2.0, 2.0])
+    assert d[4] is None
+    assert all(isinstance(v, float) for v in d[:4])
+    with pytest.raises(ValueError):
+        cp.cluster_centroid_distances(X, labels[:-1])
+
+
+@pytest.mark.parametrize("with_mfcc", [True, False])
+def test_tempo_and_energy_columns_are_raw_and_only_when_selected(tmp_path, fake_engine, monkeypatch, with_mfcc):
+    """Column c of track i's raw vector is ``c + 100 * i``: the members file
+    must carry the raw tempo/energy numbers from the right columns."""
+    def extract(path, log_callback=None, engine="librosa", features=None):
+        idx = int(Path(path).stem.split("_")[1])
+        dim = cp.feature_vector_length(features)
+        return np.arange(dim, dtype=np.float32) + 100.0 * idx
+
+    monkeypatch.setattr(cp, "extract_audio_features", extract)
+    tracks = _tracks(tmp_path, 6)
+    selection = {"mfcc": with_mfcc, "tempo": True, "energy": True}
+    result = _run(tmp_path, tracks, features=selection)
+    members = _members(tmp_path)
+    tempo_col = 26 if with_mfcc else 0
+    energy_col = tempo_col + 1
+    for i, track in enumerate(members["tracks"]):
+        idx = int(Path(track).stem.split("_")[1])
+        assert members["tempo_bpm"][i] == pytest.approx(tempo_col + 100.0 * idx)
+        assert members["energy"][i] == pytest.approx(energy_col + 100.0 * idx)
+    assert len(members["tempo_bpm"]) == len(members["energy"]) == len(result["tracks"])
+    assert cp.feature_column(selection, "tempo") == tempo_col
+
+    _run(tmp_path, tracks, features={"mfcc": True, "chroma": True})
+    members = _members(tmp_path)
+    assert "tempo_bpm" not in members and "energy" not in members

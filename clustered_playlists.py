@@ -8,8 +8,11 @@ import json as json_module
 from contextlib import contextmanager
 from collections import Counter
 from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait as _wait_futures
+import math
 import multiprocessing
+import secrets
 import time
+from datetime import datetime
 from typing import Literal
 
 logger = logging.getLogger(__name__)
@@ -927,6 +930,155 @@ def build_cluster_payload(X, X_2d, X_3d, labels, tracks, cluster_info, log_callb
     }
 
 
+# ── Cluster membership (Docs/cluster_members.json) ───────────────────────
+#
+# ``cluster_info.json`` is downsampled for the map, so a playlist built from it
+# would quietly lose tracks. Every successful run therefore also writes the
+# full, never-downsampled membership plus the ordering data the cluster
+# playlist export needs (docs/specs/cluster_playlists.md, CP-1..CP-6). Both
+# files carry the same ``run`` block, so a reader can tell whether they belong
+# together.
+
+#: File name of the full membership, beside ``cluster_info.json``.
+CLUSTER_MEMBERS_FILE = "cluster_members.json"
+#: Version of the ``run`` block / members schema.
+CLUSTER_RUN_SCHEMA = 1
+
+
+def make_run_block(
+    *, started: float, root_path: str, method: str, params: dict, selection: dict,
+    feature_engine: str, normalization: str, track_count: int, failed_count: int,
+) -> dict:
+    """The ``run`` block shared by ``cluster_info.json`` and the members file.
+
+    ``run_id`` is the local start time plus 6 random hex digits, so two runs
+    that start in the same second still differ.
+    """
+    local = datetime.fromtimestamp(started)
+    return {
+        "schema": CLUSTER_RUN_SCHEMA,
+        "run_id": f"{local.strftime('%Y%m%d-%H%M%S')}-{secrets.token_hex(3)}",
+        "created": local.isoformat(timespec="seconds"),
+        "library_root": os.path.abspath(root_path),
+        "method": method,
+        "params": dict(params or {}),
+        "features": feature_selection_key(selection),
+        "feature_engine": feature_engine,
+        "normalization": normalization,
+        "track_count": int(track_count),
+        "failed_count": int(failed_count),
+    }
+
+
+def cluster_centroid_distances(X, labels) -> list:
+    """Distance of every point to the centroid of its own cluster.
+
+    The centroid of cluster ``c >= 0`` is the mean of the (scaled) vectors of
+    its members, for K-Means and HDBSCAN alike. Noise points (label ``-1``)
+    get ``None``. O(n·d).
+    """
+    X = np.asarray(X, dtype=float)
+    labels = np.asarray(labels)
+    if X.ndim == 1:
+        X = X.reshape(-1, 1)
+    if len(X) != len(labels):
+        raise ValueError(
+            f"X and labels are not index-aligned ({len(X)} != {len(labels)})"
+        )
+    out: list = [None] * len(labels)
+    for cluster_id in np.unique(labels):
+        if int(cluster_id) < 0:
+            continue
+        idx = np.flatnonzero(labels == cluster_id)
+        centroid = X[idx].mean(axis=0)
+        dists = np.linalg.norm(X[idx] - centroid, axis=1)
+        for i, d in zip(idx.tolist(), dists.tolist()):
+            out[i] = float(d)
+    return out
+
+
+def feature_column(selection: dict, block: str) -> int | None:
+    """Column of ``block``'s first number in a vector built from ``selection``.
+
+    Only the selected blocks are present, so the offset is the width of the
+    *selected* blocks before it in :data:`FEATURE_ORDER`. ``None`` when the
+    block is not selected.
+    """
+    selection = normalize_feature_selection(selection)
+    if not selection.get(block):
+        return None
+    col = 0
+    for name in FEATURE_ORDER:
+        if name == block:
+            return col
+        if selection[name]:
+            col += FEATURE_DIMENSIONS[name]
+    return None  # pragma: no cover - block is always in FEATURE_ORDER
+
+
+def _finite_or_none(value) -> float | None:
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return None
+    return value if math.isfinite(value) else None
+
+
+def build_cluster_members(run: dict, tracks, labels, X, features, selection, failed) -> dict:
+    """Assemble ``Docs/cluster_members.json`` (CP-3): full length, never
+    downsampled, every per-track array index-aligned with ``tracks``.
+
+    ``tempo_bpm`` / ``energy`` come from the **raw** feature vectors
+    (``features``), not the scaled ``X``, and only when that block was
+    selected. ``energy`` is the energy block's first number: RMS mean with
+    librosa, spectral-energy mean with Essentia; it is only ever compared
+    within one run.
+    """
+    labels = [int(v) for v in np.asarray(labels).tolist()]
+    tracks = [str(t) for t in tracks]
+    n = len(tracks)
+    if not (len(labels) == len(X) == n):
+        raise ValueError(
+            "cluster members are not index-aligned "
+            f"(tracks={n}, labels={len(labels)}, X={len(X)})"
+        )
+    members = {
+        "run": run,
+        "tracks": tracks,
+        "labels": labels,
+        "centroid_distance": cluster_centroid_distances(X, labels),
+    }
+    raw = [np.asarray(v, dtype=float).ravel() for v in (features or [])]
+    if len(raw) == n:
+        for key, block in (("tempo_bpm", "tempo"), ("energy", "energy")):
+            col = feature_column(selection, block)
+            if col is None:
+                continue
+            members[key] = [
+                _finite_or_none(v[col]) if v.shape[0] > col else None for v in raw
+            ]
+    members["failed"] = [str(p) for p in (failed or {})]
+    return members
+
+
+def _write_json_atomic(path: str, data, *, compact: bool = False) -> None:
+    """Write ``data`` as JSON to ``path`` via a ``.tmp`` file and ``os.replace``."""
+    tmp = path + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            if compact:
+                json_module.dump(data, f, separators=(",", ":"))
+            else:
+                json_module.dump(data, f, indent=2)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
+
+
 def generate_clustered_playlists(
     tracks,
     root_path: str,
@@ -941,12 +1093,15 @@ def generate_clustered_playlists(
     cancel_event=None,
     progress_callback=None,
 ) -> dict:
-    """Cluster ``tracks`` and write the graph artefacts. Writes **no playlists**.
+    """Cluster ``tracks`` and write the analysis artefacts. Writes **no playlists**.
 
     Despite the historical name, this only writes analysis artefacts: the
-    feature cache, ``Docs/cluster_info.json`` and ``Docs/cluster_graph.html``.
-    Cluster playlists are exported by hand from the Music Graph (select a
-    cluster, then "Export playlist…").
+    feature cache, ``Docs/cluster_members.json`` (the full membership, never
+    downsampled), ``Docs/cluster_info.json`` (the map payload) and
+    ``Docs/cluster_graph.html``. Both JSON files carry the same ``run`` block
+    (:func:`make_run_block`). Playlists are written only by the previewed
+    **Save cluster playlists…** export (``cluster_playlist_export``), which
+    reads the members file, or by exporting a map selection.
 
     ``features`` picks which audio qualities to cluster on (see
     :data:`FEATURE_ORDER`); ``None`` keeps the legacy MFCC+tempo behaviour.
@@ -955,13 +1110,15 @@ def generate_clustered_playlists(
 
     ``cancel_event`` (a ``threading.Event``) is polled throughout feature
     extraction and between the later stages; when set,
-    :class:`ClusteringCancelled` is raised and no ``cluster_info.json`` /
-    ``cluster_graph.html`` is written. ``progress_callback(done, total)``
-    reports per-file extraction progress.
+    :class:`ClusteringCancelled` is raised and none of the members file,
+    ``cluster_info.json`` or ``cluster_graph.html`` is written.
+    ``progress_callback(done, total)`` reports per-file extraction progress.
 
     Tracks whose features cannot be extracted are left out (and listed in the
     result's ``failed`` mapping) rather than clustered as zero vectors; the
     returned ``tracks``/``X``/``labels`` are index-aligned with each other.
+    The result also carries ``run`` (the run block) and ``members_file`` (its
+    path, or ``None`` when it could not be written).
     """
     if log_callback is None:
         log_callback = lambda msg: None
@@ -1086,11 +1243,6 @@ def generate_clustered_playlists(
     )
     log_cluster_summary(labels, log_callback)
 
-    log_callback(
-        "→ Cluster playlists are not written automatically; export a cluster "
-        "from the Music Graph (select it, then Export playlist…)."
-    )
-
     # Prepare cluster metadata
     unique_labels = set([l for l in labels if l >= 0])
     cluster_info = {}
@@ -1115,19 +1267,46 @@ def generate_clustered_playlists(
 
     if _is_cancelled(cancel_event):
         raise ClusteringCancelled()
+    # Nothing below checks for cancel: from here the run writes its artefacts.
+
+    run = make_run_block(
+        started=run_started, root_path=root_path, method=method, params=params,
+        selection=selection, feature_engine=feature_engine, normalization=normalization,
+        track_count=len(tracks), failed_count=len(failed),
+    )
+
+    # The full membership first (never downsampled; see CP-1/CP-3). A failure
+    # here must not cost the user the map, so it is logged and the map is
+    # still written; an older members file left beside it carries another
+    # run_id, which the playlist export refuses.
+    members_file: str | None = os.path.join(docs, CLUSTER_MEMBERS_FILE)
+    try:
+        members = build_cluster_members(
+            run, tracks, labels, X, feats, selection, failed
+        )
+        _write_json_atomic(members_file, members, compact=True)
+        log_callback(
+            "→ Saved cluster membership; use Save cluster playlists… to write "
+            "one playlist per cluster."
+        )
+    except (OSError, ValueError, TypeError) as e:
+        members_file = None
+        log_callback(
+            "! Could not save cluster membership (cluster playlists unavailable "
+            f"for this run): {e}"
+        )
+        logger.warning("Failed to save cluster membership: %s", e)
 
     # Save cluster data to JSON for visualization (downsampled for very large
     # libraries, but always index-aligned — see build_cluster_payload).
     cluster_data = build_cluster_payload(
         X, X_2d, X_3d, labels, tracks, cluster_info, log_callback
     )
+    cluster_data["run"] = run
 
     cluster_info_file = os.path.join(docs, "cluster_info.json")
     try:
-        tmp = cluster_info_file + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json_module.dump(cluster_data, f, indent=2)
-        os.replace(tmp, cluster_info_file)
+        _write_json_atomic(cluster_info_file, cluster_data)
         log_callback(f"✓ Saved cluster data to {cluster_info_file}")
     except OSError as e:
         log_callback(f"! Error saving cluster data: {e}")
@@ -1154,4 +1333,6 @@ def generate_clustered_playlists(
         "cluster_info": cluster_info,
         "failed": failed,
         "metrics": {},  # Will be filled by caller with sklearn metrics
+        "run": run,
+        "members_file": members_file,
     }

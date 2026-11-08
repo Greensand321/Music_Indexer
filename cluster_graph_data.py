@@ -9,6 +9,12 @@ The payload this reads is ``Docs/cluster_info.json``, written by
 **index-aligned**: point *i* of ``X_2d``/``X_3d`` belongs to ``labels[i]`` and
 ``tracks[i]``. Everything here exists to keep that promise honest, because a
 misalignment silently maps a selected dot to the wrong song.
+
+It also reads ``Docs/cluster_members.json`` — the run's full, never
+downsampled membership that the cluster playlist export works from — and
+checks that it belongs to the same run as the map payload (both carry the
+same ``run`` block; see ``docs/specs/cluster_playlists.md`` §4). The same
+index-alignment rule applies to that file.
 """
 from __future__ import annotations
 
@@ -90,6 +96,152 @@ def validate_cluster_payload(data: dict) -> None:
             f"be the same length (got {len(coords)}, {len(labels)}, "
             f"{len(tracks)}). Re-run Clustered Playlists to regenerate it."
         )
+
+
+# ── Full membership (Docs/cluster_members.json) ──────────────────────────
+
+#: Keys a usable members file must carry (``run`` is checked separately).
+MEMBERS_REQUIRED_KEYS = ("tracks", "labels")
+
+_REANALYSE = "Run the analysis again to rebuild it."
+
+
+def cluster_members_path(library_path: str | os.PathLike[str]) -> Path:
+    """Return the expected location of ``cluster_members.json`` for a library."""
+    return Path(library_path) / "Docs" / "cluster_members.json"
+
+
+def load_cluster_members(library_path: str | os.PathLike[str]) -> dict:
+    """Load and validate the full cluster membership for *library_path*.
+
+    Raises
+    ------
+    ClusterDataError
+        If the file is missing, unparseable, not a JSON object, lacks ``run``,
+        ``run.run_id``, ``run.track_count``, ``tracks`` or ``labels``, or fails
+        :func:`validate_cluster_members`.
+    """
+    path = cluster_members_path(library_path)
+    if not path.is_file():
+        raise ClusterDataError(
+            f"No cluster membership at {path}. Run an analysis first."
+        )
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise ClusterDataError(f"Could not read {path}: {exc}. {_REANALYSE}") from exc
+    if not isinstance(data, dict):
+        raise ClusterDataError(f"{path} does not contain a JSON object. {_REANALYSE}")
+    run = data.get("run")
+    missing = []
+    if not isinstance(run, dict):
+        missing.append("run")
+    else:
+        missing.extend(f"run.{k}" for k in ("run_id", "track_count") if k not in run)
+    missing.extend(k for k in MEMBERS_REQUIRED_KEYS if k not in data)
+    if missing:
+        raise ClusterDataError(
+            f"{path} is missing required key(s): {', '.join(missing)}. {_REANALYSE}"
+        )
+    validate_cluster_members(data)
+    return data
+
+
+def _is_int(value) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _is_number(value) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def validate_cluster_members(data: dict) -> None:
+    """Check a members file is index-aligned and internally consistent.
+
+    ``tracks``, ``labels`` and ``centroid_distance`` must all be
+    ``run.track_count`` long (as ``tempo_bpm`` / ``energy`` when present);
+    labels must be ints (a bool is not); a clustered track must have a
+    distance and a noise track must not.
+    """
+    run = data.get("run") if isinstance(data.get("run"), dict) else {}
+    count = run.get("track_count")
+    if not _is_int(count) or count < 0:
+        raise ClusterDataError(f"cluster membership has an invalid track count ({count!r}). {_REANALYSE}")
+    for key in ("tracks", "labels", "centroid_distance"):
+        value = data.get(key)
+        if not isinstance(value, list) or len(value) != count:
+            got = len(value) if isinstance(value, list) else "missing"
+            raise ClusterDataError(
+                f"cluster membership is misaligned: '{key}' has {got} entries, "
+                f"expected {count}. {_REANALYSE}"
+            )
+    for key in ("tempo_bpm", "energy"):
+        if key in data and (not isinstance(data[key], list) or len(data[key]) != count):
+            got = len(data[key]) if isinstance(data[key], list) else "not a list"
+            raise ClusterDataError(
+                f"cluster membership is misaligned: '{key}' has {got} entries, "
+                f"expected {count}. {_REANALYSE}"
+            )
+    for i, (label, dist) in enumerate(zip(data["labels"], data["centroid_distance"])):
+        if not _is_int(label):
+            raise ClusterDataError(
+                f"cluster membership has a non-integer label at {i} ({label!r}). {_REANALYSE}"
+            )
+        if label == NOISE_LABEL:
+            if dist is not None:
+                raise ClusterDataError(
+                    f"cluster membership gives an unclustered track a centre distance (at {i}). {_REANALYSE}"
+                )
+        elif not _is_number(dist):
+            raise ClusterDataError(
+                f"cluster membership has no centre distance for a clustered track (at {i}). {_REANALYSE}"
+            )
+    failed = data.get("failed", [])
+    if not isinstance(failed, list):
+        raise ClusterDataError(f"cluster membership's 'failed' is not a list. {_REANALYSE}")
+
+
+_OUT_OF_STEP = (
+    "The saved cluster membership is out of step with the map (they come from "
+    "different analyses). Re-run the analysis."
+)
+
+
+def check_members_match_payload(payload: dict, members: dict) -> None:
+    """Raise :class:`ClusterDataError` unless *members* describes the same run
+    as the map *payload*. Compares the stored paths (before any rebasing).
+
+    The run ids must match, and the map's points must be the members' points:
+    the same arrays when the map is not downsampled, otherwise the members at
+    ``X_indices``.
+    """
+    p_run = payload.get("run") if isinstance(payload.get("run"), dict) else {}
+    m_run = members.get("run") if isinstance(members.get("run"), dict) else {}
+    if not p_run.get("run_id") or p_run.get("run_id") != m_run.get("run_id"):
+        raise ClusterDataError(_OUT_OF_STEP)
+    p_tracks = list(payload.get("tracks") or [])
+    p_labels = list(payload.get("labels") or [])
+    m_tracks = members["tracks"]
+    m_labels = members["labels"]
+    if not payload.get("X_downsampled"):
+        if p_tracks != m_tracks or p_labels != m_labels:
+            raise ClusterDataError(_OUT_OF_STEP)
+        return
+    indices = payload.get("X_indices")
+    if (
+        payload.get("X_total_points") != m_run.get("track_count")
+        or not isinstance(indices, list)
+        or len(indices) != len(p_tracks)
+        or len(p_labels) != len(p_tracks)
+    ):
+        raise ClusterDataError(_OUT_OF_STEP)
+    n = len(m_tracks)
+    for pos, idx in enumerate(indices):
+        if not _is_int(idx) or not 0 <= idx < n:
+            raise ClusterDataError(_OUT_OF_STEP)
+        if m_tracks[idx] != p_tracks[pos] or m_labels[idx] != p_labels[pos]:
+            raise ClusterDataError(_OUT_OF_STEP)
 
 
 def _raw_coords(data: dict) -> list | None:
