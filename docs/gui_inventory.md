@@ -548,25 +548,43 @@ second run.
 
 ### 6.6 Metadata
 
+Four sections in the Liquid Glass look (redesign R2). None repeats the page or section
+title: each view starts with one muted purpose line, then **one hero card** (radius 30,
+title role) holding its main action, then a plan/review card. Item views are
+transparent "glass rows" (`gui/workspaces/metadata_views.py`: rounded 34 px rows,
+whole-row hover and selection from the material, one hairline between rows; a value
+that would be written sits on an accent-tinted chip, current values are muted, tools and
+"drop" values are pills; all painted from the theme at paint time, no per-item colours).
+Counts are `StatRow`s; before there are results an `EmptyState` says what will appear.
+Buttons carry painted glyphs (no emoji). Paths are elided in the middle with the full
+path in the tooltip, status lines wrap, and every section fits the 900×600 minimum
+window with no sideways scrolling (`tests/ui/test_ui_meta_glass.py`).
+
 #### 6.6.1 Tag Fixer (`tag_fixer.py`)
 
-Scan (lookups only) → tick field changes → Apply Selected → confirm. There is no
+Find tag fixes (lookups only) → tick field changes → Apply → confirm. There is no
 service selector on this page; the sources come from Settings (see
 features/tag_fixer.md).
 
 | Element | Type | Purpose |
 |---|---|---|
-| Dry run (propose only, do not write tags) | Checkbox | Checked by default; while checked, Apply only shows a message |
-| Fix fields: Title / Artist / Album / Genre | Checkboxes | Show or hide that field's rows; hidden rows are never written |
-| 🏷 Scan for Tag Issues | Button (primary) | `TagFixWorker`; never writes |
-| ✓ Apply Selected | Button | Writes exactly the visible, ticked rows (a `LIBRARY_WRITES` job that also takes the shared tag-write guard) |
-| Select All / Deselect All / Cancel | Buttons | Cancel stops a scan or an apply |
-| Progress | Bar + label | A real percentage |
-| Tag Proposals | Tree | ✓, File, Field, Current Value, Proposed Value, Score. **One row per field change**; each tick selects that one field. |
-| Summary label | Label | Counts |
-| Reason label | Label | Which lookup sources ran, and why nothing matched when nothing did |
-| No match found | List | Files nothing could identify, each with its reason |
-| Log | Text | |
+| **Tag lookup** (hero card) | Card | The scan's scope, sources and main action |
+| Lookup sources line | Label (`_reason_lbl`) | Before a scan: where the sources are chosen. After: which lookup sources ran, and why nothing matched when nothing did |
+| Find tag fixes | Button (primary, search glyph) | `TagFixWorker`; never writes |
+| Cancel | Button (flat, close glyph) | Stops a scan or an apply at the next file |
+| Scope: Whole library / One folder | Pill + elided path | What the scan looks at |
+| Choose folder… / Whole library | Buttons (folder / refresh glyph) | Scan one folder inside the library instead of all of it. Folders outside the library and the reserved folders the Tag Fixer never touches are refused. A library change resets the scope. The database and change log stay the library's. |
+| Lookup sources | Button (flat, external glyph) | Opens Settings → Metadata services |
+| Progress | Status line + thin bar | A real percentage |
+| **Review fixes** | Card | |
+| Proposed changes / Files to fix / Ticked to write / No match | `StatRow` | Counts after a scan |
+| Show: Title / Artist / Album / Genre | Checkboxes | Show or hide that field's rows; hidden rows are never written |
+| Review grid | Glass tree | Tick, File, Field, Current (muted), Proposed (accent chip), Score. **One row per field change**; each tick selects that one field. As tall as its rows (up to 10, then it scrolls). Empty state before a scan; "Nothing to fix" / "Nothing could be matched" after one. |
+| Tick all / Untick all | Buttons (flat, glyphs) | Shown rows only |
+| Dry run | Checkbox | Checked by default; while checked, Apply only shows a message |
+| Apply N changes | Button (success, check glyph) | Writes exactly the visible, ticked rows after a confirmation (a `LIBRARY_WRITES` job that also takes the shared tag-write guard) |
+| **No match found (N)** | Card + glass list | Only when something was unmatched: each file with its reason |
+| **Log** | Text (log role) | |
 
 After an apply, the written rows drop out, the log is kept, and the change-log path
 (`Docs/tag_changes_tagfixer_<timestamp>.jsonl`) is shown. There is no automatic
@@ -575,33 +593,41 @@ finishes.
 
 #### 6.6.2 Fill genres · Normalize genres (`genres.py`)
 
-One panel (still titled "Genre Normalizer") serves both sections: the Metadata page's tabs switch it, and its own tab bar is hidden. See features/tag_fixer.md. Both read every genre value of a file, write real
-multi-value lists, skip files changed since the preview, log every write to
+One panel serves both sections as two views: the Metadata page's tabs switch it (its own
+tab bar only shows when the panel stands alone), with a short cross-fade (`motion.reveal`;
+at once under reduced motion). The view stack is sized to the view on show. See
+features/tag_fixer.md. Both read every genre value of a file, write real multi-value
+lists, skip files changed since the preview, log every write to
 `Docs/tag_changes_*.jsonl`, and share one tag-write guard with the Tag Fixer.
 
-**Fill genres** (the panel's "Fill from MusicBrainz" view; preview-first)
+**Fill genres** (preview-first)
 
 | Element | Type | Purpose |
 |---|---|---|
-| What this does | Card | States the rules: top three MusicBrainz community tags, existing genres kept, files with 2+ genres skipped |
-| 🔍 Look up genres (preview) | Button (primary) | Lookups only; builds the proposals table, writes nothing |
-| ✎ Apply N additions | Button (danger) | Enabled once proposals exist; confirms, then writes exactly the table (a `LIBRARY_WRITES` job) |
-| Cancel | Button | Stops the lookup or the apply |
+| **Fill missing genres** (hero card) | Card | States the rules: top MusicBrainz community tags, existing genres kept, files with 2+ genres skipped |
+| Look up genres | Button (primary, search glyph) | Lookups only; builds the plan, writes nothing |
+| Cancel | Button (flat) | Stops the lookup or the apply |
 | Progress + status | | |
-| Proposed genre additions | Table | File, Current genres, After, MusicBrainz match |
-| Log | Text | |
+| **Proposed additions** | Card | |
+| Would get genres / Already 2+ genres / No usable match / Errors / can't write | `StatRow` | |
+| Plan | Glass table | File, Current genres (muted), After (accent chip), MusicBrainz match. Empty state before the lookup. |
+| Apply N additions | Button (danger, check glyph) | Enabled once proposals exist; confirms, then writes exactly the table (a `LIBRARY_WRITES` job) |
+| **Log** | Text | |
 
-(The old dry-run checkbox is gone; the preview replaced it.)
-
-**Normalize genres** ("Normalize with a mapping"; backed by `controllers/normalize_controller.py`)
+**Normalize genres** (backed by `controllers/normalize_controller.py`)
 
 | Element | Type | Purpose |
 |---|---|---|
-| 1 · Scan library / Copy list | Buttons | Every distinct raw genre string |
-| 2 · Copy prompt / Load saved mapping / Save mapping | Buttons | Prompt for an external LLM; mapping file `Docs/.genre_mapping.json`. Load asks before replacing unsaved edits. |
-| Mapping editor | Text | JSON, validated live. Unsaved text is kept per library across library switches. |
-| 3 · Preview changes | Button (primary) | Table of File / Current genres / After, plus counts and files that can't be written |
-| 4 · ✎ Apply N changes / Cancel | Buttons | Enabled only for a preview of the current mapping text; confirms; writes exactly the preview |
+| **Build the mapping** (hero card) | Card | The inputs and the main action |
+| Preview changes | Button (primary, list glyph) | Read-only job: the plan below, plus counts and files that can't be written |
+| Scan library / Copy list / Copy prompt | Buttons (glyphs) | Every distinct raw genre string (shown as wrapping chips); the prompt for an external LLM |
+| Load saved mapping / Save mapping | Buttons (glyphs) | Mapping file `Docs/.genre_mapping.json`. Load asks before replacing unsaved edits. |
+| Mapping editor | Text (mono) | JSON, validated live. Unsaved text is kept per library across library switches. |
+| Mapping table | Glass tree | Raw genre → Becomes, following the editor; `["invalid"]` and `null` show as a **Drop** pill. Side by side with the editor when there is room, below it when not. |
+| **Preview** | Card | |
+| Would change / Already canonical / No genre tag / Can't write | `StatRow` | |
+| Plan | Glass table | File, Current genres (muted), After (accent chip; "All dropped" as a pill). Empty state before a preview. |
+| Apply N changes / Cancel | Buttons (danger / flat) | Enabled only for a preview of the current mapping text; confirms; writes exactly the preview |
 
 Preview is disabled while any apply runs. A library change cancels scans, previews and
 lookups and drops their results.
@@ -612,10 +638,14 @@ Rolls back one Tag Fixer or genre apply from its change log (`controllers/tag_re
 
 | Element | Type | Purpose |
 |---|---|---|
-| Tag applies in this library | List | Every change log in `Docs/` that wrote something, newest first: When, Tool, Files, Changes, Status ("Undone" in muted text once reverted; an undo is listed as "Undo"). Re-read on Refresh, on showing the tab, and after an undo. |
-| Preview undo | Button (primary) | Read-only job: per file and tag, what it holds now and what it gets back. Files edited since the apply, missing or unreadable are listed as "Left alone". Writes nothing. |
-| Undo these changes | Button (primary) | Enabled only with a preview that restores something. Confirms, then writes exactly the preview, re-checking each file first. Holds the tag-write guard and the library-write lock. Logged to `Docs/tag_changes_revert_*.jsonl`, so it can be undone too. |
-| Cancel | Button | Stops the preview or the undo at the next file |
+| **Past applies** (hero card) | Glass rows | Every change log in `Docs/` that wrote something, newest first and preselected: When, Tool (a pill; an undo in the warning tone), Files, Tags, Status (an apply already undone is muted, its pill grey). Re-read on Refresh, on showing the tab, and after an undo. Empty state when nothing has been applied. |
+| Refresh | Button (icon only, refresh glyph) | Re-reads the change logs |
+| Preview undo | Button (primary, list glyph) | Read-only job: per file and tag, what it holds now and what it gets back. Writes nothing. |
+| **What the undo would restore** | Card | |
+| Tags to restore / Files / Left alone / Already restored | `StatRow` | |
+| Preview | Glass tree | File, Tag, Now (muted), Restores to (accent chip). Files edited since the apply, missing or unreadable are muted rows with a **Left alone** pill and the reason. Empty state before a preview. |
+| Undo these changes | Button (danger, undo glyph) | Enabled only with a preview that restores something. Confirms, then writes exactly the preview, re-checking each file first. Holds the tag-write guard and the library-write lock. Logged to `Docs/tag_changes_revert_*.jsonl`, so it can be undone too. |
+| Cancel | Button (flat) | Stops the preview or the undo at the next file |
 
 Selecting another apply drops the shown preview. A library change drops the preview; a confirmed undo finishes on its own library.
 

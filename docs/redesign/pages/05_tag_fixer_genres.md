@@ -4,6 +4,38 @@ _Scope: `gui/workspaces/tag_fixer.py`, `gui/workspaces/genres.py`, with the back
 ## Summary
 This area is where the user fixes what is written inside the files: artist, title, album and genre tags. The Qt app splits it across two sidebar entries under CLEAN UP. **Tag Fixer** identifies each track online (AcoustID fingerprint, with MusicBrainz enrichment nested inside it) and proposes per-field corrections. **Genre Normalizer** has two tabs: one fills genres from MusicBrainz community tags, the other rewrites a messy genre vocabulary into a canonical one using a mapping the user builds with an outside LLM. Both pages are meant to be preview-first. Only the mapping tab actually works that way. The Fill tab writes straight to files with no preview and no confirmation. Tag Fixer's Apply button currently raises an exception and writes nothing. All three tools share one hidden flaw: the tag reader returns only the **first** genre value. So all three tools can silently delete extra genres from multi-genre files, and the preview never shows that this will happen.
 
+## Status after the Liquid Glass restyle (R2, 2026-11-08)
+
+The map below is the 2026-11-07 audit, kept as it was found; for which of its bugs are
+fixed see the bug-status table in `docs/redesign/README.md`. The area now lives on one **Metadata** page with four
+sections (Tag Fixer, Fill genres, Normalize genres, Undo changes); "Genre Normalizer" is
+no longer a page or a title. In the Liquid Glass look (see `docs/gui_inventory.md` §6.6
+for every control):
+
+- **No repeated titles.** Each view has one muted purpose line, then one hero card with
+  its main action, then a plan/review card. The "1 · 2 · 3 · 4" step numbers of the
+  mapping view are gone (they were decoration; the cards' order says the same).
+- **Glass item views** (`gui/workspaces/metadata_views.py`, Metadata only): rounded rows,
+  whole-row hover/selection, the value that would be written on an accent-tinted chip,
+  current values muted, tools and "drop" values as pills. Colours are painted from the
+  theme at paint time; the panels set no per-item colours (the Undo page's warning and
+  muted brushes used to go stale on a theme switch).
+- **Counts are `StatRow`s; empty results are `EmptyState`s**; buttons carry painted glyphs.
+- **Tag Fixer scope**: the hero card shows what a scan looks at and can narrow it to one
+  folder inside the library (reserved folders and folders outside it are refused). The
+  sources line links to Settings → Metadata services.
+- **Normalize**: a live table beside the JSON editor shows the mapping; `["invalid"]` and
+  `null` show as a **Drop** pill, and a file whose genres would all be dropped shows
+  "All dropped" as a pill in the plan.
+- **Fill ↔ Normalize** cross-fade when the page switches between them (one panel serves
+  both, so the page's own section fade never ran), and the view stack is sized to the
+  view on show (the Fill view used to sit above an empty scroll the height of the
+  Normalize view).
+- Every section fits the 900×600 minimum window without sideways scrolling.
+
+Behaviour is unchanged: preview-first, Apply writes exactly what is ticked/previewed, every
+write is confirmed, holds the tag-write guard and the library-write lock, and is logged.
+
 ## Pages
 
 ### Tag Fixer (`gui/workspaces/tag_fixer.py`, class `TagFixerWorkspace`; workers `TagFixWorker`, `TagFixApplyWorker`)
