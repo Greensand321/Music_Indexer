@@ -229,3 +229,125 @@ def test_unsaved_mapping_survives_a_library_switch(make_workspace, tmp_path, qtb
     dialogs.answer_yes()
     ws._on_load_mapping()
     assert json.loads(ws._map_edit.toPlainText()) == {"saved": ["Saved"]}
+
+
+# ── Liquid Glass layout (R2) ──────────────────────────────────────────────
+
+
+def _map_rows(ws):
+    from gui.workspaces.metadata_views import PILL_ROLE, kind_of
+
+    tree = ws._map_view
+    out = {}
+    for i in range(tree.topLevelItemCount()):
+        item = tree.topLevelItem(i)
+        out[item.text(0)] = (item.text(1), kind_of(item, 1))
+        assert item.data(1, PILL_ROLE) is None
+    return out
+
+
+def test_mapping_table_shows_drop_values_as_a_pill(make_workspace, tmp_path, qtbot):
+    (tmp_path / "lib").mkdir()
+    ws = make_workspace("genres", library_path=tmp_path / "lib")
+    ws.set_section("normalize")
+    ws._map_edit.setPlainText(json.dumps(
+        {"90s": ["invalid"], "seen live": None, "hip hop": ["Hip-Hop"], "Rock": ["Rock"]}))
+    wait_for(qtbot, lambda: ws._map_view.topLevelItemCount() == 4, timeout=3000)
+    assert _map_rows(ws) == {
+        "90s": ("Drop", "pill"),             # ["invalid"] means drop
+        "seen live": ("Drop", "pill"),       # so does null
+        "hip hop": ("Hip-Hop", "accent"),    # a real change
+        "Rock": ("Rock", ""),                # maps to itself: nothing to tint
+    }
+    assert "2 marked to drop" in ws._map_status.text()
+    ws._map_edit.setPlainText("{ not json")
+    wait_for(qtbot, lambda: ws._map_view.topLevelItemCount() == 0, timeout=3000)
+
+
+def test_preview_card_counts_and_marks_what_changes(make_workspace, tmp_path, qtbot):
+    from gui.workspaces.metadata_views import kind_of
+
+    build_genre_library(tmp_path / "lib", [
+        ("m.flac", "A", "T1", ["rock", "90s"]),
+        ("x.flac", "A", "T2", ["90s"]),
+        ("ok.flac", "A", "T3", ["Rock"]),
+        ("none.flac", "A", "T4", []),
+    ])
+    ws = make_workspace("genres", library_path=tmp_path / "lib")
+    ws.set_section("normalize")
+    assert ws._norm_empty.isVisibleTo(ws) and not ws._changes_table.isVisibleTo(ws)
+    _preview(ws, qtbot, {"rock": ["Rock"], "90s": ["invalid"]})
+    assert ws._changes_table.isVisibleTo(ws) and not ws._norm_empty.isVisibleTo(ws)
+    stats = {k: ws._norm_stats.tile(k).value() for k in ws._norm_stats.keys()}
+    assert stats == {"changes": "2", "canonical": "1", "untagged": "1", "blocked": "0"}
+    t = ws._changes_table
+    rows = {t.item(r, 0).text(): (t.item(r, 2).text(), kind_of(t.item(r, 2))) for r in range(t.rowCount())}
+    assert rows == {
+        "m.flac": ("Rock", "accent"),
+        "x.flac": ("(none — all dropped)", "pill"),
+    }
+    assert ws._apply_btn.text() == "Apply 2 changes"
+    ws._map_edit.setPlainText(json.dumps({"rock": ["Hard Rock"]}))
+    assert ws._norm_empty.isVisibleTo(ws) and ws._apply_btn.text() == "Apply changes"
+
+
+def test_fill_view_shows_an_empty_state_then_its_plan(make_workspace, tmp_path, fake_mb, qtbot):
+    answers, _calls = fake_mb
+    answers.update({"One": ["Electronic"]})
+    _fill_library(tmp_path / "lib")
+    ws = make_workspace("genres", library_path=tmp_path / "lib")
+    assert ws._fill_empty.isVisibleTo(ws) and not ws._fill_table.isVisibleTo(ws)
+    ws._run_btn.click()
+    wait_for(qtbot, lambda: ws._worker is None)
+    assert ws._fill_table.isVisibleTo(ws) and ws._fill_stats.isVisibleTo(ws)
+    stats = {k: ws._fill_stats.tile(k).value() for k in ws._fill_stats.keys()}
+    assert stats == {"changes": "1", "skipped": "1", "nomatch": "1", "problems": "0"}
+    assert ws._fill_apply_btn.text() == "Apply 1 addition"
+
+
+def test_each_view_is_sized_to_itself(make_workspace, tmp_path):
+    """A stacked widget reserves its tallest page; the Fill view used to sit
+    above a long empty scroll the height of the Normalize view."""
+    (tmp_path / "lib").mkdir()
+    ws = make_workspace("genres", library_path=tmp_path / "lib")
+    ws.set_section_tabs_visible(False)
+    ws.set_section("fill")
+    fill = ws._tabs.heightForWidth(800)
+    ws.set_section("normalize")
+    normalize = ws._tabs.heightForWidth(800)
+    assert fill < normalize
+    assert fill == ws._tabs.widget(0).heightForWidth(800)
+
+
+def test_switching_views_cross_fades(main_window, monkeypatch):
+    from gui.themes import motion
+
+    revealed = []
+    real = motion.reveal
+    monkeypatch.setattr(motion, "reveal", lambda w, **kw: (revealed.append(w), real(w, **kw))[1])
+    genres = main_window._workspaces["genres"]
+    main_window._on_nav_changed("metadata/fill_genres")
+    revealed.clear()
+    main_window._on_nav_changed("metadata/normalize_genres")
+    assert revealed == [genres]           # same panel: the page itself never fades it
+    main_window._on_nav_changed("metadata/fill_genres")
+    assert revealed == [genres, genres]
+
+
+def test_buttons_carry_glyphs_and_the_old_title_is_gone(make_workspace):
+    from gui.compat import QtWidgets
+
+    ws = make_workspace("genres")
+    glyphs = {
+        ws._run_btn: "search", ws._fill_apply_btn: "check", ws._cancel_btn: "close",
+        ws._scan_btn: "search", ws._copy_raw_btn: "list", ws._copy_prompt_btn: "file",
+        ws._load_map_btn: "folder", ws._save_map_btn: "save", ws._preview_btn: "list",
+        ws._apply_btn: "check", ws._apply_cancel_btn: "close",
+    }
+    for button, name in glyphs.items():
+        assert button.property("glyphName") == name, button.text()
+    for button in ws.findChildren(QtWidgets.QAbstractButton):
+        assert all(ord(ch) < 0x2190 or ch in "…→" for ch in button.text()), button.text()
+    texts = [w.text() for w in ws.findChildren(QtWidgets.QLabel)]
+    assert not any("Genre Normalizer" in t for t in texts)
+    assert ws.findChildren(QtWidgets.QLabel, "sectionTitle") == []

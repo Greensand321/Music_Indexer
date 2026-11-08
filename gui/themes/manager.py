@@ -285,7 +285,16 @@ QLabel#experimentalNote {{
 
 
 /* [area:metadata] begin */
-
+QAbstractItemView[metaGlass="true"] {{
+    background: transparent;
+}}
+QLabel#metaHeroTitle {{
+    color: palette(window-text);
+}}
+QPlainTextEdit#genreMapEditor {{
+    font-family: {MONO_STACK};
+    font-size: {caption}px;
+}}
 /* [area:metadata] end */
 
 
@@ -373,7 +382,7 @@ _THEMED_OBJECT_NAMES = frozenset({
     frozenset({"dupStepRow", "dupGroupList", "dupHeroTitle", "experimentalNote"}),
 
     # [area:metadata]
-    frozenset(),
+    frozenset({"metaHeroTitle", "genreMapEditor"}),
 
     # [area:player]
     frozenset(),

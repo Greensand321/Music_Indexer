@@ -34,6 +34,22 @@ _ROW_ROLE = QtCore.Qt.ItemDataRole.UserRole
 _SCORE_COL = 5
 _WRITE_OWNER = "Tag Fixer apply"
 
+_SOURCES_HINT = "Lookup sources come from Settings → Metadata services."
+_EMPTY_BEFORE = (
+    "No fixes to review yet",
+    "Find tag fixes looks each track up online and lists every proposed "
+    "change here, one row per field.",
+)
+_EMPTY_NONE = (
+    "Nothing to fix",
+    "Every track the lookups matched already has these tags.",
+)
+_EMPTY_UNMATCHED = (
+    "Nothing could be matched",
+    "No track was identified online, so there is nothing to propose. "
+    "The reason is shown above.",
+)
+
 
 def _fmt(value: object) -> str:
     if isinstance(value, (list, tuple)):
@@ -53,9 +69,12 @@ class TagFixWorker(QtCore.QThread):
     proposal_ready = Signal(list)   # every FileRecord of the scan
     finished = Signal(bool, str)
 
-    def __init__(self, library_path: str) -> None:
+    def __init__(self, library_path: str, scan_root: str = "") -> None:
         super().__init__()
         self.library_path = library_path
+        # The folder to look up: the library, or one folder inside it. The
+        # database and change log always belong to the library.
+        self.scan_root = scan_root or library_path
         self._cancel = threading.Event()
         # Populated during run(); read by workspace after finished
         self.db_path: str = ""
@@ -87,7 +106,7 @@ class TagFixWorker(QtCore.QThread):
 
             self.diagnostics = ScanDiagnostics()
             records = tagfix_controller.gather_records(
-                self.library_path,
+                self.scan_root,
                 self.db_path,
                 show_all=True,
                 progress_callback=None,
@@ -186,38 +205,118 @@ class TagFixerWorkspace(WorkspaceBase):
         self._rows: list = []             # row index -> (FileRecord, field)
         self._db_path: str = ""
         self._scan_library: str = ""      # library the shown proposals belong to
+        self._scope_folder: str = ""      # "" = the whole library
+        self._scanned_once = False        # the review card shows "Nothing to fix"
         self._worker: TagFixWorker | None = None
         self._apply_worker: TagFixApplyWorker | None = None
         self._build_ui()
 
     def _build_ui(self) -> None:
-        cl = self.content_layout
+        from gui.widgets.glass import ElidedLabel
+        from gui.widgets.glass_parts import EmptyState, StatRow
+        from gui.widgets.glyphs import set_glyph
+        from gui.widgets.pill import Pill
+        from gui.workspaces import metadata_views as mv
 
-        cl.addWidget(self._make_section_title("Tag Fixer"))
+        cl = self.content_layout
         cl.addWidget(self._make_subtitle(
-            "Scan your library, look up each track via AcoustID or MusicBrainz, "
-            "and propose corrected tags. Review proposals in the table, "
-            "approve the ones you want, and apply."
+            "Fix artist, title, album and genre tags from online lookups, "
+            "reviewed field by field and written only when you apply."
         ))
 
-        # ── Options card ───────────────────────────────────────────────────
-        opt_card = self._make_card()
-        opt_layout = QtWidgets.QVBoxLayout(opt_card)
-        opt_layout.setContentsMargins(16, 16, 16, 16)
-        opt_layout.setSpacing(10)
-        opt_layout.addWidget(self._make_card_title("Options"))
+        # ── Hero: what to check, and the main action ──────────────────────
+        hero = self._make_card()
+        hero.setObjectName("headerCard")
+        hl = QtWidgets.QVBoxLayout(hero)
+        hl.setContentsMargins(16, 16, 16, 16)
+        hl.setSpacing(12)
 
-        opts_row = QtWidgets.QHBoxLayout()
-        self._dry_run_cb = QtWidgets.QCheckBox("Dry run (propose only, do not write tags)")
-        self._dry_run_cb.setChecked(True)
-        opts_row.addWidget(self._dry_run_cb)
-        opts_row.addStretch(1)
-        opt_layout.addLayout(opts_row)
+        top = QtWidgets.QHBoxLayout()
+        top.setSpacing(10)
+        heading, _title, self._reason_lbl = mv.card_heading("Tag lookup", " ", hero=True)
+        # The sources line: which lookup services ran, and why nothing
+        # matched when nothing did (filled after each scan).
+        self._reason_lbl.setObjectName("statusHint")
+        self._reason_lbl.setText(_SOURCES_HINT)
+        top.addWidget(heading, 1)
+        self._cancel_btn = QtWidgets.QPushButton("Cancel")
+        self._cancel_btn.setFlat(True)
+        self._cancel_btn.setToolTip("Stop the scan or the apply at the next file")
+        set_glyph(self._cancel_btn, "close")
+        self._cancel_btn.setEnabled(False)
+        self._cancel_btn.clicked.connect(self._on_cancel)
+        self._scan_btn = self._make_primary_button("Find tag fixes")
+        self._scan_btn.setToolTip("Look every track in the scope up online. Never writes.")
+        set_glyph(self._scan_btn, "search", role="inverse")
+        self._scan_btn.clicked.connect(self._on_scan)
+        top.addWidget(self._cancel_btn, 0, QtCore.Qt.AlignmentFlag.AlignTop)
+        top.addWidget(self._scan_btn, 0, QtCore.Qt.AlignmentFlag.AlignTop)
+        hl.addLayout(top)
+
+        # Scope: the whole library, or one folder inside it.
+        scope = QtWidgets.QHBoxLayout()
+        scope.setSpacing(8)
+        self._scope_lib_pill = Pill("Whole library", "accent",
+                                    "Every track in the library (reserved folders skipped)")
+        self._scope_dir_pill = Pill("One folder", "success", "Only the tracks in this folder")
+        self._scope_path = ElidedLabel("", QtCore.Qt.TextElideMode.ElideMiddle)
+        self._scope_path.setObjectName("mutedLabel")
+        self._scope_path.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored,
+                                       QtWidgets.QSizePolicy.Policy.Preferred)
+        self._scope_btn = QtWidgets.QPushButton("Choose folder…")
+        self._scope_btn.setToolTip("Check one folder inside the library instead of all of it")
+        set_glyph(self._scope_btn, "folder")
+        self._scope_btn.clicked.connect(self._on_choose_folder)
+        self._scope_reset_btn = QtWidgets.QPushButton("Whole library")
+        self._scope_reset_btn.setFlat(True)
+        self._scope_reset_btn.setToolTip("Check the whole library again")
+        set_glyph(self._scope_reset_btn, "refresh")
+        self._scope_reset_btn.clicked.connect(self._on_whole_library)
+        for w in (self._scope_lib_pill, self._scope_dir_pill):
+            scope.addWidget(w, 0, QtCore.Qt.AlignmentFlag.AlignVCenter)
+        scope.addWidget(self._scope_path, 1)
+        scope.addWidget(self._scope_reset_btn)
+        scope.addWidget(self._scope_btn)
+        hl.addLayout(scope)
+
+        foot = QtWidgets.QHBoxLayout()
+        foot.setSpacing(10)
+        self._prog_status = mv.status_label("Idle")
+        foot.addWidget(self._prog_status, 1)
+        self._sources_btn = QtWidgets.QPushButton("Lookup sources")
+        self._sources_btn.setFlat(True)
+        self._sources_btn.setToolTip("Choose the lookup services in Settings → Metadata services")
+        set_glyph(self._sources_btn, "external", role="muted")
+        self._sources_btn.clicked.connect(self._on_open_sources)
+        foot.addWidget(self._sources_btn, 0, QtCore.Qt.AlignmentFlag.AlignTop)
+        hl.addLayout(foot)
+        self._prog_bar = mv.thin_progress()
+        hl.addWidget(self._prog_bar)
+        cl.addWidget(hero)
+
+        # ── Review: one row per proposed field change ─────────────────────
+        review = self._make_card()
+        rl = QtWidgets.QVBoxLayout(review)
+        rl.setContentsMargins(16, 16, 16, 16)
+        rl.setSpacing(12)
+        heading, _t, _s = mv.card_heading(
+            "Review fixes", "Each row is one field of one file. Apply writes exactly the ticked rows.")
+        rl.addWidget(heading)
+
+        self._stats = StatRow([
+            ("proposed", "Proposed changes"), ("files", "Files to fix"),
+            ("ticked", "Ticked to write"), ("nomatch", "No match"),
+        ])
+        self._stats.setVisible(False)
+        rl.addWidget(self._stats)
 
         # Field filter: shows/hides that field's rows. Apply writes exactly
         # the rows that are visible *and* ticked.
-        fields_row = QtWidgets.QHBoxLayout()
-        fields_row.addWidget(QtWidgets.QLabel("Fix fields:"))
+        self._filter_row = QtWidgets.QWidget()
+        fields_row = mv.FlowLayout(self._filter_row, spacing=14)
+        show = QtWidgets.QLabel("Show")
+        show.setObjectName("mutedLabel")
+        fields_row.addWidget(show)
         self._field_cbs: dict[str, QtWidgets.QCheckBox] = {}
         for field in ("Title", "Artist", "Album", "Genre"):
             cb = QtWidgets.QCheckBox(field)
@@ -226,108 +325,89 @@ class TagFixerWorkspace(WorkspaceBase):
             cb.toggled.connect(self._apply_field_filter)
             fields_row.addWidget(cb)
             self._field_cbs[field] = cb
-        fields_row.addStretch(1)
-        opt_layout.addLayout(fields_row)
-        cl.addWidget(opt_card)
+        self._filter_row.setVisible(False)
+        rl.addWidget(self._filter_row)
 
-        # ── Action buttons ─────────────────────────────────────────────────
-        btn_row = QtWidgets.QHBoxLayout()
-        self._scan_btn = self._make_primary_button("🏷  Scan for Tag Issues")
-        self._scan_btn.clicked.connect(self._on_scan)
+        self._empty = EmptyState(*_EMPTY_BEFORE)
+        rl.addWidget(self._empty)
 
-        self._apply_btn = QtWidgets.QPushButton("✓  Apply Selected")
-        self._apply_btn.setObjectName("successBtn")
-        self._apply_btn.setEnabled(False)
-        self._apply_btn.clicked.connect(self._on_apply)
+        self._table = mv.GlassTree()
+        self._table.setObjectName("tagFixerProposals")
+        self._table.setHeaderLabels(["", "File", "Field", "Current", "Proposed", "Score"])
+        self._table.headerItem().setToolTip(0, "Ticked rows are written when you apply")
+        mv.stretch_columns(self._table.header(), {
+            0: 40, 1: "stretch", 2: "contents", 3: "stretch", 4: "stretch", 5: 64,
+        })
+        self._table.setSortingEnabled(True)
+        self._table.itemChanged.connect(self._on_item_changed)
+        self._table.setVisible(False)
+        rl.addWidget(self._table)
 
-        self._select_all_btn = QtWidgets.QPushButton("Select All")
+        actions = QtWidgets.QHBoxLayout()
+        actions.setSpacing(8)
+        self._select_all_btn = QtWidgets.QPushButton("Tick all")
+        self._select_all_btn.setFlat(True)
+        self._select_all_btn.setToolTip("Tick every shown row")
+        set_glyph(self._select_all_btn, "check")
         self._select_all_btn.setEnabled(False)
         self._select_all_btn.clicked.connect(self._on_select_all)
-
-        self._deselect_btn = QtWidgets.QPushButton("Deselect All")
+        self._deselect_btn = QtWidgets.QPushButton("Untick all")
+        self._deselect_btn.setFlat(True)
+        self._deselect_btn.setToolTip("Untick every shown row")
+        set_glyph(self._deselect_btn, "minus")
         self._deselect_btn.setEnabled(False)
         self._deselect_btn.clicked.connect(self._on_deselect_all)
+        self._summary_lbl = mv.status_label("")
+        self._dry_run_cb = QtWidgets.QCheckBox("Dry run")
+        self._dry_run_cb.setToolTip(
+            "While ticked, Apply only reminds you that nothing is written. "
+            "Untick it to write the ticked changes."
+        )
+        self._dry_run_cb.setChecked(True)
+        self._apply_btn = QtWidgets.QPushButton("Apply changes")
+        self._apply_btn.setObjectName("successBtn")
+        self._apply_btn.setToolTip("Write exactly the ticked rows (asks first)")
+        set_glyph(self._apply_btn, "check", role="inverse")
+        self._apply_btn.setEnabled(False)
+        self._apply_btn.clicked.connect(self._on_apply)
+        actions.addWidget(self._select_all_btn)
+        actions.addWidget(self._deselect_btn)
+        actions.addStretch(1)
+        actions.addWidget(self._dry_run_cb)
+        actions.addWidget(self._apply_btn)
+        rl.addWidget(self._summary_lbl)
+        rl.addLayout(actions)
+        cl.addWidget(review)
 
-        self._cancel_btn = QtWidgets.QPushButton("✕  Cancel")
-        self._cancel_btn.setEnabled(False)
-        self._cancel_btn.clicked.connect(self._on_cancel)
-
-        btn_row.addWidget(self._scan_btn)
-        btn_row.addWidget(self._apply_btn)
-        btn_row.addWidget(self._select_all_btn)
-        btn_row.addWidget(self._deselect_btn)
-        btn_row.addWidget(self._cancel_btn)
-        btn_row.addStretch(1)
-        cl.addLayout(btn_row)
-
-        # ── Progress ───────────────────────────────────────────────────────
-        self._prog_bar = QtWidgets.QProgressBar()
-        self._prog_bar.setRange(0, 100)
-        self._prog_bar.setValue(0)
-        self._prog_bar.setTextVisible(False)
-        self._prog_bar.setFixedHeight(6)
-        self._prog_status = QtWidgets.QLabel("Idle")
-        self._prog_status.setObjectName("statusHint")
-        cl.addWidget(self._prog_bar)
-        cl.addWidget(self._prog_status)
-
-        # ── Proposals table ────────────────────────────────────────────────
-        table_card = self._make_card()
-        table_layout = QtWidgets.QVBoxLayout(table_card)
-        table_layout.setContentsMargins(16, 16, 16, 16)
-        table_layout.addWidget(self._make_card_title("Tag Proposals"))
-
-        self._table = QtWidgets.QTreeWidget()
-        self._table.setHeaderLabels([
-            "✓", "File", "Field", "Current Value", "Proposed Value", "Score"
-        ])
-        self._table.setColumnWidth(0, 28)
-        self._table.setColumnWidth(1, 240)
-        self._table.setColumnWidth(2, 70)
-        self._table.setColumnWidth(3, 180)
-        self._table.setColumnWidth(4, 180)
-        self._table.setColumnWidth(5, 55)
-        self._table.setAlternatingRowColors(True)
-        self._table.setSortingEnabled(True)
-        self._table.setMinimumHeight(260)
-        self._table.itemChanged.connect(self._on_item_changed)
-        table_layout.addWidget(self._table)
-
-        self._summary_lbl = QtWidgets.QLabel("")
-        self._summary_lbl.setObjectName("statusHint")
-        self._summary_lbl.setWordWrap(True)
-        table_layout.addWidget(self._summary_lbl)
-
-        # Why things did or didn't match: active sources, and the reasons.
-        self._reason_lbl = QtWidgets.QLabel("")
-        self._reason_lbl.setObjectName("statusHint")
-        self._reason_lbl.setWordWrap(True)
-        table_layout.addWidget(self._reason_lbl)
-
-        # Files with no match are listed here, never as blank proposals.
-        self._nomatch_title = QtWidgets.QLabel("No match found")
-        self._nomatch_title.setObjectName("cardTitle")
-        self._nomatch_list = QtWidgets.QListWidget()
-        self._nomatch_list.setMaximumHeight(120)
-        self._nomatch_title.setVisible(False)
-        self._nomatch_list.setVisible(False)
-        table_layout.addWidget(self._nomatch_title)
-        table_layout.addWidget(self._nomatch_list)
-        cl.addWidget(table_card)
+        # ── Files with no match: listed here, never as blank proposals ────
+        self._nomatch_card = self._make_card()
+        nl = QtWidgets.QVBoxLayout(self._nomatch_card)
+        nl.setContentsMargins(16, 16, 16, 16)
+        nl.setSpacing(10)
+        heading, self._nomatch_title, _s = mv.card_heading(
+            "No match found", "Nothing is written to these files.")
+        nl.addWidget(heading)
+        self._nomatch_list = mv.GlassList(max_rows=5)
+        nl.addWidget(self._nomatch_list)
+        self._nomatch_card.setVisible(False)
+        cl.addWidget(self._nomatch_card)
 
         # ── Log ────────────────────────────────────────────────────────────
         log_card = self._make_card()
         log_layout = QtWidgets.QVBoxLayout(log_card)
         log_layout.setContentsMargins(16, 16, 16, 16)
-        log_layout.addWidget(self._make_card_title("Log"))
+        log_layout.setSpacing(10)
+        log_layout.addWidget(mv.card_heading("Log")[0])
         self._log_area = QtWidgets.QPlainTextEdit()
+        self._log_area.setObjectName("logText")
         self._log_area.setReadOnly(True)
         self._log_area.setMinimumHeight(100)
-        self._log_area.setFont(QtGui.QFontDatabase.systemFont(QtGui.QFontDatabase.SystemFont.FixedFont))
+        self._log_area.setMaximumHeight(180)
         log_layout.addWidget(self._log_area)
         cl.addWidget(log_card)
 
         cl.addStretch(1)
+        self._refresh_scope()
 
     # ── Helpers ───────────────────────────────────────────────────────────
 
@@ -346,6 +426,8 @@ class TagFixerWorkspace(WorkspaceBase):
         self._select_all_btn.setEnabled(has_rows and not busy)
         self._deselect_btn.setEnabled(has_rows and not busy)
         self._cancel_btn.setEnabled(busy)
+        self._scope_btn.setEnabled(not busy and bool(self._library_path))
+        self._scope_reset_btn.setEnabled(not busy)
 
     def _clear_results(self) -> None:
         self._table.clear()
@@ -355,11 +437,93 @@ class TagFixerWorkspace(WorkspaceBase):
         self._proposals = []
         self._db_path = ""
         self._scan_library = ""
+        self._scanned_once = False
         self._summary_lbl.setText("")
-        self._reason_lbl.setText("")
+        self._reason_lbl.setText(_SOURCES_HINT)
         self._nomatch_list.clear()
-        self._nomatch_title.setVisible(False)
-        self._nomatch_list.setVisible(False)
+        self._nomatch_card.setVisible(False)
+        self._show_results()
+
+    def _show_results(self) -> None:
+        """Swap the empty state and the review grid."""
+        has_rows = self._table.topLevelItemCount() > 0
+        self._table.setVisible(has_rows)
+        self._filter_row.setVisible(has_rows)
+        self._stats.setVisible(bool(self._records))
+        self._empty.setVisible(not has_rows)
+        if not self._scanned_once or not self._records:
+            self._empty.set_text(*_EMPTY_BEFORE)
+        elif all(r.status == "unmatched" for r in self._records):
+            self._empty.set_text(*_EMPTY_UNMATCHED)
+        else:
+            self._empty.set_text(*_EMPTY_NONE)
+
+    # ── Scope: the whole library or one folder in it ──────────────────────
+
+    def _scan_root(self) -> str:
+        return self._scope_folder or self._library_path
+
+    def _refresh_scope(self) -> None:
+        folder = bool(self._scope_folder)
+        self._scope_lib_pill.setVisible(not folder)
+        self._scope_dir_pill.setVisible(folder)
+        self._scope_reset_btn.setVisible(folder)
+        path = self._scan_root()
+        self._scope_path.setText(path or "No library selected")
+        self._scope_path.setToolTip(path)
+        self._update_buttons()
+
+    def _scope_problem(self, folder: str) -> str:
+        """Why ``folder`` can't be the scope ("" when it can)."""
+        from tag_fixer import TAG_SCAN_SKIPPED_FOLDERS
+        from utils.reserved_folders import is_reserved_path
+
+        library = os.path.abspath(self._library_path)
+        target = os.path.abspath(folder)
+        try:
+            inside = os.path.commonpath(
+                [os.path.normcase(library), os.path.normcase(target)]
+            ) == os.path.normcase(library)
+        except ValueError:      # another drive on Windows
+            inside = False
+        if not inside:
+            return "Choose a folder inside the library. The Tag Fixer only checks your library."
+        if is_reserved_path(target, library, TAG_SCAN_SKIPPED_FOLDERS):
+            return (
+                "That folder is one the Tag Fixer never checks or changes "
+                f"({', '.join(TAG_SCAN_SKIPPED_FOLDERS)}). Choose another one."
+            )
+        return ""
+
+    def _set_scope(self, folder: str) -> None:
+        if folder and os.path.normcase(os.path.abspath(folder)) == os.path.normcase(
+                os.path.abspath(self._library_path or "")):
+            folder = ""
+        self._scope_folder = os.path.abspath(folder) if folder else ""
+        self._refresh_scope()
+
+    @Slot()
+    def _on_whole_library(self) -> None:
+        self._set_scope("")
+
+    @Slot()
+    def _on_choose_folder(self) -> None:
+        if not self._library_path or self._busy():
+            return
+        folder = QtWidgets.QFileDialog.getExistingDirectory(
+            self, "Choose a folder to check", self._scan_root()
+        )
+        if not folder:
+            return
+        problem = self._scope_problem(folder)
+        if problem:
+            QtWidgets.QMessageBox.information(self, "Choose Another Folder", problem)
+            return
+        self._set_scope(folder)
+
+    @Slot()
+    def _on_open_sources(self) -> None:
+        self.navigate_requested.emit("settings/services")
 
     def _selected_changes(self) -> list:
         """``[(FileRecord, [field, ...])]`` for every visible, ticked row.
@@ -385,6 +549,7 @@ class TagFixerWorkspace(WorkspaceBase):
     def _render_rows(self, keep_unticked: set | None = None) -> None:
         """(Re)build the grid from ``self._records`` via planned_changes."""
         from tag_fixer import planned_changes
+        from gui.workspaces.metadata_views import mark
 
         keep_unticked = keep_unticked or set()
         self._table.blockSignals(True)
@@ -423,6 +588,11 @@ class TagFixerWorkspace(WorkspaceBase):
                 row.setToolTip(1, str(rec.path))
                 row.setToolTip(3, _fmt(before))
                 row.setToolTip(4, _fmt(after))
+                # Current values muted; the value that would be written on
+                # an accent-tinted chip (painted from the theme, no colours here).
+                mark(row, "muted", 3)
+                mark(row, "accent", 4)
+                mark(row, "muted", _SCORE_COL)
                 self._table.addTopLevelItem(row)
         self._table.setSortingEnabled(sorting)
         self._table.blockSignals(False)
@@ -436,25 +606,32 @@ class TagFixerWorkspace(WorkspaceBase):
             item.setToolTip(str(rec.path))
             self._nomatch_list.addItem(item)
         self._nomatch_title.setText(f"No match found ({len(unmatched)})")
-        self._nomatch_title.setVisible(bool(unmatched))
-        self._nomatch_list.setVisible(bool(unmatched))
+        self._nomatch_card.setVisible(bool(unmatched))
+        self._show_results()
         self._update_summary()
 
     def _update_summary(self) -> None:
         total_rows = self._table.topLevelItemCount()
         if not self._records:
             self._summary_lbl.setText("")
+            self._apply_btn.setText("Apply changes")
             return
         selected = self._selected_changes()
         n_fields = sum(len(f) for _r, f in selected)
         unmatched = sum(1 for r in self._records if r.status == "unmatched")
-        text = (
-            f"{total_rows} change(s) proposed across {len(self._proposals)} file(s) · "
-            f"{n_fields} ticked across {len(selected)} file(s)"
+        self._stats.tile("proposed").set_value(total_rows)
+        self._stats.tile("files").set_value(len(self._proposals))
+        self._stats.tile("ticked").set_value(n_fields, tone="accent" if n_fields else "")
+        self._stats.tile("nomatch").set_value(unmatched, tone="warning" if unmatched else "")
+        if not total_rows:
+            self._summary_lbl.setText("")
+        elif n_fields:
+            self._summary_lbl.setText(f"Writes {n_fields} ticked in {len(selected)} file(s)")
+        else:
+            self._summary_lbl.setText("Nothing ticked")
+        self._apply_btn.setText(
+            f"Apply {n_fields} change{'s' if n_fields != 1 else ''}" if n_fields else "Apply changes"
         )
-        if unmatched:
-            text += f" · {unmatched} file(s) with no match"
-        self._summary_lbl.setText(text)
 
     # ── Library change ────────────────────────────────────────────────────
 
@@ -470,6 +647,8 @@ class TagFixerWorkspace(WorkspaceBase):
             self._prog_bar.setValue(0)
         had_results = bool(self._records)
         self._clear_results()
+        self._scope_folder = ""            # a folder belongs to the old library
+        self._refresh_scope()
         if self._apply_worker is None:
             self._prog_status.setText(
                 "Library changed — scan again." if had_results else "Idle"
@@ -491,10 +670,11 @@ class TagFixerWorkspace(WorkspaceBase):
         self._prog_bar.setValue(0)
         self._prog_status.setText("Scanning…")
         self._scan_library = self._library_path
-        self._log("Starting tag scan…", "info")
+        where = f" of {self._scope_folder}" if self._scope_folder else ""
+        self._log(f"Starting tag scan{where}…", "info")
         self._emit_status("Scanning tags…", "warning")
 
-        worker = TagFixWorker(self._library_path)
+        worker = TagFixWorker(self._library_path, self._scope_folder)
         worker.progress.connect(self._prog_bar.setValue)
         worker.log_line.connect(self._on_log_line)
         worker.proposal_ready.connect(self._on_proposals)
@@ -587,6 +767,7 @@ class TagFixerWorkspace(WorkspaceBase):
                 continue
             _rec, field = self._rows[int(index)]
             item.setHidden(field not in shown)
+        self._table.fit_rows(10, 3)
         self._update_summary()
 
     @Slot(QtWidgets.QTreeWidgetItem, int)
@@ -608,6 +789,7 @@ class TagFixerWorkspace(WorkspaceBase):
             return  # a scan cancelled by a library change; its result is stale
         self._records = list(records)
         self._all_records = self._records
+        self._scanned_once = True
         self._render_rows()
 
     @Slot(str)

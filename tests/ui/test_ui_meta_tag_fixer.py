@@ -57,7 +57,10 @@ def test_preview_lists_exact_field_changes_and_separates_no_match(make_workspace
     # ...it is listed separately, with the reason.
     assert ws._nomatch_list.count() == 1
     assert ws._nomatch_list.item(0).text().startswith("b.mp3")
-    assert "1 file(s) with no match" in ws._summary_lbl.text()
+    # The counts are a StatRow (unmatched counted on their own, not as proposals).
+    stats = {k: ws._stats.tile(k).value() for k in ws._stats.keys()}
+    assert stats == {"proposed": "3", "files": "2", "ticked": "3", "nomatch": "1"}
+    assert ws._nomatch_title.text() == "No match found (1)"
     assert get_genres(files["a.flac"]) == ["Rock", "Pop"]  # a scan never writes
 
 
@@ -262,3 +265,104 @@ def test_closing_the_app_mid_scan_stops_the_worker(main_window, tmp_path, monkey
     wait_for(qtbot, lambda: not main_window.isVisible(), timeout=5000)
     assert threads.wait_all(5000) == []
     assert len(source.calls) < 6
+
+
+# ── Liquid Glass layout (R2): empty state, review grid, scope, glyphs ───────
+
+
+def test_empty_state_before_a_scan_then_the_review_grid(make_workspace, tmp_path, monkeypatch, qtbot):
+    from gui.compat import QtCore
+    from gui.workspaces.metadata_views import kind_of
+
+    _library(tmp_path / "lib")
+    install_source(monkeypatch, ANSWERS)
+    ws = make_workspace("tag_fixer", library_path=tmp_path / "lib")
+    assert ws._empty.isVisibleTo(ws) and not ws._table.isVisibleTo(ws)
+    assert not ws._stats.isVisibleTo(ws)
+    _scan(ws, qtbot)
+    assert ws._table.isVisibleTo(ws) and not ws._empty.isVisibleTo(ws)
+    assert ws._stats.isVisibleTo(ws) and ws._nomatch_card.isVisibleTo(ws)
+    # Changed values are painted on an accent chip from the theme and the
+    # current value is muted: a painting kind, no per-item colour.
+    item = ws._table.topLevelItem(0)
+    assert (kind_of(item, 3), kind_of(item, 4)) == ("muted", "accent")
+    assert item.data(4, QtCore.Qt.ItemDataRole.ForegroundRole) is None
+    assert ws._apply_btn.text() == "Apply 3 changes"
+    ws._on_deselect_all()
+    assert ws._apply_btn.text() == "Apply changes"
+    assert ws._stats.tile("ticked").value() == "0"
+
+
+def test_nothing_matched_says_so(make_workspace, tmp_path, monkeypatch, qtbot):
+    _library(tmp_path / "lib")
+    install_source(monkeypatch, {})
+    ws = make_workspace("tag_fixer", library_path=tmp_path / "lib")
+    _scan(ws, qtbot)
+    assert ws._empty.isVisibleTo(ws)
+    assert ws._empty.title() == "Nothing could be matched"
+    assert ws._nomatch_list.count() == 3
+
+
+def test_scope_can_be_one_folder_inside_the_library(make_workspace, tmp_path, monkeypatch, qtbot, dialogs):
+    files = build_genre_library(tmp_path / "lib", [
+        ("Inside/a.flac", "Art", "Song", []),
+        ("Outside/c.opus", "Art", "Other", []),
+        ("Quarantine/q.flac", "Art", "Song", []),
+    ])
+    source = install_source(monkeypatch, ANSWERS)
+    ws = make_workspace("tag_fixer", library_path=tmp_path / "lib")
+    assert ws._scope_lib_pill.isVisibleTo(ws) and not ws._scope_reset_btn.isVisibleTo(ws)
+
+    # A reserved folder and a folder outside the library are refused.
+    for bad in (tmp_path / "lib" / "Quarantine", tmp_path):
+        dialogs.choose_directory(bad)
+        ws._scope_btn.click()
+        assert ws._scope_folder == ""
+    assert len(dialogs.calls_of("information")) == 2
+
+    dialogs.choose_directory(tmp_path / "lib" / "Inside")
+    ws._scope_btn.click()
+    assert ws._scope_folder == str(tmp_path / "lib" / "Inside")
+    assert ws._scope_dir_pill.isVisibleTo(ws) and ws._scope_reset_btn.isVisibleTo(ws)
+    assert ws._scope_path.toolTip() == str(tmp_path / "lib" / "Inside")
+    _scan(ws, qtbot)
+    assert [Path(p).name for p in source.calls] == ["a.flac"]
+    assert [r[0] for r in table_rows(ws)] == ["a.flac", "a.flac"]
+
+    # Apply still writes (and logs) into the library's Docs/.
+    ws._field_cbs["Genre"].setChecked(False)
+    _apply(ws, qtbot, dialogs)
+    assert get_field(files["Inside/a.flac"], "artist") == ["Fixed Artist"]
+    assert list((tmp_path / "lib" / "Docs").glob("tag_changes_tagfixer_*.jsonl"))
+
+    # The reset button means "whole library" again; a library change too.
+    ws._scope_reset_btn.click()
+    assert ws._scope_folder == "" and ws._scope_lib_pill.isVisibleTo(ws)
+    dialogs.choose_directory(tmp_path / "lib" / "Inside")
+    ws._scope_btn.click()
+    (tmp_path / "B").mkdir()
+    ws.set_library_path(str(tmp_path / "B"))
+    assert ws._scope_folder == ""
+
+
+def test_buttons_carry_glyphs_and_no_emoji(make_workspace):
+    from gui.compat import QtWidgets
+
+    ws = make_workspace("tag_fixer")
+    glyphs = {
+        ws._scan_btn: "search", ws._apply_btn: "check", ws._cancel_btn: "close",
+        ws._scope_btn: "folder", ws._select_all_btn: "check", ws._deselect_btn: "minus",
+    }
+    for button, name in glyphs.items():
+        assert button.property("glyphName") == name, button.text()
+        assert not button.icon().isNull()
+    for button in ws.findChildren(QtWidgets.QAbstractButton):
+        assert all(ord(ch) < 0x2190 or ch in "…→" for ch in button.text()), button.text()
+
+
+def test_sources_button_opens_the_settings_section(make_workspace):
+    ws = make_workspace("tag_fixer")
+    asked = []
+    ws.navigate_requested.connect(asked.append)
+    ws._sources_btn.click()
+    assert asked == ["settings/services"]
