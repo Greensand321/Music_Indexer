@@ -3,10 +3,14 @@
 * ``make_library`` — a tiny library of empty "audio" files, including the
   reserved folders, for workflows whose analysis is faked anyway.
 * ``write_cluster_payload`` — fabricate ``Docs/cluster_info.json`` (valid,
-  malformed, misaligned or large) and check it with ``cluster_graph_data``.
+  malformed, misaligned or large) and check it with ``cluster_graph_data``;
+  a valid payload also gets a run block and a matching
+  ``Docs/cluster_members.json`` (``with_members=True``).
 * ``FakeClustering`` — a stand-in ``clustered_playlists`` module for worker
   tests (the worker imports it inside ``run()``), with a controllable gate so
-  a test can hold a run "in extraction" and check cancellation.
+  a test can hold a run "in extraction" and check cancellation. It writes the
+  members file and returns the run block like the real engine
+  (``write_members=True``).
 """
 from __future__ import annotations
 
@@ -16,6 +20,7 @@ import types
 from pathlib import Path
 
 import cluster_graph_data as cgd
+from _helpers.cluster_payloads import members_for_payload
 
 STANDARD_FILES = (
     "Artist A/Album 1/01 a.mp3",
@@ -53,8 +58,12 @@ def cluster_payload(n: int = 12, n_clusters: int = 3, noise: int = 0, tracks_roo
     }
 
 
-def write_cluster_payload(library: Path, kind: str = "valid", **kw) -> Path:
-    """Write ``Docs/cluster_info.json``; ``kind`` is valid|malformed|misaligned."""
+def write_cluster_payload(library: Path, kind: str = "valid", with_members: bool = True, **kw) -> Path:
+    """Write ``Docs/cluster_info.json``; ``kind`` is valid|malformed|misaligned.
+
+    A valid payload written ``with_members`` also carries a run block and gets
+    a matching ``Docs/cluster_members.json`` (``_helpers.cluster_payloads``).
+    """
     path = cgd.cluster_info_path(library)
     path.parent.mkdir(parents=True, exist_ok=True)
     if kind == "malformed":
@@ -63,6 +72,13 @@ def write_cluster_payload(library: Path, kind: str = "valid", **kw) -> Path:
     payload = cluster_payload(**kw)
     if kind == "misaligned":
         payload["labels"] = payload["labels"][:-1]
+    if kind == "valid" and with_members:
+        payload, members = members_for_payload(
+            payload, root=kw.get("tracks_root", "/music"),
+        )
+        cgd.cluster_members_path(library).write_text(
+            json.dumps(members, separators=(",", ":")), encoding="utf-8"
+        )
     path.write_text(json.dumps(payload), encoding="utf-8")
     if kind == "valid":
         cgd.load_cluster_data(library)  # the helper itself must produce loadable data
@@ -72,7 +88,8 @@ def write_cluster_payload(library: Path, kind: str = "valid", **kw) -> Path:
 class FakeClustering:
     """Fake ``clustered_playlists`` module. ``install(monkeypatch)`` puts it in sys.modules."""
 
-    def __init__(self, n_clusters: int = 3, noise: int = 0, hold: bool = False) -> None:
+    def __init__(self, n_clusters: int = 3, noise: int = 0, hold: bool = False,
+                 write_members: bool = True) -> None:
         self.n_clusters = n_clusters
         self.noise = noise
         self.calls: list[dict] = []
@@ -82,6 +99,8 @@ class FakeClustering:
             self.release.set()
         self.saw_cancel = False
         self.write_payload = True
+        self.write_members = write_members
+        self.runs = 0
 
         class ClusteringCancelled(Exception):
             pass
@@ -113,6 +132,16 @@ class FakeClustering:
             labels[-(i + 1)] = -1
         X = np.random.RandomState(0).rand(n, 4) + labels[:, None] * 3.0
         info = {int(c): {"size": int((labels == c).sum())} for c in set(labels.tolist()) if c >= 0}
+        self.runs += 1
+        run = {
+            "schema": 1, "run_id": f"20261107-1530{self.runs:02d}-fa{self.runs:04x}",
+            "created": f"2026-11-07T15:30:{self.runs % 60:02d}", "library_root": str(root),
+            "method": method, "params": dict(params), "features": "mfcc-tempo",
+            "feature_engine": "librosa", "normalization": "standard",
+            "track_count": n, "failed_count": 0,
+        }
+        result = {"X": X, "labels": labels, "tracks": list(tracks), "cluster_info": info,
+                  "features": [], "failed": {}}
         if self.write_payload:
             docs = Path(root) / "Docs"
             docs.mkdir(parents=True, exist_ok=True)
@@ -121,9 +150,23 @@ class FakeClustering:
                 "labels": labels.tolist(), "tracks": list(tracks),
                 "cluster_info": {str(k): v for k, v in info.items()},
             }
+            if self.write_members:
+                distances = [None] * n
+                for c in set(labels.tolist()):
+                    if c < 0:
+                        continue
+                    idx = np.flatnonzero(labels == c)
+                    d = np.linalg.norm(X[idx] - X[idx].mean(axis=0), axis=1)
+                    for i, v in zip(idx.tolist(), d.tolist()):
+                        distances[i] = float(v)
+                members = {"run": run, "tracks": list(tracks), "labels": labels.tolist(),
+                           "centroid_distance": distances, "failed": []}
+                (docs / "cluster_members.json").write_text(json.dumps(members), encoding="utf-8")
+                payload["run"] = run
+                result["run"] = run
+                result["members_file"] = str(docs / "cluster_members.json")
             (docs / "cluster_info.json").write_text(json.dumps(payload), encoding="utf-8")
-        return {"X": X, "labels": labels, "tracks": list(tracks), "cluster_info": info,
-                "features": [], "failed": {}}
+        return result
 
     def module(self) -> types.ModuleType:
         mod = types.ModuleType("clustered_playlists")

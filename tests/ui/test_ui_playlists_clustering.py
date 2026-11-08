@@ -2,8 +2,10 @@
 
 Covers PL-02/07/08/09 (worker lifecycle and cooperative cancel), PL-03/04
 (wizard keeps choices; "kmeans" not "k-means"), PL-05 (report renders),
-PL-15 (no promise of cluster playlists), PL-18 (noise is not a cluster),
-PL-27 (wizard config kept apart from Quick Start) and PL-31 (library change).
+PL-15 (the results point at Save cluster playlists; the wizard's other unbuilt
+options stay off), PL-18 (noise is not a cluster), PL-27 (wizard config kept
+apart from Quick Start), PL-31 (library change) and the cluster-playlist offer
+after a run (docs/specs/cluster_playlists.md CP-43/CP-44).
 """
 from __future__ import annotations
 
@@ -93,14 +95,31 @@ def test_wizard_blocks_leaving_page_one_without_features(qtbot, dialogs):
 
 
 def test_wizard_does_not_offer_unbuilt_options(qtbot):
+    """CP-45: everything except the playlist offer stays switched off."""
     d = ClusteringWizardDialog()
     qtbot.addWidget(d)
     for w in (d._reduction_combo, d._remove_small_cb, d._min_threshold_spin, d._merge_cb,
-              d._create_playlists_cb, d._open_graph_cb):
+              d._generate_report_cb, d._open_graph_cb):
         assert not w.isEnabled()
     cfg = d.get_config()
     assert cfg["create_playlists"] is False
     assert cfg["dimensionality_reduction"] == "none"
+
+
+def test_wizard_offer_option_is_enabled_and_saved(qtbot):
+    """CP-44: the old "Create M3U playlists" option, relabelled and live."""
+    d = ClusteringWizardDialog()
+    qtbot.addWidget(d)
+    cb = d._create_playlists_cb
+    assert cb.isEnabled() and not cb.isChecked()
+    assert cb.text() == "Offer to save a playlist per cluster when the analysis finishes"
+    assert "Nothing is written until you click Save" in cb.toolTip()
+    for _ in range(4):
+        d._on_next()
+    cb.setChecked(True)
+    d._on_next()                              # Finish saves step 5
+    assert d.result() == QtWidgets.QDialog.DialogCode.Accepted.value
+    assert d.get_config()["create_playlists"] is True
 
 
 # ── Quality report (PL-05) ───────────────────────────────────────────────
@@ -234,15 +253,149 @@ def test_metrics_need_two_clusters():
     assert "silhouette_score" not in m and m["n_clusters"] == 1
 
 
-def test_results_do_not_promise_cluster_playlists(make_workspace, tmp_path, qtbot, monkeypatch):
+def test_results_point_to_save_cluster_playlists(qtbot, tmp_path, monkeypatch):
+    """CP-43: the hint names the page action, which a finished run enables."""
     FakeClustering().install(monkeypatch)
-    ws, _lib = _ws(make_workspace, tmp_path, 9)
+    page, ws, lib = _sound_map(qtbot, tmp_path, 15)
+    button = page.cluster_playlists_flow.button
+    assert not button.isEnabled()                     # no analysis yet
     ws._on_run_quick_start()
     _wait_idle(ws, qtbot)
     texts = _results_text(ws)
     assert not any("View Playlists" in t for t in texts)
-    assert any("Playlists are not created automatically" in t for t in texts)
+    assert not any("Playlists are not created automatically" in t for t in texts)
+    assert any("Save a playlist per cluster with “Save cluster playlists…”" in t for t in texts)
     assert any("Open the map" in t for t in texts)
+    qtbot.waitUntil(button.isEnabled, timeout=5000)
+    assert button.isVisible() and button.text() == "Save cluster playlists…"
+
+
+def test_advanced_summary_describes_the_playlist_offer(make_workspace, tmp_path):
+    ws, _lib = _ws(make_workspace, tmp_path)
+    ws._display_config({"algorithm": "kmeans", "features": {}, "create_playlists": False})
+    text = ws._config_display.toPlainText()
+    assert "Save cluster playlists… writes one playlist per cluster" in text
+    assert "Offers to save them" not in text and "not written automatically" not in text
+    ws._display_config({"algorithm": "kmeans", "features": {}, "create_playlists": True})
+    assert "Offers to save them when the run finishes" in ws._config_display.toPlainText()
+
+
+# ── CP-44: offer to save after a successful run ──────────────────────────
+
+
+def _sound_map(qtbot, tmp_path, n_files: int = 15, show: bool = True):
+    """A Sound Map page (Analyse + Map panels) on its own, as the app builds it."""
+    from gui import navigation
+    from gui.pages import SoundMapPage
+    from gui.workspaces.clustered_enhanced import EnhancedClusteredWorkspace
+    from gui.workspaces.graph import GraphWorkspace
+
+    files = [f"Artist {i % 3}/Album/t{i:02d}.mp3" for i in range(n_files)]
+    lib = make_library(tmp_path / "lib", files)
+    analysis = EnhancedClusteredWorkspace(library_path=str(lib))
+    graph = GraphWorkspace(library_path=str(lib))
+    page = SoundMapPage(navigation.PAGE_BY_KEY["sound_map"], {"clustered": analysis, "graph": graph})
+    qtbot.addWidget(page)
+    if show:
+        page.resize(1100, 760)
+        page.show()
+    return page, analysis, lib
+
+
+@pytest.fixture
+def _no_tags(monkeypatch):
+    import utils.audio_metadata_reader as amr
+    monkeypatch.setattr(amr, "read_tags", lambda path: {})
+
+
+def _offer_config() -> dict:
+    from gui.workspaces.clustered_enhanced import QUICK_START_CONFIG
+
+    return {**QUICK_START_CONFIG, "create_playlists": True}
+
+
+def test_successful_run_with_offer_opens_preview(qtbot, tmp_path, monkeypatch, dialogs, _no_tags):
+    from gui.dialogs.cluster_playlists_dialog import ClusterPlaylistsDialog
+
+    FakeClustering(write_members=True).install(monkeypatch)
+    page, ws, lib = _sound_map(qtbot, tmp_path)
+    shown = []
+    dialogs.on_exec(lambda dlg: (shown.append((type(dlg), len(dlg.plan().items))),
+                                 QtWidgets.QDialog.DialogCode.Rejected)[1])
+    ws._run_clustering(_offer_config())
+    qtbot.waitUntil(lambda: bool(shown), timeout=8000)
+    assert shown == [(ClusterPlaylistsDialog, 3)]
+    flow = page.cluster_playlists_flow
+    qtbot.waitUntil(lambda: not flow.is_busy(), timeout=5000)
+    assert not (lib / "Playlists").exists()           # rejected: nothing written
+
+
+def test_offer_waits_until_the_page_is_shown(qtbot, tmp_path, monkeypatch, dialogs, _no_tags):
+    FakeClustering(write_members=True).install(monkeypatch)
+    page, ws, _lib = _sound_map(qtbot, tmp_path, show=False)
+    ws._run_clustering(_offer_config())
+    _wait_idle(ws, qtbot)
+    process_events(200)
+    assert not dialogs.calls_of("exec"), "no modal may open over another page"
+    dialogs.on_exec(QtWidgets.QDialog.DialogCode.Rejected)
+    page.show()
+    qtbot.waitUntil(lambda: bool(dialogs.calls_of("exec")), timeout=8000)
+    flow = page.cluster_playlists_flow
+    qtbot.waitUntil(lambda: not flow.is_busy(), timeout=5000)
+
+
+def test_failed_or_cancelled_run_never_offers(qtbot, tmp_path, monkeypatch, dialogs, _no_tags):
+    fake = FakeClustering(write_members=True, hold=True).install(monkeypatch)
+    page, ws, _lib = _sound_map(qtbot, tmp_path)
+    ws._run_clustering(_offer_config())
+    assert fake.started.wait(3)
+    ws._cancel_btn.click()
+    _wait_idle(ws, qtbot)
+
+    def boom(*a, **k):
+        raise RuntimeError("decoder exploded")
+
+    fake.generate = boom
+    FakeClustering.install(fake, monkeypatch)
+    ws._run_clustering(_offer_config())
+    _wait_idle(ws, qtbot)
+    assert any("decoder exploded" in t for t in _results_text(ws))
+    process_events(200)
+    assert not dialogs.calls_of("exec")
+    assert not page.cluster_playlists_flow.is_busy()
+
+
+def test_quick_start_never_offers(qtbot, tmp_path, monkeypatch, dialogs, _no_tags):
+    FakeClustering(write_members=True).install(monkeypatch)
+    page, ws, _lib = _sound_map(qtbot, tmp_path)
+    ws._on_run_quick_start()
+    _wait_idle(ws, qtbot)
+    process_events(200)
+    assert not dialogs.calls_of("exec")
+    assert page.cluster_playlists_flow.button.isEnabled()
+
+
+def test_analysis_waits_while_cluster_playlists_are_busy(qtbot, tmp_path, monkeypatch, dialogs):
+    """CP-34: the page pauses its Run buttons while a preview or write runs."""
+    import utils.audio_metadata_reader as amr
+
+    FakeClustering(write_members=True).install(monkeypatch)
+    page, ws, _lib = _sound_map(qtbot, tmp_path)
+    ws._on_run_quick_start()
+    _wait_idle(ws, qtbot)
+    release = __import__("threading").Event()
+    monkeypatch.setattr(amr, "read_tags", lambda path: (release.wait(5), {})[1])
+    flow = page.cluster_playlists_flow
+    dialogs.on_exec(QtWidgets.QDialog.DialogCode.Rejected)
+    try:
+        assert flow.start()
+        assert all(not b.isEnabled() for b in ws._run_buttons)
+        ws._on_run_quick_start()                      # refused while busy
+        assert not ws.is_busy()
+    finally:
+        release.set()
+    qtbot.waitUntil(lambda: not flow.is_busy(), timeout=8000)
+    assert all(b.isEnabled() for b in ws._run_buttons)
 
 
 def test_reserved_folders_are_not_clustered(make_workspace, tmp_path, qtbot, monkeypatch):

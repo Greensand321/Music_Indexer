@@ -236,11 +236,17 @@ class SoundMapPage(SectionedPage):
 
     Page actions (right of the tabs, visible in both sections):
 
+    * **Save cluster playlists…** — the previewed one-playlist-per-cluster
+      export (``gui/cluster_playlist_jobs.py``,
+      docs/specs/cluster_playlists.md). The Map panel owns the flow (it knows
+      the hidden clusters, the run on the map and the colours, and refreshes
+      the flow on every load and library change); this page places its
+      button, makes the flow watch the *page* for visibility (so a held
+      offer opens on either section, never over another page), forwards a
+      successful analysis to ``offer_after_run`` and pauses the Analyse Run
+      buttons while a preview or write runs.
     * **Quality report** — the latest analysis' cluster quality report,
       enabled once an analysis with scores has finished in this session.
-    * **Save clusters as playlists** belongs here too: build the button and
-      ``add_action()`` it in ``_build_actions`` (it would read the same
-      ``Docs/cluster_info.json`` the Map loads, via ``cluster_graph_data``).
     """
 
     def __init__(
@@ -258,7 +264,24 @@ class SoundMapPage(SectionedPage):
     def map_panel(self):
         return self.panel_for("map")
 
+    @property
+    def cluster_playlists_flow(self):
+        """The Map panel's Save cluster playlists flow (None if it has none)."""
+        return getattr(self.map_panel, "cluster_playlists_flow", None)
+
     def _build_actions(self) -> None:
+        flow = self.cluster_playlists_flow
+        if flow is not None:
+            flow.set_show_target(self)
+            self.add_action(flow.button)
+            analysis = self.analysis_panel
+            succeeded = getattr(analysis, "analysis_succeeded", None)
+            if succeeded is not None:
+                succeeded.connect(flow.offer_after_run)
+            pause = getattr(analysis, "set_external_busy", None)
+            if callable(pause):
+                flow.busy_changed.connect(pause)
+
         self._report_btn = QtWidgets.QPushButton("Quality report")
         self._report_btn.setObjectName("soundMapReportBtn")
         self._report_btn.setToolTip("How well the latest analysis separated your tracks")
