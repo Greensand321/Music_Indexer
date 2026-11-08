@@ -7,6 +7,15 @@ import time
 from collections import OrderedDict
 from typing import Callable, Dict, Optional
 from utils.path_helpers import ensure_long_path
+from near_duplicate_detector import has_silence_padding
+
+#: ``fp_scheme`` of rows written by this module: fingerprints of audio that
+#: was cut to the fingerprint window but never padded. Rows from before the
+#: column existed are NULL; those whose print ends in a run of padding
+#: silence (``has_silence_padding``) — short tracks fingerprinted by the old
+#: ``audio_norm.normalize_for_fp`` — are treated as stale, every other old row
+#: stays valid.
+FP_SCHEME_UNPADDED = 2
 
 verbose: bool = True
 
@@ -121,7 +130,8 @@ def _initialize_db(conn: sqlite3.Connection) -> None:
             artwork_json TEXT,
             normalized_artist TEXT,
             normalized_title TEXT,
-            normalized_album TEXT
+            normalized_album TEXT,
+            fp_scheme INTEGER
         );
         """
     )
@@ -160,6 +170,8 @@ def _initialize_db(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE fingerprints ADD COLUMN normalized_title TEXT")
     if "normalized_album" not in cols:
         conn.execute("ALTER TABLE fingerprints ADD COLUMN normalized_album TEXT")
+    if "fp_scheme" not in cols:
+        conn.execute("ALTER TABLE fingerprints ADD COLUMN fp_scheme INTEGER")
     conn.commit()
 
 
@@ -181,8 +193,9 @@ _INSERT_SQL = """
         artwork_json,
         normalized_artist,
         normalized_title,
-        normalized_album
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        normalized_album,
+        fp_scheme
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 """
 
 
@@ -234,6 +247,7 @@ class FingerprintWriter:
         normalized_artist: str | None = None,
         normalized_title: str | None = None,
         normalized_album: str | None = None,
+        fp_scheme: int | None = FP_SCHEME_UNPADDED,
     ) -> None:
         row = (
             path,
@@ -253,6 +267,7 @@ class FingerprintWriter:
             normalized_artist,
             normalized_title,
             normalized_album,
+            fp_scheme,
         )
         with self._state_lock:
             if not self._closed and self._thread.is_alive():
@@ -521,6 +536,30 @@ def _open_readonly_connection(db_path: str) -> sqlite3.Connection | None:
     return conn
 
 
+def _scheme_column(conn: sqlite3.Connection) -> str:
+    """``fp_scheme`` when the table has it (a cache opened read-only before any
+    schema upgrade may not), else a NULL stand-in — never "no such column"."""
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(fingerprints)")}
+    return "fp_scheme" if "fp_scheme" in cols else "NULL AS fp_scheme"
+
+
+def _fingerprint_trusted(fp: object, scheme: object) -> bool:
+    """False for a pre-fix row holding a silence-padded short-track print.
+
+    ``audio_norm.normalize_for_fp`` padded tracks shorter than the window with
+    silence; the prints of *different* short tracks then matched each other
+    (5-second clips ~0.012, under the exact threshold). Only old rows (no
+    ``fp_scheme``) whose print ends in padding are distrusted, so the rest of
+    the library is not re-fingerprinted.
+    """
+    try:
+        if scheme is not None and int(scheme) >= FP_SCHEME_UNPADDED:
+            return True
+    except (TypeError, ValueError):
+        pass
+    return not has_silence_padding(fp)
+
+
 def _row_is_current(cached_mtime: object, cached_size: object, mtime: float, size: int) -> bool:
     """True when a cache row was written for the file as it is now.
 
@@ -603,7 +642,7 @@ def get_fingerprint(
         conn = _open_readonly_connection(db_path)
         if conn is not None:
             row = conn.execute(
-                "SELECT mtime, size, fingerprint FROM fingerprints WHERE path=?",
+                f"SELECT mtime, size, fingerprint, {_scheme_column(conn)} FROM fingerprints WHERE path=?",
                 (key,),
             ).fetchone()
     except sqlite3.Error as e:
@@ -616,6 +655,12 @@ def get_fingerprint(
 
     cached_mtime = row[0] if row else None
     cached_size = row[1] if row else None
+    if row and _row_is_current(cached_mtime, cached_size, mtime, size) and not _fingerprint_trusted(
+        _decode_fingerprint(row[2]), row[3]
+    ):
+        log_callback(f"Re-fingerprinting {path}: its cached fingerprint was made with silence padding.")
+        trace["stale_reason"] = "silence_padding"
+        row = None
     if row and _row_is_current(cached_mtime, cached_size, mtime, size):
         _dlog("FP", f"cache hit {path}", log_callback)
         fp = _decode_fingerprint(row[2])
@@ -697,9 +742,13 @@ def get_cached_fingerprint(
                 trace["error"] = str(e)
                 return None
             row = conn.execute(
-                "SELECT mtime, size, fingerprint FROM fingerprints WHERE path=?",
+                f"SELECT mtime, size, fingerprint, {_scheme_column(conn)} FROM fingerprints WHERE path=?",
                 (key,),
             ).fetchone()
+            if row and not _fingerprint_trusted(_decode_fingerprint(row[2]), row[3]):
+                trace["source"] = "stale"
+                trace["error"] = "fingerprint made with silence padding; needs re-fingerprinting"
+                return None
             if row and _row_is_current(row[0], row[1], mtime, size):
                 fp = row[2]
                 _dlog("FP", f"cache hit {path}", log_callback)
@@ -777,7 +826,7 @@ def get_cached_fingerprint_metadata(
                 trace["error"] = str(e)
                 return None, None
             row = conn.execute(
-                """
+                f"""
                 SELECT
                     mtime,
                     size,
@@ -793,12 +842,17 @@ def get_cached_fingerprint_metadata(
                     artwork_json,
                     normalized_artist,
                     normalized_title,
-                    normalized_album
+                    normalized_album,
+                    {_scheme_column(conn)}
                 FROM fingerprints
                 WHERE path=?
                 """,
                 (key,),
             ).fetchone()
+            if row and not _fingerprint_trusted(_decode_fingerprint(row[2]), row[15]):
+                trace["source"] = "stale"
+                trace["error"] = "fingerprint made with silence padding; needs re-fingerprinting"
+                return None, None
             if row and _row_is_current(row[0], row[1], mtime, size):
                 fp = _decode_fingerprint(row[2])
                 _dlog("FP", f"cache hit {path}", log_callback)

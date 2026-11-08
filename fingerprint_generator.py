@@ -104,13 +104,36 @@ def compute_fingerprint_for_file(
         return caller_path, None, None, str(e)
 
 
+#: ``fp_scheme`` of rows written now: the audio is cut to the window, never
+#: padded (``audio_norm.normalize_for_fp`` used to pad short tracks with
+#: silence, and different short tracks then matched each other).
+FP_SCHEME_UNPADDED = 2
+
+
+def _ensure_scheme_column(conn: sqlite3.Connection) -> None:
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(fingerprints)")}
+    if "fp_scheme" not in cols:
+        conn.execute("ALTER TABLE fingerprints ADD COLUMN fp_scheme INTEGER")
+
+
 def _load_cached_entries(conn: sqlite3.Connection) -> dict[str, Tuple[float, int | None, str | None]]:
-    """Return a mapping of path -> (mtime, duration, fingerprint)."""
+    """Return a mapping of path -> (mtime, duration, fingerprint).
+
+    Rows from before ``fp_scheme`` whose print ends in padding silence are
+    left out (so those short tracks are fingerprinted again); every other
+    cached row is reused as before.
+    """
+    from near_duplicate_detector import has_silence_padding
 
     cursor = conn.execute(
-        "SELECT path, mtime, duration, fingerprint FROM fingerprints"
+        "SELECT path, mtime, duration, fingerprint, fp_scheme FROM fingerprints"
     )
-    return {row[0]: (row[1], row[2], row[3]) for row in cursor.fetchall()}
+    entries: dict[str, Tuple[float, int | None, str | None]] = {}
+    for path, mtime, duration, fp, scheme in cursor.fetchall():
+        if scheme is None and has_silence_padding(fp):
+            continue
+        entries[path] = (mtime, duration, fp)
+    return entries
 
 
 def _gather_audio_files(root_path: str | Iterable[str]) -> List[str]:
@@ -179,6 +202,7 @@ def compute_fingerprints_parallel(
         );
         """
     )
+    _ensure_scheme_column(conn)
 
     results: list[tuple[str, int | None, str | None]] = []
     audio_files = _gather_audio_files(root_path)
@@ -263,8 +287,9 @@ def compute_fingerprints_parallel(
                     progress_callback(completed, total, path, phase)
                     continue
                 conn.execute(
-                    "INSERT OR REPLACE INTO fingerprints (path, mtime, duration, fingerprint) VALUES (?, ?, ?, ?)",
-                    (path, mtime, duration, fp_hash),
+                    "INSERT OR REPLACE INTO fingerprints (path, mtime, duration, fingerprint, fp_scheme) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (path, mtime, duration, fp_hash, FP_SCHEME_UNPADDED),
                 )
                 results.append((path, duration, fp_hash))
                 log_callback(f"Fingerprinted {path}")

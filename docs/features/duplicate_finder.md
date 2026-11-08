@@ -310,6 +310,14 @@ stale and refreshed. The practical result is dramatic: a first scan of ten thous
 tracks might take many minutes, while a follow-up scan of the same library finishes in
 seconds, because almost nothing needs to be re-analyzed.
 
+Fingerprints of short tracks made by older versions with **silence padding** (tracks
+shorter than the fingerprint window used to be padded to its length, so different
+short tracks matched each other) are not reused: a cached fingerprint from before the
+fix that ends in a run of padding silence is recomputed once; every other cached
+fingerprint stays valid, so the rest of the library is not re-analysed. (The Duplicates
+page's own fpcalc fingerprints were never padded — the padding came from the
+fingerprint generator Library Sync uses — but the check costs microseconds.)
+
 The cache is only ever a shortcut. If its file is damaged ("file is not a database"),
 it is renamed to `….corrupt-<date>` — not deleted — and a fresh cache is started; a
 row the cache cannot read is simply a cache miss. (A damaged cache used to make every
