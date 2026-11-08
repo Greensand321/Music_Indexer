@@ -1,4 +1,4 @@
-"""Playlist Generator workspace — m3u playlists, Auto-DJ, folder playlists.
+"""Playlists page — folder, tempo/energy and Auto-DJ playlists, and repair.
 
 Every mode is preview-first: a background job works out exactly which
 ``.m3u`` files would be written (and which existing ones overwritten), the
@@ -234,95 +234,329 @@ class PlaylistWorker(QtCore.QThread):
         self.done.emit(not errors, msg + ".", result)
 
 
+#: The four kinds of playlist: key, segment label, primary-button text, and
+#: the one-line description shown under the segments.
+_MODES = (
+    ("folder", "Folder", "Preview folder playlists",
+     "One playlist per album folder, named after its path (Artist_Album.m3u). "
+     "The library's own folders (Docs, Playlists, Trash, …) are skipped."),
+    ("tempo", "Tempo & energy", "Preview tempo playlists",
+     "Groups tracks by BPM and energy into Playlists/slow_low.m3u … fast_high.m3u. "
+     "Tracks outside the ranges are left out; analysis can take a while."),
+    ("autodj", "Auto-DJ", "Preview Auto-DJ playlist",
+     "Chains sonically close tracks from a seed track, so each flows into the next. "
+     "Saved as Playlists/autodj.m3u."),
+    ("repair", "Repair", "Find fixes",
+     "Re-points broken entries after files moved or were renamed, by name or the same "
+     "track in the other codec. Leave the list empty to check every playlist in Playlists/."),
+)
+
+_ROLE_DETAIL = int(QtCore.Qt.ItemDataRole.UserRole) + 1
+_ROLE_BADGE = int(QtCore.Qt.ItemDataRole.UserRole) + 2
+_ROLE_TONE = int(QtCore.Qt.ItemDataRole.UserRole) + 3
+
+
+class _PlanRowDelegate(QtWidgets.QStyledItemDelegate):
+    """A planned playlist as a glass row: the name, then a small status
+    pill ("new", "replace", "written", …) and a muted detail on the right.
+    Also used, without pills, for the repair list."""
+
+    ROW_H = 38   # 34 px row + 4 px gap
+
+    def sizeHint(self, option: QtWidgets.QStyleOptionViewItem,  # noqa: N802
+                 index: QtCore.QModelIndex) -> QtCore.QSize:
+        return QtCore.QSize(max(80, option.rect.width()), self.ROW_H)
+
+    def paint(self, p: QtGui.QPainter, option: QtWidgets.QStyleOptionViewItem,
+              index: QtCore.QModelIndex) -> None:
+        from gui.themes.glass import font, paint_pill, qcolor
+        from gui.themes.tokens import rgba
+
+        t = get_manager().current
+        m = t.material
+        selected = bool(option.state & QtWidgets.QStyle.StateFlag.State_Selected)
+        hovered = bool(option.state & QtWidgets.QStyle.StateFlag.State_MouseOver)
+        row = QtCore.QRectF(option.rect).adjusted(0, 2, -1, -2)
+        p.save()
+        try:
+            p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+            path = QtGui.QPainterPath()
+            path.addRoundedRect(row, 12, 12)
+            fill = (qcolor(m.selection) if selected
+                    else qcolor(m.pressed) if hovered else qcolor(m.hover, 0.75))
+            p.fillPath(path, fill)
+            ink = qcolor(m.selection_text if selected else t.text_primary)
+            quiet = qcolor(m.selection_text if selected else t.text_secondary)
+
+            right = row.right() - 12
+            badge = str(index.data(_ROLE_BADGE) or "")
+            if badge:
+                tone = {"accent": t.accent, "warning": t.warning, "success": t.success,
+                        "danger": t.danger}.get(str(index.data(_ROLE_TONE) or ""), t.text_secondary)
+                bf = font("micro", px=10, weight=700, tracking=0.06)
+                bm = QtGui.QFontMetrics(bf)
+                bw = bm.horizontalAdvance(badge.upper()) + 16
+                pill = QtCore.QRectF(right - bw, row.center().y() - 10, bw, 20)
+                paint_pill(p, pill, rgba(tone, 0.18), rgba(tone, 0.40))
+                p.setFont(bf)
+                p.setPen(qcolor(tone))
+                p.drawText(pill, int(QtCore.Qt.AlignmentFlag.AlignCenter), badge.upper())
+                right = pill.left() - 10
+            detail = str(index.data(_ROLE_DETAIL) or "")
+            if detail:
+                df = font("caption", tabular=True)
+                dm = QtGui.QFontMetrics(df)
+                dw = min(dm.horizontalAdvance(detail), int((right - row.left()) * 0.45))
+                p.setFont(df)
+                p.setPen(quiet)
+                p.drawText(QtCore.QRectF(right - dw, row.top(), dw, row.height()),
+                           int(QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter),
+                           dm.elidedText(detail, QtCore.Qt.TextElideMode.ElideLeft, dw))
+                right -= dw + 12
+            name = str(index.data(QtCore.Qt.ItemDataRole.DisplayRole) or "")
+            nf = font("label", weight=500)
+            nm = QtGui.QFontMetrics(nf)
+            left = row.left() + 14
+            p.setFont(nf)
+            p.setPen(ink)
+            p.drawText(QtCore.QRectF(left, row.top(), max(0.0, right - left), row.height()),
+                       int(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter),
+                       nm.elidedText(name, QtCore.Qt.TextElideMode.ElideMiddle,
+                                     int(max(0.0, right - left))))
+        finally:
+            p.restore()
+
+
+def _glass_list(name: str) -> QtWidgets.QListWidget:
+    """A transparent list of glass rows (``_PlanRowDelegate``)."""
+    view = QtWidgets.QListWidget()
+    view.setObjectName(name)
+    view.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+    view.setUniformItemSizes(True)
+    view.setMouseTracking(True)
+    view.viewport().setAttribute(QtCore.Qt.WidgetAttribute.WA_Hover, True)
+    view.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+    view.setVerticalScrollMode(QtWidgets.QAbstractItemView.ScrollMode.ScrollPerPixel)
+    view.setItemDelegate(_PlanRowDelegate(view))
+    return view
+
+
 class PlaylistsWorkspace(WorkspaceBase):
-    """Generate m3u playlists by folder, tempo/energy, or Auto-DJ."""
+    """Generate m3u playlists by folder, tempo/energy, or Auto-DJ, and repair
+    existing ones — every one previewed before anything is written.
+
+    Layout: a hero card (choose the kind, set its options, Preview), then a
+    Preview card (the planned files as glass rows with a summary, or an
+    empty state before the first run) whose Details hold the job's log."""
+
+    #: Rows the preview list shows before it scrolls.
+    _MAX_VISIBLE_ROWS = 8
 
     def __init__(self, library_path: str = "", parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(library_path, parent)
         self._worker: PlaylistWorker | None = None
         self._run_buttons: list[QtWidgets.QPushButton] = []
+        self._mode = _MODES[0][0]
+        self._row_by_path: dict[str, QtWidgets.QListWidgetItem] = {}
         # Auto-DJ analysis is the slow part; keep it for the next run in this
         # library (one worker at a time uses it, so no locking is needed).
         self._feature_caches: dict[str, AudioFeatureCache] = {}
         self._build_ui()
         self._set_busy(False)
 
+    # ── UI construction ───────────────────────────────────────────────────
+
+    def _glyph_button(self, glyph: str, tip: str, slot) -> QtWidgets.QPushButton:
+        from gui.widgets.glyphs import set_glyph
+
+        btn = QtWidgets.QPushButton()
+        btn.setFlat(True)
+        btn.setFixedSize(34, 34)
+        btn.setToolTip(tip)
+        btn.setAccessibleName(tip.rstrip("…"))
+        btn.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
+        set_glyph(btn, glyph, role="muted", size=17)
+        btn.clicked.connect(slot)
+        return btn
+
+    @staticmethod
+    def _field_label(text: str) -> QtWidgets.QLabel:
+        from gui.themes.glass import font
+
+        lbl = QtWidgets.QLabel(text)
+        lbl.setObjectName("mutedLabel")
+        lbl.setFont(font("label"))
+        return lbl
+
     def _build_ui(self) -> None:
+        from gui.pages import SegmentedTabBar
+        from gui.themes.glass import font
+        from gui.widgets.glass import GlassPanel
+        from gui.widgets.glass_parts import EmptyState, StatRow
+        from gui.widgets.glyphs import set_glyph
+
         cl = self.content_layout
 
-        cl.addWidget(self._make_section_title("Playlist Generator"))
-        cl.addWidget(self._make_subtitle(
-            "Build .m3u playlists from your library by folder structure, "
-            "tempo/energy buckets, or Auto-DJ flow. "
-            "You see the list of playlists that would be written (and which "
-            "existing ones would be replaced) before anything is saved; replaced "
-            "playlists are backed up as .bak files first."
-        ))
+        subtitle = self._make_subtitle(
+            "Build .m3u playlists from your library. You see every file before anything "
+            "is written, and replaced playlists are kept as .bak copies.")
+        cl.addWidget(subtitle)
 
-        # ── Tabs for playlist modes ────────────────────────────────────────
-        tabs = QtWidgets.QTabWidget()
+        # ── Hero: the kind of playlist, its options, Preview ──────────────
+        hero = self._make_card()
+        hero.setObjectName("headerCard")
+        hl = QtWidgets.QVBoxLayout(hero)
+        hl.setContentsMargins(16, 16, 16, 16)
+        hl.setSpacing(12)
 
-        # ── Folder Playlists tab ───────────────────────────────────────────
-        folder_widget = QtWidgets.QWidget()
-        folder_layout = QtWidgets.QVBoxLayout(folder_widget)
-        folder_layout.setContentsMargins(16, 16, 16, 16)
-        folder_layout.setSpacing(10)
+        title = QtWidgets.QLabel("Make playlists")
+        title.setObjectName("cardTitle")
+        title.setFont(font("title"))
+        hl.addWidget(title)
 
-        folder_layout.addWidget(self._make_subtitle(
-            "Create one playlist per album folder (every folder that directly "
-            "contains audio files), named after its path, e.g. Artist_Album.m3u. "
-            "The library's own folders (Docs, Playlists, Trash, Quarantine, "
-            "Not Sorted, Manual Review) are skipped."
-        ))
+        self._mode_tabs = SegmentedTabBar()
+        self._mode_tabs.setObjectName("playlistModeTabs")
+        self._mode_tabs.setAccessibleName("Kind of playlist")
+        for key, label, _button, _desc in _MODES:
+            idx = self._mode_tabs.addTab(label)
+            self._mode_tabs.setTabData(idx, key)
+        tabs_row = QtWidgets.QHBoxLayout()
+        tabs_row.addWidget(self._mode_tabs)
+        tabs_row.addStretch(1)
+        hl.addLayout(tabs_row)
 
+        self._mode_desc = QtWidgets.QLabel(_MODES[0][3])
+        self._mode_desc.setObjectName("sectionSubtitle")
+        self._mode_desc.setWordWrap(True)
+        hl.addWidget(self._mode_desc)
+
+        # Options: one tidy well per kind
+        self._options = QtWidgets.QStackedWidget()
+        self._options.addWidget(self._folder_options(GlassPanel))
+        self._options.addWidget(self._tempo_options(GlassPanel))
+        self._options.addWidget(self._autodj_options(GlassPanel))
+        self._options.addWidget(self._repair_options(GlassPanel, EmptyState))
+        hl.addWidget(self._options)
+
+        act = QtWidgets.QHBoxLayout()
+        act.setSpacing(10)
+        self._run_btn = self._make_primary_button(_MODES[0][2])
+        self._run_btn.setObjectName("primaryBtn")
+        self._run_btn.setMinimumHeight(40)
+        self._run_btn.clicked.connect(lambda: self._on_run(self._mode))
+        self._run_buttons.append(self._run_btn)
+        act.addWidget(self._run_btn)
+        self._prog_bar = QtWidgets.QProgressBar()
+        self._prog_bar.setRange(0, 0)  # indeterminate
+        self._prog_bar.setFixedSize(140, 6)
+        self._prog_bar.setTextVisible(False)
+        act.addWidget(self._prog_bar)
+        self._cancel_btn = QtWidgets.QPushButton("Cancel")
+        set_glyph(self._cancel_btn, "close", size=14)
+        self._cancel_btn.clicked.connect(self._on_cancel)
+        act.addWidget(self._cancel_btn)
+        act.addStretch(1)
+        hl.addLayout(act)
+        cl.addWidget(hero)
+
+        self._mode_tabs.currentChanged.connect(self._on_mode_changed)
+        self._on_mode_changed(0)
+
+        # ── Preview: the planned files, then what was written ─────────────
+        res = self._make_card()
+        rl = QtWidgets.QVBoxLayout(res)
+        rl.setContentsMargins(16, 16, 16, 14)
+        rl.setSpacing(10)
+        head = QtWidgets.QHBoxLayout()
+        self._results_title = self._make_card_title("Preview")
+        head.addWidget(self._results_title)
+        head.addStretch(1)
+        self._details_btn = QtWidgets.QPushButton("Details")
+        self._details_btn.setFlat(True)
+        self._details_btn.setCheckable(True)
+        self._details_btn.setToolTip("Show the job's log")
+        set_glyph(self._details_btn, "chevron_right", role="muted", size=14)
+        self._details_btn.toggled.connect(self._toggle_details)
+        head.addWidget(self._details_btn)
+        rl.addLayout(head)
+
+        self._results_stack = QtWidgets.QStackedWidget()
+        self._results_empty = EmptyState(
+            "No playlists yet",
+            "Choose a kind above and press Preview. Nothing is saved until you "
+            "confirm the list.")
+        self._results_stack.addWidget(self._results_empty)
+
+        body = QtWidgets.QWidget()
+        bl = QtWidgets.QVBoxLayout(body)
+        bl.setContentsMargins(0, 0, 0, 0)
+        bl.setSpacing(10)
+        self._stats = StatRow([("playlists", "playlists"), ("tracks", "tracks"),
+                               ("replaced", "replaced (kept as .bak)")])
+        bl.addWidget(self._stats)
+        self._results_list = _glass_list("playlistResults")
+        bl.addWidget(self._results_list)
+        self._results_note = QtWidgets.QLabel("")
+        self._results_note.setObjectName("mutedLabel")
+        self._results_note.setFont(font("label"))
+        self._results_note.setWordWrap(True)
+        bl.addWidget(self._results_note)
+        self._results_stack.addWidget(body)
+        rl.addWidget(self._results_stack)
+
+        self._log_area = QtWidgets.QPlainTextEdit()
+        self._log_area.setObjectName("logText")
+        self._log_area.setReadOnly(True)
+        self._log_area.setMinimumHeight(130)
+        self._log_area.setPlaceholderText("The job's log appears here (and in Activity).")
+        self._log_area.setVisible(False)
+        rl.addWidget(self._log_area)
+        cl.addWidget(res)
+
+        cl.addStretch(1)
+
+    def _options_well(self, panel_cls) -> tuple[QtWidgets.QWidget, QtWidgets.QFormLayout]:
+        well = panel_cls(surface="well")
+        form = QtWidgets.QFormLayout(well)
+        form.setContentsMargins(16, 12, 16, 12)
+        form.setHorizontalSpacing(14)
+        form.setVerticalSpacing(10)
+        form.setLabelAlignment(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter)
+        form.setRowWrapPolicy(QtWidgets.QFormLayout.RowWrapPolicy.DontWrapRows)
+        form.setFieldGrowthPolicy(QtWidgets.QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+        return well, form
+
+    def _folder_options(self, panel_cls) -> QtWidgets.QWidget:
+        well, form = self._options_well(panel_cls)
         self._folder_out_entry = QtWidgets.QLineEdit()
-        self._folder_out_entry.setPlaceholderText("Leave blank to use Playlists/ inside library")
-        folder_out_row = QtWidgets.QHBoxLayout()
-        folder_out_row.addWidget(QtWidgets.QLabel("Output folder:"))
-        folder_out_row.addWidget(self._folder_out_entry, 1)
-        browse_folder = QtWidgets.QPushButton("Browse…")
-        browse_folder.clicked.connect(lambda: self._browse_dir(self._folder_out_entry))
-        folder_out_row.addWidget(browse_folder)
-        folder_layout.addLayout(folder_out_row)
+        self._folder_out_entry.setPlaceholderText("Playlists/ inside the library")
+        self._folder_out_entry.setMinimumWidth(120)
+        row = QtWidgets.QHBoxLayout()
+        row.setSpacing(6)
+        row.addWidget(self._folder_out_entry, 1)
+        row.addWidget(self._glyph_button(
+            "folder", "Choose the output folder…",
+            lambda: self._browse_dir(self._folder_out_entry)))
+        form.addRow(self._field_label("Save to"), row)
+        return well
 
-        folder_btn = self._make_primary_button("🎵  Generate Folder Playlists")
-        folder_btn.clicked.connect(lambda: self._on_run("folder"))
-        self._run_buttons.append(folder_btn)
-        folder_layout.addWidget(folder_btn)
-        folder_layout.addStretch(1)
-        tabs.addTab(folder_widget, "Folder Playlists")
-
-        # ── Tempo/Energy Playlists tab ─────────────────────────────────────
-        tempo_widget = QtWidgets.QWidget()
-        tempo_layout = QtWidgets.QVBoxLayout(tempo_widget)
-        tempo_layout.setContentsMargins(16, 16, 16, 16)
-        tempo_layout.setSpacing(10)
-
-        tempo_layout.addWidget(self._make_subtitle(
-            "Group tracks into playlists by BPM and energy level "
-            "(Playlists/slow_low.m3u … fast_high.m3u). Tracks outside the ranges "
-            "below are left out. Uses librosa for feature extraction — may take a "
-            "while on large libraries."
-        ))
-
-        tform = QtWidgets.QFormLayout()
-        tform.setSpacing(8)
-
-        tempo_range_row = QtWidgets.QHBoxLayout()
+    def _tempo_options(self, panel_cls) -> QtWidgets.QWidget:
+        well, form = self._options_well(panel_cls)
         self._tempo_min = QtWidgets.QSpinBox()
         self._tempo_min.setRange(0, 300)
         self._tempo_min.setValue(0)
         self._tempo_max = QtWidgets.QSpinBox()
         self._tempo_max.setRange(0, 300)
         self._tempo_max.setValue(300)
-        tempo_range_row.addWidget(self._tempo_min)
-        tempo_range_row.addWidget(QtWidgets.QLabel("–"))
-        tempo_range_row.addWidget(self._tempo_max)
-        tempo_range_row.addWidget(QtWidgets.QLabel("BPM"))
-        tempo_range_row.addStretch(1)
-        tform.addRow("Tempo range:", tempo_range_row)
+        tempo = QtWidgets.QHBoxLayout()
+        tempo.setSpacing(8)
+        tempo.addWidget(self._tempo_min)
+        tempo.addWidget(self._field_label("to"))
+        tempo.addWidget(self._tempo_max)
+        tempo.addWidget(self._field_label("BPM"))
+        tempo.addStretch(1)
+        form.addRow(self._field_label("Tempo"), tempo)
 
-        energy_range_row = QtWidgets.QHBoxLayout()
         self._energy_min = QtWidgets.QDoubleSpinBox()
         self._energy_min.setRange(0.0, 1.0)
         self._energy_min.setSingleStep(0.05)
@@ -331,133 +565,190 @@ class PlaylistsWorkspace(WorkspaceBase):
         self._energy_max.setRange(0.0, 1.0)
         self._energy_max.setSingleStep(0.05)
         self._energy_max.setValue(1.0)
-        energy_range_row.addWidget(self._energy_min)
-        energy_range_row.addWidget(QtWidgets.QLabel("–"))
-        energy_range_row.addWidget(self._energy_max)
-        energy_range_row.addStretch(1)
-        tform.addRow("Energy range:", energy_range_row)
-        tempo_layout.addLayout(tform)
+        for spin in (self._tempo_min, self._tempo_max, self._energy_min, self._energy_max):
+            spin.setMinimumWidth(92)
+        energy = QtWidgets.QHBoxLayout()
+        energy.setSpacing(8)
+        energy.addWidget(self._energy_min)
+        energy.addWidget(self._field_label("to"))
+        energy.addWidget(self._energy_max)
+        energy.addStretch(1)
+        form.addRow(self._field_label("Energy"), energy)
+        return well
 
-        tempo_btn = self._make_primary_button("🎵  Generate Tempo Playlists")
-        tempo_btn.clicked.connect(lambda: self._on_run("tempo"))
-        self._run_buttons.append(tempo_btn)
-        tempo_layout.addWidget(tempo_btn)
-        tempo_layout.addStretch(1)
-        tabs.addTab(tempo_widget, "Tempo / Energy")
-
-        # ── Auto-DJ tab ────────────────────────────────────────────────────
-        autodj_widget = QtWidgets.QWidget()
-        autodj_layout = QtWidgets.QVBoxLayout(autodj_widget)
-        autodj_layout.setContentsMargins(16, 16, 16, 16)
-        autodj_layout.setSpacing(10)
-
-        autodj_layout.addWidget(self._make_subtitle(
-            "Build a smooth transition playlist using similarity-based track ordering. "
-            "Tracks are chained so each song is sonically close to the next. "
-            "Saved as Playlists/autodj.m3u."
-        ))
-
-        count_row = QtWidgets.QHBoxLayout()
-        count_row.addWidget(QtWidgets.QLabel("Track count:"))
+    def _autodj_options(self, panel_cls) -> QtWidgets.QWidget:
+        well, form = self._options_well(panel_cls)
         self._autodj_count = QtWidgets.QSpinBox()
         self._autodj_count.setRange(5, 500)
         self._autodj_count.setValue(20)
-        count_row.addWidget(self._autodj_count)
-        count_row.addStretch(1)
-        autodj_layout.addLayout(count_row)
+        self._autodj_count.setMinimumWidth(92)
+        count = QtWidgets.QHBoxLayout()
+        count.addWidget(self._autodj_count)
+        count.addWidget(self._field_label("tracks"))
+        count.addStretch(1)
+        form.addRow(self._field_label("Length"), count)
 
-        seed_row = QtWidgets.QHBoxLayout()
-        seed_row.addWidget(QtWidgets.QLabel("Seed track:"))
         self._autodj_seed = QtWidgets.QLineEdit()
-        self._autodj_seed.setPlaceholderText("Path to the starting track (in your library)…")
-        seed_browse = QtWidgets.QPushButton("Browse…")
-        seed_browse.clicked.connect(lambda: self._browse_file(self._autodj_seed))
-        seed_row.addWidget(self._autodj_seed, 1)
-        seed_row.addWidget(seed_browse)
-        autodj_layout.addLayout(seed_row)
+        self._autodj_seed.setPlaceholderText("The track to start from (in your library)")
+        self._autodj_seed.setMinimumWidth(120)
+        seed = QtWidgets.QHBoxLayout()
+        seed.setSpacing(6)
+        seed.addWidget(self._autodj_seed, 1)
+        seed.addWidget(self._glyph_button(
+            "file", "Choose the seed track…", lambda: self._browse_file(self._autodj_seed)))
+        form.addRow(self._field_label("Start from"), seed)
+        return well
 
-        autodj_btn = self._make_primary_button("🎵  Generate Auto-DJ Playlist")
-        autodj_btn.clicked.connect(lambda: self._on_run("autodj"))
-        self._run_buttons.append(autodj_btn)
-        autodj_layout.addWidget(autodj_btn)
-        autodj_layout.addStretch(1)
-        tabs.addTab(autodj_widget, "Auto-DJ")
+    def _repair_options(self, panel_cls, empty_cls) -> QtWidgets.QWidget:
+        well = panel_cls(surface="well")
+        lay = QtWidgets.QVBoxLayout(well)
+        lay.setContentsMargins(14, 10, 14, 12)
+        lay.setSpacing(8)
 
-        # ── Playlist Repair tab ────────────────────────────────────────────
-        repair_widget = QtWidgets.QWidget()
-        repair_layout = QtWidgets.QVBoxLayout(repair_widget)
-        repair_layout.setContentsMargins(16, 16, 16, 16)
-        repair_layout.setSpacing(10)
+        head = QtWidgets.QHBoxLayout()
+        head.setSpacing(2)
+        head.addWidget(self._field_label("Playlists to check"))
+        head.addStretch(1)
+        head.addWidget(self._glyph_button("plus", "Add playlists…", self._on_add_playlists))
+        head.addWidget(self._glyph_button(
+            "minus", "Remove the selected playlist",
+            lambda: self._repair_list.takeItem(self._repair_list.currentRow())))
+        head.addWidget(self._glyph_button("trash", "Clear the list",
+                                          lambda: self._repair_list.clear()))
+        lay.addLayout(head)
 
-        repair_layout.addWidget(self._make_subtitle(
-            "Re-scan playlists for broken paths after you've moved or renamed files. "
-            "Missing entries are matched to library tracks by name (or to the same "
-            "track in the other codec). Add playlists below, or leave the list empty "
-            "to check every playlist in the library's Playlists/ folder. You review "
-            "the fixes before anything is saved."
-        ))
+        self._repair_list = _glass_list("playlistRepairList")
+        self._repair_list.setMinimumHeight(_PlanRowDelegate.ROW_H * 2 + 4)
+        self._repair_list.setMaximumHeight(_PlanRowDelegate.ROW_H * 4 + 4)
+        self._repair_empty = empty_cls(
+            "Every playlist in Playlists/", "Add playlists to check only those.")
+        grid = QtWidgets.QGridLayout()
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.addWidget(self._repair_list, 0, 0)
+        grid.addWidget(self._repair_empty, 0, 0)
+        lay.addLayout(grid)
+        model = self._repair_list.model()
+        model.rowsInserted.connect(self._update_repair_empty)
+        model.rowsRemoved.connect(self._update_repair_empty)
+        model.modelReset.connect(self._update_repair_empty)
 
-        self._repair_list = QtWidgets.QListWidget()
-        self._repair_list.setMinimumHeight(120)
-        repair_layout.addWidget(self._repair_list)
-
-        repair_add_row = QtWidgets.QHBoxLayout()
-        repair_add_btn = QtWidgets.QPushButton("Add Playlists…")
-        repair_add_btn.clicked.connect(self._on_add_playlists)
-        repair_rem_btn = QtWidgets.QPushButton("Remove Selected")
-        repair_rem_btn.clicked.connect(
-            lambda: self._repair_list.takeItem(self._repair_list.currentRow())
-        )
-        repair_clear_btn = QtWidgets.QPushButton("Clear")
-        repair_clear_btn.clicked.connect(self._repair_list.clear)
-        self._prefer_opus_cb = QtWidgets.QCheckBox("Prefer Opus when searching for missing FLAC")
+        self._prefer_opus_cb = QtWidgets.QCheckBox("Prefer Opus when a FLAC entry is missing")
         self._prefer_opus_cb.setToolTip(
             "Checked: a missing .flac entry is pointed at the same track's .opus.\n"
             "Unchecked: a missing .opus entry is pointed at the same track's .flac."
         )
-        repair_add_row.addWidget(repair_add_btn)
-        repair_add_row.addWidget(repair_rem_btn)
-        repair_add_row.addWidget(repair_clear_btn)
-        repair_add_row.addWidget(self._prefer_opus_cb)
-        repair_add_row.addStretch(1)
-        repair_layout.addLayout(repair_add_row)
+        lay.addWidget(self._prefer_opus_cb)
+        return well
 
-        repair_run_btn = self._make_primary_button("🔧  Run Repair")
-        repair_run_btn.clicked.connect(lambda: self._on_run("repair"))
-        self._run_buttons.append(repair_run_btn)
-        repair_layout.addWidget(repair_run_btn)
-        repair_layout.addStretch(1)
-        tabs.addTab(repair_widget, "Playlist Repair")
+    # ── View state ────────────────────────────────────────────────────────
 
-        cl.addWidget(tabs)
+    def _on_mode_changed(self, index: int) -> None:
+        if not 0 <= index < len(_MODES):
+            return
+        key, _label, button, desc = _MODES[index]
+        self._mode = key
+        self._mode_desc.setText(desc)
+        self._run_btn.setText(button)
+        self._options.setCurrentIndex(index)
+        # The stack sizes to its largest page; keep only the current one's.
+        for i in range(self._options.count()):
+            page = self._options.widget(i)
+            page.setSizePolicy(QtWidgets.QSizePolicy.Policy.Preferred,
+                               QtWidgets.QSizePolicy.Policy.Preferred if i == index
+                               else QtWidgets.QSizePolicy.Policy.Ignored)
+        self._options.adjustSize()
 
-        # ── Progress + Cancel + Log ────────────────────────────────────────
-        prog_row = QtWidgets.QHBoxLayout()
-        self._prog_bar = QtWidgets.QProgressBar()
-        self._prog_bar.setRange(0, 0)  # indeterminate
-        self._prog_bar.setFixedHeight(6)
-        self._prog_bar.setTextVisible(False)
-        prog_row.addWidget(self._prog_bar, 1)
-        self._cancel_btn = QtWidgets.QPushButton("✕ Cancel")
-        self._cancel_btn.clicked.connect(self._on_cancel)
-        prog_row.addWidget(self._cancel_btn)
-        cl.addLayout(prog_row)
+    def set_mode(self, key: str) -> None:
+        """Show the options of playlist kind ``key`` (folder/tempo/autodj/repair)."""
+        for i, (k, *_rest) in enumerate(_MODES):
+            if k == key:
+                self._mode_tabs.setCurrentIndex(i)
+                self._on_mode_changed(i)
+                return
 
-        log_card = self._make_card()
-        log_layout = QtWidgets.QVBoxLayout(log_card)
-        log_layout.setContentsMargins(16, 16, 16, 16)
-        log_layout.addWidget(QtWidgets.QLabel("Log"))
-        self._log_area = QtWidgets.QPlainTextEdit()
-        self._log_area.setObjectName("logText")
-        self._log_area.setReadOnly(True)
-        self._log_area.setMinimumHeight(130)
-        self._log_area.setPlaceholderText(
-            "The app switches to the Activity Log automatically during playlist generation."
-        )
-        log_layout.addWidget(self._log_area)
-        cl.addWidget(log_card)
+    def mode(self) -> str:
+        return self._mode
 
-        cl.addStretch(1)
+    def _update_repair_empty(self, *args) -> None:
+        self._repair_empty.setVisible(self._repair_list.count() == 0)
+
+    def _toggle_details(self, on: bool) -> None:
+        from gui.widgets.glyphs import set_glyph
+
+        self._log_area.setVisible(on)
+        set_glyph(self._details_btn, "chevron_down" if on else "chevron_right",
+                  role="muted", size=14)
+
+    def _show_empty(self, title: str, message: str) -> None:
+        from gui.themes import motion
+
+        self._results_empty.set_text(title, message)
+        if self._results_stack.currentIndex() != 0:
+            self._results_stack.setCurrentIndex(0)
+            motion.reveal(self._results_empty, duration="fast")
+
+    def _show_plan(self, mode: str, plan: list) -> None:
+        """The planned files as glass rows, with the summary above them."""
+        from gui.themes import motion
+
+        self._results_list.clear()
+        self._row_by_path.clear()
+        stats = self._stats
+        if mode == "repair":
+            fixes = sum(len(i.changes) for i in plan)
+            missing = sum(len(i.unresolved) for i in plan)
+            stats.tile("playlists").set_value(len(plan))
+            stats.tile("tracks").set_label("entries re-pointed")
+            stats.tile("tracks").set_value(fixes)
+            stats.tile("replaced").set_label("still missing")
+            stats.tile("replaced").set_value(missing, tone="warning" if missing else "")
+        else:
+            replaced = sum(1 for i in plan if i.exists)
+            stats.tile("playlists").set_value(len(plan))
+            stats.tile("tracks").set_label("tracks")
+            stats.tile("tracks").set_value(f"{sum(i.entries for i in plan):,}")
+            stats.tile("replaced").set_label("replaced (kept as .bak)")
+            stats.tile("replaced").set_value(replaced, tone="warning" if replaced else "")
+        for item in plan:
+            if mode == "repair":
+                name = Path(item.path).name
+                detail = f"{len(item.changes)} fixed" + (
+                    f" · {len(item.unresolved)} missing" if item.unresolved else "")
+                badge, tone = "repair", "accent"
+            else:
+                name = self._display_path(item.path)
+                detail = f"{item.entries} track{'s' if item.entries != 1 else ''}"
+                badge, tone = ("replace", "warning") if item.exists else ("new", "accent")
+            row = QtWidgets.QListWidgetItem(name)
+            row.setToolTip(item.path)
+            row.setData(_ROLE_DETAIL, detail)
+            row.setData(_ROLE_BADGE, badge)
+            row.setData(_ROLE_TONE, tone)
+            self._results_list.addItem(row)
+            self._row_by_path[os.path.normcase(os.path.abspath(item.path))] = row
+        rows = min(len(plan), self._MAX_VISIBLE_ROWS)
+        self._results_list.setFixedHeight(rows * _PlanRowDelegate.ROW_H + 4)
+        self._results_note.setText("")
+        if self._results_stack.currentIndex() != 1:
+            self._results_stack.setCurrentIndex(1)
+            motion.reveal(self._results_stack.currentWidget(), duration="fast")
+
+    def _mark_written(self, result: dict) -> None:
+        """After the write: each row says what happened to its file."""
+        def _row(path: str):
+            return self._row_by_path.get(os.path.normcase(os.path.abspath(path)))
+
+        for path in result.get("written", []):
+            row = _row(path)
+            if row is not None:
+                row.setData(_ROLE_BADGE, "written")
+                row.setData(_ROLE_TONE, "success")
+        for path, message in result.get("errors", []):
+            row = _row(path)
+            if row is not None:
+                row.setData(_ROLE_BADGE, "failed")
+                row.setData(_ROLE_TONE, "danger")
+                row.setToolTip(f"{path}\n{message}")
 
     # ── State ─────────────────────────────────────────────────────────────
 
@@ -507,6 +798,9 @@ class PlaylistsWorkspace(WorkspaceBase):
         self._log_area.clear()
         self._log(f"Previewing {mode} playlists…", "info")
         self._status("Preparing playlists…", "busy")
+        self._results_title.setText("Preview")
+        self._show_empty("Working out the playlists…",
+                         "Nothing is written yet. Open Details to follow the job.")
 
         repair_paths = [
             self._repair_list.item(i).text()
@@ -553,18 +847,31 @@ class PlaylistsWorkspace(WorkspaceBase):
         self._set_busy(False)
 
         if not success:
-            if message.startswith("Cancelled"):
+            if worker.mode == "write":
+                # Some files failed (or the write was cut short): say which.
+                if isinstance(payload, dict):
+                    self._mark_written(payload)
+                self._results_note.setText(message)
+                self._log(message, "error")
+                self._status("Error", "error")
+            elif message.startswith("Cancelled"):
                 self._log("Cancelled — nothing was written.", "warn")
                 self._status("Cancelled", "neutral")
+                self._show_empty("Cancelled", "Nothing was written.")
             else:
                 self._log(message, "error")
                 self._status("Error", "error")
+                self._show_empty("The playlists could not be prepared", message)
             return
 
         if worker.mode == "write":
             self._log(message, "ok")
             self._log_area.appendPlainText(message)
             self._status("Done", "ok")
+            if isinstance(payload, dict):
+                self._mark_written(payload)
+            self._results_title.setText("Written")
+            self._results_note.setText(message)
             return
 
         plan = list(payload or [])
@@ -578,20 +885,28 @@ class PlaylistsWorkspace(WorkspaceBase):
             self._log(text, "info")
             self._log_area.appendPlainText(text)
             self._status("Nothing to write", "neutral")
+            self._show_empty("Nothing to write", text if worker.mode == "repair"
+                             else "No playlist came out of these settings.")
             return
 
+        self._show_plan(worker.mode, plan)
         if self._library_writes_blocked("Playlist write"):
             self._log("Another job is changing the library — nothing was written.", "warn")
             self._log_area.appendPlainText("Nothing was written (library busy).")
             self._status("Not saved", "neutral")
+            self._results_note.setText(
+                "Nothing was written: another job is changing the library. Preview again "
+                "when it has finished.")
             return
         if not self._confirm_plan(worker.mode, plan):
             self._log("Nothing was written.", "info")
             self._log_area.appendPlainText("Nothing was written.")
             self._status("Not saved", "neutral")
+            self._results_note.setText("Nothing was written.")
             return
 
         self._status("Writing playlists…", "busy")
+        self._results_note.setText("Writing…")
         self._start(
             PlaylistWorker(library_path=self._library_path, mode="write", plan=plan),
             "Write playlists",
@@ -664,6 +979,12 @@ class PlaylistsWorkspace(WorkspaceBase):
             self._set_busy(False)
             self._log("Library changed — the running playlist job was cancelled.", "warn")
             self._status("Cancelled", "neutral")
+        # A preview belongs to the library it was made for.
+        self._results_title.setText("Preview")
+        self._show_empty(
+            "No playlists yet",
+            "Choose a kind above and press Preview. Nothing is saved until you "
+            "confirm the list.")
 
     @Slot()
     def _on_add_playlists(self) -> None:
