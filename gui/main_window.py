@@ -752,6 +752,10 @@ class AlphaDEXWindow(QtWidgets.QMainWindow):
         if library and covers:
             norm = os.path.normpath(os.path.abspath(os.path.expanduser(library)))
             self._backdrop.seed_covers(norm, list(covers))
+            # The library is applied after the landing's cross-fade; the
+            # backdrop can show its wall from the first frame already
+            # (_apply_library's later set_library is then a no-op for it).
+            self._backdrop.set_library(norm)
 
     def play_directory(self, dirpath: str) -> None:
         """Switch to the Player workspace and start playing all tracks in *dirpath*."""

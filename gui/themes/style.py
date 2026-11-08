@@ -191,6 +191,37 @@ def _draw_chevron(p: QP, rect: QRF, color: str | QC, direction: str = "down",
 _draw_arrow = _draw_chevron
 
 
+# Size constants (a module table: pixelMetric runs thousands of times while
+# a window is built).
+_METRICS: dict = {
+    PM.PM_ButtonMargin:               14,
+    PM.PM_ButtonDefaultIndicator:     0,
+    PM.PM_DefaultFrameWidth:          1,
+    PM.PM_ScrollBarExtent:            10,
+    PM.PM_ScrollBarSliderMin:         32,
+    PM.PM_IndicatorWidth:             18,
+    PM.PM_IndicatorHeight:            18,
+    PM.PM_ExclusiveIndicatorWidth:    18,
+    PM.PM_ExclusiveIndicatorHeight:   18,
+    PM.PM_CheckBoxLabelSpacing:       8,
+    PM.PM_RadioButtonLabelSpacing:    8,
+    PM.PM_TabBarTabHSpace:            28,
+    PM.PM_TabBarTabVSpace:            14,
+    PM.PM_TabBarTabOverlap:           0,
+    PM.PM_TabBarBaseOverlap:          0,
+    PM.PM_ComboBoxFrameWidth:         0,
+    PM.PM_SpinBoxFrameWidth:          0,
+    PM.PM_MenuPanelWidth:             1,
+    PM.PM_MenuHMargin:                4,
+    PM.PM_MenuVMargin:                4,
+    PM.PM_ToolBarFrameWidth:          0,
+    PM.PM_ToolBarItemSpacing:         4,
+    PM.PM_SliderThickness:            20,
+    PM.PM_SliderControlThickness:     16,
+    PM.PM_SliderLength:               16,
+}
+
+
 # ── Main style class ──────────────────────────────────────────────────────────
 
 class AlphaDEXStyle(QtWidgets.QProxyStyle):
@@ -245,34 +276,8 @@ class AlphaDEXStyle(QtWidgets.QProxyStyle):
     def pixelMetric(self, metric: PM,
                     option: QtWidgets.QStyleOption | None = None,
                     widget: QtWidgets.QWidget | None = None) -> int:
-        m: dict[PM, int] = {
-            PM.PM_ButtonMargin:               14,
-            PM.PM_ButtonDefaultIndicator:     0,
-            PM.PM_DefaultFrameWidth:          1,
-            PM.PM_ScrollBarExtent:            10,
-            PM.PM_ScrollBarSliderMin:         32,
-            PM.PM_IndicatorWidth:             18,
-            PM.PM_IndicatorHeight:            18,
-            PM.PM_ExclusiveIndicatorWidth:    18,
-            PM.PM_ExclusiveIndicatorHeight:   18,
-            PM.PM_CheckBoxLabelSpacing:       8,
-            PM.PM_RadioButtonLabelSpacing:    8,
-            PM.PM_TabBarTabHSpace:            28,
-            PM.PM_TabBarTabVSpace:            14,
-            PM.PM_TabBarTabOverlap:           0,
-            PM.PM_TabBarBaseOverlap:          0,
-            PM.PM_ComboBoxFrameWidth:         0,
-            PM.PM_SpinBoxFrameWidth:          0,
-            PM.PM_MenuPanelWidth:             1,
-            PM.PM_MenuHMargin:                4,
-            PM.PM_MenuVMargin:                4,
-            PM.PM_ToolBarFrameWidth:          0,
-            PM.PM_ToolBarItemSpacing:         4,
-            PM.PM_SliderThickness:            20,
-            PM.PM_SliderControlThickness:     16,
-            PM.PM_SliderLength:               16,
-        }
-        return m.get(metric, super().pixelMetric(metric, option, widget))
+        value = _METRICS.get(metric)
+        return value if value is not None else super().pixelMetric(metric, option, widget)
 
     def sizeFromContents(self, ct: CT,
                          option: QtWidgets.QStyleOption | None,

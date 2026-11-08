@@ -78,7 +78,14 @@ def font(role: str, *, weight: int | None = None, px: int | None = None,
          tabular: bool | None = None, tracking: float | None = None) -> QtGui.QFont:
     """A QFont for a role of the type ramp: display · title · heading · body ·
     label · caption · micro · mono · stat. Keyword overrides adjust one
-    property (``tracking`` in em)."""
+    property (``tracking`` in em). Built once per combination (polishing
+    asks for the same few fonts thousands of times); callers get a copy."""
+    return QtGui.QFont(_font(role, weight, px, tabular, tracking))
+
+
+@lru_cache(maxsize=128)
+def _font(role: str, weight: int | None, px: int | None, tabular: bool | None,
+          tracking: float | None) -> QtGui.QFont:
     spec = TYPE[role]
     if tabular is not None or tracking is not None:
         from dataclasses import replace

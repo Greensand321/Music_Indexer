@@ -28,7 +28,9 @@ Performance contract (it must never stall a frame):
 * ``paintEvent`` only blits the cached pixmap (cropped to the dirty rect)
   plus the 9-slice shadows of the floating shell surfaces (the sidebar);
 * rebuilds are debounced on resize (and only happen when the size *bucket*
-  changes), and follow library, theme, accent and Settings changes.
+  changes), and follow library, theme, accent and Settings changes;
+* a new image replaces the old one at once: a cross-fade would repaint the
+  whole window (every translucent layer above) on every frame of it.
 
 Covers come from the landing's scanner (``gui.widgets.landing._CoverScan``):
 the landing hands what it found to the window (``seed_covers``), so the wall
@@ -341,9 +343,6 @@ class Backdrop(QtWidgets.QWidget):
         self._library = ""
         self._spec: BackdropSpec | None = None     # what is shown
         self._pixmap: QtGui.QPixmap | None = None
-        self._old: QtGui.QPixmap | None = None       # fading out (None: the base colour)
-        self._fading = False
-        self._fade = 1.0
         self._generation = 0
         self._worker: BackdropWorker | None = None
         self._floating: list[tuple[QtWidgets.QWidget, str]] = []
@@ -409,13 +408,13 @@ class Backdrop(QtWidgets.QWidget):
             return
         if spec.mode == "plain":
             self._cancel_worker()
-            self._show(spec, None, fade=False)
+            self._show(spec, None)
             return
         cached = _PIXMAPS.get(spec)
         if cached is not None:
             self._cancel_worker()
             _PIXMAPS.move_to_end(spec)
-            self._show(spec, cached, fade=False)
+            self._show(spec, cached)
             return
         if self._worker is not None and getattr(self._worker, "_spec", None) == spec:
             return   # already building exactly this
@@ -452,46 +451,18 @@ class Backdrop(QtWidgets.QWidget):
         if spec.mode == "art" and covers:
             remember_covers(spec.library, covers)
         if image.isNull():
-            self._show(spec, None, fade=False)
+            self._show(spec, None)
             return
         pm = QtGui.QPixmap.fromImage(image)
         _cache_pixmap(spec, pm)
-        # Fade only when art (or a first image) replaces something; theme and
-        # size changes swap at once like the rest of the window.
-        fade = self._spec is None or self._pixmap is None or (
-            self._spec.library != spec.library and spec.mode == "art")
-        self._show(spec, pm, fade=fade)
+        self._show(spec, pm)
 
-    def _show(self, spec: BackdropSpec, pm: QtGui.QPixmap | None, *, fade: bool) -> None:
-        from gui.themes import motion
-
-        old = self._pixmap
+    def _show(self, spec: BackdropSpec, pm: QtGui.QPixmap | None) -> None:
+        """Swap at once (see the module docstring: no cross-fade)."""
         self._spec = spec
         self._pixmap = pm
-        if fade and pm is not None and motion.duration("slow") > 0:
-            self._old = old
-            self._fading = True
-            self._fade = 0.0
-            motion.animate_value(self, "swap", 0.0, 1.0, self._on_fade,
-                                 duration="slow", easing="standard",
-                                 on_finished=self._on_fade_done)
-        else:
-            motion.stop(self, "swap")
-            self._old = None
-            self._fading = False
-            self._fade = 1.0
-            self.update()
+        self.update()
         self.rebuilt.emit(spec)
-
-    def _on_fade(self, value: float) -> None:
-        self._fade = float(value)
-        self.update()
-
-    def _on_fade_done(self) -> None:
-        self._old = None
-        self._fading = False
-        self._fade = 1.0
-        self.update()
 
     # ── Events ────────────────────────────────────────────────────────────
 
@@ -544,14 +515,6 @@ class Backdrop(QtWidgets.QWidget):
                 p.fillRect(r, QtGui.QColor(t.material.backdrop_base))
             else:
                 self._blit(p, self._pixmap, r)
-            if self._fading and self._fade < 1.0:
-                # Cross-fade: what was shown before, fading out on top.
-                p.setOpacity(1.0 - self._fade)
-                if self._old is not None:
-                    self._blit(p, self._old, r)
-                else:
-                    p.fillRect(r, QtGui.QColor(t.material.backdrop_base))
-                p.setOpacity(1.0)
             for widget, surface in self._floating:
                 if not widget.isVisible():
                     continue
