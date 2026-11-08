@@ -251,7 +251,36 @@ QLabel#sidebarSectionLabel {{
 
 
 /* [area:duplicates] begin */
-
+/* Find duplicates: the Scan · Review · Execute steps as a compact pill row. */
+QFrame#dupStepRow QLabel#stepActive, QFrame#dupStepRow QLabel#stepInactive {{
+    border-radius: 9px;
+    padding: 3px 10px;
+    font-size: {caption}px;
+}}
+QFrame#dupStepRow QLabel#stepActive {{
+    background: palette(highlight);
+    color: palette(highlighted-text);
+    border: 1px solid palette(link);
+    font-weight: 600;
+}}
+QFrame#dupStepRow QLabel#stepInactive {{
+    background: palette(midlight);
+    color: palette(placeholder-text);
+    border: 1px solid palette(light);
+}}
+/* The group list paints its own glass rows (a delegate): no view fill. */
+QTreeWidget#dupGroupList {{
+    background: transparent;
+    border: none;
+}}
+/* Hero card titles (title role font; cardTitle's 16 px rule would override it). */
+QLabel#dupHeroTitle {{
+    color: palette(window-text);
+}}
+/* Prototype launchers: the "not ready to test" note inside its well. */
+QLabel#experimentalNote {{
+    color: palette(window-text);
+}}
 /* [area:duplicates] end */
 
 
@@ -333,7 +362,7 @@ _THEMED_OBJECT_NAMES = frozenset({
     frozenset(),
 
     # [area:duplicates]
-    frozenset(),
+    frozenset({"dupStepRow", "dupGroupList", "dupHeroTitle", "experimentalNote"}),
 
     # [area:metadata]
     frozenset(),
