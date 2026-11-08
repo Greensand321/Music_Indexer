@@ -599,7 +599,10 @@ class IndexerWorkspace(WorkspaceBase):
 
     @Slot()
     def _on_cancel(self) -> None:
-        if self._busy():
+        # Not just while the thread runs: a worker whose thread has finished
+        # but whose result is still queued must honour the click too
+        # (_on_finished drops a preview that was cancelled this late).
+        if self._worker is not None:
             self._worker.cancel()
             self._status_lbl.setText("Cancelling…")
             self._cancel_btn.setEnabled(False)
@@ -649,6 +652,14 @@ class IndexerWorkspace(WorkspaceBase):
         self._status_lbl.setText(message)
         outcome = worker.outcome or ("ok" if success else "error")
         same_library = worker.library_path == self._library_path
+
+        if worker.mode == IndexerWorker.PREVIEW and success and worker.cancel_requested:
+            # Cancel was pressed after the worker's last cancel check, so the
+            # preview finished anyway. A preview writes nothing to the library,
+            # so honour the click: drop the result instead of showing a plan
+            # (and a "Preview Ready" box) the user just cancelled.
+            success, outcome, message = False, "cancelled", "Cancelled by user."
+            self._status_lbl.setText(message)
 
         if worker.mode == IndexerWorker.PREVIEW:
             if success and same_library:

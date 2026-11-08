@@ -204,6 +204,24 @@ def test_cancel_preview_then_rerun_immediately(make_workspace, library, qtbot, t
     assert threads.wait_all(10_000) == []
 
 
+def test_cancel_that_lands_after_the_preview_finished_still_cancels(make_workspace, library, qtbot,
+                                                                   threads):
+    """The race behind the old flaky LIB-07 run: the preview thread has
+    finished, but its result is still queued when Cancel is clicked. The click
+    must still cancel (a preview has written nothing to undo)."""
+    ws = _indexer(make_workspace, library.root)
+    qtbot.mouseClick(ws._run_btn, QtCore.Qt.MouseButton.LeftButton)
+    worker = ws._worker
+    assert worker is not None
+    assert worker.wait(30_000)            # thread done; its result not yet delivered
+    assert ws._worker is worker
+    ws._cancel_btn.click()                # emits clicked without processing queued events
+    wait_idle(qtbot, ws)
+    assert ws._plan is None
+    assert ws._statuses[-1][0] == "Cancelled"
+    assert threads.wait_all(10_000) == []
+
+
 def test_library_change_cancels_a_running_preview(make_workspace, library, qtbot, monkeypatch, threads):
     import music_indexer_api  # the module the worker will import (not a stale copy)
     started = threading.Event()
