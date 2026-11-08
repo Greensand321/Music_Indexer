@@ -1,8 +1,16 @@
-"""ThemePickerDialog and AutoThemeDialog — runtime theme selection UI."""
+"""ThemePickerPanel, ThemePickerDialog and AutoThemeDialog — runtime theme UI.
+
+The panel (Settings → Appearance) leads with **Liquid Glass**, the default
+look: its swatch, the four accents and "Reduce transparency". Below it,
+Auto, then the 14 **Classic** themes (dark and light). Everything here
+applies instantly through the ThemeManager (which persists it).
+"""
 from __future__ import annotations
 
 from gui.compat import QtCore, QtGui, QtWidgets, Signal
-from gui.themes.tokens import THEMES, DARK_THEMES, LIGHT_THEMES, ThemeTokens
+from gui.themes.tokens import (
+    ACCENTS, CLASSIC_THEMES, DARK_THEMES, GLASS_KEY, LIGHT_THEMES, THEMES, ThemeTokens,
+)
 from gui.themes.manager import get_manager
 
 
@@ -57,7 +65,18 @@ class _SwatchCard(QtWidgets.QAbstractButton):
         else:
             p.setPen(QtGui.QPen(QtGui.QColor(current.card_border), 1.0))
 
-        p.setBrush(QtGui.QColor(t.content_bg))
+        if t.is_glass:
+            # A hint of the glass look: an accent glow behind the panels.
+            glass_accent = get_manager().current.accent if current.is_glass else t.accent
+            grad = QtGui.QRadialGradient(QtCore.QPointF(card_r.right(), card_r.top()),
+                                         card_r.width())
+            glow = QtGui.QColor(glass_accent)
+            glow.setAlpha(110)
+            grad.setColorAt(0.0, glow)
+            grad.setColorAt(1.0, QtGui.QColor(t.content_bg))
+            p.setBrush(QtGui.QBrush(grad))
+        else:
+            p.setBrush(QtGui.QColor(t.content_bg))
         p.drawPath(path)
 
         # ── Preview rows (sidebar strip + content area) ───────────────────
@@ -149,6 +168,41 @@ class _SwatchCard(QtWidgets.QAbstractButton):
             p.drawLine(QtCore.QPointF(cx - 1, cy + 2.5), QtCore.QPointF(cx + 3.5, cy - 2.5))
 
         p.end()
+
+
+# ── Accent swatch ─────────────────────────────────────────────────────────────
+
+class _AccentSwatch(QtWidgets.QAbstractButton):
+    """A 28 px accent disc; the chosen one carries a ring."""
+
+    SIZE = 34
+
+    def __init__(self, key: str, name: str, colour: str,
+                 parent: QtWidgets.QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.key = key
+        self._colour = colour
+        self.setCheckable(True)
+        self.setFixedSize(self.SIZE, self.SIZE)
+        self.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
+        self.setToolTip(f"{name} accent")
+        self.setAccessibleName(f"{name} accent")
+
+    def paintEvent(self, event: QtGui.QPaintEvent) -> None:  # noqa: N802
+        t = get_manager().current
+        p = QtGui.QPainter(self)
+        try:
+            p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+            r = QtCore.QRectF(self.rect())
+            if self.isChecked():
+                p.setPen(QtGui.QPen(QtGui.QColor(t.text_primary), 2.0))
+                p.setBrush(QtCore.Qt.BrushStyle.NoBrush)
+                p.drawEllipse(r.adjusted(1.5, 1.5, -1.5, -1.5))
+            p.setPen(QtCore.Qt.PenStyle.NoPen)
+            p.setBrush(QtGui.QColor(self._colour))
+            p.drawEllipse(r.adjusted(5, 5, -5, -5))
+        finally:
+            p.end()
 
 
 # ── Section header label ──────────────────────────────────────────────────────
@@ -305,18 +359,81 @@ class ThemePickerPanel(QtWidgets.QWidget):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(16)
 
+        # Liquid Glass (the default look) with its accents
+        root.addWidget(self._make_glass_row())
+
         # Auto card (special)
         root.addWidget(self._make_auto_card())
 
-        # Dark themes
-        root.addWidget(_section_label("Dark Themes"))
-        dark_grid = self._make_swatch_grid(DARK_THEMES)
+        # The classic themes, opaque, through the same components
+        root.addWidget(_section_label("Classic themes"))
+        dark_grid = self._make_swatch_grid([k for k in DARK_THEMES if k in CLASSIC_THEMES])
         root.addLayout(dark_grid)
-
-        # Light themes
-        root.addWidget(_section_label("Light Themes"))
-        light_grid = self._make_swatch_grid(LIGHT_THEMES)
+        light_grid = self._make_swatch_grid([k for k in LIGHT_THEMES if k in CLASSIC_THEMES])
         root.addLayout(light_grid)
+
+    def _make_glass_row(self) -> QtWidgets.QWidget:
+        """The Liquid Glass swatch, its four accents and Reduce transparency."""
+        mgr = get_manager()
+        row = QtWidgets.QWidget()
+        row.setObjectName("glassRow")
+        hl = QtWidgets.QHBoxLayout(row)
+        hl.setContentsMargins(0, 0, 0, 0)
+        hl.setSpacing(18)
+
+        glass = _SwatchCard(THEMES[GLASS_KEY])
+        glass.clicked.connect(lambda checked=False: self._apply_theme(GLASS_KEY))
+        self._all_swatches.append(glass)
+        hl.addWidget(glass, 0, QtCore.Qt.AlignmentFlag.AlignTop)
+
+        col = QtWidgets.QVBoxLayout()
+        col.setSpacing(8)
+        title = QtWidgets.QLabel("Liquid Glass")
+        title.setObjectName("cardTitle")
+        desc = QtWidgets.QLabel(
+            "Translucent glass over a blurred wall of your own album covers. The default look."
+        )
+        desc.setObjectName("statusHint")
+        desc.setWordWrap(True)
+        col.addWidget(title)
+        col.addWidget(desc)
+
+        accents = QtWidgets.QHBoxLayout()
+        accents.setSpacing(10)
+        accents.addWidget(QtWidgets.QLabel("Accent"))
+        self._accent_buttons: dict[str, _AccentSwatch] = {}
+        for key, accent in ACCENTS.items():
+            sw = _AccentSwatch(accent.key, accent.name, accent.base)
+            sw.clicked.connect(lambda checked=False, k=key: self._apply_accent(k))
+            accents.addWidget(sw)
+            self._accent_buttons[key] = sw
+        accents.addStretch(1)
+        col.addLayout(accents)
+
+        self._reduce_transparency_cb = QtWidgets.QCheckBox(
+            "Reduce transparency — solid surfaces instead of glass")
+        self._reduce_transparency_cb.setToolTip(
+            "Opaque panels and cards: easier to read over busy album art, and lighter "
+            "on the graphics card. Classic themes are always opaque.")
+        self._reduce_transparency_cb.setChecked(mgr.reduce_transparency())
+        self._reduce_transparency_cb.toggled.connect(mgr.set_reduce_transparency)
+        col.addWidget(self._reduce_transparency_cb)
+        hl.addLayout(col, 1)
+        self._sync_accents()
+        return row
+
+    def _apply_accent(self, key: str) -> None:
+        """An accent belongs to Liquid Glass: choosing one shows it."""
+        mgr = get_manager()
+        mgr.set_accent(key)
+        if self._current_key != GLASS_KEY:
+            self._apply_theme(GLASS_KEY)
+        self._sync_accents()
+
+    def _sync_accents(self) -> None:
+        current = get_manager().accent()
+        for key, sw in getattr(self, "_accent_buttons", {}).items():
+            sw.setChecked(key == current)
     def _make_auto_card(self) -> QtWidgets.QWidget:
         """Build the special Auto-mode card row."""
         container = QtWidgets.QWidget()
@@ -423,6 +540,14 @@ class ThemePickerPanel(QtWidgets.QWidget):
         if key != self._current_key:
             self._current_key = key
             self._refresh_selection()
+        self._sync_accents()
+        cb = getattr(self, "_reduce_transparency_cb", None)
+        if cb is not None and cb.isChecked() != mgr.reduce_transparency():
+            was = cb.blockSignals(True)
+            cb.setChecked(mgr.reduce_transparency())
+            cb.blockSignals(was)
+        for sw in self._all_swatches:
+            sw.update()
 
     def _refresh_selection(self) -> None:
         is_auto = self._current_key == "auto"
