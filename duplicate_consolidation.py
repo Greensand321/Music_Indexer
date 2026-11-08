@@ -9,6 +9,7 @@ before executing any changes.
 from __future__ import annotations
 
 import base64
+import codecs
 import datetime
 import html
 import hashlib
@@ -18,6 +19,7 @@ import json
 import os
 import platform
 import re
+import tempfile
 import threading
 import time
 import logging
@@ -26,7 +28,7 @@ from dataclasses import dataclass, field
 from typing import Callable, Dict, Iterable, List, Mapping, MutableMapping, Optional, Sequence
 from collections import defaultdict
 
-from config import PREVIEW_ARTWORK_MAX_DIM, PREVIEW_ARTWORK_QUALITY, load_config
+from config import FORMAT_PRIORITY, PREVIEW_ARTWORK_MAX_DIM, PREVIEW_ARTWORK_QUALITY, load_config
 from utils.path_helpers import ensure_long_path
 from utils.year_normalizer import UNKNOWN_YEAR, normalize_year
 from utils.audio_metadata_reader import read_metadata, read_sidecar_artwork_bytes
@@ -47,7 +49,10 @@ else:  # pragma: no cover - optional dependency
     Image = None  # type: ignore
 
 from music_indexer_api import extract_primary_and_collabs
-from near_duplicate_detector import fingerprint_distance, _parse_fp as _parse_fingerprint
+from near_duplicate_detector import (
+    _parse_fp as _parse_fingerprint,
+    duplicate_fingerprint_distance as fingerprint_distance,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -265,13 +270,33 @@ def _metadata_cache_path_for_tracks(tracks: Sequence[Mapping[str, object]]) -> s
     return os.path.join(docs_dir, METADATA_CACHE_FILENAME)
 
 
+def _atomic_write_text(path: str, text: str) -> None:
+    """Write ``path`` via a temporary file + rename, so a crash or full disk
+    mid-write never leaves a truncated preview/cache behind."""
+    safe = ensure_long_path(path)
+    directory = os.path.dirname(safe) or "."
+    os.makedirs(directory, exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(prefix=".alphadex-", suffix=".tmp", dir=directory)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+        os.replace(tmp_path, safe)
+        tmp_path = ""
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+
+
 def _load_metadata_cache(cache_path: str) -> Dict[str, object]:
     if not cache_path or not os.path.exists(cache_path):
         return {"version": METADATA_CACHE_VERSION, "entries": {}}
     try:
         with open(cache_path, "r", encoding="utf-8") as handle:
             payload = json.load(handle)
-    except (OSError, json.JSONDecodeError):
+    except (OSError, ValueError):  # ValueError: bad JSON *or* bytes that are not UTF-8
         return {"version": METADATA_CACHE_VERSION, "entries": {}}
     if not isinstance(payload, Mapping):
         return {"version": METADATA_CACHE_VERSION, "entries": {}}
@@ -285,10 +310,11 @@ def _save_metadata_cache(cache_path: str, cache: Mapping[str, object]) -> None:
     if not cache_path:
         return
     try:
-        os.makedirs(os.path.dirname(cache_path), exist_ok=True)
-        with open(cache_path, "w", encoding="utf-8") as handle:
-            json.dump(cache, handle, indent=2)
-    except OSError:
+        # default=str: a tag value json cannot encode used to raise TypeError
+        # here, after all the work, and crash the whole plan build.
+        _atomic_write_text(cache_path, json.dumps(cache, indent=2, default=str))
+    except (OSError, TypeError, ValueError) as exc:
+        logger.warning("Could not save the duplicate metadata cache %s: %s", cache_path, exc)
         return
 
 
@@ -741,8 +767,16 @@ def _artwork_status(track: "DuplicateTrack", art_hash: int | None) -> Dict[str, 
     return {"status": "unknown", "reason": "art missing/unreadable (no artwork found)"}
 
 
+_NO_ARTWORK_STATES = {"deferred", "no artwork found", "no artwork tags"}
+
+
 def _has_artwork_error(track: "DuplicateTrack") -> bool:
-    return bool(track.artwork_error and track.artwork_error != "deferred")
+    """True when artwork could not be *read* — not when a file simply has none.
+
+    "No artwork found" counted as an error, so every group with an
+    artwork-less copy was flagged "Artwork present but unreadable".
+    """
+    return bool(track.artwork_error and track.artwork_error not in _NO_ARTWORK_STATES)
 
 
 def _load_artwork_for_track(track: "DuplicateTrack") -> None:
@@ -1063,9 +1097,14 @@ def _read_tags_and_artwork(
     return base, artwork, error, art_error, audio_props, metadata_trace
 
 
+_NOT_TAG_TEXT_KEYS = {"cover_hash", "artwork_hash"}
+
+
 def _placeholder_present(tags: Mapping[str, object]) -> bool:
     for key, value in tags.items():
-        if value is None:
+        if value is None or key in _NOT_TAG_TEXT_KEYS or _tag_value_missing(key, value):
+            # The normalised "Unknown" year means "no year tag"; it flagged
+            # every group with an undated copy as placeholder metadata.
             continue
         if isinstance(value, (list, tuple)):
             vals = value
@@ -1081,11 +1120,12 @@ def _placeholder_present(tags: Mapping[str, object]) -> bool:
 def _capture_library_state(path: str, *, quick: bool = False) -> Dict[str, object]:
     """Capture stable file attributes to detect changes between preview and execution."""
 
-    state: Dict[str, object] = {"exists": os.path.exists(path)}
+    safe = ensure_long_path(path)
+    state: Dict[str, object] = {"exists": os.path.exists(safe)}
     if not state["exists"]:
         return state
     try:
-        stat = os.stat(path)
+        stat = os.stat(safe)
         state["size"] = stat.st_size
         state["mtime"] = int(stat.st_mtime)
     except Exception as exc:  # pragma: no cover - depends on filesystem permissions
@@ -1420,6 +1460,35 @@ class ConsolidationPlan:
         return signature
 
 
+_COPY_SUFFIX_RE = re.compile(r"\s*\((\d{1,2})\)$")
+
+
+def planned_winner_rename(group: GroupPlan) -> str | None:
+    """Where the executor renames this group's winner after the losers are gone, or None.
+
+    Only a copy-number suffix — ``Song (1).flac`` — is dropped, and only when
+    the suffix-free name is exactly a loser *of this group* that will be moved
+    or deleted: i.e. the suffix only existed because that loser held the name.
+    (The executor used to strip any trailing ``(digits)`` from every winner,
+    unpreviewed, so ``Live (1986).flac`` became ``Live.flac``.)
+    """
+    stem, ext = os.path.splitext(os.path.basename(group.winner_path))
+    match = _COPY_SUFFIX_RE.search(stem)
+    if not match:
+        return None
+    trimmed = stem[: match.start()].rstrip()
+    if not trimmed:
+        return None
+    candidate = os.path.join(os.path.dirname(group.winner_path), f"{trimmed}{ext}")
+    candidate_key = os.path.normcase(os.path.abspath(candidate))
+    for loser in group.losers:
+        if os.path.normcase(os.path.abspath(loser)) != candidate_key:
+            continue
+        if group.loser_disposition.get(loser, "quarantine") in ("quarantine", "delete"):
+            return candidate
+    return None
+
+
 def _planned_actions(group: GroupPlan) -> List[Dict[str, object]]:
     actions: List[Dict[str, object]] = []
     for path, changes in group.metadata_changes.items():
@@ -1570,13 +1639,53 @@ def _expect_str_mapping(value: object, field: str) -> Dict[str, object]:
     return {str(k): v for k, v in mapping.items()}
 
 
+PLAYLIST_EXTENSIONS = (".m3u", ".m3u8")
+_PLAYLIST_FALLBACK_ENCODINGS = ("cp1252", "latin-1")
+
+
 def _iter_playlists(playlists_dir: str) -> Iterable[str]:
-    if not os.path.isdir(playlists_dir):
+    """Every ``.m3u``/``.m3u8`` under ``playlists_dir`` (``.m3u8`` used to be missed,
+    so its entries kept pointing at quarantined losers)."""
+    if not playlists_dir or not os.path.isdir(playlists_dir):
         return []
     for dirpath, _dirs, files in os.walk(playlists_dir):
-        for fname in files:
-            if fname.lower().endswith(".m3u"):
+        for fname in sorted(files):
+            if fname.lower().endswith(PLAYLIST_EXTENSIONS):
                 yield os.path.join(dirpath, fname)
+
+
+def read_playlist_lines(path: str) -> tuple[List[str], str]:
+    """``(lines, encoding)`` of a playlist, without line endings.
+
+    ``.m3u`` files made on Windows are usually cp1252, not UTF-8. Reading them
+    as UTF-8 raised ``UnicodeDecodeError``, which crashed the whole duplicate
+    scan (only ``OSError`` was caught). The encoding found here is the one a
+    rewrite must use, so the file's other entries survive byte for byte.
+    Raises ``OSError`` only when the file cannot be read.
+    """
+    with open(ensure_long_path(path), "rb") as handle:
+        data = handle.read()
+    text: str | None = None
+    encoding = "utf-8"
+    if data.startswith(codecs.BOM_UTF8):
+        try:
+            text, encoding = data[len(codecs.BOM_UTF8):].decode("utf-8"), "utf-8-sig"
+        except UnicodeDecodeError:
+            data = data[len(codecs.BOM_UTF8):]
+    if text is None:
+        for candidate in ("utf-8", *_PLAYLIST_FALLBACK_ENCODINGS):
+            try:
+                text, encoding = data.decode(candidate), candidate
+                break
+            except UnicodeDecodeError:
+                continue
+    return (text or "").splitlines(), encoding
+
+
+def playlist_write_encoding(path: str, encoding: str) -> str:
+    if path.lower().endswith(".m3u8") and encoding not in ("utf-8", "utf-8-sig"):
+        return "utf-8"
+    return encoding or "utf-8"
 
 
 def _normalize_playlist_entry(entry: str, playlist_dir: str) -> str:
@@ -1587,37 +1696,64 @@ def _normalize_playlist_entry(entry: str, playlist_dir: str) -> str:
     return os.path.normpath(os.path.join(playlist_dir, entry))
 
 
+def playlist_path_key(path: str) -> str:
+    """How a playlist entry is compared with a library path: Windows paths are
+    case-insensitive (``normcase``), so ``c:\\music\\song.mp3`` in a playlist
+    is the loser ``C:\\Music\\Song.mp3``. A no-op case fold elsewhere."""
+    return os.path.normcase(os.path.normpath(path)) if path else path
+
+
 def _playlist_rewrite_losers(
     playlists_dir: str | None,
     losers: Iterable[str],
 ) -> tuple[set[str], int, set[str]]:
     if not playlists_dir or not os.path.isdir(playlists_dir):
         return set(), 0, set()
-    loser_set = {os.path.normpath(path) for path in losers if path}
-    if not loser_set:
+    loser_by_key = {playlist_path_key(path): path for path in losers if path}
+    if not loser_by_key:
         return set(), 0, set()
     matches: set[str] = set()
     playlists_with_hits = 0
     impacted_playlists: set[str] = set()
     for playlist in _iter_playlists(playlists_dir):
         try:
-            with open(playlist, "r", encoding="utf-8") as handle:
-                lines = [ln.rstrip("\n") for ln in handle]
+            lines, _encoding = read_playlist_lines(playlist)
         except OSError:
             continue
         playlist_dir = os.path.dirname(playlist)
-        normalized_lines = {_normalize_playlist_entry(ln, playlist_dir) for ln in lines if ln}
-        hit = loser_set & normalized_lines
+        normalized_lines = {
+            playlist_path_key(_normalize_playlist_entry(ln, playlist_dir)) for ln in lines if ln
+        }
+        hit = {loser_by_key[key] for key in loser_by_key.keys() & normalized_lines}
         if hit:
             playlists_with_hits += 1
             matches.update(hit)
             impacted_playlists.add(playlist)
-            if len(matches) == len(loser_set):
-                return matches, playlists_with_hits, impacted_playlists
     return matches, playlists_with_hits, impacted_playlists
 
 
-def _infer_playlists_dir(paths: Sequence[str]) -> str | None:
+def _scan_roots(tracks: Sequence[Mapping[str, object]]) -> List[str]:
+    roots: List[str] = []
+    for raw in tracks:
+        discovery = raw.get("discovery") if isinstance(raw.get("discovery"), Mapping) else {}
+        listed = discovery.get("scan_roots") if isinstance(discovery.get("scan_roots"), list) else []
+        for root in listed:
+            if isinstance(root, str) and root and root not in roots:
+                roots.append(root)
+    return roots
+
+
+def _infer_playlists_dir(paths: Sequence[str], scan_roots: Sequence[str] = ()) -> str | None:
+    """``<library>/Playlists``: from the scan root when the caller gave one.
+
+    Falling back to the tracks' common folder found no playlists at all when
+    every track sat under one top-level folder (``Music/iTunes/...``), so no
+    playlist entry was redirected and quarantining a loser left them dangling.
+    """
+    for root in scan_roots:
+        candidate = os.path.join(root, "Playlists")
+        if os.path.isdir(candidate):
+            return candidate
     if not paths:
         return None
     try:
@@ -1637,17 +1773,15 @@ def _build_playlist_index(playlists_dir: str | None) -> Dict[str, set[str]]:
     index: Dict[str, set[str]] = {}
     for playlist in _iter_playlists(playlists_dir):
         try:
-            with open(playlist, "r", encoding="utf-8") as handle:
-                lines = [ln.rstrip("\n") for ln in handle]
+            lines, _encoding = read_playlist_lines(playlist)
         except OSError:
             continue
         playlist_dir = os.path.dirname(playlist)
         for line in lines:
-            normalized = _normalize_playlist_entry(line, playlist_dir)
+            normalized = _normalize_playlist_entry(line.strip(), playlist_dir)
             if not normalized or normalized.startswith("#"):
                 continue
-            normalized = os.path.normpath(normalized)
-            index.setdefault(normalized, set()).add(playlist)
+            index.setdefault(playlist_path_key(normalized), set()).add(playlist)
     return index
 
 
@@ -2209,15 +2343,93 @@ def _classify_context(track: DuplicateTrack) -> tuple[str, List[str]]:
     return "unknown", evidence
 
 
+def _format_rank(track: DuplicateTrack) -> int:
+    ext = (track.ext or os.path.splitext(track.path)[1]).lower()
+    if ext and not ext.startswith("."):
+        ext = f".{ext}"
+    return int(FORMAT_PRIORITY.get(ext, 0))
+
+
 def _quality_tuple(track: DuplicateTrack, context: str) -> tuple:
+    """Sort key for "which copy is better" (higher wins).
+
+    Lossless always beats lossy. Between lossless copies the bitrate only
+    measures compression (an uncompressed WAV "out-bitrates" the same audio as
+    FLAC), so resolution decides first and then the format priority from
+    ``config.FORMAT_PRIORITY`` (FLAC > WAV, as documented). Between lossy
+    copies the bitrate decides. The path breaks remaining ties deterministically.
+    """
+    if track.is_lossless:
+        return (
+            1,
+            track.sample_rate,
+            track.bit_depth,
+            track.channels,
+            _format_rank(track),
+            track.bitrate,
+            track.path.lower(),
+        )
     return (
-        1 if track.is_lossless else 0,
+        0,
         track.bitrate,
         track.sample_rate,
         track.bit_depth,
         track.channels,
+        _format_rank(track),
         track.path.lower(),
     )
+
+
+def _winner_key(track: DuplicateTrack, context: str, has_known_artwork: bool) -> tuple:
+    """Lossless first; readable cover art only decides between copies of the same class.
+
+    Artwork used to come first, so an MP3 with a cover beat the FLAC without
+    one and the lossless master was the copy quarantined (or deleted).
+    """
+    quality = _quality_tuple(track, context)
+    return (quality[0], 1 if has_known_artwork else 0, quality)
+
+
+def _file_identity(path: str) -> tuple[int, int] | None:
+    try:
+        stat = os.stat(ensure_long_path(path))
+    except OSError:
+        return None
+    if not stat.st_ino:  # some network file systems report no inode
+        return None
+    return stat.st_dev, stat.st_ino
+
+
+def _collapse_same_file_aliases(
+    tracks: Sequence[DuplicateTrack],
+) -> tuple[List[DuplicateTrack], List[str]]:
+    """Keep one path per underlying file; return ``(tracks, log notes)``.
+
+    A symlink (or hard link) to a library file fingerprints identically to it,
+    so the two were grouped as exact duplicates — and when the link won, the
+    real file was the "loser" that got quarantined or deleted, leaving the
+    kept copy a dangling link. They are one file, not duplicates: only the
+    real path (non-link, then shortest, then alphabetical) takes part.
+    """
+    by_identity: Dict[tuple[int, int], List[DuplicateTrack]] = defaultdict(list)
+    for track in tracks:
+        identity = _file_identity(track.path)
+        if identity is not None:
+            by_identity[identity].append(track)
+    dropped: set[int] = set()
+    notes: List[str] = []
+    for members in by_identity.values():
+        if len(members) < 2:
+            continue
+        ordered = sorted(members, key=lambda t: (os.path.islink(t.path), len(t.path), t.path))
+        keep = ordered[0]
+        for alias in ordered[1:]:
+            dropped.add(id(alias))
+            notes.append(
+                f"Same file reached through two paths; only {keep.path} is considered "
+                f"(ignoring alias {alias.path})."
+            )
+    return [t for t in tracks if id(t) not in dropped], notes
 
 
 def _stable_group_id(paths: Sequence[str]) -> str:
@@ -2326,6 +2538,15 @@ def _quality_rationale(winner: DuplicateTrack, runner_up: DuplicateTrack | None,
         reasons.append("Lossless encoding")
     if runner_up and winner.is_lossless and not runner_up.is_lossless:
         reasons.append(f"Lossless beats lossy ({fmt_codec(winner)} > {fmt_codec(runner_up)})")
+    if (
+        runner_up
+        and winner.is_lossless
+        and runner_up.is_lossless
+        and _format_rank(winner) > _format_rank(runner_up)
+        and (winner.sample_rate, winner.bit_depth, winner.channels)
+        == (runner_up.sample_rate, runner_up.bit_depth, runner_up.channels)
+    ):
+        reasons.append(f"Preferred lossless format at equal resolution ({fmt_codec(winner)} > {fmt_codec(runner_up)})")
     if runner_up and winner.bitrate != runner_up.bitrate:
         if winner.bitrate > runner_up.bitrate:
             reasons.append(f"Higher bitrate: {winner.bitrate} vs {runner_up.bitrate} kbps")
@@ -2768,13 +2989,26 @@ def build_consolidation_plan(
         if cancel_event.is_set():
             review_flags.append("Cancelled before normalization.")
             break
-        normalized.append(_normalize_track(raw, quick_state=True))
-        if len(normalized) >= max_candidates:
-            review_flags.append(f"Truncated candidate set to {max_candidates} items to protect runtime.")
+        if max_candidates and len(normalized) >= max_candidates:
+            message = (
+                f"Truncated candidate set to {max_candidates} items to protect runtime "
+                f"({len(raw_tracks) - len(normalized)} track(s) not checked)."
+            )
+            review_flags.append(message)
+            log(f"Warning: {message}")
             break
+        normalized.append(_normalize_track(raw, quick_state=True))
     log(f"Grouping phase: normalized {len(normalized)} tracks.")
+    normalized, alias_notes = _collapse_same_file_aliases(normalized)
+    for note in alias_notes:
+        log(note)
 
     log("Grouping phase: running duplicate clustering...")
+    # The time budget is for grouping itself: measured from the start of the
+    # build, a first scan of a large library spent it all reading tags and
+    # grouping "timed out" at its first bucket (no duplicates reported).
+    grouping_start = _now()
+    flags_before = len(review_flags)
     clusters = _cluster_duplicates(
         normalized,
         exact_duplicate_threshold=exact_duplicate_threshold,
@@ -2784,10 +3018,12 @@ def build_consolidation_plan(
         max_comparisons=max_comparisons,
         timeout_sec=timeout_sec,
         progress_callback=progress_callback,
-        start_time=start_time,
+        start_time=grouping_start,
         review_flags=review_flags,
         log_callback=log_callback,
     )
+    for flag in review_flags[flags_before:]:
+        log(f"Warning: {flag}")
     log(f"Grouping phase: clustering complete ({len(clusters)} clusters).")
 
     cluster_track_map: Dict[str, DuplicateTrack] = {}
@@ -2819,7 +3055,7 @@ def build_consolidation_plan(
     plans: List[GroupPlan] = []
     plan_placeholders = False
     plan_impacted_playlists: set[str] = set()
-    playlists_dir = _infer_playlists_dir([t.path for t in normalized])
+    playlists_dir = _infer_playlists_dir([t.path for t in normalized], _scan_roots(raw_tracks))
     playlist_index: Dict[str, set[str]] = {}
     if playlists_dir:
         log("Grouping phase: indexing playlists...")
@@ -2924,10 +3160,7 @@ def build_consolidation_plan(
             known_group_paths = {p for p in group_paths if artwork_hashes.get(p) is not None}
             quality_sorted = sorted(
                 group_tracks,
-                key=lambda t: (
-                    1 if t.path in known_group_paths else 0,
-                    _quality_tuple(t, group_contexts[t.path]),
-                ),
+                key=lambda t: _winner_key(t, group_contexts[t.path], t.path in known_group_paths),
                 reverse=True,
             )
             winner = quality_sorted[0]
@@ -3136,7 +3369,7 @@ def build_consolidation_plan(
 
             dispositions = {loser: "quarantine" for loser in losers}
             if playlist_index:
-                normalized_losers = {os.path.normpath(loser): loser for loser in losers}
+                normalized_losers = {playlist_path_key(loser): loser for loser in losers}
                 hit_norms = {
                     norm for norm in normalized_losers.keys() if norm in playlist_index
                 }
@@ -3384,8 +3617,7 @@ def export_consolidation_preview(
     if preview_settings:
         payload["preview_settings"] = dict(preview_settings)
 
-    with open(output_json_path, "w", encoding="utf-8") as f:
-        json.dump(payload, f, indent=2)
+    _atomic_write_text(output_json_path, json.dumps(payload, indent=2))
     try:
         output_size = os.path.getsize(output_json_path)
     except OSError:
@@ -3556,8 +3788,7 @@ def export_duplicate_pair_report_html(report: DuplicatePairReport, output_html_p
 
     html_lines.extend(["</body>", "</html>"])
 
-    with open(output_html_path, "w", encoding="utf-8") as handle:
-        handle.write("\n".join(html_lines))
+    _atomic_write_text(output_html_path, "\n".join(html_lines))
     return output_html_path
 
 
@@ -4559,6 +4790,14 @@ def export_consolidation_preview_html(
         html_lines.append("<div class='kv context-card-details'>")
         html_lines.append("<div class='k'>Kept file (winner)</div>")
         html_lines.append(f"<div class='v'>{_path_row(group.winner_path)}</div>")
+        renamed_to = planned_winner_rename(group)
+        if renamed_to:
+            html_lines.append("<div class='k'>Then renamed to</div>")
+            html_lines.append(
+                f"<div class='v'>{_path_row(renamed_to)}"
+                "<div class='tiny muted'>Drops the copy-number suffix once the same-named loser "
+                "has been moved out of the way.</div></div>"
+            )
         html_lines.append("<div class='k'>Group ID</div>")
         html_lines.append(f"<div class='v mono'>{esc(group.group_id)}</div>")
         html_lines.append("<div class='k'>Metadata bucket key</div>")
@@ -4976,8 +5215,7 @@ def export_consolidation_preview_html(
     )
     html_lines.append("</body></html>")
 
-    with open(ensure_long_path(output_html_path), "w", encoding="utf-8") as handle:
-        handle.write("\n".join(html_lines))
+    _atomic_write_text(output_html_path, "\n".join(html_lines))
     try:
         output_size = os.path.getsize(output_html_path)
     except OSError:

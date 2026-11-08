@@ -15,6 +15,7 @@ import numpy as np
 from near_duplicate_detector import fingerprint_distance, _parse_fp
 from simple_duplicate_finder import SUPPORTED_EXTS
 import chromaprint_utils
+from utils.reserved_folders import is_reserved_path, walk_library
 
 logger = logging.getLogger(__name__)
 
@@ -122,22 +123,14 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     )
 
 
-EXCLUDED_DIRS = {"not sorted", "playlists"}
-
-
 def _is_excluded_path(path: str, root: str) -> bool:
-    rel_path = os.path.relpath(path, root)
-    parts = {part.lower() for part in rel_path.split(os.sep)}
-    return bool(EXCLUDED_DIRS & parts)
+    """True inside a reserved top-level folder (Quarantine/, Trash/, Docs/, …)."""
+    return is_reserved_path(path, root)
 
 
 def _list_audio_files(root: str) -> list[str]:
     paths: list[str] = []
-    for base, dirnames, files in os.walk(root):
-        if _is_excluded_path(base, root):
-            dirnames[:] = []
-            continue
-        dirnames[:] = [d for d in dirnames if d.lower() not in EXCLUDED_DIRS]
+    for base, _dirnames, files in walk_library(root):
         for name in files:
             ext = os.path.splitext(name)[1].lower()
             if ext in SUPPORTED_EXTS:

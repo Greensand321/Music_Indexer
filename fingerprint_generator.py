@@ -17,6 +17,7 @@ def _with_thresh(func, *args, silence_threshold_db: float = SILENCE_THRESH, **kw
 from concurrent.futures import ProcessPoolExecutor
 import acoustid
 from utils.path_helpers import ensure_long_path
+from utils.reserved_folders import walk_library
 import audio_norm
 
 SUPPORTED_EXTS = {".flac", ".m4a", ".aac", ".mp3", ".wav", ".ogg"}
@@ -103,13 +104,36 @@ def compute_fingerprint_for_file(
         return caller_path, None, None, str(e)
 
 
+#: ``fp_scheme`` of rows written now: the audio is cut to the window, never
+#: padded (``audio_norm.normalize_for_fp`` used to pad short tracks with
+#: silence, and different short tracks then matched each other).
+FP_SCHEME_UNPADDED = 2
+
+
+def _ensure_scheme_column(conn: sqlite3.Connection) -> None:
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(fingerprints)")}
+    if "fp_scheme" not in cols:
+        conn.execute("ALTER TABLE fingerprints ADD COLUMN fp_scheme INTEGER")
+
+
 def _load_cached_entries(conn: sqlite3.Connection) -> dict[str, Tuple[float, int | None, str | None]]:
-    """Return a mapping of path -> (mtime, duration, fingerprint)."""
+    """Return a mapping of path -> (mtime, duration, fingerprint).
+
+    Rows from before ``fp_scheme`` whose print ends in padding silence are
+    left out (so those short tracks are fingerprinted again); every other
+    cached row is reused as before.
+    """
+    from near_duplicate_detector import has_silence_padding
 
     cursor = conn.execute(
-        "SELECT path, mtime, duration, fingerprint FROM fingerprints"
+        "SELECT path, mtime, duration, fingerprint, fp_scheme FROM fingerprints"
     )
-    return {row[0]: (row[1], row[2], row[3]) for row in cursor.fetchall()}
+    entries: dict[str, Tuple[float, int | None, str | None]] = {}
+    for path, mtime, duration, fp, scheme in cursor.fetchall():
+        if scheme is None and has_silence_padding(fp):
+            continue
+        entries[path] = (mtime, duration, fp)
+    return entries
 
 
 def _gather_audio_files(root_path: str | Iterable[str]) -> List[str]:
@@ -117,11 +141,9 @@ def _gather_audio_files(root_path: str | Iterable[str]) -> List[str]:
 
     if isinstance(root_path, str):
         audio_files: List[str] = []
-        for dirpath, _, files in os.walk(root_path):
-            rel_dir = os.path.relpath(dirpath, root_path)
-            if {"not sorted", "playlists"} & {p.lower() for p in rel_dir.split(os.sep)}:
-                continue
-            for fname in files:
+        # Skips every reserved top-level folder (Quarantine/, Trash/, Docs/…).
+        for dirpath, _, files in walk_library(root_path):
+            for fname in sorted(files):
                 ext = os.path.splitext(fname)[1].lower()
                 if ext in SUPPORTED_EXTS:
                     audio_files.append(os.path.join(dirpath, fname))
@@ -180,6 +202,7 @@ def compute_fingerprints_parallel(
         );
         """
     )
+    _ensure_scheme_column(conn)
 
     results: list[tuple[str, int | None, str | None]] = []
     audio_files = _gather_audio_files(root_path)
@@ -218,7 +241,13 @@ def compute_fingerprints_parallel(
         if cancel_event.is_set():
             log_callback("Cancellation requested before fingerprint scheduling")
             break
-        mtime = os.path.getmtime(ensure_long_path(path))
+        try:
+            mtime = os.path.getmtime(ensure_long_path(path))
+        except OSError as exc:  # vanished since the walk: skip it, don't abort the run
+            log_callback(f"   ! Skipped {path}: {exc}")
+            completed += 1
+            progress_callback(completed, total, path, phase)
+            continue
         cache_entry = cached.get(path)
         if cache_entry and cache_entry[2] is not None and cache_entry[0] == mtime:
             duration, fp_hash = cache_entry[1], cache_entry[2]
@@ -250,10 +279,17 @@ def compute_fingerprints_parallel(
                     if cancel_event.is_set():
                         break
                     continue
-                mtime = os.path.getmtime(ensure_long_path(path))
+                try:
+                    mtime = os.path.getmtime(ensure_long_path(path))
+                except OSError as exc:
+                    log_callback(f"   ! Not cached (file vanished): {path}: {exc}")
+                    results.append((path, duration, fp_hash))
+                    progress_callback(completed, total, path, phase)
+                    continue
                 conn.execute(
-                    "INSERT OR REPLACE INTO fingerprints (path, mtime, duration, fingerprint) VALUES (?, ?, ?, ?)",
-                    (path, mtime, duration, fp_hash),
+                    "INSERT OR REPLACE INTO fingerprints (path, mtime, duration, fingerprint, fp_scheme) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (path, mtime, duration, fp_hash, FP_SCHEME_UNPADDED),
                 )
                 results.append((path, duration, fp_hash))
                 log_callback(f"Fingerprinted {path}")
