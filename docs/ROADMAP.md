@@ -7,8 +7,10 @@ plain language so anyone can understand the state of the project at a glance. Th
 link here rather than keeping their own lists.*
 
 *Last reviewed: 2026-11-07, after the fix phase that closed about 200 bugs across
-every page of the Qt app. The per-area bug inventories (and which bug was fixed by
-which change) live in `docs/redesign/`; this page lists only what is still open.*
+every page of the Qt app; page names updated on 2026-11-08 for the adopted page
+structure (written here as **Page → Section**). The per-area bug inventories (and
+which bug was fixed by which change) live in `docs/redesign/`; this page lists only
+what is still open.*
 
 ---
 
@@ -55,29 +57,53 @@ either build what it promises or remove it in the redesign.
   cluster when the analysis finishes", works: it opens the Save cluster playlists
   preview.) Save cluster playlists' own *Minimum tracks* is the playlist-only
   counterpart of "remove small clusters".
-- **Fuzzy Finder (Utilities → Diagnostics): the metadata word-matching group,
+- **Duplicates → Fuzzy finder (Experimental): the metadata word-matching group,
   "Include pairs without fingerprints", "Skip fingerprint check", "Include
   non-matching FP pairs in review", "Send Matches to Duplicate Pair Review"**
-  *(Disabled, no backend).* The dialog is a proof of concept; whether to keep it at
-  all is an open decision (see below).
-- **Settings → Advanced tab** *(Empty).* There is also no Settings control for
-  reduced motion (config key `reduced_motion` or `ALPHADEX_REDUCED_MOTION=1`) or for
-  the mixed-codec threshold boost (editable only on the Duplicates page).
+  *(Disabled, no backend).* The dialog the section opens is a proof of concept;
+  whether to keep it at all is an open decision (see below).
+- **Settings has no control for the mixed-codec threshold boost** *(Backend ready, not
+  connected).* Duplicates → Find duplicates starts from the config key
+  (`mixed_codec_threshold_boost`) and has its own "Mixed-codec boost" field for the
+  scan at hand, but nothing in Settings saves the key. (Reduced motion now has one —
+  **Settings → Appearance → Reduce motion** — and the old Settings dialog's empty
+  Advanced tab is gone: the Settings page has three sections, Metadata services,
+  General and Appearance.)
 
 ---
 
 ## Open decisions for the owner
 
 The redesign groundwork (`docs/redesign/README.md`, section 6) lists decisions that
-are not bugs but block some cleanup: the new page structure, whether to keep the
-"delete permanently" option in Duplicates, whether to keep the three prototype
-dialogs (Fuzzy Finder, Scan Engine, Bucketing POC), which dead files may be deleted,
-the visual direction, and whether startup should skip the landing when the saved
-library is valid.
+are not bugs but block some cleanup. Several are now settled: the new page structure
+was adopted, the "delete permanently" option in Duplicates stays (behind a typed
+`DELETE`), the dead files were deleted, and the visual direction is Liquid Glass.
+Still open: whether to keep the three prototype dialogs (Fuzzy Finder, Scan Engine,
+Bucketing POC — for now they are Experimental sections of Duplicates), and whether
+startup should skip the landing when the saved library is valid.
 
 ---
 
 ## Recently completed
+
+**Liquid Glass (2026-11-08).** The look the owner chose: translucent glass surfaces over
+a blurred wall of the library's own album covers, a floating sidebar, a page header
+in place of the top bar, a floating Now Playing capsule, and section tabs as a
+segmented control. Liquid Glass is the default theme (a saved classic theme is
+switched to it once, and choosing a classic theme afterwards sticks), and **Settings
+→ Appearance** gained the accent, Reduce transparency, the backdrop choice and Reduce
+motion. Every change is listed in `docs/CONTRADICTING_UPDATES.md` §F.
+
+**The new page structure (2026-11-07).** The flat 13-entry sidebar became pages
+grouped by job — Library, Organize, Clean up, Listen, Take away — with sections inside
+a page. Similarity became **Duplicates → Compare two files**; Tag Fixer and the genre
+tools became the **Metadata** page (with **Undo changes** added later); Clustered and
+Music Graph became the **Sound Map** (Analyse · Map); Compression became **Mirror**.
+Utilities is gone: File Cleanup and Exports are pages, the Validator is Home's
+"Library health", the crash log is on **Activity**, the Opus/M4A testers are **Mirror →
+Verify the mirror**, and Pair Review and the prototypes are Duplicates sections.
+Settings is a page instead of a dialog. Home and Activity are new. The old navigation
+keys still route. See `docs/CONTRADICTING_UPDATES.md` §B.
 
 **Save cluster playlists (2026-11-08).** The Sound Map's **Save cluster playlists…**
 previews and saves one `.m3u` per cluster into a per-run folder under
@@ -112,7 +138,8 @@ headlines, so they don't get re-raised:
   about jobs that may be writing, cancels cooperatively, and can't trap you behind a
   hung job. Only one job may change library files at a time.
 - **Preview first, everywhere.** The Indexer, Library Sync, Duplicates, Tag Fixer,
-  both Genre Normalizer tabs, the Playlist Generator and File Cleanup each compute a
+  both genre tools (now Metadata → Fill genres and Normalize genres), the Playlist
+  Generator and File Cleanup each compute a
   plan, show it, ask, and then execute *exactly that plan*; a plan whose inputs or
   files changed since the preview is refused or its stale items skipped. Genre fill
   used to write with no preview at all.
@@ -128,7 +155,8 @@ headlines, so they don't get re-raised:
   Sync transfers are reversible, back up what they replace, and keep Windows letter
   case; settings saves are atomic and an unreadable settings file is backed up.
 - **The Duplicate Finder compares decoded fingerprints**, so a FLAC and its MP3 now
-  score below 0.01 instead of 0.08–0.46 (Library Sync excepted; see Known bugs).
+  score below 0.01 instead of 0.08–0.46. (Library Sync's engine got the same fix; see
+  the Library Sync entry above.)
 - **Reserved folders** have one definition (`utils/reserved_folders.py`) used by
   every scan.
 - **Themes switch in ~75 ms** instead of over a second, reach every widget, meet WCAG
@@ -137,17 +165,19 @@ headlines, so they don't get re-raised:
 - **The Player survives a missing libVLC** (the playback backend seam) and says
   "Playback unavailable" instead of pretending to play.
 - **The crash log exists** (`~/.alphadex/crash.log`, `~/.alphadex/faults.log`) and the
-  Crash Log viewer reads it. Help links point at the maintained docs.
+  app shows it (then in a Crash Log viewer; now on the **Activity** page, under
+  Problems). Help links point at the maintained docs.
 - **The test suite is green and order-independent**, and there is a headless GUI
   harness (`tests/ui/`) with a synthetic music library.
 
 **Earlier:**
 
 - **Library Sync's Export Report button** is wired — a real "📤 Export Report" button
-  in the Library Sync workspace saves HTML, JSON, or CSV reports.
-- **Metadata settings honesty** — the Settings dialog now shows Spotify and Gracenote
-  visibly but disabled, with a tooltip explaining they aren't implemented, instead of
-  silently omitting them or listing them as if they worked.
+  on the Library Sync page saves HTML, JSON, or CSV reports.
+- **Metadata settings honesty** — Settings (then a dialog, now **Settings → Metadata
+  services**) shows Spotify and Gracenote visibly but disabled, with a tooltip
+  explaining they aren't implemented, instead of silently omitting them or listing
+  them as if they worked.
 - **The Duplicate Pair Report crash is fixed.** `build_duplicate_pair_report()` was
   calling `.items()` on the list returned by `_build_metadata_buckets()`, so it
   raised `AttributeError` on every single invocation. It now looks each track's
@@ -165,10 +195,10 @@ headlines, so they don't get re-raised:
   `messagebox` — it returns the output path and the legacy GUI reports it. Both
   modules now import headlessly, which un-breaks
   `tests/test_musicbrainz_service.py` on machines without a system Tkinter.
-- **The "Open Visual Graph" button navigates.** `WorkspaceBase` gained a
-  `navigate_requested(key)` signal that the main window connects for every
-  workspace; the Clustered workspace emits it instead of showing a message box
-  telling you to click the sidebar yourself.
+- **The "Open Visual Graph" button navigates** (today it is **Open the map**, on
+  Sound Map → Analyse). `WorkspaceBase` gained a `navigate_requested(key)` signal that
+  the main window connects for every panel; the clustering panel emits it instead of
+  showing a message box telling you to click the sidebar yourself.
 - **The 3-D browser graph was generating invalid JavaScript, and is fixed.**
   `_render_html()` substituted only the `/*__CLUSTER_DATA__*/` comment, leaving
   the template's trailing `null` in place and emitting
@@ -178,14 +208,15 @@ headlines, so they don't get re-raised:
   two new tests: one asserting the injected assignment is syntactically clean and
   one asserting the loud failure. (Every other test in that module is a substring
   check, which is exactly why this shipped unnoticed.)
-- **The in-app 2-D interactive map is built and reachable.** The Music Graph
-  workspace now embeds a live scatter plot alongside the cluster legend and a track
-  details panel, instead of only launching a browser page. Pan / rectangle / lasso
+- **The in-app 2-D interactive map is built and reachable.** The map page (then
+  Music Graph, now **Sound Map → Map**) embeds a live scatter plot alongside the
+  cluster legend and a track details panel, instead of only launching a browser page. Pan / rectangle / lasso
   selection (Ctrl or Shift to add), hover to identify, click for full tags and cover
   art, click a legend row to select a whole cluster, and send a selection straight to
-  the Player or export it as CSV or `.m3u`. The four widgets that had been sitting
-  unused were substantially reworked rather than merely connected — see the report
-  in the commit for what was wrong with each.
+  the Player or export it as CSV or `.m3u`. The three widgets it uses, which had been
+  sitting unused, were substantially reworked rather than merely connected — see the
+  report in the commit for what was wrong with each. (A fourth, an in-app 3-D plot,
+  was never wired in and has since been deleted; the 3-D view is the browser page.)
 - **Cluster data is no longer misaligned when downsampled.** For libraries above
   5,000 tracks, `clustered_playlists` wrote subsetted `X_2d`/`X_3d` alongside
   *full-length* `labels` and `tracks`. That made `cluster_info.json` internally
@@ -203,9 +234,10 @@ headlines, so they don't get re-raised:
   moment a checkbox changed, and silently mixed librosa and Essentia values before
   that. The legacy MFCC+tempo/librosa combination keeps the original filename so
   existing caches still load.
-- **Canonical genre mapping is in the modern app.** The Genre Normalizer workspace
-  is now two tabs: the existing MusicBrainz gap-filler (with its two non-functional
-  controls removed) and a new "Normalize with a mapping" tab — scan raw genres, build
+- **Canonical genre mapping is in the modern app.** The Genre Normalizer (today
+  **Metadata → Fill genres** and **Metadata → Normalize genres**) became two tabs: the
+  existing MusicBrainz gap-filler (with its two non-functional controls removed) and a
+  new "Normalize with a mapping" tab — scan raw genres, build
   a raw → canonical mapping with an LLM's help, save/reload it, **preview** every file
   that would change, then apply exactly that plan. The backend
   (`controllers/normalize_controller.py`) gained `plan_genre_normalization` /
@@ -259,7 +291,7 @@ headlines, so they don't get re-raised:
 
 - **Decide the fate of the two Library Sync front-ends** *(Housekeeping).* A
   feature-flagged legacy Tkinter review panel (`library_sync_review.py`) and the
-  modern Qt workspace both exist as separate, non-shared implementations of the same
+  modern Qt page both exist as separate, non-shared implementations of the same
   review-first workflow. If the Tkinter one is no longer meant to be used, retiring
   it removes a second place bugs can hide; if it's meant to stay as a fallback, that
   should be a stated decision rather than an accident of history.
@@ -293,13 +325,11 @@ headlines, so they don't get re-raised:
   (the scan log says "duration/tempo normalization deferred"), so a sped-up radio edit
   may not match its album version.
 
-## Playlists, Clustering & the Visual Music Graph
+## Playlists, Clustering & the Sound Map
 
-The foundation and the in-app map are built; the remaining work is the editing and
-tuning layer on top of them.
-
-- **Retire the dead `clustered.py` workspace** *(Housekeeping).* It is unreachable and
-  now says so in its docstring; deleting it is one of the open decisions above.
+The foundation and the in-app map (Sound Map → Map) are built; the remaining work is
+the editing and tuning layer on top of them. (The dead `clustered.py` panel that used
+to be listed here was deleted on 2026-11-07.)
 
 - **Cluster playlists: follow-ups** *(Designed, not started).* Save cluster playlists
   (`docs/specs/cluster_playlists.md`) shipped without these, each a clean addition:
@@ -361,8 +391,8 @@ tuning layer on top of them.
   source; no work started.
 
 > The providers that **do** work today are AcoustID, MusicBrainz, and Last.fm (Last.fm
-> needs the `LASTFM_API_KEY` environment variable until the Settings bug above is
-> fixed).
+> needs a key: the one in Settings → Metadata services, or the `LASTFM_API_KEY`
+> environment variable).
 
 ## Other / housekeeping
 
@@ -394,18 +424,16 @@ tuning layer on top of them.
   made the old **`mutagen_stub/` package dead**; it was deleted on 2026-11-07. `tests/conftest.py` still stubs `pydub` when it isn't installed, and gives
   every test an isolated home folder and config path.
 
-- **A global activity indicator** *(Backend ready, not connected).* The JobRegistry
-  emits `jobs_changed(count)` for exactly this; nothing displays it yet.
-
 - **Tidal-dl sync** *(Designed, not started).* An old idea to pull music from Tidal;
   no interface or workflow exists. Dormant unless revived.
 
-- **Small loose ends** *(Designed, not started).* `Sidebar.set_badge()` is fully built
-  but never called; dead modules (`gui/widgets/splash.py`,
-  `gui/widgets/interactive_3d_scatter.py`, `gui/workspaces/clustered.py`) await the
-  delete decision above; jumping to the map automatically after a clustering run is
-  still just an idea. (The Linux-only "View Playlists" button and the broken Help link
-  are gone.)
+- **Small loose ends** *(Designed, not started).* Jumping to the map automatically
+  after a clustering run is still just an idea. (Done since this list was written: the
+  global activity indicator — the **Activity** page and the "N running" badge on the
+  sidebar, both driven by the JobRegistry's `jobs_changed` — and the deletion of the
+  dead modules `gui/widgets/splash.py`, `gui/widgets/interactive_3d_scatter.py` and
+  `gui/workspaces/clustered.py`. The Linux-only "View Playlists" button and the broken
+  Help link are gone too.)
 
 ---
 
@@ -414,13 +442,13 @@ tuning layer on top of them.
 If you've been away and want the shortest path back to momentum:
 
 1. **Fix the Known bugs first** — they are small and each one makes an existing
-   feature tell the truth (the Last.fm key and the Library Sync fingerprint metric
-   matter most).
+   feature tell the truth. (The two that mattered most, the Last.fm key and the
+   Library Sync fingerprint metric, are fixed; what is left is legacy-app only.)
 2. **Decide the open questions** in `docs/redesign/README.md` §6; several cleanups
    (dead files, prototype dialogs, the disabled controls) wait on them.
 3. **Library Sync bulk flagging and persistent sessions** remain the main friction in
    the app's strongest workflow.
-4. **Treat the Visual Music Graph's deeper interactivity** — live re-tuning, in-map
+4. **Treat the Sound Map's deeper interactivity** — live re-tuning, in-map
    editing, the suggestion engine — as the big, deliberate project it always was.
 5. **Everything under "Other / housekeeping" is safe to ignore** until you're already
    touching the relevant file.
