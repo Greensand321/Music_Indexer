@@ -464,3 +464,25 @@ def test_report_lists_orphans_and_stale_counts(tmp_path):
     assert "Orphaned files in the mirror: 1" in text
     assert "&lt;gone&gt;.mp3" in text and "<gone>" not in text
     assert "older than their changed source: 1 (0 updated)" in text
+
+
+def test_an_unreadable_source_folder_suppresses_the_orphan_list(tmp_path, monkeypatch):
+    """Its mirror files would all look orphaned (and a prune would delete them)."""
+    src = tmp_path / "src"
+    _write(src / "Readable" / "a.mp3")
+    dst = tmp_path / "dst"
+    _write(dst / "Locked" / "b.mp3")  # mirrored earlier; its source folder is unreadable now
+    real_walk = os.walk
+
+    def walk(top, *args, **kwargs):
+        if os.path.normcase(str(top)) == os.path.normcase(str(src)) and kwargs.get("onerror"):
+            kwargs["onerror"](PermissionError(13, "Permission denied", str(src / "Locked")))
+        yield from real_walk(top, *args, **kwargs)
+
+    monkeypatch.setattr(mirror.os, "walk", walk)
+    summary = mirror.mirror_library(str(src), str(dst), False)
+
+    assert summary["orphan_files"] == []
+    assert summary["orphan_scan"].startswith("skipped")
+    assert summary["copied"] == 1 and summary["errors"] == 1
+    assert "Could not read this folder" in summary["error_files"][0][1]
