@@ -34,6 +34,11 @@ When a title reader is supplied (the GUI passes one that reads tags), a file
 whose own title tag already ends with the "artifact" is skipped: the suffix
 is part of the real title.
 
+A track's per-file artwork sidecar (``Song (1).mp3.artwork`` / ``.cover`` /
+``.jpg``, as the readers and the duplicate executor use them) is renamed with
+it, as its own row of the plan, so the cover stays attached; it is only
+renamed if its track was.
+
 This module is Qt-free so it can be tested and reused without the GUI.
 """
 from __future__ import annotations
@@ -49,6 +54,10 @@ from datetime import datetime
 from typing import Callable, Iterable
 
 from utils.reserved_folders import DOCS, walk_library
+
+#: Per-track artwork files, named ``<track file name><suffix>`` (see
+#: ``utils.audio_metadata_reader.SIDECAR_ARTWORK_SUFFIXES``).
+SIDECAR_SUFFIXES: tuple[str, ...] = (".artwork", ".cover", ".jpg")
 
 AUDIO_EXTS = frozenset({".mp3", ".flac", ".m4a", ".aac", ".ogg", ".wav", ".opus"})
 
@@ -93,6 +102,8 @@ class RenameItem:
     rule: str
     status: str = STATUS_RENAME
     note: str = ""
+    #: For an artwork sidecar: the track it belongs to (renamed only after it).
+    parent: str | None = None
 
     @property
     def is_rename(self) -> bool:
@@ -197,8 +208,34 @@ def build_cleanup_plan(
         elif len(by_target[collision_key(item.dst)]) > 1:
             item.status = STATUS_COLLISION
             item.note = "several files would get this name"
-    plan.items = proposals
+    plan.items = _with_sidecars(proposals, folder_names)
     return plan
+
+
+def _with_sidecars(
+    proposals: list[RenameItem], folder_names: dict[str, set[str]]
+) -> list[RenameItem]:
+    """``proposals`` with each renamed track's artwork sidecars right after it.
+
+    Without this a cleaned ``Song.mp3`` lost its ``Song (1).mp3.artwork``
+    cover (the readers look for ``Song.mp3.artwork``).
+    """
+    items: list[RenameItem] = []
+    for item in proposals:
+        items.append(item)
+        if not item.is_rename:
+            continue
+        siblings = folder_names.get(os.path.dirname(item.src), set())
+        for suffix in SIDECAR_SUFFIXES:
+            side_src = item.src + suffix
+            if os.path.basename(side_src).casefold() not in siblings:
+                continue
+            side = RenameItem(side_src, item.dst + suffix, "artwork sidecar", parent=item.src)
+            if os.path.lexists(side.dst) or os.path.basename(side.dst).casefold() in siblings:
+                side.status = STATUS_COLLISION
+                side.note = "an artwork file with the new name already exists"
+            items.append(side)
+    return items
 
 
 def collision_key(path: str) -> str:
@@ -308,7 +345,11 @@ def execute_cleanup_plan(
                 result.cancelled = True
                 _append(log, {"type": "cancelled"})
                 break
-            if not os.path.exists(item.src):
+            if item.parent is not None and item.parent not in result.renamed:
+                outcome = "skipped: its track was not renamed"
+                result.failed.append((item.src, outcome))
+                _append(log, {"type": "skipped", "old": item.src, "new": item.dst, "reason": outcome})
+            elif not os.path.exists(item.src):
                 outcome = "skipped: source no longer exists"
                 result.failed.append((item.src, outcome))
                 _append(log, {"type": "skipped", "old": item.src, "new": item.dst, "reason": outcome})
@@ -331,7 +372,10 @@ def execute_cleanup_plan(
                 else:
                     outcome = "renamed"
                     result.renamed[item.src] = item.dst
-                    _append(log, {"type": "rename", "old": item.src, "new": item.dst})
+                    record = {"type": "rename", "old": item.src, "new": item.dst}
+                    if item.parent is not None:
+                        record["sidecar_of"] = item.parent
+                    _append(log, record)
             if on_item is not None:
                 on_item(item, outcome)
     return result
@@ -353,16 +397,29 @@ class UndoPlan(CleanupPlan):
 
 
 def _read_log(log_path: str) -> list[dict]:
-    with open(log_path, encoding="utf-8") as handle:
+    """The log's records; damaged lines are skipped, never fatal.
+
+    A line cut short by a crash, a line that is not a JSON object, a rename
+    record without both names, or bytes that are not UTF-8 (an edited log)
+    used to raise out of "Undo Last Cleanup".
+    """
+    with open(log_path, encoding="utf-8", errors="replace") as handle:
         records = []
         for line in handle:
             line = line.strip()
             if not line:
                 continue
             try:
-                records.append(json.loads(line))
+                record = json.loads(line)
             except ValueError:
                 continue  # a line cut short by a crash
+            if not isinstance(record, dict):
+                continue
+            if record.get("type") in ("rename", "undo") and not (
+                isinstance(record.get("old"), str) and isinstance(record.get("new"), str)
+            ):
+                continue
+            records.append(record)
         return records
 
 
@@ -406,7 +463,7 @@ def latest_undoable_log(library_root: str) -> str | None:
         try:
             if _pending_undo(_read_log(path)):
                 return path
-        except OSError:
+        except (OSError, ValueError):
             continue
     return None
 
@@ -414,7 +471,8 @@ def latest_undoable_log(library_root: str) -> str | None:
 def plan_undo(log_path: str) -> UndoPlan:
     """Plan (but do not perform) undoing the renames recorded in ``log_path``.
 
-    Newest rename first. Nothing on disk changes.
+    Newest rename first; an artwork sidecar comes right after its track and
+    is only restored if the track is. Nothing on disk changes.
     """
     records = _read_log(log_path)
     header = next((r for r in records if r.get("type") == "header"), {})
@@ -422,11 +480,25 @@ def plan_undo(log_path: str) -> UndoPlan:
         os.path.dirname(os.path.abspath(log_path))
     )
     plan = UndoPlan(library_root=library_root, log_path=log_path)
-    pending = list(reversed(_pending_undo(records)))
+    newest_first = list(reversed(_pending_undo(records)))
+    tracks = [r for r in newest_first if not isinstance(r.get("sidecar_of"), str)]
+    track_olds = {r["old"] for r in tracks}
+    sidecars_of: dict[str, list[dict]] = {}
+    for rec in newest_first:
+        parent = rec.get("sidecar_of")
+        if isinstance(parent, str):
+            if parent in track_olds:
+                sidecars_of.setdefault(parent, []).append(rec)
+            else:
+                tracks.append(rec)  # its track was restored already: on its own
+    pending: list[tuple[dict, str | None]] = []
+    for rec in tracks:
+        pending.append((rec, None))
+        pending.extend((side, rec["new"]) for side in sidecars_of.get(rec["old"], []))
     plan.scanned = len(pending)
     by_target: dict[str, list[RenameItem]] = {}
-    for rec in pending:
-        item = RenameItem(src=rec["new"], dst=rec["old"], rule="undo")
+    for rec, parent in pending:
+        item = RenameItem(src=rec["new"], dst=rec["old"], rule="undo", parent=parent)
         if not os.path.exists(item.src):
             item.status = STATUS_COLLISION
             item.note = "the renamed file is no longer there"
@@ -472,7 +544,9 @@ def execute_undo(
                 result.cancelled = True
                 _append(log, {"type": "undo_cancelled"})
                 break
-            if not os.path.exists(item.src):
+            if item.parent is not None and item.parent not in result.renamed:
+                outcome = "skipped: its track was not restored"
+            elif not os.path.exists(item.src):
                 outcome = "skipped: the renamed file is no longer there"
             else:
                 try:

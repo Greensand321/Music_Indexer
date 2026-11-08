@@ -28,6 +28,14 @@ def validate_soundvault_structure(root_path):
     """
     errors = []
 
+    # No folder at all: "" used to be joined onto the working directory (so
+    # a "By Artist/" there made it "valid") and None raised a TypeError.
+    if root_path is None or not str(root_path).strip():
+        return False, ["No library folder was selected."]
+    root_path = str(root_path)
+    if not os.path.isdir(root_path):
+        return False, [f"The folder does not exist (or is not a folder): {root_path}"]
+
     # Case A: does root_path directly contain the indexed layout?
     if _has_layout(root_path):
         return True, []
