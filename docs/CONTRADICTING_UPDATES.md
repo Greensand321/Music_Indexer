@@ -516,3 +516,31 @@ short muted line saying what it is for, and buttons use painted glyphs instead o
   - The "Track Details" title became an empty state until a track is hovered or pinned.
 - **Legend**: the colour dot is the show/hide toggle (still exposed as `.checkbox`).
 - **Wizard**: the thin progress bar became step pills.
+
+### G3. Metadata
+- **Tag Fixer scope**:
+  - **Was**: "every supported audio file under the library" (`docs/features/tag_fixer.md`).
+  - **Is**: the whole library or one folder inside it. Reserved folders and folders outside the library are
+    refused. The database and the change log stay the library's.
+- **Normalize genres**:
+  - The "1 · 2 · 3 · 4" numbered steps, which the redesign page map once held up as a pattern, are removed.
+  - A hero card holds the inputs and **Preview changes**; a plan card holds Apply.
+  - Mappings to `["invalid"]` / `null` show as a red **Drop** pill. A file whose genres would all be dropped shows
+    "All dropped".
+- **Undo changes**:
+  - The undo button is **dangerBtn** (was primaryBtn), because it overwrites tags.
+  - The list column "Changes" → "Tags".
+- **Tag Fixer labels**:
+  - "Scan for Tag Issues" → **Find tag fixes**;
+  - "Apply Selected" → **Apply N changes**;
+  - "Select All / Deselect All" → **Tick all / Untick all**;
+  - "Fix fields:" → **Show**.
+  - `docs/features/tag_fixer.md` still uses the old labels.
+- **Counts**: the Tag Fixer summary and Normalize's "N of M tagged files would change (…)" sentence → stat tiles.
+  The status lines keep only the explanation.
+- **Columns**: Metadata's tables stretch their columns and elide the middle of the text, so nothing scrolls
+  sideways at 900 px. **Column widths can no longer be dragged.**
+- **Row separators** (Metadata only): one continuous hairline per row, drawn by a delegate, instead of the style's
+  per-cell line.
+- **Genres, first load**: "Library changed — preview again" appears only when there was a plan or a lookup to drop.
+- **Motion**: switching between Fill and Normalize cross-fades. Since R1 it had been an instant swap.
