@@ -409,8 +409,10 @@ class PlaylistsWorkspace(WorkspaceBase):
         hl.setContentsMargins(16, 16, 16, 16)
         hl.setSpacing(12)
 
+        # The hero title (20/650): a plain label, so the cardTitle role's
+        # 16 px rule doesn't override the title font.
         title = QtWidgets.QLabel("Make playlists")
-        title.setObjectName("cardTitle")
+        title.setObjectName("playlistHeroTitle")
         title.setFont(font("title"))
         hl.addWidget(title)
 
