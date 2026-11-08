@@ -10,7 +10,11 @@ from typing import Dict, Iterable, List, Optional, Tuple
 from utils.path_helpers import ensure_long_path
 from utils.text_decoding import decode_tag_bytes
 from utils.year_normalizer import normalize_year
-from utils.opus_metadata_reader import read_opus_metadata
+from utils.opus_metadata_reader import (
+    _decode_coverart_payload,
+    _decode_picture_payload,
+    read_opus_metadata,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -281,6 +285,24 @@ def _extract_cover_payloads(audio) -> List[bytes]:
             for pic in wmp:
                 data = getattr(pic, "value", None)
                 if data:
+                    payloads.append(data)
+
+        # Ogg Vorbis / Opus (and other Vorbis-comment containers) carry covers
+        # as METADATA_BLOCK_PICTURE: a base64 FLAC picture block. Nothing read
+        # it here, so every OGG/Opus cover — including the ones the duplicate
+        # executor embeds — looked missing. COVERART is the older raw-base64
+        # form. (FLAC's own picture blocks are ``audio.pictures`` above; a
+        # payload already found there is not listed twice.)
+        for key, decode in (
+            ("metadata_block_picture", _decode_picture_payload),
+            ("coverart", _decode_coverart_payload),
+        ):
+            values = _lookup(key)
+            if not values:
+                continue
+            for value in values if isinstance(values, (list, tuple)) else [values]:
+                data = decode(str(value))
+                if data and data not in payloads:
                     payloads.append(data)
 
     return payloads
