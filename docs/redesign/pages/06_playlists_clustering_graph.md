@@ -25,6 +25,21 @@ Auto-DJ paths cannot run here.
 ## Pages
 
 ### Playlist Generator (`gui/workspaces/playlists.py`, class `PlaylistsWorkspace`)
+
+> **R2 (Liquid Glass, 2026-11-08).** The audit below predates the fixes (preview-first writes,
+> Cancel, ranges and Prefer Opus read, reserved folders skipped; see the bug table). The page now
+> reads: one muted purpose line (no "Playlist Generator" heading: the page header says
+> Playlists); a hero card **Make playlists** with a segmented control for the kind (Folder ·
+> Tempo & energy · Auto-DJ · Repair), a one-line description, that kind's options in a well, and
+> one primary **Preview** button (its text names the kind) with the busy bar and Cancel beside
+> it. The four emoji "Generate" buttons became that one button (`_run_buttons` lists it). A
+> **Preview** card shows an empty state before the first run, then the planned files as glass
+> rows (pills: new / replace / written / failed; track counts) under a stat row (playlists,
+> tracks, replaced; for Repair: entries re-pointed, still missing); cancel, "nothing to write"
+> and errors show there too. The job log moved behind the card's **Details** toggle. Glyph
+> buttons with tooltips replace the text and emoji buttons. Behaviour is unchanged: preview,
+> confirmation dialog, `.bak` backups, library-write lock, Auto-DJ feature cache.
+
 - **Intent:** write `.m3u` playlists by simple rules (folder, tempo/energy bucket, Auto-DJ chain) and repair existing playlists whose paths broke.
 - **When the user comes here / entry points:** sidebar key `playlists` ("Playlists", 🎵), Ctrl+7. Nothing else navigates here.
 - **Primary flow:** pick one of four tabs → (optional) set output folder / seed / track count / playlist list → click the tab's primary button → worker runs → log lines → done. **No preview and no confirmation at any point.** Every mode writes (or overwrites) `.m3u` files directly.

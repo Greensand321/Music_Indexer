@@ -8,6 +8,50 @@ This area lets you listen to your library without leaving AlphaDEX. The **Player
 
 The original intent (still visible in the 235-line first Qt version, `player_106bd0e.py`) was an *audition tool* "used for quick validation during duplicate review and similarity inspection". Today no Duplicates or Similarity screen can send tracks to the Player. The only playback backend is libVLC through python-vlc. With it missing the page still acts as if it is playing, and with python-vlc installed but libVLC missing the whole main window fails to build. `gui/audio_preview.py` is used only by the legacy Tkinter app.
 
+## R2 (Liquid Glass, 2026-11-08): the bar is the only transport
+
+The audit below describes the page before the redesign; every bug in its table is fixed (see
+`docs/redesign/README.md`). The R2 restyle then changed the page's shape:
+
+- **No transport on the page.** The seek bar, ⏮ ▶ ⏭ ■, shuffle, repeat and volume are gone from
+  the Player page. The Now Playing capsule is the transport everywhere:
+  - shuffle and repeat are glyph toggles beside prev/next on the capsule (repeat still cycles
+    Off → Track → All; Track shows a small "1", an on-state also gets an accent dot);
+  - **Stop was dropped.** Pause stops the sound, Previous after 3 s restarts the track, and Clear
+    (queue card) unloads everything; modern players have no Stop, and the capsule has no room for
+    a sixth button at the minimum width. `_on_stop()` still exists and is what the end of the
+    queue, Clear and a failed track use;
+  - the capsule mirrors what the player can do (`transport_changed(available, can_play, reason)`):
+    without a backend its controls are disabled and the reason is in their tooltips.
+- **The Player page pins the capsule** (`transport_pinned`): on that page it shows even before
+  anything has played, idle ("Nothing playing" or "Playback unavailable"), so the page is never
+  without a transport. Elsewhere it still appears only once something plays (R1's rule: an empty
+  transport floating over another page would cover content and offer nothing to do).
+- **Width tiers** keep the capsule inside its 880 px / window − 40 width: *full* (inline volume),
+  *compact* (volume in a popup behind the speaker), *narrow* (the times move into the seek bar's
+  tooltip, gaps tighten). Every control stays reachable in every tier; at the 900 px minimum
+  window the capsule is ~620 px wide and uses the narrow tier.
+- **Library card**: the table is a transparent item view on a glass card (34 px rows, muted 12 px
+  header, tabular # and time, no grid). The playing track's row is tinted with the accent and its
+  # cell shows a play (or pause) glyph. The card itself carries the blurred cover of the playing
+  track (the old `_BgArtWidget`, which painted an opaque block, is now `_LibraryCard`). Search is a
+  glass pill with the search glyph; Reload and Open file are glyph buttons; the status line and
+  the "30 s preview" toggle sit in the card's footer. Narrow tables hide Album, then # (both stay
+  searchable).
+- **Side column**: the cover carousel is glass album tiles (radius 20, painted shadow, inset ring;
+  a faint well with a music glyph when there is no art; neighbours only when the queue has them),
+  shown only when the column has room for it *and* a usable queue. The queue and Recently played
+  are glass rows; the queue card's header holds glyph buttons for add selected, load M3U, save
+  M3U and clear.
+- **Playback unavailable** is a quiet notice row under the page's purpose line (warning glyph,
+  the reason), plus the idle capsule.
+- Tracks without embedded art now use the folder's cover (`cover.jpg`, `folder.jpg`, …, the same
+  names as the landing) in the capsule, the carousel and the card.
+- New public API: `volume()`, `set_shuffle()`, `set_repeat()`, `cycle_repeat()`,
+  `transport_state()`, `is_playing()`; signals `shuffle_changed`, `repeat_changed`,
+  `transport_changed`, `transport_pinned`. The main window wires them in its existing
+  Player ↔ capsule block.
+
 ## Pages
 
 ### Player workspace (`gui/workspaces/player.py`, class `PlayerWorkspace`)
@@ -23,7 +67,7 @@ The original intent (still visible in the 235-line first Qt version, `player_106
   2. Rows stream into the table in adaptive batches (50–500). The search box filters on Title/Artist/Album.
   3. Double-click a row, or right-click → "Play now": `_play_directly(path)`. This plays outside the queue (`_direct_row`) and leaves the queue alone.
   4. "+ Add Selected" or right-click "Add to queue" → `_add_paths_to_queue`. Double-click a queue row → `_play_current()`.
-  5. Transport: Prev / Play-Pause / Next / Stop / Shuffle / Repeat (Off → Track → All), seek slider, volume slider.
+  5. Transport: Prev / Play-Pause / Next / Stop / Shuffle / Repeat (Off → Track → All), seek slider, volume slider. *(R2: all on the capsule; Stop dropped.)*
   6. When a track ends (`_tick_position` polls VLC state every 400 ms): a direct-played track hands over to the queue; otherwise the queue advances according to repeat and shuffle.
   7. M3U: "Load M3U" replaces the queue and plays. "Save Queue as M3U…" and right-click "Save selection as M3U…" write a `#EXTM3U` file of absolute paths.
   - Nothing here changes audio files, so the preview-first rule doesn't apply to playback. The only file writes are the M3U save (QFileDialog acts as the confirmation) and a `Playlists/` folder created *before* that dialog (PLY-19).
@@ -33,7 +77,7 @@ The original intent (still visible in the 235-line first Qt version, `player_106
   - Writes only `.m3u` files (default folder `<library>/Playlists`). No config keys: volume, repeat, shuffle, 30s-preview, recently played and the queue are all lost on restart.
   - Signals out: `now_playing_changed(str, str, str, object)`, `playback_state_changed(bool)`, `position_changed(int, int)`, and `log_message` from the base class.
   - Called by the main window: `_on_play_pause`, `play_next`, `play_prev`, `seek_to_ms`, `set_volume`, `set_keyboard_mode`, `kb_target`, `kb_lib_*`, `_preview_next`, `_restart_current`.
-  - The main window also reaches into `player_ws._vol_slider` directly (`main_window.py:156-159`).
+  - The main window also reaches into `player_ws._vol_slider` directly (`main_window.py:156-159`). *(Fixed earlier: it uses `volume_changed`; R2 removed the page slider.)*
 - **Backend dependencies:**
   - `python-vlc`: `vlc.Instance()` and `media_player_new()`, all on the GUI thread, all calls synchronous.
   - `utils.audio_metadata_reader.read_metadata_from_mutagen` / `read_metadata`: on the scanner thread for the table, but **on the GUI thread** for every queued or handed-over track (`_load_row` in `_play_directly`, `_play_current`'s callers, `load_tracks_and_play`, `_add_paths_to_queue`) and for the hover popup (`show_for` reads tags *and* cover synchronously).
@@ -72,7 +116,7 @@ The original intent (still visible in the 235-line first Qt version, `player_106
 - **Overlaps:**
   - M3U creation duplicates the Playlists workspace and the Graph's own M3U export.
   - "Open folder" (`_open_in_explorer`) duplicates Graph's `_on_reveal`.
-  - The Player's transport duplicates the Now Playing bar (two seek sliders, two volume sliders, two play buttons on screen at once).
+  - The Player's transport duplicates the Now Playing bar (two seek sliders, two volume sliders, two play buttons on screen at once). *(R2: resolved, the bar is the only transport.)*
   - The library scan repeats `_StatsWorker`'s rglob in `main_window.py` and the Indexer's walk; nothing is shared or cached.
 - **Redesign notes:**
   - **Direct play vs queue are two hidden modes.** Prev and Next only ever act on the queue, so after a library double-click Next jumps to some unrelated queue item, or does nothing. Pick one model ("Play now" = insert at queue head and play; "Up next") and show it.
@@ -91,7 +135,7 @@ The original intent (still visible in the 235-line first Qt version, `player_106
   - **Threads:** monkeypatch `gui.workspaces.player._load_row` (the scanner and every queue add use it) and `utils.audio_metadata_reader.read_metadata` (art) to make them slow or instant. Wait for `ws._scan_finished` *and* `not ws._lib_scanner.isRunning()`.
     - At teardown, wait on `_lib_scanner`, `_art_loader`, `_prev_art_loader`, `_next_art_loader` and `_sel_art_loader`, or the test process aborts.
   - **Timing constants:** `player._HIGHLIGHT_DURATION_MS` / `_HIGHLIGHT_START_MS` are read at call time, so they can be monkeypatched to tens of ms.
-  - **Handles:** no objectNames except `transportBar` and `trackHoverPopup`. Tests have to use attributes: `_lib_table`, `_search`, `_queue_list`, `_recent_list`, `_play_btn`, `_prev_btn`, `_next_btn`, `_stop_btn`, `_shuffle_btn`, `_repeat_btn`, `_highlight_chk`, `_seek_slider`, `_vol_slider`, `_np_title`, `_np_artist`, `_status_lbl`, `_vlc_status_lbl`, `_covers`, `_bg_art`, `_hover_popup`, `_pos_timer`, `_highlight_timer`. The redesign should add objectNames.
+  - **Handles** *(R2: `transportBar` and the page's transport attributes are gone; objectNames `playerLibraryCard`, `playerLibraryTable`, `playerSearch`, `playerQueueCard`, `playerQueueList`, `playerRecentList`, `playerNowPlayingCard`, `playerNotice`, `playerSide`; drive transport through the capsule, see `tests/ui/player_helpers.make_player_with_bar`)*: no objectNames except `transportBar` and `trackHoverPopup`. Tests have to use attributes: `_lib_table`, `_search`, `_queue_list`, `_recent_list`, `_play_btn`, `_prev_btn`, `_next_btn`, `_stop_btn`, `_shuffle_btn`, `_repeat_btn`, `_highlight_chk`, `_seek_slider`, `_vol_slider`, `_np_title`, `_np_artist`, `_status_lbl`, `_vlc_status_lbl`, `_covers`, `_bg_art`, `_hover_popup`, `_pos_timer`, `_highlight_timer`. The redesign should add objectNames.
 
 ### Now Playing bar (`gui/widgets/now_playing_bar.py`, class `NowPlayingBar`, objectName `nowPlayingBar`)
 - **Intent:** Keep transport (prev/play/next, seek, volume) and "what's playing" in view from every workspace, and host the Keyboard Mode toggle.
@@ -112,10 +156,10 @@ The original intent (still visible in the 235-line first Qt version, `player_106
 - **Decorative / dead controls:**
   - Clicks on the seek-slider groove, the mouse wheel and arrow keys move the knob but emit nothing. Seek snaps back; volume visibly changes without changing loudness (PLY-09).
   - The play button's tooltip says "[Space]", but Space only works while the Player page is visible.
-- **Overlaps:** a full duplicate of the Player page's transport row.
+- **Overlaps:** a full duplicate of the Player page's transport row. *(R2: resolved.)*
 - **Redesign notes:**
-  - Make the bar the single transport.
-  - Add a "no backend" state.
+  - Make the bar the single transport. *(R2: done.)*
+  - Add a "no backend" state. *(R2: done: disabled controls, the reason in tooltips, "Playback unavailable".)*
   - Show the keyboard-mode state somewhere other than a tiny pill.
   - Its tooltip only describes the *queue* meaning of the arrows, while the default target is the *library*, where ↓/→/← mean something else.
   - Stop/Clear should collapse or reset the bar.
