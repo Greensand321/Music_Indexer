@@ -118,6 +118,68 @@ Status legend: **Done** (in the code now) · **Pending owner** (decision needed;
   "compares the compressed fingerprint text" and listed that as a known bug. The decoded metric was already
   ported, so that text was stale and is corrected.
 
+### A15. Short tracks are no longer padded with silence before fingerprinting — **Done**
+- **Was**: `audio_norm.normalize_for_fp` padded any track shorter than the fingerprint window (120 s) with
+  silence. The old `test_padding_short_track` required this.
+- **Is**: the window is cut to the track, never padded.
+- **Why**: measured with real Chromaprint, two *unrelated* 5 s clips scored 0.011–0.014 (under the 0.02
+  exact-duplicate threshold). 20 s clips scored about 0.05 and 40 s clips about 0.1, both under Library Sync's
+  0.2. So intros, skits and interludes could be matched to each other as duplicates.
+- **Still open**: fingerprints already cached were made padded and stay that way until those files are
+  fingerprinted again. Targeted invalidation of short-track entries is being handled with the duplicate-finder
+  audit.
+
+### A16. M4A track and disc numbers read as "3/12", not the integer 3 — **Done**
+- `test_audio_metadata_reader.py` asserted an integer. Every other format already returned "N/T", and the M4A
+  totals were being lost.
+
+### A17. Mirror: playlists are rewritten, stale files detected, orphans offered for removal — **Done**
+- **Was**: "all other formats copied unchanged" (page subtitle and info label). Existing destination files were
+  skipped as "already exists" forever. There was no backend check that the folders don't overlap. The mirror
+  never deleted anything.
+- **Is**:
+  - Copied playlists have their FLAC entries pointed at the converted `.opus`. The file is otherwise
+    byte-exact.
+  - A mirrored file older than its changed source is "stale". On the page, **Update mirror files whose
+    source has changed** is checked by default, so stale files are redone. Unchecked, they are kept and
+    reported.
+  - Files left in the mirror after their source was deleted or renamed are listed as orphans. **Remove N
+    orphaned file(s)…** deletes them only after a confirm, only inside the mirror, and logs every outcome.
+  - The backend refuses the same folder, a destination inside the source, *and* a source inside the
+    destination. The page previously allowed the last of these.
+  - A run removes its own temporary files left by a killed earlier run.
+  - A destination folder whose symlink or junction points outside the mirror, or into the source, is refused.
+- **Undo**: `utils/opus_library_mirror.py`. The page default is `_update_cb` in
+  `gui/workspaces/compression.py` (the backend default is off).
+
+### A18. `update_genres.py` (command line) is preview-first — **Done**
+- **Was**: its docstring said the CLI "writes as it goes". Each file was written as soon as its lookup
+  returned.
+- **Is**: it lists every planned change, asks (or takes `--yes`), then writes exactly that list and logs to
+  `Docs/`. A file whose genres can't be read is never written.
+
+### A19. File Cleanup renames artwork sidecars with their track — **Done**
+- **Was**: only audio files were renamed, so `Song (1).jpg` was left behind when `Song (1).mp3` became
+  `Song.mp3`.
+- **Is**: a sidecar (`.jpg`/`.cover`/`.artwork`) is its own preview row. It is renamed only if its track is,
+  and undone with it. (Album artwork going to `Trash/` during indexing is unchanged; see A8.)
+
+### A20. Playlist engine edge cases — **Done**
+- `autodj_playlist(n <= 0)` returns `[]` instead of `[seed]` (the page's minimum is 5).
+- `bucket_by_tempo_energy` returns a new `failed` key. A NaN tempo or energy is a failed analysis instead of
+  landing in "fast/high".
+- One undecodable track no longer aborts an Auto-DJ run. A track listed twice is used once.
+- **New on the Playlists page**: Auto-DJ keeps each track's analysis for the next run in the same library.
+  A file whose size or mtime changed is analysed again.
+
+### A21. Tag text that isn't UTF-8 is no longer guessed as UTF-16 — **Done**
+- `b"Caf\xe9"` used to decode as CJK characters. It is now UTF-8, then UTF-16 only with a BOM, then cp1252,
+  then Latin-1 (`utils/text_decoding.py`).
+
+### A22. A failed genre write records why — **Done**
+- `apply_genre_changes` now logs the writer's reason in the change log (for example a file open in another
+  program), not just "write failed".
+
 ## B. Structure that changed (adopted IA) — **Done**
 
 ### B1. New page structure replaces the 13-page sidebar

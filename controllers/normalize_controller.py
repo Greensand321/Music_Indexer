@@ -251,9 +251,11 @@ def _default_read_tags(path: str) -> Dict[str, object]:
 
 
 def _default_writer(path: str, genres: Sequence[str]) -> bool:
-    from update_genres import update_genre_tag
+    """Write the genres; raise with the reason on failure (logged by the caller)."""
+    from update_genres import write_genre_tag
 
-    return bool(update_genre_tag(path, list(genres)))
+    write_genre_tag(path, list(genres))
+    return True
 
 
 def _default_writable_check(path: str) -> Optional[str]:
