@@ -194,3 +194,14 @@ def test_controls_stay_disabled_without_a_plot(make_workspace, tmp_path, monkeyp
 def test_legend_has_room_for_several_rows(make_workspace, tmp_path):
     ws, _lib = _graph(make_workspace, tmp_path, n=12, n_clusters=6)
     assert ws._legend.minimumHeight() >= 200
+
+
+def test_empty_map_points_at_the_analyse_tab(make_workspace, tmp_path):
+    """The data layer still says "Run Clustered Playlists"; on the Sound Map
+    that step is the Analyse tab."""
+    lib = tmp_path / "Lib"
+    lib.mkdir()
+    graph = make_workspace("graph", library_path=lib)
+    text = graph._status.text()
+    assert "No cluster data" in text and "Analyse tab" in text
+    assert "Clustered Playlists" not in text

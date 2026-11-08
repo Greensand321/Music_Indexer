@@ -278,51 +278,32 @@ class AutoThemeDialog(QtWidgets.QDialog):
         self.accept()
 
 
-# ── ThemePickerDialog ─────────────────────────────────────────────────────────
+# ── ThemePickerPanel ──────────────────────────────────────────────────────────
 
-class ThemePickerDialog(QtWidgets.QDialog):
-    """Main theme picker: swatch grid with all 14 themes + Auto option."""
+class ThemePickerPanel(QtWidgets.QWidget):
+    """Swatch grid with all 14 themes + the Auto option. Changes apply
+    instantly. Embedded in Settings → Appearance; ``ThemePickerDialog`` wraps
+    it in a window."""
 
     theme_applied = Signal(str)   # key or "auto"
 
     def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Choose Theme")
-        self.setModal(False)          # allow interacting with the main window
-        self.setMinimumWidth(680)
-        self.setWindowFlags(
-            self.windowFlags() & ~QtCore.Qt.WindowType.WindowContextHelpButtonHint
-        )
-
         mgr = get_manager()
         self._current_key = "auto" if mgr.is_auto() else mgr.current.key
         self._all_swatches: list[_SwatchCard] = []
 
         self._build_ui()
         self._refresh_selection()
+        # Follow switches made elsewhere (another picker, Auto's day/night flip).
+        mgr.theme_changed.connect(self._on_theme_changed)
 
     # ── Build ─────────────────────────────────────────────────────────────
 
     def _build_ui(self) -> None:
         root = QtWidgets.QVBoxLayout(self)
-        root.setContentsMargins(24, 24, 24, 20)
+        root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(16)
-
-        # Title row
-        title = QtWidgets.QLabel("Choose Theme")
-        title_font = title.font()
-        title_font.setPointSize(14)
-        title_font.setBold(True)
-        title.setFont(title_font)
-
-        subtitle = QtWidgets.QLabel("Changes apply instantly")
-        subtitle.setObjectName("mutedLabel")
-
-        title_row = QtWidgets.QVBoxLayout()
-        title_row.setSpacing(2)
-        title_row.addWidget(title)
-        title_row.addWidget(subtitle)
-        root.addLayout(title_row)
 
         # Auto card (special)
         root.addWidget(self._make_auto_card())
@@ -336,15 +317,6 @@ class ThemePickerDialog(QtWidgets.QDialog):
         root.addWidget(_section_label("Light Themes"))
         light_grid = self._make_swatch_grid(LIGHT_THEMES)
         root.addLayout(light_grid)
-
-        # Close button
-        btn_row = QtWidgets.QHBoxLayout()
-        btn_row.addStretch()
-        close_btn = QtWidgets.QPushButton("Close")
-        close_btn.clicked.connect(self.close)
-        btn_row.addWidget(close_btn)
-        root.addLayout(btn_row)
-
     def _make_auto_card(self) -> QtWidgets.QWidget:
         """Build the special Auto-mode card row."""
         container = QtWidgets.QWidget()
@@ -445,12 +417,68 @@ class ThemePickerDialog(QtWidgets.QDialog):
 
     # ── Selection refresh ─────────────────────────────────────────────────
 
+    def _on_theme_changed(self, _tokens=None) -> None:
+        mgr = get_manager()
+        key = "auto" if mgr.is_auto() else mgr.current.key
+        if key != self._current_key:
+            self._current_key = key
+            self._refresh_selection()
+
     def _refresh_selection(self) -> None:
         is_auto = self._current_key == "auto"
         self._auto_select_btn.setText("✓ Active" if is_auto else "Select")
         self._auto_select_btn.setEnabled(not is_auto)
         for sw in self._all_swatches:
             sw.setSelected(not is_auto and sw.tokens.key == self._current_key)
+
+
+
+# ── ThemePickerDialog ─────────────────────────────────────────────────────────
+
+class ThemePickerDialog(QtWidgets.QDialog):
+    """``ThemePickerPanel`` in its own non-modal window (the app itself shows
+    the panel in Settings → Appearance)."""
+
+    theme_applied = Signal(str)   # key or "auto"
+
+    def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Choose Theme")
+        self.setModal(False)          # allow interacting with the main window
+        self.setMinimumWidth(680)
+        self.setWindowFlags(
+            self.windowFlags() & ~QtCore.Qt.WindowType.WindowContextHelpButtonHint
+        )
+        root = QtWidgets.QVBoxLayout(self)
+        root.setContentsMargins(24, 24, 24, 20)
+        root.setSpacing(16)
+
+        title = QtWidgets.QLabel("Choose Theme")
+        title_font = title.font()
+        title_font.setPointSize(14)
+        title_font.setBold(True)
+        title.setFont(title_font)
+        subtitle = QtWidgets.QLabel("Changes apply instantly")
+        subtitle.setObjectName("mutedLabel")
+        title_row = QtWidgets.QVBoxLayout()
+        title_row.setSpacing(2)
+        title_row.addWidget(title)
+        title_row.addWidget(subtitle)
+        root.addLayout(title_row)
+
+        self.panel = ThemePickerPanel(self)
+        self.panel.theme_applied.connect(self.theme_applied)
+        root.addWidget(self.panel)
+        # Names callers used before the panel was split out.
+        self._auto_pair_label = self.panel._auto_pair_label
+        self._all_swatches = self.panel._all_swatches
+
+        btn_row = QtWidgets.QHBoxLayout()
+        btn_row.addStretch()
+        close_btn = QtWidgets.QPushButton("Close")
+        close_btn.clicked.connect(self.close)
+        btn_row.addWidget(close_btn)
+        root.addLayout(btn_row)
 
 
 # ── Convenience launcher ──────────────────────────────────────────────────────

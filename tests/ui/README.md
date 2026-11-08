@@ -39,8 +39,12 @@ def test_example(main_window, library, dialogs, threads, motion, qtbot):
     ...
 ```
 
-* `main_window`: a shown `AlphaDEXWindow` with no library selected.
-* `make_workspace(key, library_path=...)`: one workspace on its own (keys from `gui.main_window._WORKSPACE_MAP`).
+* `main_window`: a shown `AlphaDEXWindow` with no library selected. It opens on Home.
+  `main_window._workspaces[panel_key]` is a panel (the old workspace keys still work),
+  `main_window._pages[page_key]` a page; `current_page()` / `current_panel()` say what is
+  on screen. Navigate with `_on_nav_changed("page/section")` (or any key from
+  `gui/navigation.py`), or `select_page(page_key)` as the sidebar does.
+* `make_workspace(key, library_path=...)`: one panel on its own (keys from `gui.main_window._WORKSPACE_MAP`).
 * `library` / `synthetic_library`: a fresh copy of the standard synthetic library from `tests/library_factory.py`:
   an MP3 album, a FLAC album, a cross-codec duplicate, M4A/OGG/Opus tracks, an untagged file, an artist-and-title-only file,
   non-audio leftovers and an `.m3u`. Build custom libraries with `library_factory.build_library(root, [TrackSpec(...)])`.

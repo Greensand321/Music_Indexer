@@ -341,7 +341,7 @@ class ClusteringWizardDialog(QtWidgets.QDialog):
         layout = QtWidgets.QVBoxLayout(page)
 
         intro = QtWidgets.QLabel(
-            "A run saves the cluster data used by the Music Graph and the 3D view "
+            "A run saves the cluster data used by the Map and the 3D view "
             "(in the library's Docs/ folder) and, when the scores can be computed, "
             "offers a quality report. Nothing in your library is modified."
         )
@@ -358,16 +358,16 @@ class ClusteringWizardDialog(QtWidgets.QDialog):
             cb.setEnabled(False)
             layout.addWidget(cb)
         self._create_playlists_cb.setToolTip(
-            "Not available yet. Export a cluster from the Music Graph instead "
+            "Not available yet. Export a cluster from the Map instead "
             "(click it in the legend, then “Export playlist…”)."
         )
         self._generate_report_cb.setToolTip("Always offered when the scores can be computed.")
-        self._open_graph_cb.setToolTip("Use “Open Visual Graph” on the Results tab.")
+        self._open_graph_cb.setToolTip("Use “Open the map” on the Results tab.")
 
         layout.addWidget(self._hint(
-            "• Playlists: export any cluster or selection from the Music Graph\n"
+            "• Playlists: export any cluster or selection from the Map\n"
             "• Report: “View Quality Report” on the Results tab\n"
-            "• Graph: “Open Visual Graph” on the Results tab"
+            "• Map: “Open the map” on the Results tab"
         ))
 
         layout.addStretch()

@@ -205,7 +205,26 @@ class GenresWorkspace(WorkspaceBase):
         tabs.addTab(self._build_fill_tab(), "Fill from MusicBrainz")
         tabs.addTab(self._build_normalize_tab(), "Normalize with a mapping")
         cl.addWidget(tabs, 1)
+        self._tabs = tabs
         self._refresh_library_state()
+
+    # ── Sections (Metadata page: "Fill genres" / "Normalize genres") ─────
+
+    SECTIONS = ("fill", "normalize")
+
+    def set_section(self, view: str) -> None:
+        """Show the Fill (``"fill"``) or Normalize (``"normalize"``) tool."""
+        if view in self.SECTIONS:
+            self._tabs.setCurrentIndex(self.SECTIONS.index(view))
+
+    def current_section(self) -> str:
+        return self.SECTIONS[max(self._tabs.currentIndex(), 0)]
+
+    def set_section_tabs_visible(self, visible: bool) -> None:
+        """Hidden when a page's section tabs switch between the two tools."""
+        self._tabs.tabBar().setVisible(visible)
+        # No pane frame either: without its tabs it would frame nothing.
+        self._tabs.setDocumentMode(not visible)
 
     @staticmethod
     def _mono_font() -> QtGui.QFont:

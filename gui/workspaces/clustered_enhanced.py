@@ -1,8 +1,8 @@
-"""Enhanced Clustered Playlists workspace with wizard and interactive results.
+"""Sound Map → Analyse: the clustering panel (wizard and interactive results).
 
 Analysis only: a run writes the feature cache, ``Docs/cluster_info.json`` and
 ``Docs/cluster_graph.html``. It does not write playlists; clusters are
-exported as playlists from the Music Graph.
+exported as playlists from the Sound Map's Map section (``graph.py``).
 """
 from __future__ import annotations
 
@@ -233,6 +233,10 @@ class ClusterWorker(QtCore.QThread):
 class EnhancedClusteredWorkspace(WorkspaceBase):
     """Enhanced workspace with wizard and interactive results."""
 
+    # Emitted whenever the latest result changes (a run finished, or the
+    # results were cleared), so the Sound Map page can enable its actions.
+    result_changed = Signal()
+
     def __init__(self, library_path: str = "", parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(library_path, parent)
         self._worker: ClusterWorker | None = None
@@ -256,11 +260,11 @@ class EnhancedClusteredWorkspace(WorkspaceBase):
         cl = self.content_layout
 
         # Title and intro
-        cl.addWidget(self._make_section_title("Clustered Playlists"))
+        cl.addWidget(self._make_section_title("Analyse your music"))
         cl.addWidget(self._make_subtitle(
             "Analyse your tracks' audio (tempo, timbre, energy and, if you choose, harmony, "
             "brightness and rhythm density) and group similar tracks with K-Means or "
-            "HDBSCAN. Explore the groups on the Music Graph, where you can play a cluster "
+            "HDBSCAN. Then explore the groups on the Map, where you can play a cluster "
             "or export it as a playlist. Nothing in your library is modified."
         ))
 
@@ -411,8 +415,8 @@ class EnhancedClusteredWorkspace(WorkspaceBase):
         lines.extend([
             "",
             "Output:",
-            "  Cluster data for the Music Graph and the 3D view, plus a quality report.",
-            "  Playlists are not written automatically: export a cluster from the Music Graph.",
+            "  Cluster data for the Map and the 3D view, plus a quality report.",
+            "  Playlists are not written automatically: export a cluster from the Map.",
         ])
 
         self._config_display.setPlainText("\n".join(lines))
@@ -436,7 +440,7 @@ class EnhancedClusteredWorkspace(WorkspaceBase):
             return
 
         self._last_run_config = copy.deepcopy(config)
-        self._current_result = None
+        self._set_result(None)
 
         self._show_progress_panel()
 
@@ -534,10 +538,10 @@ class EnhancedClusteredWorkspace(WorkspaceBase):
         self._clear_results()
 
         if success:
-            self._current_result = result
+            self._set_result(result)
             self._show_results_panel(result)
             self._status("Clustering complete", "ok")
-            self._log("Clustering complete — open the Music Graph to explore it.", "ok")
+            self._log("Clustering complete — open the map to explore it.", "ok")
         elif message == "Cancelled":
             self._show_placeholder("Clustering was cancelled. No cluster data was written.")
             self._status("Cancelled", "neutral")
@@ -594,7 +598,7 @@ class EnhancedClusteredWorkspace(WorkspaceBase):
         self._results_layout.addWidget(summary_card)
 
         hint = QtWidgets.QLabel(
-            "Playlists are not created automatically. Open the Music Graph, click a "
+            "Playlists are not created automatically. Open the map, click a "
             "cluster in its legend (or lasso a region) and use “Export playlist…”."
         )
         hint.setObjectName("statusHint")
@@ -608,12 +612,28 @@ class EnhancedClusteredWorkspace(WorkspaceBase):
             report_btn.clicked.connect(lambda: self._show_quality_report(result))
             button_layout.addWidget(report_btn)
 
-        graph_btn = QtWidgets.QPushButton("📊 Open Visual Graph")
+        graph_btn = QtWidgets.QPushButton("📊 Open the map")
         graph_btn.clicked.connect(self._open_graph)
         button_layout.addWidget(graph_btn)
 
         button_layout.addStretch(1)
         self._results_layout.addLayout(button_layout)
+
+    # ── Latest result (read by the Sound Map page's actions) ──────────────
+
+    def _set_result(self, result: dict | None) -> None:
+        self._current_result = result
+        self.result_changed.emit()
+
+    def quality_report_available(self) -> bool:
+        """True when the latest run has scores to report."""
+        result = self._current_result or {}
+        return "silhouette_score" in (result.get("metrics") or {})
+
+    def show_quality_report(self) -> None:
+        """Show the latest run's quality report (no-op without one)."""
+        if self.quality_report_available():
+            self._show_quality_report(self._current_result)
 
     def _show_quality_report(self, result: dict) -> None:
         """Show cluster quality report dialog."""
@@ -627,8 +647,9 @@ class EnhancedClusteredWorkspace(WorkspaceBase):
             dialog.deleteLater()
 
     def _open_graph(self) -> None:
-        """Open Visual Music Graph workspace."""
-        self._log("Opening Visual Music Graph...", "info")
+        """Switch to the Sound Map's Map section (the main window routes the
+        old "graph" key there)."""
+        self._log("Opening the map…", "info")
         self.navigate_requested.emit("graph")
 
     # ── Library changes ───────────────────────────────────────────────────
@@ -642,5 +663,5 @@ class EnhancedClusteredWorkspace(WorkspaceBase):
             self._set_busy(False)
             self._log("Library changed — the running clustering job was cancelled.", "warn")
             self._status("Cancelled", "neutral")
-        self._current_result = None
+        self._set_result(None)
         self._show_placeholder("Run Quick Start or the Advanced configuration to see results here.")

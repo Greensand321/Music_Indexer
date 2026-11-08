@@ -12,7 +12,7 @@ class WorkspaceBase(QtWidgets.QWidget):
     Provides:
       - log_message(str, level)  signal routed to the LogDrawer
       - status_changed(str)      signal for the status chip
-      - navigate_requested(key)  signal asking the main window to switch workspace
+      - navigate_requested(key)  signal asking the main window to switch page/section
       - A scroll-area wrapper so content can grow freely
       - Helper: _make_card() — returns a styled QFrame card
       - Helper: _make_card_title(text) — bold card section heading
@@ -22,9 +22,11 @@ class WorkspaceBase(QtWidgets.QWidget):
 
     log_message = Signal(str, str)   # (message, level)
     status_changed = Signal(str, str)  # (text, colour)
-    # Emitted with a _WORKSPACE_MAP key when a workspace wants the main window
-    # to navigate elsewhere (e.g. "open this result in the Music Graph").
-    # Workspaces never switch themselves; the main window owns navigation.
+    # Emitted with a navigation key (a panel key from _WORKSPACE_MAP, a page
+    # or section key, or "page/section"; see gui/navigation.py) when a
+    # workspace wants the main window to navigate elsewhere (e.g. "graph":
+    # open this result on the Sound Map's Map). Workspaces never switch
+    # themselves; the main window owns navigation.
     navigate_requested = Signal(str)
     # Emitted with (paths, label) to hand a set of tracks to the Player. Same
     # rule as above: the workspace asks, the main window routes.

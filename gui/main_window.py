@@ -1,4 +1,13 @@
-"""AlphaDEX main window — Option A layout: Sidebar + Workspace + Log drawer."""
+"""AlphaDEX main window — Sidebar + page stack + Now Playing bar + Log drawer.
+
+Navigation follows the information architecture in ``gui/navigation.py``:
+sidebar groups → pages → sections. The workspace classes are *panels*;
+``_init_workspaces`` builds every panel once (``self._workspaces[panel_key]``,
+signals wired as before), and ``_init_pages`` composes them into pages
+(``self._pages[page_key]``, ``gui/pages.py``) that the stack shows.
+``_on_nav_changed(key)`` accepts page keys, section keys, ``"page/section"``
+and the old per-panel keys (``"graph"``, ``"similarity"``, ``"tools"``, …).
+"""
 from __future__ import annotations
 
 import os
@@ -7,56 +16,74 @@ from pathlib import Path
 
 from gui.compat import QtCore, QtGui, QtWidgets, Signal, Slot
 from gui.themes.manager import get_manager
+from gui import navigation
+from gui.pages import SectionedPage, SoundMapPage
 from gui.widgets.top_bar import TopBar
-from gui.widgets.sidebar import NAV_STRUCTURE, Sidebar
+from gui.widgets.sidebar import Sidebar
 from gui.widgets.log_drawer import LogDrawer
 from gui.widgets.now_playing_bar import NowPlayingBar
 
-# ── Workspace imports ─────────────────────────────────────────────────────────
+# ── Panel imports ─────────────────────────────────────────────────────────────
+from gui.workspaces.home import HomeWorkspace
 from gui.workspaces.indexer import IndexerWorkspace
 from gui.workspaces.library_sync import LibrarySyncWorkspace
+from gui.workspaces.tools import ExportsWorkspace, FileCleanupWorkspace
 from gui.workspaces.duplicates import DuplicatesWorkspace
 from gui.workspaces.similarity import SimilarityWorkspace
+from gui.workspaces.launchers import (
+    BucketingWorkspace, FuzzyFinderWorkspace, PairReviewWorkspace, ScanEngineWorkspace,
+)
 from gui.workspaces.tag_fixer import TagFixerWorkspace
 from gui.workspaces.genres import GenresWorkspace
-from gui.workspaces.playlists import PlaylistsWorkspace
+from gui.workspaces.player import PlayerWorkspace
 from gui.workspaces.clustered_enhanced import EnhancedClusteredWorkspace as ClusteredWorkspace
 from gui.workspaces.graph import GraphWorkspace
-from gui.workspaces.player import PlayerWorkspace
+from gui.workspaces.playlists import PlaylistsWorkspace
 from gui.workspaces.compression import CompressionWorkspace
-from gui.workspaces.tools import ToolsWorkspace
+from gui.workspaces.mirror_verify import MirrorVerifyWorkspace
+from gui.workspaces.activity import ActivityWorkspace
+from gui.workspaces.settings import SettingsWorkspace
 from gui.workspaces.help import HelpWorkspace
 from gui.workspaces.base import WorkspaceBase
 
 
-# Map sidebar keys → workspace class
+# Panel key → panel class (one instance each). Pages are composed from these
+# in gui/navigation.py; the keys are also what ``make_workspace(key)`` in the
+# GUI tests builds, and the old keys still navigate (see navigation.resolve).
 _WORKSPACE_MAP: dict[str, type[WorkspaceBase]] = {
-    "indexer":      IndexerWorkspace,
-    "library_sync": LibrarySyncWorkspace,
-    "duplicates":   DuplicatesWorkspace,
-    "similarity":   SimilarityWorkspace,
-    "tag_fixer":    TagFixerWorkspace,
-    "genres":       GenresWorkspace,
-    "playlists":    PlaylistsWorkspace,
-    "clustered":    ClusteredWorkspace,
-    "graph":        GraphWorkspace,
-    "player":       PlayerWorkspace,
-    "compression":  CompressionWorkspace,
-    "tools":        ToolsWorkspace,
-    "help":         HelpWorkspace,
+    "home":          HomeWorkspace,
+    "indexer":       IndexerWorkspace,
+    "library_sync":  LibrarySyncWorkspace,
+    "file_cleanup":  FileCleanupWorkspace,
+    "duplicates":    DuplicatesWorkspace,
+    "similarity":    SimilarityWorkspace,
+    "pair_review":   PairReviewWorkspace,
+    "fuzzy_finder":  FuzzyFinderWorkspace,
+    "scan_engine":   ScanEngineWorkspace,
+    "bucketing":     BucketingWorkspace,
+    "tag_fixer":     TagFixerWorkspace,
+    "genres":        GenresWorkspace,
+    "player":        PlayerWorkspace,
+    "clustered":     ClusteredWorkspace,
+    "graph":         GraphWorkspace,
+    "playlists":     PlaylistsWorkspace,
+    "compression":   CompressionWorkspace,
+    "mirror_verify": MirrorVerifyWorkspace,
+    "exports":       ExportsWorkspace,
+    "activity":      ActivityWorkspace,
+    "settings":      SettingsWorkspace,
+    "help":          HelpWorkspace,
+}
+
+# Pages that need more than the generic section host.
+_PAGE_CLASSES: dict[str, type[SectionedPage]] = {
+    "sound_map": SoundMapPage,
 }
 
 # Sidebar order and labels — the single source for Ctrl+1..9 and the status
 # bar, so shortcuts can never drift from what the sidebar shows.
-_NAV_ORDER: list[str] = [
-    item.key for section in NAV_STRUCTURE for item in section.items
-    if item.key in _WORKSPACE_MAP
-] + [key for key in _WORKSPACE_MAP if key not in {
-    item.key for section in NAV_STRUCTURE for item in section.items
-}]
-_NAV_LABELS: dict[str, str] = {
-    item.key: item.label for section in NAV_STRUCTURE for item in section.items
-}
+_NAV_ORDER: list[str] = navigation.nav_order()
+_NAV_LABELS: dict[str, str] = {page.key: page.label for page in navigation.PAGES}
 
 # Focus widgets that own the arrow keys: keyboard mode never steals them.
 _ARROW_KEY_OWNERS = (
@@ -87,8 +114,11 @@ class AlphaDEXWindow(QtWidgets.QMainWindow):
         self.setMinimumSize(900, 600)
 
         self._library_path: str = ""
-        self._workspaces: dict[str, WorkspaceBase] = {}
-        self._theme_picker = None   # keep reference so dialog stays open
+        self._workspaces: dict[str, WorkspaceBase] = {}   # panel key → panel
+        self._pages: dict[str, SectionedPage] = {}        # page key → page
+        self._current_page_key: str = ""
+        # Log lines that arrive before the Activity panel exists.
+        self._log_backlog: list[tuple[str, str]] = []
 
         self._stats_worker = None
         self._stats_generation = 0
@@ -129,7 +159,7 @@ class AlphaDEXWindow(QtWidgets.QMainWindow):
         body_layout.setSpacing(0)
 
         self._sidebar = Sidebar()
-        self._sidebar.nav_changed.connect(self._on_nav_changed)
+        self._sidebar.nav_changed.connect(self.select_page)
         self._sidebar.exit_requested.connect(self.close)
         body_layout.addWidget(self._sidebar)
 
@@ -157,11 +187,12 @@ class AlphaDEXWindow(QtWidgets.QMainWindow):
         # ── Status bar ─────────────────────────────────────────────────────
         self.statusBar().showMessage("Ready")
 
-        # Pre-create and register all workspaces
+        # Pre-create every panel, then compose them into pages
         self._init_workspaces()
+        self._init_pages()
 
-        # Show the first workspace
-        self._on_nav_changed("indexer")
+        # Show the first page (Home)
+        self.select_page(_NAV_ORDER[0])
 
     def _init_workspaces(self) -> None:
         for key, cls in _WORKSPACE_MAP.items():
@@ -170,9 +201,23 @@ class AlphaDEXWindow(QtWidgets.QMainWindow):
             ws.status_changed.connect(self._on_status_changed)
             ws.navigate_requested.connect(self._on_nav_changed)
             ws.play_tracks_requested.connect(self.play_tracks)
-            ws.flush_pending_logs()   # anything logged during construction
-            self._stack.addWidget(ws)
             self._workspaces[key] = ws
+            ws.flush_pending_logs()   # anything logged during construction
+
+        # ── Activity page: every log line, and who owns each job ─────────
+        activity = self._workspaces.get("activity")
+        if isinstance(activity, ActivityWorkspace):
+            for message, level in self._log_backlog:
+                activity.append_log(message, level)
+            self._log_backlog.clear()
+            activity.set_owner_labels(self._owner_labels())
+        from gui.workers import job_registry
+        job_registry().jobs_changed.connect(self._on_jobs_changed)
+
+        # ── Settings page: the same saved → apply flow the dialog had ────
+        settings = self._workspaces.get("settings")
+        if isinstance(settings, SettingsWorkspace):
+            settings.settings_saved.connect(self._on_settings_page_saved)
 
         # ── Wire PlayerWorkspace ↔ NowPlayingBar ────────────────────────
         player_ws = self._workspaces.get("player")
@@ -193,6 +238,25 @@ class AlphaDEXWindow(QtWidgets.QMainWindow):
             # Any volume change on the page (drag, wheel, keys, groove click)
             # updates the bar's knob; set_volume() there doesn't echo back.
             player_ws.volume_changed.connect(npb.set_volume)
+
+    def _init_pages(self) -> None:
+        for spec in navigation.PAGES:
+            panels = {s.panel: self._workspaces[s.panel] for s in spec.sections}
+            page = _PAGE_CLASSES.get(spec.key, SectionedPage)(spec, panels)
+            page.section_changed.connect(self._on_section_changed)
+            self._stack.addWidget(page)
+            self._pages[spec.key] = page
+
+    @staticmethod
+    def _owner_labels() -> dict[str, str]:
+        """Panel class name → "Page · Section", for the Activity job list."""
+        labels: dict[str, str] = {}
+        for page in navigation.PAGES:
+            for section in page.sections:
+                cls = _WORKSPACE_MAP.get(section.panel)
+                if cls is not None and cls.__name__ not in labels:
+                    labels[cls.__name__] = navigation.label(page.key, section.key)
+        return labels
 
     # ── Keyboard mode (Player arrow keys) ─────────────────────────────────
     #
@@ -230,7 +294,7 @@ class AlphaDEXWindow(QtWidgets.QMainWindow):
             return False
         if isinstance(target, _ARROW_KEY_OWNERS):
             return False
-        if self._stack.currentWidget() is player_ws:
+        if self.current_panel() is player_ws:
             return True
         bar = self._now_playing_bar
         return target is bar or bar.isAncestorOf(target)
@@ -314,27 +378,64 @@ class AlphaDEXWindow(QtWidgets.QMainWindow):
             QtGui.QKeySequence("Ctrl+W"), self
         ).activated.connect(self._log_drawer._on_clear)
 
-        # Ctrl+1–9 → Switch workspaces by sidebar order
+        # Ctrl+1–9 → the first nine pages, in sidebar order
         for i, key in enumerate(_NAV_ORDER[:9], 1):
             QtGui.QShortcut(
                 QtGui.QKeySequence(f"Ctrl+{i}"), self
-            ).activated.connect(lambda k=key: self._on_nav_changed(k))
+            ).activated.connect(lambda k=key: self.select_page(k))
 
     # ── Slots ─────────────────────────────────────────────────────────────
 
     @Slot(str)
     def _on_nav_changed(self, key: str) -> None:
-        if key not in self._workspaces:
+        """Show the page (and section) ``key`` names — a page key, a section
+        key, ``"page/section"`` or an old panel key; see navigation.resolve.
+        Unknown keys are ignored."""
+        target = navigation.resolve(key)
+        if target is None:
             return
-        self._sidebar.activate(key)
-        ws = self._workspaces[key]
-        self._stack.setCurrentWidget(ws)
-        self.statusBar().showMessage(_NAV_LABELS.get(key, key.replace("_", " ").title()))
-        # Optional hook: a page can refresh itself when it is shown (e.g. the
-        # Music Graph reloading a newer cluster payload).
-        hook = getattr(ws, "on_activated", None)
-        if callable(hook):
-            hook()
+        page_key, section_key = target
+        page = self._pages.get(page_key)
+        if page is None:
+            return
+        if key in self._workspaces:
+            # A panel key: the section showing that panel's current view
+            # (the Genre panel serves "Fill genres" and "Normalize genres").
+            section_key = page.section_for_panel(key) or section_key
+        self._show_page(page, section_key)
+
+    @Slot(str)
+    def select_page(self, page_key: str) -> None:
+        """Sidebar click / Ctrl+1..9: show a page in the section it showed
+        last (``_on_nav_changed`` with a panel key picks that panel's section)."""
+        page = self._pages.get(page_key)
+        if page is not None:
+            self._show_page(page, None)
+
+    def _show_page(self, page: SectionedPage, section_key: str | None) -> None:
+        page_key = page.key
+        if section_key is not None:
+            page.show_section(section_key, activate=False)
+        self._sidebar.activate(page_key)
+        self._stack.setCurrentWidget(page)
+        self._current_page_key = page_key
+        self.statusBar().showMessage(navigation.label(page_key, page.current_section()))
+        # Optional hook: a panel can refresh itself when it is shown (e.g. the
+        # Sound Map's Map reloading a newer cluster payload).
+        page.activated()
+
+    @Slot(str, str)
+    def _on_section_changed(self, page_key: str, section_key: str) -> None:
+        if page_key == self._current_page_key:
+            self.statusBar().showMessage(navigation.label(page_key, section_key))
+
+    def current_page(self) -> SectionedPage | None:
+        return self._pages.get(self._current_page_key)
+
+    def current_panel(self) -> QtWidgets.QWidget | None:
+        """The panel on screen (the current page's visible section)."""
+        page = self.current_page()
+        return page.current_panel() if page is not None else None
 
     # ── Library selection: the one validated path ─────────────────────────
     #
@@ -402,6 +503,16 @@ class AlphaDEXWindow(QtWidgets.QMainWindow):
     @Slot(str, str)
     def _on_log_message(self, message: str, level: str) -> None:
         self._log_drawer.append(message, level)
+        activity = self._workspaces.get("activity")
+        if isinstance(activity, ActivityWorkspace):
+            activity.append_log(message, level)
+        else:
+            self._log_backlog.append((message, level))
+
+    @Slot(int)
+    def _on_jobs_changed(self, count: int) -> None:
+        """The sidebar's Activity entry shows how many jobs are running."""
+        self._sidebar.set_badge("activity", count)
 
     @Slot(str, str)
     def _on_status_changed(self, text: str, colour: str) -> None:
@@ -410,15 +521,16 @@ class AlphaDEXWindow(QtWidgets.QMainWindow):
 
     @Slot()
     def _on_settings(self) -> None:
-        from gui.dialogs.settings_drawer import SettingsDrawer
-        dlg = SettingsDrawer(self)
-        dlg.settings_saved.connect(lambda: self._on_settings_saved(dlg))
-        try:
-            dlg.exec()
-        finally:
-            dlg.deleteLater()   # one dialog per open, not one leaked per open
+        """Ctrl+, and the top bar's Settings button: the Settings page."""
+        self._on_nav_changed("settings")
+
+    @Slot()
+    def _on_settings_page_saved(self) -> None:
+        self._on_settings_saved(self._workspaces.get("settings"))
 
     def _on_settings_saved(self, dlg=None) -> None:
+        """After Settings saved. ``dlg`` is the Settings panel (or anything
+        with a ``library_changed`` flag)."""
         # Cached appearance settings must pick up the new values now, not on
         # the next theme switch.
         from gui.themes.motion import refresh_reduced_motion
@@ -431,7 +543,7 @@ class AlphaDEXWindow(QtWidgets.QMainWindow):
             except Exception as exc:  # noqa: BLE001 - one page must not block the rest
                 self._on_log_message(f"{type(ws).__name__}: could not apply settings ({exc})", "warn")
 
-        # Switch library only if the default library was changed in the dialog
+        # Switch library only if the default library was changed in Settings
         if dlg is not None and not getattr(dlg, "library_changed", True):
             return
         try:
@@ -444,18 +556,9 @@ class AlphaDEXWindow(QtWidgets.QMainWindow):
 
     @Slot()
     def _on_theme_requested(self) -> None:
-        picker = self._theme_picker
-        try:
-            if picker is not None and picker.isVisible():
-                picker.raise_()
-                picker.activateWindow()
-                return
-            if picker is not None:
-                picker.deleteLater()
-        except RuntimeError:  # already deleted
-            pass
-        from gui.themes.picker import open_theme_picker
-        self._theme_picker = open_theme_picker(self)
+        """The top bar's Theme button: Settings → Appearance, where the theme
+        picker lives now."""
+        self._on_nav_changed("settings/appearance")
 
     # ── Close / shutdown ──────────────────────────────────────────────────
     #
@@ -567,7 +670,6 @@ class AlphaDEXWindow(QtWidgets.QMainWindow):
         os._exit(3)
 
     # ── Public API ────────────────────────────────────────────────────────
-    # ── Public API ────────────────────────────────────────────────────────
 
     def set_library(self, path: str) -> bool:
         """Make *path* the active library (called once by the startup
@@ -587,7 +689,7 @@ class AlphaDEXWindow(QtWidgets.QMainWindow):
     def play_tracks(self, paths: list, label: str = "") -> None:
         """Switch to the Player workspace and queue *paths*.
 
-        Lets a workspace hand a set of tracks to the player — the Music Graph
+        Lets a workspace hand a set of tracks to the player — the Sound Map
         uses it to send a lasso'd selection straight to playback.
         """
         if not paths:
@@ -634,6 +736,9 @@ class AlphaDEXWindow(QtWidgets.QMainWindow):
             return  # stale: a newer library's scan is (or was) running
         self._stats_worker = None
         self._top_bar.set_stats(tracks, size_gb, artists)
+        home = self._workspaces.get("home")
+        if isinstance(home, HomeWorkspace):
+            home.set_library_stats(tracks, size_gb, artists)
 
 
 _AUDIO_EXTS = frozenset({".flac", ".m4a", ".aac", ".mp3", ".wav", ".ogg", ".opus"})

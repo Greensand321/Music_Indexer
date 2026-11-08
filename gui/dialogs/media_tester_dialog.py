@@ -1,6 +1,7 @@
-"""M4A / Opus tester dialog — validate album art and metadata parsing.
+"""M4A / Opus tester — validate album art and metadata parsing.
 
-The dialog reads files through ``utils.audio_metadata_reader.read_metadata``,
+``MediaTesterPanel`` is embedded in Mirror → "Verify the mirror" (it used to
+be a dialog opened from the Utilities page). The panel reads files through ``utils.audio_metadata_reader.read_metadata``,
 the same reader the rest of the app uses, so what it shows is what the
 Indexer, Tag Fixer and Player will see. (It used to probe tags itself with a
 guessed ``\\xa9`` + first-three-letters key, which raised on Opus files,
@@ -67,25 +68,33 @@ def _direct_mp4_cover(path: str) -> bytes | None:
     return bytes(covers[0]) if covers else None
 
 
-class MediaTesterDialog(QtWidgets.QDialog):
-    """Open an .m4a or .opus file and display its album art and metadata."""
+class MediaTesterPanel(QtWidgets.QWidget):
+    """Open an .m4a or .opus file and display its album art and metadata.
+
+    Embedded in Mirror → "Verify the mirror"; ``MediaTesterDialog`` wraps it
+    in a window.
+    """
 
     def __init__(self, parent: QtWidgets.QWidget | None = None, codec: str = "m4a") -> None:
         super().__init__(parent)
         self._codec = codec.lower()
-        self.setWindowTitle(f"{codec.upper()} Tester")
-        self.setMinimumWidth(480)
         self._build_ui()
         get_manager().theme_changed.connect(self._apply_theme)
 
+    @property
+    def codec(self) -> str:
+        return self._codec
+
     def _build_ui(self) -> None:
         root = QtWidgets.QVBoxLayout(self)
-        root.setContentsMargins(16, 16, 16, 16)
+        root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(12)
 
-        root.addWidget(QtWidgets.QLabel(
+        intro = QtWidgets.QLabel(
             f"Select a .{self._codec} file to validate album art and metadata parsing."
-        ))
+        )
+        intro.setWordWrap(True)
+        root.addWidget(intro)
 
         # ── File section ───────────────────────────────────────────────────
         file_grp = QtWidgets.QGroupBox(f"{self._codec.upper()} File")
@@ -93,6 +102,7 @@ class MediaTesterDialog(QtWidgets.QDialog):
         self._file_entry = QtWidgets.QLineEdit()
         self._file_entry.setReadOnly(True)
         browse = QtWidgets.QPushButton("Browse…")
+        browse.setObjectName(f"browse_{self._codec}")
         browse.clicked.connect(self._on_browse)
         file_l.addWidget(self._file_entry, 1)
         file_l.addWidget(browse)
@@ -118,10 +128,6 @@ class MediaTesterDialog(QtWidgets.QDialog):
         self._meta_text.setObjectName("logText")  # monospace, themed
         meta_l.addWidget(self._meta_text)
         root.addWidget(meta_grp)
-
-        close_btn = QtWidgets.QPushButton("Close")
-        close_btn.clicked.connect(self.accept)
-        root.addWidget(close_btn)
         self._apply_theme(get_manager().current)
 
     def _apply_theme(self, tokens) -> None:
@@ -171,3 +177,27 @@ class MediaTesterDialog(QtWidgets.QDialog):
             self._clear_art("Embedded art found but it is not a readable image")
             return
         self._clear_art()
+
+
+class MediaTesterDialog(QtWidgets.QDialog):
+    """``MediaTesterPanel`` in its own window (the app embeds the panel)."""
+
+    def __init__(self, parent: QtWidgets.QWidget | None = None, codec: str = "m4a") -> None:
+        super().__init__(parent)
+        self.setWindowTitle(f"{codec.upper()} Tester")
+        self.setMinimumWidth(480)
+        root = QtWidgets.QVBoxLayout(self)
+        root.setContentsMargins(16, 16, 16, 16)
+        root.setSpacing(12)
+        self.panel = MediaTesterPanel(self, codec=codec)
+        root.addWidget(self.panel)
+        close_btn = QtWidgets.QPushButton("Close")
+        close_btn.clicked.connect(self.accept)
+        root.addWidget(close_btn)
+        # The panel's widgets, under the names callers used before the split.
+        self._art_lbl = self.panel._art_lbl
+        self._meta_text = self.panel._meta_text
+        self._file_entry = self.panel._file_entry
+
+    def _load_file(self, path: str) -> None:
+        self.panel._load_file(path)
