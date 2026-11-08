@@ -610,3 +610,33 @@ short muted line saying what it is for, and buttons use painted glyphs instead o
   called `Playlists/..m3u`, because `os.path.relpath(root, root)` is ".". They now go into `root.m3u`, the
   fallback `_sanitize_name` always meant to use. This applies to both `plan_folder_playlists` and
   `generate_playlists`.
+
+### G6. Mirror, Settings and dialogs
+- **Mirror → Build**:
+  - **Build mirror** is the primary button, disabled until an estimate exists. Before, "Estimate Space Savings"
+    was primary and "Start Compression" secondary. Preview-first is unchanged.
+  - The "Library Compression" heading, the job names and the log lines now say Mirror.
+- **Path fields**: source, destination and the default library were typeable line edits with Browse… → elided
+  path rows chosen through the folder dialog. **You can no longer type or paste a path** (new
+  `gui/widgets/path_field.py`).
+- **Results**: the run and estimate prose ("Converted N…, copied N…", a 4-line estimate) → stat tiles. The status
+  line keeps only explanations. The full prose still goes to the Activity log.
+- **Mirror → Verify**: two cards side by side (stacked below 960 px), each with stat tiles and problem rows. The
+  media tester's tags are body text on a well instead of the monospace log style.
+- **Settings**:
+  - Reduce motion moved from Appearance to General (same key, applies on Save).
+  - Backdrop is a segmented pill instead of a combo. It still applies on Save, unlike accent and transparency,
+    which apply at once.
+  - Services are rows, with Spotify and Gracenote marked "Not available yet" (was "(unavailable)" combo entries).
+  - Auto's "✓ Active" → "Active" plus a check glyph.
+  - The theme picker groups the classic themes into Dark and Light, in an even grid.
+- **App-wide dialog chrome**:
+  - Dialogs stay opaque: a raised content surface above a footer band.
+  - Every dialog's default button is painted as the primary pill. As in standard Qt, the default follows focus
+    among auto-default buttons.
+  - Message boxes get painted 40 px icons.
+  - Dialogs that use Qt's default margins get 22/20/22/16 px.
+  - "&" mnemonic markers are no longer drawn on buttons, check boxes and radio buttons (they showed as a literal
+    "&Yes"). The shortcuts still work.
+- **SettingsDrawer** (not opened by the app; see B3): its inline-styled header and "✕" button → a title plus a
+  footer button box.
