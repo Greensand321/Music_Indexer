@@ -271,7 +271,7 @@ class IndexerWorkspace(WorkspaceBase):
         hl.setSpacing(12)
         title_box = QtWidgets.QVBoxLayout()
         title_box.setSpacing(4)
-        title_box.addWidget(hero_title("Organise this library"))
+        title_box.addWidget(hero_title("Organize this library"))
         title_box.addWidget(self._make_subtitle(
             "Rename and file every track into By Artist/ and By Year/. Preview first: "
             "nothing moves until you execute the plan you reviewed."

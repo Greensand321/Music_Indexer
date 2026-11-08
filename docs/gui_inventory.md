@@ -404,7 +404,7 @@ repeat its title (the shell header shows it). The glass parts it uses live in
 
 | Element | Type | Purpose |
 |---|---|---|
-| Hero: "Organise this library" | Hero card (`headerCard`) | Title, one-line purpose, the step pills, the library, the mode and the main action |
+| Hero: "Organize this library" | Hero card (`headerCard`) | Title, one-line purpose, the step pills, the library, the mode and the main action |
 | Step pills | `StepPills` | Preview → Review the report → Execute. **Real state**: 0 without a preview of this library, 1 once one exists, 2 while Execute is selected or running |
 | Library | Path well (`ElidedLabel`, middle elide) | The current library; full path in the tooltip. "No library selected…" without one |
 | Dry run: preview only, nothing is moved | Checkbox | Checked by default. Unchecking switches the Run button to Execute. |
