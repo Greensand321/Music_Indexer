@@ -476,27 +476,37 @@ finishes.
 ### 6.5 Duplicates
 
 Six sections (§3.2). The first two are the real workflow; Pair review and the three
-prototypes open their dialogs (§7.5).
+prototypes open their dialogs (§7.5). Every section is drawn in the Liquid Glass card
+language (one hero card, glass rows, stat tiles, glyph buttons; parts in
+`gui/widgets/dupes_parts.py`) and fits the minimum window (900 × 600) without
+horizontal scrolling. No section repeats the page or section title: the hero card's
+title says what the card is for.
 
 #### 6.5.1 Find duplicates (`duplicates.py`)
 
-Scan → Preview → Execute. Stepper: 1. Scan & fingerprint → 2. Review groups → 3. Execute plan.
-The page always works on the current library (there is no separate path field).
+Scan → Preview → Execute. The page always works on the current library (there is no
+separate path field).
 
-| Element | Type | Purpose |
-|---|---|---|
-| Exact / Near / Mixed-codec boost | `QDoubleSpinBox` ×3 | Start from the Settings keys (`exact_duplicate_threshold`, `near_duplicate_threshold`, `mixed_codec_threshold_boost`) and follow later Settings saves |
-| Update playlists after execution | Checkbox | **Shown checked and disabled on purpose:** the executor always rewrites playlist entries that point at a moved loser, so it is not a choice. |
-| Quarantine duplicates (safe default) / Delete losers permanently | Radio buttons | The global disposition |
-| Scan Library | Button (primary) | Fingerprints and groups. If fpcalc or FFmpeg is missing, asks once (with install links) whether to scan using cached fingerprints only. |
-| Preview | Button | Opens `Docs/duplicate_preview.html` |
-| Execute | Button (danger) | See below. Disabled once the plan has run, until the next scan. |
-| Open Report | Button | Opens the newest execution report, including one from an earlier session |
-| Cancel | Button | Cancels the scan, or asks the execution to stop at the next safe point |
-| Progress | Bar + label | |
-| Groups table | `QTreeWidget` | Columns `#`, Winner, Losers, Review (the Review cell's tooltip lists the flags) |
-| Group details + Disposition | Text + `QComboBox` | **Wired:** Default (global choice) / Keep loser in place (retain) / Quarantine / Delete permanently, per group |
-| Log | Text | Per-file failures are capped at 20 lines |
+| Card | Element | Type | Purpose |
+|---|---|---|---|
+| Hero "Scan your library" | Library | Glass row, folder glyph + middle-elided path (full path in the tooltip) | The current library |
+| | Find duplicates | Button (primary, search glyph) | Fingerprints and groups. If fpcalc or FFmpeg is missing, asks once (with install links) whether to scan using cached fingerprints only. |
+| | Exact / Near / Mixed-codec boost | `QDoubleSpinBox` ×3, caption above each | Start from the Settings keys (`exact_duplicate_threshold`, `near_duplicate_threshold`, `mixed_codec_threshold_boost`) and follow later Settings saves |
+| | Scan · Review · Execute | Pill row (`dupStepRow`; labels `stepActive` / `stepInactive`) | Where the flow is; moves on after a scan and after an execution |
+| | Status, Cancel, progress | Label; button (close glyph); thin bar | Cancel and the bar only show while a job runs. Cancel stops the scan, or asks the execution to stop at the next safe point. |
+| "Duplicate groups" | Empty state | `EmptyState` | Before the first scan ("No scan yet"), without a library, while scanning, after a scan with no groups ("No duplicates found"), after a cancel or a failed scan |
+| | Plan tiles | `TileGrid` of `StatTile`s | Groups · Duplicate files · Space reclaimable (size of the copies that will leave the library; not counting copies kept in place) · Flagged for review |
+| | Outcome tiles | `TileGrid`, shown after an execution | Quarantined · Deleted · Left in place for safety · Not attempted · Errors, counted by `execution_counts` from the same tally as `summarize_execution` |
+| | Reason line | Muted label | Before Execute: how many groups are flagged and that nothing has moved; after: the `summarize_execution` sentence |
+| | Group rows | `QTreeWidget#dupGroupList` painted by a delegate | One glass row per group: **Keep** and the kept file, then each loser with its **disposition** (Quarantine / Delete / Keep in place), format and bitrate pills, a **Review** pill when flagged (tooltip: full paths and flags). Three loser lines at most, then "+ N more". |
+| | Selected group + Losers | Glass row + `QComboBox` | **Wired:** Default (global choice) / Keep loser in place (retain) / Quarantine / Delete permanently, per group. The rows and the space tile follow it at once. |
+| | Group details | Mono text | Full paths with each loser's disposition, and the review flags |
+| "Apply the plan" | Quarantine duplicates (safe default) / Delete losers permanently | Radio buttons, plus a danger "Cannot be undone" pill | The global disposition |
+| | Update playlists after execution | Checkbox | **Shown checked and disabled on purpose:** the executor always rewrites playlist entries that point at a moved loser, so it is not a choice. |
+| | Preview | Button (external glyph) | Opens `Docs/duplicate_preview.html` |
+| | Report | Button (file glyph) | Opens the newest execution report, including one from an earlier session |
+| | Execute… | Button (danger, check glyph) | See below. Disabled once the plan has run, until the next scan. |
+| "Log" | Log | Mono text | Per-file failures are capped at 20 lines |
 
 **Execute** in order: refuses if another library write is running; if any group is
 flagged for review, lists the flagged groups and why, and asks whether to **override**
@@ -509,42 +519,47 @@ gate. Preflight refusals are reported with their reason.
 
 The scan also writes `Docs/duplicate_preview.json`, which the Pair review section reads.
 
-**Still different from the other pages:** a library change *cancels* a running
-duplicate execution (it stops at the next safe point and writes its report to the old
-library's `Docs/`), where the Indexer, Library Sync and the tag tools let a confirmed
-write finish. See ROADMAP.md.
+A library change cancels a running scan and ignores its result; a confirmed execution
+is left to finish on the library it started on (its report goes to that library's
+`Docs/`), like every other page's confirmed writes.
 
 #### 6.5.2 Compare two files (`similarity.py`)
 
-Formerly the Similarity page. A two-file duplicate diagnostic that uses **the Duplicate Finder's own pipeline and
-settings**.
+A two-file duplicate diagnostic that uses **the same pipeline and settings as Find
+duplicates**.
 
-| Element | Type | Purpose |
-|---|---|---|
-| File A / File B | Entry + Browse… | The two audio files |
-| Advanced Overrides | Checkable group (off by default) | Off: fingerprint exactly like the Duplicate Finder (reusing its cache) with the thresholds from Settings. On: trim silence, fingerprint offset / duration, silence threshold / min length, and exact / near / mixed-codec thresholds are used. An invalid field is named in a warning. |
-| ⚖ Run Comparison / Clear | Buttons | Clear also discards a late result from a running comparison |
-| Comparison Report | Text | Codecs, durations, distance, thresholds, verdict, and which fingerprint source was used (the Duplicate Finder cache at `<library>/Docs/.duplicate_fingerprints.db`, fpcalc, or pyacoustid as a last resort) |
+| Card | Element | Type | Purpose |
+|---|---|---|---|
+| Hero "Pick two files" | File A / File B | Glass rows: letter badge, middle-elided path (tooltip: full path), Browse… (folder glyph) | The two audio files. Dropping an audio file on a row picks it too. |
+| | Compare / Clear | Buttons (primary with search glyph; close glyph) | Clear also discards a late result from a running comparison |
+| "Verdict" | Empty state | `EmptyState` | Until the first comparison |
+| | Verdict | Pill | Exact duplicate (success) · Near duplicate (accent) · Not a duplicate (neutral) · Could not compare (danger); "Thresholds from Settings / Advanced Overrides" beside it |
+| | Distances | `TileGrid` | Fingerprint distance (the verdict's) · **Overlap-only distance** · Effective threshold · Exact threshold |
+| | Explanation | Muted text | Which threshold decided it, a clip-of-a-song hint, codecs and the mixed-codec boost |
+| | Full report | Fold-out mono text | Files, fingerprint sources (the Find duplicates cache at `<library>/Docs/.duplicate_fingerprints.db`, fpcalc, or pyacoustid as a last resort), codecs, distances, thresholds, verdict |
+| "Advanced overrides" | Checkbox | Off by default | Off: the fields fold away and one line names the Settings thresholds in use. On: trim silence, fingerprint offset / duration, silence threshold / min length, and exact / near / mixed-codec thresholds are used. An invalid field is named in a warning. |
 
 Thresholds are re-read when Settings saves (`on_settings_saved`).
 
 #### 6.5.3 Pair review (`launchers.py`, `PairReviewWorkspace`)
 
-Explains the tool (pairs from the duplicate preview in `Docs/`; tags, format and art side
-by side; a rejected file is moved to `Quarantine/`, never deleted; decisions logged to
-`Docs/`) and **Open Pair Review…** opens `PairReviewDialog` (§7.5). Without a library it
-warns; without a duplicate preview it says "No duplicate preview found — run Duplicate
-Finder first".
+One card, "Decide pair by pair": what the tool does (pairs from the duplicate preview
+in `Docs/`; tags, format and art side by side; a rejected file is moved to
+`Quarantine/`, never deleted; decisions logged to `Docs/`) and **Open Pair Review…**
+(external glyph), which opens `PairReviewDialog` (§7.5). Without a library it warns;
+without a duplicate preview it says "No duplicate preview found — run Find duplicates
+first".
 
 #### 6.5.4 Fuzzy finder · Scan engine · Bucketing — **Experimental**
 
-Each section shows its name with the **Experimental** pill, the note *"Experimental —
-not ready to test. A prototype of another way to find duplicates: its results are not
-used by Find duplicates and have not been checked."*, what the prototype does, and an
-**Open …** button for its dialog (`FuzzyDupeDialog`, `ScanEngineDialog`,
-`BucketingPocDialog`; §7.5). There is at most one live dialog per tool: closing one
-whose worker still runs keeps it, and the next Open re-shows it instead of starting a
-second run.
+One card each, titled with what the prototype is for ("Near-duplicate candidates",
+"A staged duplicate scan", "Duplicate buckets report") with the **Experimental** pill
+beside the title, the note *"Experimental — not ready to test. A prototype of another
+way to find duplicates: its results are not used by Find duplicates and have not been
+checked."* in a well with a warning glyph, what the prototype does, and an **Open …**
+button for its dialog (`FuzzyDupeDialog`, `ScanEngineDialog`, `BucketingPocDialog`;
+§7.5). There is at most one live dialog per tool: closing one whose worker still runs
+keeps it, and the next Open re-shows it instead of starting a second run.
 
 ### 6.6 Metadata
 
@@ -876,14 +891,17 @@ See §5.3 and §5.4. Only AutoThemeDialog is still opened (from the picker's Con
 
 ### 7.5 Dialogs opened from the Duplicates page
 
-Each is deleted when closed; closing one mid-run cancels its worker.
+Each is deleted when closed; closing one mid-run cancels its worker. Their contents use
+the Duplicates area's glass parts: a title-role heading, glass section cards, captions
+over fields, glyph buttons (no emoji) and theme-following text with no inline style
+sheets. (The dialog window itself is the shell's.)
 
 | Dialog | Purpose |
 |---|---|
-| `BucketingPocDialog` | Duplicate bucketing proof of concept. Asks before running without fpcalc and then says "Completed without fingerprints". |
-| `ScanEngineDialog` | Ten duplicate-scan tuning fields. **Run is disabled** without numpy/librosa (the tooltip says what to install). Its output database has no reader in the app yet. |
-| `FuzzyDupeDialog` | Proof of concept that now runs the real `near_duplicate_detector` over the Duplicate Finder's cached fingerprints; thresholds default to Settings; results list verdict, distance and the pair. **Still not implemented, and disabled with a tooltip:** the "Metadata Match Settings" group, "Include pairs without fingerprints", "Skip fingerprint check", "Include non-matching FP pairs in review", and "Send Matches to Duplicate Pair Review". |
-| `PairReviewDialog` | Side-by-side review of pairs from the Duplicate Finder's plan (`Docs/duplicate_preview.json`), or else files with the same name in the **same folder** (reserved folders skipped). Prev / Next / Switch / Prefer MP3 / Jump to. **"Quarantine inferior…"** confirms with both file names, moves the loser to `Quarantine/` under a unique name (never deleting, never overwriting), points playlist entries at the kept file, and logs to `Docs/duplicate_pair_review_log.txt`. "No — skip" skips; "Tag" appends the pair to `Docs/duplicate_pair_tags.txt`. Shortcuts: Backspace = skip, Left/Right = navigate. Enter no longer triggers the action. Refuses while another library write runs. |
+| `BucketingPocDialog` | Duplicate bucketing proof of concept: a folder card (path + Browse…) and Run. Asks before running without fpcalc and then says "Completed without fingerprints". |
+| `ScanEngineDialog` | Paths card (library root, database) and ten duplicate-scan tuning fields in two columns. **Run is disabled** without numpy/librosa (the tooltip says what to install). Its output database has no reader in the app yet. |
+| `FuzzyDupeDialog` | Proof of concept that runs the real `near_duplicate_detector` over the fingerprints Find duplicates has cached; "Fingerprint filter" card (thresholds default to Settings) and the results card (verdict, distance and the pair; the selected pair's paths below). **Still not implemented, and disabled with a tooltip:** the "Metadata match" card (marked "Not implemented"), "Include pairs without fingerprints", "Skip fingerprint check", "Include non-matching FP pairs in review", and "Send Matches to Duplicate Pair Review". |
+| `PairReviewDialog` | Side-by-side review of pairs from the Find duplicates plan (`Docs/duplicate_preview.json`), or else files with the same name in the **same folder** (reserved folders skipped). Each side is a glass card: rounded cover tile, title, format pill, a winner badge ("Winner (kept)" / "Would be quarantined" / "Winner not set"), the main tags and the elided path. Prev / Next / Switch / Prefer MP3 / Jump to. **"Quarantine inferior…"** confirms with both file names, moves the loser to `Quarantine/` under a unique name (never deleting, never overwriting), points playlist entries at the kept file, and logs to `Docs/duplicate_pair_review_log.txt`. "No — skip" skips; "Tag" appends the pair to `Docs/duplicate_pair_tags.txt`. Shortcuts: Backspace = skip, Left/Right = navigate. Enter no longer triggers the action. Refuses while another library write runs. |
 
 The Opus / M4A testers are embedded now (§6.10.2; `MediaTesterDialog` remains as a
 wrapper the app does not open), and `CrashLogDialog` is no longer opened: Activity shows
