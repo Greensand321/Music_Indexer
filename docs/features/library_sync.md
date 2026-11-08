@@ -108,6 +108,16 @@ that; later scans read it back. Recompute Matches reuses the index outright. A t
 default (0.3 / 0.35, which meant something else on the old scale) is replaced by 0.2
 once, with a line in the log; any other saved value is kept.
 
+**Short tracks are fingerprinted as they are.** The fingerprint covers the first
+two minutes of a track (the fingerprint duration setting). A track shorter than that
+used to be padded with silence up to the full window, so the prints of two
+*different* short tracks agreed on all that silence: unrelated 5-second clips scored
+about 0.01 (an "exact match"), 20-second clips about 0.05 and 40-second clips about
+0.1 — so interludes, intros and short songs of similar length were matched to each
+other. Nothing is padded now (`audio_norm.normalize_for_fp`). Fingerprints already in
+the cache from before this change are still padded until those files are
+fingerprinted again.
+
 Alongside the match, Library Sync also weighs **quality**: it compares the incoming
 file's format and bitrate against the existing one and labels the pairing as a
 "Potential Upgrade" (the incoming copy is better) or "Keep Existing" (yours is as good

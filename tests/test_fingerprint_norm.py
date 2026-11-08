@@ -72,7 +72,15 @@ def test_radio_edit_alignment(tmp_path, monkeypatch):
     assert any("WARNING" in m for m in log.msgs)
 
 
-def test_padding_short_track(tmp_path, monkeypatch):
+def test_short_track_is_not_padded_with_silence(tmp_path, monkeypatch):
+    """A track shorter than the window is fingerprinted as it is.
+
+    It used to be padded with silence up to the window, which made the prints
+    of *different* short tracks agree on the silence: two unrelated 5-second
+    clips padded to 120 s scored a bit error rate of about 0.01 (the
+    exact-duplicate threshold is 0.02), so Library Sync matched different
+    interludes and intros of similar length. See ``audio_norm.normalize_for_fp``.
+    """
     setup_acoustid(monkeypatch)
     import audio_norm
     tone = Sine(440).to_audio_segment(duration=500)
@@ -80,5 +88,5 @@ def test_padding_short_track(tmp_path, monkeypatch):
     tone.export(p, format="wav")
     buf = audio_norm.normalize_for_fp(str(p), fingerprint_duration_ms=1000)
     seg = AudioSegment.from_file(buf)
-    assert len(seg) == 1000
+    assert len(seg) == 500
 

@@ -52,7 +52,10 @@ appended to `Docs/playlist_writes.log`. A Cancel button stops a long analysis.
   folders — Docs, Playlists, Trash, Quarantine, Not Sorted, Manual Review — are
   skipped.
 - **Auto-DJ** needs a seed track from your library; it no longer silently starts
-  from whichever file happens to be found first.
+  from whichever file happens to be found first. A track whose audio can't be
+  analysed (a corrupt or undecodable file) is skipped and named in the log —
+  it used to fail the whole run — and only an unreadable seed is an error.
+  Cancel now works while the library is being analysed, not just afterwards.
 - **Playlist repair** checks the playlists you add (or, with an empty list, every
   playlist in the library's `Playlists/` folder). A missing entry is first pointed at
   the same track in the other codec (FLAC → Opus when "Prefer Opus" is ticked, Opus →
@@ -62,6 +65,9 @@ appended to `Docs/playlist_writes.log`. A Cancel button stops a long analysis.
 The analysis caches (`Docs/tempo_energy.npy`, `Docs/features*.npy`) are stored in a
 plain numeric format and are never unpickled; a corrupt cache — or one written by an
 older version — is simply rebuilt, so the first run after upgrading re-analyses once.
+A track whose tempo or energy comes out as "not a number" is treated as a failed
+analysis: it is left out of every bucket (it used to land in fast/high) and is not
+cached. A track listed twice is bucketed once.
 
 ### Auto-DJ: playlists that flow
 
@@ -85,7 +91,11 @@ walk: starting from your seed track, it repeatedly picks whichever *remaining* t
 is closest (by plain distance in that 27-dimensional space) to the track it just
 added, then moves on from there. It has no lookahead and doesn't try to avoid
 "painting itself into a corner" late in a long playlist — it's a nearest-neighbor
-tour, not an optimized route. One detail worth knowing if a queued set feels uneven:
+tour, not an optimized route. Every track is used at most once (the same file listed
+twice is one track), ties go to the track found first, so the same seed and library
+always give the same set, and the walk always ends. Each run analyses the whole
+library again (the app does not yet hand Auto-DJ a saved feature cache), which is the
+slow part on a large library. One detail worth knowing if a queued set feels uneven:
 this distance calculation does not currently apply the same feature-scaling step the
 clustering wizard uses, so a feature with
 naturally larger numbers can end up dominating the "how similar is this" judgment
