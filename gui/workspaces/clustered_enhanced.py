@@ -1,4 +1,4 @@
-"""Sound Map → Analyse: the clustering panel (wizard and interactive results).
+"""Sound Map → Analyse: the clustering panel (Quick Start, results, settings).
 
 Analysis only: a run writes the feature cache, ``Docs/cluster_members.json``
 (the full membership), ``Docs/cluster_info.json`` (the map) and
@@ -7,7 +7,8 @@ Analysis only: a run writes the feature cache, ``Docs/cluster_members.json``
 cluster (``gui/cluster_playlist_jobs.py``), and a map selection can be
 exported from the Map section (``graph.py``). After a successful run this
 panel emits ``analysis_succeeded(result)``; the page uses it to offer the
-preview when the wizard's "Offer to save a playlist per cluster" is ticked.
+preview when the run's "Offer to save a playlist per cluster" was ticked
+(on the settings card, or in the wizard that fills it in).
 """
 from __future__ import annotations
 
@@ -20,8 +21,15 @@ from gui.compat import QtCore, QtGui, QtWidgets, Signal, Slot
 from gui.cluster_playlist_jobs import ANALYSIS_JOB_NAME
 from gui.themes.manager import get_manager
 from gui.workspaces.base import WorkspaceBase
-from gui.dialogs.clustering_wizard_dialog import ClusteringWizardDialog
+from gui.dialogs.clustering_wizard_dialog import (
+    ClusteringWizardDialog,
+    feature_toggles,
+    features_text,
+)
 from gui.dialogs.cluster_quality_report_dialog import ClusterQualityReportDialog
+from gui.themes.glass import apply_font
+from gui.widgets.glass_parts import EmptyState, StatRow
+from gui.widgets.glyphs import glyph_icon, set_glyph
 
 logger = logging.getLogger(__name__)
 
@@ -239,7 +247,22 @@ class ClusterWorker(QtCore.QThread):
 
 
 class EnhancedClusteredWorkspace(WorkspaceBase):
-    """Enhanced workspace with wizard and interactive results."""
+    """Sound Map → Analyse.
+
+    Three cards, top to bottom:
+
+    * **Quick Start** (the hero): the recommended run, one click, plus
+      *Guided setup…* (the clustering wizard), which fills in the settings
+      card below.
+    * **Results**: an empty state before the first run, progress (bar,
+      status, log, Cancel) while one runs, then the latest analysis as a
+      ``StatRow`` (clusters, tracks, unclustered, silhouette, …) with *Open
+      the map*, *Save cluster playlists…* and *Quality report*.
+    * **Your own settings**: the features to listen for
+      (``clustered_playlists.FEATURE_ORDER``) as pill toggles, the
+      algorithm and its parameters, the scaling, and the offer to save a
+      playlist per cluster; *Run with these settings* runs exactly them.
+    """
 
     # Emitted whenever the latest result changes (a run finished, or the
     # results were cleared), so the Sound Map page can enable its actions.
@@ -247,6 +270,9 @@ class EnhancedClusteredWorkspace(WorkspaceBase):
     # Emitted with the result after a *successful* run only (never on a
     # failure or cancel): the page offers "Save cluster playlists" on it.
     analysis_succeeded = Signal(dict)
+    # The results card's "Save cluster playlists…": the page routes it to the
+    # Map's ClusterPlaylistFlow (the same preview-first flow as its button).
+    save_playlists_requested = Signal()
 
     def __init__(self, library_path: str = "", parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(library_path, parent)
@@ -254,14 +280,16 @@ class EnhancedClusteredWorkspace(WorkspaceBase):
         # True while another job on the page (Save cluster playlists) runs:
         # the Run buttons wait for it (spec CP-34).
         self._external_busy = False
-        # The wizard's settings (Advanced → Run) are kept apart from whatever
-        # ran last, so a Quick Start run cannot replace them behind the user's
-        # back while the Advanced tab still displays the wizard's choices.
-        self._wizard_config: dict | None = None
+        # The settings card's choices (Run with these settings) are kept apart
+        # from whatever ran last, so a Quick Start run cannot replace them
+        # behind the user's back.
         self._last_run_config: dict | None = None
         self._current_result: dict | None = None
         self._run_buttons: list[QtWidgets.QPushButton] = []
         self._cancel_btn: QtWidgets.QPushButton | None = None
+        self._save_btn: QtWidgets.QPushButton | None = None
+        self._save_state: tuple[bool, str] = (False, "")
+        self._stats = None
         self._build_ui()
 
     # Backwards-compatible alias (older code and tests read it).
@@ -269,103 +297,276 @@ class EnhancedClusteredWorkspace(WorkspaceBase):
     def _current_config(self) -> dict | None:
         return self._last_run_config
 
+    @property
+    def _wizard_config(self) -> dict:
+        """What *Run with these settings* would run (read from the card)."""
+        return self.settings_config()
+
     def _build_ui(self) -> None:
         """Build the UI."""
         cl = self.content_layout
-
-        # Title and intro
-        cl.addWidget(self._make_section_title("Analyse your music"))
         cl.addWidget(self._make_subtitle(
-            "Analyse your tracks' audio (tempo, timbre, energy and, if you choose, harmony, "
-            "brightness and rhythm density) and group similar tracks with K-Means or "
-            "HDBSCAN. Then explore the groups on the Map, play a cluster, or save a "
-            "playlist per cluster with Save cluster playlists… (previewed first). "
-            "The analysis itself modifies nothing in your library."
+            "Group tracks that sound alike, then explore the groups on the Map. "
+            "Analysing reads your audio; it changes nothing in your library."
         ))
-
-        # ── Config Tabs ────────────────────────────────────────────────────────
-        self._tab_widget = QtWidgets.QTabWidget()
-
-        # Quick start tab
-        self._tab_widget.addTab(self._build_quick_start_tab(), "🚀 Quick Start")
-
-        # Advanced tab
-        self._tab_widget.addTab(self._build_advanced_tab(), "⚙ Advanced")
-
-        # Results tab
-        self._results_widget = QtWidgets.QWidget()
-        self._results_layout = QtWidgets.QVBoxLayout(self._results_widget)
-        self._tab_widget.addTab(self._results_widget, "📊 Results")
-        self._show_placeholder("Run Quick Start or the Advanced configuration to see results here.")
-
-        cl.addWidget(self._tab_widget)
-
+        cl.addWidget(self._build_quick_start_card())
+        cl.addWidget(self._build_results_card())
+        cl.addWidget(self._build_settings_card())
         cl.addStretch(1)
+        self._show_placeholder()
 
-    def _build_quick_start_tab(self) -> QtWidgets.QWidget:
-        """Build quick start tab."""
-        tab = QtWidgets.QWidget()
-        layout = QtWidgets.QVBoxLayout(tab)
+    def _card_header(self, layout: QtWidgets.QVBoxLayout, title: str, subtitle: str = "",
+                     *, hero: bool = False) -> tuple[QtWidgets.QLabel, QtWidgets.QLabel]:
+        if hero:
+            # The hero's title is the "title" role (20/650); cardTitle's
+            # stylesheet size would override an explicit font.
+            head = QtWidgets.QLabel(title)
+            head.setObjectName("soundMapHeroTitle")
+            apply_font(head, "title")
+        else:
+            head = self._make_card_title(title)
+        layout.addWidget(head)
+        sub = QtWidgets.QLabel(subtitle)
+        sub.setObjectName("mutedLabel")
+        apply_font(sub, "label")
+        sub.setWordWrap(True)
+        sub.setVisible(bool(subtitle))
+        layout.addWidget(sub)
+        return head, sub
 
-        # Info box
-        info_card = self._make_card()
-        info_layout = QtWidgets.QVBoxLayout(info_card)
-        info_text = QtWidgets.QLabel(
-            "Run clustering with recommended settings:\n"
-            "• 8 clusters using K-Means\n"
-            "• Tempo, timbre (MFCC) and energy features\n"
-            "• Standard normalization\n\n"
-            "Want more control (harmony, brightness, HDBSCAN…)? Use the Advanced tab."
+    def _build_quick_start_card(self) -> QtWidgets.QFrame:
+        """The hero: the recommended run and the guided setup."""
+        card = self._make_card()
+        card.setObjectName("headerCard")
+        layout = QtWidgets.QVBoxLayout(card)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(6)
+        q = QUICK_START_CONFIG
+        self._card_header(
+            layout, "Quick Start",
+            f"{q['k']} clusters with K-Means, listening for {features_text(q['features'])}. "
+            "The first run takes a while; later runs reuse the analysed audio.",
+            hero=True,
         )
-        info_text.setWordWrap(True)
-        info_layout.addWidget(info_text)
-        layout.addWidget(info_card)
-
-        # Button
-        run_btn = self._make_primary_button("📊  Run Quick Start")
+        layout.addSpacing(8)
+        row = QtWidgets.QHBoxLayout()
+        row.setSpacing(8)
+        run_btn = self._make_primary_button("Run Quick Start")
+        run_btn.setObjectName("primaryBtn")
+        set_glyph(run_btn, "play", role="inverse")
+        run_btn.setToolTip("Analyse the library with the recommended settings")
         run_btn.clicked.connect(self._on_run_quick_start)
+        self._quick_btn = run_btn
         self._run_buttons.append(run_btn)
-        layout.addWidget(run_btn)
-
-        layout.addStretch(1)
-        return tab
-
-    def _build_advanced_tab(self) -> QtWidgets.QWidget:
-        """Build advanced configuration tab."""
-        tab = QtWidgets.QWidget()
-        layout = QtWidgets.QVBoxLayout(tab)
-
-        # Info
-        info_label = QtWidgets.QLabel(
-            "Choose the features, normalization and algorithm with the wizard, then Run:"
+        row.addWidget(run_btn)
+        wizard_btn = QtWidgets.QPushButton("Guided setup…")
+        set_glyph(wizard_btn, "list")
+        wizard_btn.setToolTip(
+            "Walk through each choice step by step; your answers fill in "
+            "“Your own settings” below."
         )
-        info_label.setWordWrap(True)
-        layout.addWidget(info_label)
+        wizard_btn.clicked.connect(self._on_configure_wizard)
+        self._wizard_btn = wizard_btn
+        row.addWidget(wizard_btn)
+        row.addStretch(1)
+        layout.addLayout(row)
+        return card
 
-        # Configuration display
-        self._config_display = QtWidgets.QPlainTextEdit()
-        self._config_display.setReadOnly(True)
-        self._config_display.setPlaceholderText("Configuration will appear here")
-        self._config_display.setMinimumHeight(150)
-        layout.addWidget(self._config_display)
+    def _build_results_card(self) -> QtWidgets.QFrame:
+        """Empty state, progress, results or an error: what the last run did."""
+        card = self._make_card()
+        card.setObjectName("workspaceCard")
+        self._results_widget = card
+        self._results_layout = QtWidgets.QVBoxLayout(card)
+        self._results_layout.setContentsMargins(16, 14, 16, 14)
+        self._results_layout.setSpacing(10)
+        return card
 
-        # Buttons
-        button_layout = QtWidgets.QHBoxLayout()
+    def _build_settings_card(self) -> QtWidgets.QFrame:
+        """Your own settings: features, algorithm, scaling, the offer."""
+        card = self._make_card()
+        layout = QtWidgets.QVBoxLayout(card)
+        layout.setContentsMargins(16, 14, 16, 16)
+        layout.setSpacing(8)
+        self._card_header(layout, "Your own settings",
+                          "Choose what the analysis listens for and how it groups tracks.")
+        layout.addSpacing(4)
 
-        configure_btn = self._make_primary_button("⚙ Configure with Wizard...")
-        configure_btn.clicked.connect(self._on_configure_wizard)
-        button_layout.addWidget(configure_btn)
+        layout.addWidget(self._caption("Listen for"))
+        # Six pills in a row when there is room, three per row otherwise
+        # (see _layout_features).
+        grid = QtWidgets.QGridLayout()
+        grid.setHorizontalSpacing(8)
+        grid.setVerticalSpacing(8)
+        self._feature_grid = grid
+        self._feature_columns = 0
+        self._feature_toggles = feature_toggles(grid)
+        for toggle in self._feature_toggles.values():
+            toggle.toggled.connect(self._on_settings_changed)
+        self._layout_features(3)
+        layout.addLayout(grid)
+        layout.addSpacing(6)
 
-        run_btn = QtWidgets.QPushButton("▶ Run")
+        form = QtWidgets.QGridLayout()
+        form.setHorizontalSpacing(12)
+        form.setVerticalSpacing(4)
+        self._algo_combo = QtWidgets.QComboBox()
+        self._algo_combo.addItem("K-Means", userData="kmeans")
+        self._algo_combo.addItem("HDBSCAN", userData="hdbscan")
+        self._algo_combo.setToolTip(
+            "K-Means makes the number of groups you ask for; HDBSCAN finds them "
+            "itself and leaves outliers unclustered (needs the optional 'hdbscan' package)."
+        )
+        self._algo_combo.currentIndexChanged.connect(self._on_algorithm_changed)
+        self._norm_combo = QtWidgets.QComboBox()
+        for text, value in (("Standard", "standard"), ("MinMax", "minmax"), ("Robust", "robust")):
+            self._norm_combo.addItem(text, userData=value)
+        self._norm_combo.setToolTip(
+            "How the features are scaled so each counts equally. Robust resists "
+            "outlier tracks."
+        )
+        self._k_spin = QtWidgets.QSpinBox()
+        self._k_spin.setRange(2, 100)
+        self._k_spin.setToolTip("How many clusters K-Means makes")
+        self._min_size_spin = QtWidgets.QSpinBox()
+        self._min_size_spin.setRange(2, 100)
+        self._min_size_spin.setToolTip("Fewest tracks an HDBSCAN cluster may have")
+        self._min_samples_spin = QtWidgets.QSpinBox()
+        self._min_samples_spin.setRange(1, 50)
+        self._min_samples_spin.setToolTip("How dense a neighbourhood must be (HDBSCAN)")
+        self._param_captions = {
+            "k": self._caption("Clusters"),
+            "min_size": self._caption("Min cluster size"),
+            "min_samples": self._caption("Min samples"),
+        }
+        cells = (
+            (self._caption("Algorithm"), self._algo_combo),
+            (self._caption("Scaling"), self._norm_combo),
+            (self._param_captions["k"], self._k_spin),
+            (self._param_captions["min_size"], self._min_size_spin),
+            (self._param_captions["min_samples"], self._min_samples_spin),
+        )
+        for col, (caption, field) in enumerate(cells):
+            form.addWidget(caption, 0, col)
+            form.addWidget(field, 1, col)
+            form.setColumnStretch(col, 1)
+        layout.addLayout(form)
+        for w in (self._k_spin, self._min_size_spin, self._min_samples_spin):
+            w.valueChanged.connect(self._on_settings_changed)
+        self._norm_combo.currentIndexChanged.connect(self._on_settings_changed)
+
+        self._offer_cb = QtWidgets.QCheckBox(
+            "Offer to save a playlist per cluster when the analysis finishes"
+        )
+        self._offer_cb.setToolTip(
+            "Opens the Save cluster playlists preview after a successful run. "
+            "Nothing is written until you click Save."
+        )
+        self._offer_cb.toggled.connect(self._on_settings_changed)
+        layout.addSpacing(4)
+        layout.addWidget(self._offer_cb)
+
+        row = QtWidgets.QHBoxLayout()
+        row.setSpacing(8)
+        self._settings_summary = QtWidgets.QLabel("")
+        self._settings_summary.setObjectName("mutedLabel")
+        apply_font(self._settings_summary, "caption")
+        self._settings_summary.setWordWrap(True)
+        row.addWidget(self._settings_summary, 1)
+        run_btn = QtWidgets.QPushButton("Run with these settings")
+        set_glyph(run_btn, "play")
+        run_btn.setToolTip("Analyse the library with the settings above")
         run_btn.clicked.connect(self._on_run_advanced)
+        self._advanced_btn = run_btn
         self._run_buttons.append(run_btn)
-        button_layout.addWidget(run_btn)
+        row.addWidget(run_btn, 0, QtCore.Qt.AlignmentFlag.AlignBottom)
+        layout.addSpacing(4)
+        layout.addLayout(row)
 
-        button_layout.addStretch(1)
-        layout.addLayout(button_layout)
+        # Start from the Quick Start settings: change what you like.
+        self._display_config(copy.deepcopy(QUICK_START_CONFIG))
+        return card
 
-        layout.addStretch(1)
-        return tab
+    @staticmethod
+    def _caption(text: str) -> QtWidgets.QLabel:
+        label = QtWidgets.QLabel(text)
+        label.setObjectName("mutedLabel")
+        apply_font(label, "caption", weight=600)
+        return label
+
+    #: Content width from which the six feature pills share one row.
+    FEATURES_ONE_ROW_FROM = 900
+
+    def _layout_features(self, columns: int) -> None:
+        """Six pills at their natural width in one row, or three per row
+        sharing the width (a narrow window)."""
+        if columns == self._feature_columns:
+            return
+        self._feature_columns = columns
+        grid = self._feature_grid
+        for toggle in self._feature_toggles.values():
+            grid.removeWidget(toggle)
+        for i, toggle in enumerate(self._feature_toggles.values()):
+            grid.addWidget(toggle, i // columns, i % columns)
+        for c in range(7):
+            grid.setColumnStretch(c, 0)
+        if columns >= len(self._feature_toggles):
+            grid.setColumnStretch(columns, 1)      # pills keep their width, left-aligned
+        else:
+            for c in range(columns):
+                grid.setColumnStretch(c, 1)
+
+    def feature_columns(self) -> int:
+        return self._feature_columns
+
+    def resizeEvent(self, event: QtGui.QResizeEvent) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        from gui.themes.tokens import SPACE
+
+        bar = self._scroll_area.verticalScrollBar().sizeHint().width()
+        width = event.size().width() - 2 * SPACE.gutter - bar
+        self._layout_features(6 if width >= self.FEATURES_ONE_ROW_FROM else 3)
+
+    # ── Settings card ─────────────────────────────────────────────────────
+
+    def settings_config(self) -> dict:
+        """The run config the settings card describes."""
+        return {
+            "features": {key: t.isChecked() for key, t in self._feature_toggles.items()},
+            "normalization": self._norm_combo.currentData() or "standard",
+            "algorithm": self._algo_combo.currentData() or "kmeans",
+            "k": self._k_spin.value(),
+            "min_cluster_size": self._min_size_spin.value(),
+            "min_samples": self._min_samples_spin.value(),
+            "create_playlists": self._offer_cb.isChecked(),
+        }
+
+    def _on_algorithm_changed(self, _index: int = 0) -> None:
+        kmeans = self._algo_combo.currentData() == "kmeans"
+        for key, widget in (("k", self._k_spin), ("min_size", self._min_size_spin),
+                            ("min_samples", self._min_samples_spin)):
+            shown = kmeans if key == "k" else not kmeans
+            widget.setVisible(shown)
+            self._param_captions[key].setVisible(shown)
+        self._on_settings_changed()
+
+    def _on_settings_changed(self, *_args) -> None:
+        cfg = self.settings_config()
+        if cfg["algorithm"] == "kmeans":
+            how = f"{cfg['k']} clusters with K-Means"
+        else:
+            how = (f"HDBSCAN, clusters of at least {cfg['min_cluster_size']} tracks "
+                   f"(min samples {cfg['min_samples']})")
+        text = f"{how}, listening for {features_text(cfg['features'])}; {cfg['normalization']} scaling."
+        if cfg.get("create_playlists"):
+            text += " Offers to save them when the run finishes."
+        self._settings_summary.setText(text)
+        nothing = not any(cfg["features"].values())
+        self._advanced_btn.setToolTip(
+            "Tick at least one feature to listen for." if nothing
+            else "Analyse the library with the settings above"
+        )
+        self._set_busy(self.is_busy())
 
     # ── Running ───────────────────────────────────────────────────────────
 
@@ -373,11 +574,16 @@ class EnhancedClusteredWorkspace(WorkspaceBase):
         return self._worker is not None
 
     def _set_busy(self, busy: bool) -> None:
+        blocked = busy or self._external_busy
         for btn in self._run_buttons:
-            btn.setEnabled(not busy and not self._external_busy)
-            btn.setToolTip(
-                "Wait for Save cluster playlists to finish." if self._external_busy and not busy else ""
-            )
+            btn.setEnabled(not blocked)
+            if self._external_busy and not busy:
+                btn.setToolTip("Wait for Save cluster playlists to finish.")
+            elif btn is self._quick_btn:
+                btn.setToolTip("Analyse the library with the recommended settings")
+        if not blocked and not any(t.isChecked() for t in self._feature_toggles.values()):
+            self._advanced_btn.setEnabled(False)
+        self._wizard_btn.setEnabled(not busy)
 
     def set_external_busy(self, busy: bool) -> None:
         """Another job on the page (Save cluster playlists) started or ended:
@@ -399,64 +605,52 @@ class EnhancedClusteredWorkspace(WorkspaceBase):
         self._run_clustering(copy.deepcopy(QUICK_START_CONFIG))
 
     def _on_configure_wizard(self) -> None:
-        """Open configuration wizard."""
+        """Open the wizard on the current settings; its answers fill them in."""
         dialog = ClusteringWizardDialog(self)
         try:
+            dialog.set_config(self.settings_config())
             if dialog.exec() == QtWidgets.QDialog.DialogCode.Accepted:
-                config = dialog.get_config()
-                self._wizard_config = config
-                self._display_config(config)
+                self._display_config(dialog.get_config())
+                self._log("Guided setup: your settings are filled in; Run with these "
+                          "settings to analyse.", "info")
         finally:
             dialog.deleteLater()
 
     def _display_config(self, config: dict) -> None:
-        """Display configuration in text area."""
-        lines = [
-            "Configuration:",
-            f"  Algorithm: {'K-Means' if config.get('algorithm') == 'kmeans' else 'HDBSCAN'}",
-            f"  Normalization: {config.get('normalization', 'unknown')}",
-            "",
-            "Features:",
-        ]
-
-        for feat, enabled in config.get("features", {}).items():
-            status = "✓" if enabled else "✗"
-            lines.append(f"  {status} {feat.replace('_', ' ').title()}")
-
-        if config.get("algorithm") == "kmeans":
-            lines.extend([
-                "",
-                "K-Means Parameters:",
-                f"  K (clusters): {config.get('k', 8)}",
-            ])
-        else:
-            lines.extend([
-                "",
-                "HDBSCAN Parameters:",
-                f"  Min cluster size: {config.get('min_cluster_size', 5)}",
-                f"  Min samples: {config.get('min_samples', 5)}",
-            ])
-
-        lines.extend([
-            "",
-            "Output:",
-            "  Cluster data for the Map and the 3D view, plus a quality report.",
-            "  Save cluster playlists… writes one playlist per cluster",
-        ])
-        if config.get("create_playlists"):
-            lines.append("  Offers to save them when the run finishes")
-
-        self._config_display.setPlainText("\n".join(lines))
+        """Show ``config`` in the settings card (what Run would use)."""
+        features = config.get("features") or {}
+        for key, toggle in self._feature_toggles.items():
+            was = toggle.blockSignals(True)
+            toggle.setChecked(bool(features.get(key, False)))
+            toggle.blockSignals(was)
+        for combo, value in ((self._algo_combo, config.get("algorithm", "kmeans")),
+                             (self._norm_combo, config.get("normalization", "standard"))):
+            index = combo.findData(value)
+            if index >= 0:
+                was = combo.blockSignals(True)
+                combo.setCurrentIndex(index)
+                combo.blockSignals(was)
+        for spin, key, default in ((self._k_spin, "k", 8),
+                                   (self._min_size_spin, "min_cluster_size", 5),
+                                   (self._min_samples_spin, "min_samples", 5)):
+            was = spin.blockSignals(True)
+            spin.setValue(int(config.get(key, default)))
+            spin.blockSignals(was)
+        was = self._offer_cb.blockSignals(True)
+        self._offer_cb.setChecked(bool(config.get("create_playlists")))
+        self._offer_cb.blockSignals(was)
+        self._on_algorithm_changed()
 
     def _on_run_advanced(self) -> None:
-        """Run with advanced configuration."""
-        if self._wizard_config is None:
+        """Run with the settings card's configuration."""
+        config = self.settings_config()
+        if not any(config["features"].values()):
             QtWidgets.QMessageBox.warning(
-                self, "No Configuration",
-                "Please configure with the wizard first."
+                self, "No Features",
+                "Tick at least one feature to listen for."
             )
             return
-        self._run_clustering(self._wizard_config)
+        self._run_clustering(config)
 
     def _run_clustering(self, config: dict) -> None:
         """Start clustering with given configuration."""
@@ -484,7 +678,7 @@ class EnhancedClusteredWorkspace(WorkspaceBase):
     # ── Results area ──────────────────────────────────────────────────────
 
     def _clear_results(self) -> None:
-        """Remove everything from the results tab, nested layouts included."""
+        """Remove everything from the results card, nested layouts included."""
         def clear(layout: QtWidgets.QLayout) -> None:
             while layout.count():
                 item = layout.takeAt(0)
@@ -497,18 +691,37 @@ class EnhancedClusteredWorkspace(WorkspaceBase):
                     item.layout().deleteLater()
         clear(self._results_layout)
         self._cancel_btn = None
+        self._save_btn = None
+        self._stats = None
 
-    def _show_placeholder(self, text: str) -> None:
+    def _reveal_results(self) -> None:
+        from gui.themes import motion
+
+        if self._results_widget.isVisible():
+            motion.reveal(self._results_widget, duration="fast")
+
+    def _show_placeholder(self, title: str = "", text: str = "") -> None:
         self._clear_results()
-        label = QtWidgets.QLabel(text)
-        label.setObjectName("statusHint")
-        label.setWordWrap(True)
-        self._results_layout.addWidget(label)
-        self._results_layout.addStretch(1)
+        empty = EmptyState(
+            title or "No analysis yet",
+            text or ("Run Quick Start, or your own settings below. The clusters, how "
+                     "well they separate and a map to explore appear here."),
+        )
+        empty.setObjectName("soundMapEmptyState")
+        self._results_layout.addWidget(empty)
 
     def _show_progress_panel(self) -> None:
         """Show clustering progress panel."""
         self._clear_results()
+        head = QtWidgets.QHBoxLayout()
+        title = self._make_card_title("Analysing your library")
+        head.addWidget(title, 1)
+        self._cancel_btn = QtWidgets.QPushButton("Cancel")
+        set_glyph(self._cancel_btn, "close")
+        self._cancel_btn.setToolTip("Stop after the files being analysed now; nothing is written")
+        self._cancel_btn.clicked.connect(self._on_cancel_clustering)
+        head.addWidget(self._cancel_btn)
+        self._results_layout.addLayout(head)
 
         self._progress_bar = QtWidgets.QProgressBar()
         self._progress_bar.setRange(0, 100)
@@ -516,23 +729,17 @@ class EnhancedClusteredWorkspace(WorkspaceBase):
         self._results_layout.addWidget(self._progress_bar)
 
         self._progress_status = QtWidgets.QLabel("Initializing...")
-        self._progress_status.setObjectName("statusHint")
+        self._progress_status.setObjectName("mutedLabel")
+        apply_font(self._progress_status, "label")
         self._results_layout.addWidget(self._progress_status)
 
         self._log_area = QtWidgets.QPlainTextEdit()
         self._log_area.setObjectName("logText")
         self._log_area.setReadOnly(True)
-        self._log_area.setMinimumHeight(200)
+        self._log_area.setMinimumHeight(140)
+        self._log_area.setMaximumHeight(200)
         self._results_layout.addWidget(self._log_area)
-
-        self._cancel_btn = QtWidgets.QPushButton("✕ Cancel")
-        self._cancel_btn.clicked.connect(self._on_cancel_clustering)
-        self._results_layout.addWidget(self._cancel_btn)
-
-        self._results_layout.addStretch(1)
-
-        # Switch to results tab
-        self._tab_widget.setCurrentIndex(2)
+        self._reveal_results()
 
     @Slot(int, str)
     def _on_progress(self, percent: int, message: str) -> None:
@@ -571,85 +778,143 @@ class EnhancedClusteredWorkspace(WorkspaceBase):
             self._status("Clustering complete", "ok")
             self._log("Clustering complete — open the map to explore it.", "ok")
         elif message == "Cancelled":
-            self._show_placeholder("Clustering was cancelled. No cluster data was written.")
+            self._show_placeholder("Analysis cancelled",
+                                   "Clustering was cancelled. No cluster data was written.")
+            self._reveal_results()
             self._status("Cancelled", "neutral")
             return
         else:
-            error_card = self._make_card()
-            error_layout = QtWidgets.QVBoxLayout(error_card)
-            error_label = QtWidgets.QLabel(f"❌ Error: {message}")
+            head = QtWidgets.QHBoxLayout()
+            icon = QtWidgets.QLabel()
+            icon.setPixmap(glyph_icon("warning", get_manager().current.danger, 20).pixmap(20, 20))
+            head.addWidget(icon, 0, QtCore.Qt.AlignmentFlag.AlignTop)
+            title = self._make_card_title("The analysis did not finish")
+            head.addWidget(title, 1)
+            self._results_layout.addLayout(head)
+            error_label = QtWidgets.QLabel(f"Error: {message}")
+            error_label.setObjectName("mutedLabel")
             error_label.setWordWrap(True)
-            error_layout.addWidget(error_label)
-            self._results_layout.addWidget(error_card)
+            error_label.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
+            self._results_layout.addWidget(error_label)
+            self._reveal_results()
             self._status("Clustering failed", "error")
             self._log(message, "error")
 
-        self._results_layout.addStretch(1)
         if success:
             # Last, once the results are on screen: the page may offer the
             # Save cluster playlists preview (wizard option, CP-44).
             self.analysis_succeeded.emit(result)
 
     def _show_results_panel(self, result: dict) -> None:
-        """Show clustering results panel."""
-        success_card = self._make_card()
-        success_layout = QtWidgets.QVBoxLayout(success_card)
-        success_label = QtWidgets.QLabel("✓ Clustering complete!")
-        success_label.setObjectName("cardTitle")
-        success_layout.addWidget(success_label)
-        self._results_layout.addWidget(success_card)
-
-        summary_card = self._make_card()
-        summary_layout = QtWidgets.QFormLayout(summary_card)
-
+        """The latest analysis: a title, a StatRow and what to do next."""
         metrics = result.get("metrics", {}) or {}
+        config = result.get("config") or {}
+        method = str(config.get("algorithm") or (result.get("run") or {}).get("method") or "")
+        bits = [{"kmeans": "K-Means", "hdbscan": "HDBSCAN"}.get(method.lower(), method)] if method else []
+        feats = config.get("features")
+        if isinstance(feats, dict) and any(feats.values()):
+            bits.append("listening for " + features_text(feats))
+        self._card_header(self._results_layout, "Latest analysis", " · ".join(bits))
+
+        tiles: list[tuple[str, str]] = []
+        values: dict[str, tuple[str, str]] = {}
         if "labels" in result:
             import numpy as np
             labels = np.asarray(result["labels"])
             n_clusters = len(np.unique(labels[labels >= 0]))
             noise = int((labels < 0).sum())
-            summary_layout.addRow("Clusters created:", QtWidgets.QLabel(str(n_clusters)))
-            summary_layout.addRow("Total tracks:", QtWidgets.QLabel(str(len(labels))))
+            tiles += [("clusters", "Clusters"), ("tracks", "Tracks")]
+            values["clusters"] = (str(n_clusters), "")
+            values["tracks"] = (f"{len(labels):,}", "")
             if noise:
-                summary_layout.addRow(
-                    "Unclustered (noise):",
-                    QtWidgets.QLabel(f"{noise} ({noise / max(len(labels), 1):.0%})"),
-                )
+                tiles.append(("noise", "Unclustered"))
+                values["noise"] = (f"{noise:,}", "")
+                self._noise_note = f"{noise / max(len(labels), 1):.0%} of the tracks"
         failed = result.get("failed") or {}
         if failed:
-            summary_layout.addRow(
-                "Could not analyse:",
-                QtWidgets.QLabel(f"{len(failed)} track(s) (left out; retried next run)"),
-            )
-
+            tiles.append(("failed", "Not analysed"))
+            values["failed"] = (f"{len(failed):,}", "warning")
         if "silhouette_score" in metrics:
-            sil = metrics["silhouette_score"]
+            sil = float(metrics["silhouette_score"])
             quality = "Good" if sil > 0.5 else "Fair" if sil > 0.3 else "Poor"
-            summary_layout.addRow("Silhouette score:", QtWidgets.QLabel(f"{sil:.3f} ({quality})"))
-
-        self._results_layout.addWidget(summary_card)
+            tone = "success" if sil > 0.5 else "warning" if sil > 0.3 else "danger"
+            tiles.append(("silhouette", f"Silhouette · {quality}"))
+            values["silhouette"] = (f"{sil:.2f}", tone)
+        if tiles:
+            self._stats = StatRow(tiles)
+            for key, (value, tone) in values.items():
+                tile = self._stats.tile(key)
+                tile.set_value(value, tone=tone)
+            if "noise" in values:
+                self._stats.tile("noise").setToolTip(
+                    f"Tracks HDBSCAN put in no cluster ({self._noise_note})")
+            if "failed" in values:
+                self._stats.tile("failed").setToolTip(
+                    "Tracks that could not be analysed: left out, retried next run")
+            if "silhouette" in values:
+                self._stats.tile("silhouette").setToolTip(
+                    "Silhouette score (−1 to 1): how clearly the clusters are apart")
+            self._results_layout.addSpacing(4)
+            self._results_layout.addWidget(self._stats)
 
         hint = QtWidgets.QLabel(
-            "Save a playlist per cluster with “Save cluster playlists…” (at the top "
-            "of the Sound Map), or export a lasso selection from the map."
+            "Save a playlist per cluster with “Save cluster playlists…”, "
+            "or export a lasso selection from the map."
         )
-        hint.setObjectName("statusHint")
+        hint.setObjectName("mutedLabel")
+        apply_font(hint, "caption")
         hint.setWordWrap(True)
         self._results_layout.addWidget(hint)
 
-        button_layout = QtWidgets.QHBoxLayout()
+        buttons = QtWidgets.QHBoxLayout()
+        buttons.setSpacing(8)
+        graph_btn = QtWidgets.QPushButton("Open the map")
+        graph_btn.setObjectName("primaryBtn")
+        set_glyph(graph_btn, "chevron_right", role="inverse")
+        graph_btn.setToolTip("Explore the clusters on the Map")
+        graph_btn.clicked.connect(self._open_graph)
+        buttons.addWidget(graph_btn)
+
+        save_btn = QtWidgets.QPushButton("Save cluster playlists…")
+        set_glyph(save_btn, "save")
+        save_btn.clicked.connect(self.save_playlists_requested.emit)
+        self._save_btn = save_btn
+        self._apply_save_state()
+        buttons.addWidget(save_btn)
 
         if "silhouette_score" in metrics:
-            report_btn = QtWidgets.QPushButton("📄 View Quality Report")
+            report_btn = QtWidgets.QPushButton("Quality report")
+            report_btn.setFlat(True)
+            set_glyph(report_btn, "info")
+            report_btn.setToolTip("How well the analysis separated your tracks")
             report_btn.clicked.connect(lambda: self._show_quality_report(result))
-            button_layout.addWidget(report_btn)
+            buttons.addWidget(report_btn)
 
-        graph_btn = QtWidgets.QPushButton("📊 Open the map")
-        graph_btn.clicked.connect(self._open_graph)
-        button_layout.addWidget(graph_btn)
+        buttons.addStretch(1)
+        self._results_layout.addSpacing(2)
+        self._results_layout.addLayout(buttons)
+        self._reveal_results()
 
-        button_layout.addStretch(1)
-        self._results_layout.addLayout(button_layout)
+    def stat_values(self) -> dict[str, str]:
+        """The results StatRow as {key: value} (empty before a result)."""
+        if self._stats is None:
+            return {}
+        return {key: self._stats.tile(key).value() for key in self._stats.keys()}
+
+    # ── Save cluster playlists (mirrors the page's flow button) ───────────
+
+    def set_save_playlists_state(self, enabled: bool, tooltip: str = "") -> None:
+        """The page keeps the results card's Save button in step with the
+        Map's flow button (enabled state and tooltip)."""
+        self._save_state = (bool(enabled), tooltip)
+        self._apply_save_state()
+
+    def _apply_save_state(self) -> None:
+        if self._save_btn is None:
+            return
+        enabled, tip = self._save_state
+        self._save_btn.setEnabled(enabled)
+        self._save_btn.setToolTip(tip)
 
     # ── Latest result (read by the Sound Map page's actions) ──────────────
 
@@ -696,4 +961,4 @@ class EnhancedClusteredWorkspace(WorkspaceBase):
             self._log("Library changed — the running clustering job was cancelled.", "warn")
             self._status("Cancelled", "neutral")
         self._set_result(None)
-        self._show_placeholder("Run Quick Start or the Advanced configuration to see results here.")
+        self._show_placeholder()
