@@ -151,11 +151,17 @@ if HAVE_QT:
         mgr = mgr_mod.ThemeManager._instance
         if mgr is None:
             return
-        from gui.themes.tokens import THEMES, DEFAULT_DARK, DEFAULT_LIGHT
-        mgr._current = THEMES[DEFAULT_DARK]
+        from gui.themes.tokens import (
+            DEFAULT_ACCENT, DEFAULT_DARK, DEFAULT_LIGHT, DEFAULT_THEME, THEMES,
+        )
+        mgr._current = THEMES[DEFAULT_THEME]
+        mgr._base = THEMES[DEFAULT_THEME]
         mgr._auto_mode = False
         mgr._auto_dark = DEFAULT_DARK
         mgr._auto_light = DEFAULT_LIGHT
+        mgr._accent = DEFAULT_ACCENT
+        mgr._reduce_transparency = False
+        mgr._migration_note = None
 
     @pytest.fixture
     def dialogs(_ui) -> DialogGuard:

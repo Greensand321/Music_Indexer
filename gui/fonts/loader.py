@@ -90,9 +90,12 @@ def jetbrains_mono_available() -> bool:
 UI_FAMILY = "Inter"
 MONO_FAMILY = "JetBrains Mono"
 
-# Fallback stacks — used in QSS / QFont if the primary is not available
-UI_STACK = '"Inter", "Segoe UI Variable", "SF Pro Text", "Helvetica Neue", Arial, sans-serif'
-MONO_STACK = '"JetBrains Mono", "Cascadia Code", "Consolas", "Menlo", monospace'
+# Family stacks for QSS, best first. Segoe UI Variable (Windows 11, the
+# owner's platform) leads; the bundled Inter is the fallback elsewhere. The
+# same preference order drives ``gui.themes.glass.font`` (tokens.UI_FAMILIES).
+UI_STACK = ('"Segoe UI Variable Text", "Segoe UI Variable", "Segoe UI", "SF Pro Text", '
+            '"Inter", "Helvetica Neue", Arial, sans-serif')
+MONO_STACK = '"JetBrains Mono", "Cascadia Mono", "Consolas", "Menlo", monospace'
 
 
 class TypeScale:

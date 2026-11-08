@@ -8,23 +8,25 @@ from gui.themes.tokens import ThemeTokens
 # ── Radius constants ──────────────────────────────────────────────────────────
 
 class R:
-    """Shared border-radius values used everywhere in the style."""
-    button   = 8
-    input    = 7
-    card     = 12
-    tab      = 6
-    checkbox = 4
-    radio    = 8    # half of 16px → full circle
+    """Shared border-radius values (``tokens.RADIUS`` is the full scale)."""
+    button   = 999   # pill
+    input    = 999   # pill
+    card     = 26
+    hero     = 30
+    tab      = 999
+    checkbox = 6
+    radio    = 9     # half of 18px → full circle
     scroll   = 4
-    tooltip  = 6
-    swatch   = 10
-    nav_item = 8
+    tooltip  = 8
+    swatch   = 14
+    nav_item = 14
 
 
 # ── Elevation (painted card shadows) ─────────────────────────────────────────
 #
 # Cards get their shadow *painted* by the surface beneath them
-# (``GradientWidget``) from a cached 9-slice pixmap, instead of a
+# (``GradientWidget``), with ``gui.themes.glass.paint_shadow`` from the
+# active material's ``card`` surface, instead of a
 # ``QGraphicsDropShadowEffect``:
 #
 # * A graphics effect re-renders the whole card off-screen and blurs it every
@@ -37,18 +39,18 @@ class R:
 #   (DS-02). Keeping a reference would fix that, but not the two problems
 #   above, so painting it is.
 
-class Elevation:
-    """Shadow geometry for level-1 elevation (cards)."""
-    sigma = 5.0      # gaussian blur, px
-    extent = 15      # how far the shadow reaches beyond the card, px (3 sigma)
-    offset_y = 3     # shadow drops slightly below the card, px
-    radius = R.card
+def _card_surface(tokens: ThemeTokens | None = None):
+    from gui.themes.tokens import classic_material
+    if tokens is None:
+        from gui.themes.manager import get_manager
+        tokens = get_manager().current
+    return (tokens.material or classic_material(tokens)).card
 
 
-def elevation_margin() -> tuple[int, int, int, int]:
+def elevation_margin(tokens: ThemeTokens | None = None) -> tuple[int, int, int, int]:
     """``QRect.adjusted`` margins covering the shadow around a card."""
-    e = Elevation.extent
-    return (-e, -e, e, e + Elevation.offset_y)
+    from gui.themes.glass import shadow_margins
+    return shadow_margins(_card_surface(tokens))
 
 
 def parse_rgba(value: str, fallback: tuple[int, int, int, int] = (0, 0, 0, 60)) -> QtGui.QColor:
@@ -68,72 +70,15 @@ def parse_rgba(value: str, fallback: tuple[int, int, int, int] = (0, 0, 0, 60)) 
     return QtGui.QColor(*fallback)
 
 
-_SHADOW_CACHE: dict[tuple, QtGui.QPixmap] = {}
-
-
-def _shadow_pixmap(color: QtGui.QColor, radius: int) -> QtGui.QPixmap:
-    """9-slice source: a blurred rounded square with a 1 px stretchable middle."""
-    key = (color.rgba(), radius, Elevation.sigma, Elevation.extent)
-    pm = _SHADOW_CACHE.get(key)
-    if pm is not None:
-        return pm
-    import math
-
-    e, r, sigma = Elevation.extent, radius, Elevation.sigma
-    corner = e + r
-    size = 2 * corner + 1
-    half = r + 0.5                       # body is (2r+1) px square, centred
-    img = QtGui.QImage(size, size, QtGui.QImage.Format.Format_ARGB32_Premultiplied)
-    img.fill(0)
-    base_a = color.alphaF()
-    centre = size / 2.0
-    root2 = math.sqrt(2.0) * sigma
-    for y in range(size):
-        qy = abs(y + 0.5 - centre) - half + r
-        for x in range(size):
-            qx = abs(x + 0.5 - centre) - half + r
-            outside = math.hypot(max(qx, 0.0), max(qy, 0.0))
-            d = outside + min(max(qx, qy), 0.0) - r      # signed distance
-            a = base_a * 0.5 * math.erfc(d / root2)      # gaussian-blurred edge
-            if a > 0.002:
-                c = QtGui.QColor(color)
-                c.setAlphaF(min(1.0, a))
-                img.setPixelColor(x, y, c)
-    pm = QtGui.QPixmap.fromImage(img)
-    _SHADOW_CACHE[key] = pm
-    return pm
-
-
 def paint_elevation(painter: QtGui.QPainter, rect: QtCore.QRect, tokens: ThemeTokens,
                     radius: int | None = None) -> None:
     """Paint a soft card shadow for a card occupying ``rect`` (painter coords).
 
     Call it *before* the card itself is painted (i.e. from the parent
-    surface's paintEvent). Only the ring around the card is drawn.
+    surface's paintEvent). Only the ring around the card is visible.
     """
-    r = Elevation.radius if radius is None else radius
-    if rect.width() < 2 * r + 2 or rect.height() < 2 * r + 2:
-        return
-    pm = _shadow_pixmap(parse_rgba(tokens.card_shadow), r)
-    c = Elevation.extent + r
-    ox = rect.x() - Elevation.extent
-    oy = rect.y() - Elevation.extent + Elevation.offset_y
-    ow = rect.width() + 2 * Elevation.extent
-    oh = rect.height() + 2 * Elevation.extent
-    mid_w, mid_h = ow - 2 * c, oh - 2 * c
-    QRF = QtCore.QRectF
-    slices = (
-        (QRF(ox, oy, c, c),                     QRF(0, 0, c, c)),
-        (QRF(ox + c, oy, mid_w, c),             QRF(c, 0, 1, c)),
-        (QRF(ox + ow - c, oy, c, c),            QRF(c + 1, 0, c, c)),
-        (QRF(ox, oy + c, c, mid_h),             QRF(0, c, c, 1)),
-        (QRF(ox + ow - c, oy + c, c, mid_h),    QRF(c + 1, c, c, 1)),
-        (QRF(ox, oy + oh - c, c, c),            QRF(0, c + 1, c, c)),
-        (QRF(ox + c, oy + oh - c, mid_w, c),    QRF(c, c + 1, 1, c)),
-        (QRF(ox + ow - c, oy + oh - c, c, c),   QRF(c + 1, c + 1, c, c)),
-    )
-    for target, source in slices:
-        painter.drawPixmap(target, pm, source)
+    from gui.themes.glass import paint_shadow
+    paint_shadow(painter, rect, _card_surface(tokens), radius=radius)
 
 
 def card_shadow(tokens: ThemeTokens,
@@ -174,27 +119,43 @@ def with_alpha(hex_color: str, alpha: int) -> QtGui.QColor:
 
 
 def build_palette(tokens: ThemeTokens) -> QtGui.QPalette:
-    """Build a QPalette from the token set for selection / window colours."""
-    p = QtGui.QPalette()
-    C = QtGui.QColor
+    """Build a QPalette from the token set for selection / window colours.
 
-    def s(role: QtGui.QPalette.ColorRole, hex_col: str) -> None:
-        c = C(hex_col)
+    Roles the static stylesheet reads for *in-window* surfaces come from the
+    material and may be translucent (Liquid Glass): item views, inputs,
+    hover, selection, hairlines. Roles that fill *top-level* windows
+    (``Window`` for dialogs, menus and combo popups, ``ToolTipBase``) stay
+    opaque: a translucent top-level background has nothing behind it.
+    """
+    from gui.themes.glass import qcolor
+    from gui.themes.tokens import classic_material
+
+    p = QtGui.QPalette()
+    m = tokens.material or classic_material(tokens)
+    glass = m.is_glass
+    disabled = QtGui.QPalette.ColorGroup.Disabled
+
+    def s(role: QtGui.QPalette.ColorRole, value: str) -> None:
+        c = qcolor(value)
         p.setColor(role, c)
-        p.setColor(QtGui.QPalette.ColorGroup.Disabled, role,
-                   lerp_color(hex_col, tokens.content_bg, 0.55))
+        if c.alpha() < 255:
+            faded = QtGui.QColor(c)
+            faded.setAlpha(c.alpha() // 2)
+            p.setColor(disabled, role, faded)
+        else:
+            p.setColor(disabled, role, lerp_color(c.name(), tokens.content_bg, 0.55))
 
     R = QtGui.QPalette.ColorRole
     s(R.Window,          tokens.content_bg)
     s(R.WindowText,      tokens.text_primary)
-    s(R.Base,            tokens.input_bg)
-    s(R.AlternateBase,   tokens.card_bg)
+    s(R.Base,            m.well.fill if glass else tokens.input_bg)
+    s(R.AlternateBase,   m.view_alt)
     s(R.Text,            tokens.text_primary)
     s(R.BrightText,      tokens.text_inverse)
-    s(R.Button,          tokens.card_bg)
+    s(R.Button,          m.view)
     s(R.ButtonText,      tokens.text_primary)
-    s(R.Highlight,       tokens.accent)
-    s(R.HighlightedText, tokens.text_inverse)
+    s(R.Highlight,       m.selection)
+    s(R.HighlightedText, m.selection_text)
     s(R.Link,            tokens.accent)
     s(R.LinkVisited,     tokens.accent_hover)
     s(R.ToolTipBase,     tokens.log_bg)
@@ -202,10 +163,14 @@ def build_palette(tokens: ThemeTokens) -> QtGui.QPalette:
     s(R.PlaceholderText, tokens.text_muted)
     # The 3-D roles carry the remaining tokens the static stylesheet needs
     # (manager._static_qss reads them with palette(mid) etc.). AlphaDEXStyle
-    # never paints from them; Fusion fallbacks get themed lines instead of
+    # paints from the tokens; Fusion fallbacks get themed lines instead of
     # the system's light-grey defaults.
-    s(R.Mid,             tokens.card_border)
-    s(R.Dark,            tokens.input_border)
-    s(R.Midlight,        tokens.sidebar_hover)
+    s(R.Mid,             m.card.border or tokens.card_border)
+    s(R.Dark,            m.raised.border if glass else tokens.input_border)
+    s(R.Midlight,        m.hover)
+    s(R.Light,           m.hairline)
     s(R.Shadow,          tokens.text_secondary)
+    accent_role = getattr(R, "Accent", None)
+    if accent_role is not None:
+        s(accent_role, tokens.accent)
     return p
