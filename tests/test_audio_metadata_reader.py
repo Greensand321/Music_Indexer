@@ -43,9 +43,10 @@ def test_read_metadata_from_mutagen_mp4_atoms() -> None:
     assert metadata["title"] == "Title"
     assert metadata["album"] == "Album"
     assert metadata["genre"] == "Rock"
-    assert metadata["tracknumber"] == 1
+    # "N/T" like every other format (the total used to be lost: 1, not "1/10").
+    assert metadata["tracknumber"] == "1/10"
     assert metadata["track"] == 1
-    assert metadata["discnumber"] == 2
+    assert metadata["discnumber"] == "2/2"
     assert metadata["disc"] == 2
     assert metadata["year"] == "2020"
     assert covers == [b"cover-bytes"]

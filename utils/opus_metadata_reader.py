@@ -8,6 +8,7 @@ import os
 from typing import Dict, List, Optional, Tuple
 
 from utils.path_helpers import ensure_long_path
+from utils.text_decoding import decode_tag_bytes
 from utils.year_normalizer import normalize_year
 
 logger = logging.getLogger(__name__)
@@ -57,12 +58,7 @@ def _first_value(value: object) -> object:
     if isinstance(value, tuple):
         return _first_value(value[0]) if value else None
     if isinstance(value, bytes):
-        for encoding in ("utf-8", "utf-16", "latin-1"):
-            try:
-                return value.decode(encoding)
-            except UnicodeDecodeError:
-                continue
-        return value.decode("utf-8", errors="replace")
+        return decode_tag_bytes(value)
     return value
 
 
@@ -141,6 +137,8 @@ def read_opus_metadata(
     cover_payloads: List[bytes] = []
     error: Optional[str] = None
 
+    # Same shape as the general reader's result for an unreadable file.
+    tags["year"] = normalize_year(None)
     if OggOpus is None:
         return tags, cover_payloads, "mutagen unavailable"
 
@@ -154,7 +152,13 @@ def read_opus_metadata(
     tags["title"] = _first_value(_get_tag(raw_tags, "title"))
     tags["artist"] = _first_value(_get_tag(raw_tags, "artist"))
     tags["album"] = _first_value(_get_tag(raw_tags, "album"))
-    tags["albumartist"] = _first_value(_get_tag(raw_tags, "albumartist"))
+    # "ALBUM ARTIST" (foobar2000, MusicBee) and "ALBUM_ARTIST" are as common
+    # as "ALBUMARTIST" in Vorbis comments; the general reader accepts them too.
+    tags["albumartist"] = _first_value(
+        _get_tag(raw_tags, "albumartist")
+        or _get_tag(raw_tags, "album artist")
+        or _get_tag(raw_tags, "album_artist")
+    )
     tags["date"] = _first_value(_get_tag(raw_tags, "date") or _get_tag(raw_tags, "year"))
     tags["genre"] = _first_value(_get_tag(raw_tags, "genre"))
     tags["compilation"] = _first_value(_get_tag(raw_tags, "compilation"))
