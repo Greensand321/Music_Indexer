@@ -358,6 +358,7 @@ def test_settings_page_saves_under_the_same_keys(make_workspace, tmp_path):
 def test_settings_page_save_runs_the_main_window_flow(main_window, monkeypatch):
     import gui.widgets.gradient_bg as gb
 
+    monkeypatch.setattr(gb, "_GRADIENT_FLAG", None)   # the cache is restored afterwards
     calls = []
     indexer = main_window._workspaces["indexer"]
     monkeypatch.setattr(indexer, "on_settings_saved", lambda: calls.append(1))
