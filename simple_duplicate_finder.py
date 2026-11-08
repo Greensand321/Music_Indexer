@@ -9,7 +9,10 @@ from fingerprint_cache import (
     get_cached_fingerprint,
     get_fingerprint,
 )
-from near_duplicate_detector import fingerprint_distance, _coarse_fingerprint_keys
+from near_duplicate_detector import (
+    _coarse_fingerprint_keys,
+    duplicate_fingerprint_distance as fingerprint_distance,
+)
 import chromaprint_utils
 from config import load_config, FP_DURATION_MS, FP_OFFSET_MS, FP_SILENCE_MIN_LEN_MS, FP_SILENCE_THRESHOLD_DB
 

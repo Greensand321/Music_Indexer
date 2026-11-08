@@ -48,7 +48,10 @@ else:  # pragma: no cover - optional dependency
     Image = None  # type: ignore
 
 from music_indexer_api import extract_primary_and_collabs
-from near_duplicate_detector import fingerprint_distance, _parse_fp as _parse_fingerprint
+from near_duplicate_detector import (
+    _parse_fp as _parse_fingerprint,
+    duplicate_fingerprint_distance as fingerprint_distance,
+)
 
 logger = logging.getLogger(__name__)
 
