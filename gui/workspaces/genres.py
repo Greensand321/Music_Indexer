@@ -1,7 +1,9 @@
-"""Genre Normalizer workspace.
+"""Metadata → Fill genres / Normalize genres (one panel, two views).
 
-Two genuinely different tools live behind this one sidebar entry, so they are
-two tabs rather than one blurred panel:
+Two genuinely different tools share this panel as two views. The Metadata
+page's section tabs ("Fill genres", "Normalize genres") switch between them
+(the panel's own tab bar only shows when it stands alone), with a short
+cross-fade:
 
 * **Fill from MusicBrainz** — for tracks with few or no genre tags, look the
   recording up and add MusicBrainz's most popular community tags. Preview
@@ -29,14 +31,33 @@ import json
 import os
 import threading
 
-from gui.compat import QtCore, QtGui, QtWidgets, Signal, Slot
+from gui.compat import QtCore, QtWidgets, Signal, Slot
 from gui.themes.manager import get_manager
+from gui.widgets.glass_parts import EmptyState, StatRow
+from gui.widgets.glyphs import set_glyph
+from gui.workspaces import metadata_views as mv
 from gui.workspaces.base import WorkspaceBase
 
 from controllers import normalize_controller as nc
 
 _FILL_OWNER = "Genre fill (MusicBrainz) apply"
 _NORMALIZE_OWNER = "Genre normalize apply"
+
+_FILL_EMPTY = (
+    "Nothing looked up yet",
+    "Look up genres lists every track that would get genres added, with what "
+    "MusicBrainz matched. Nothing is written until you apply.",
+)
+_FILL_NONE = ("No additions", "No track would get a genre added.")
+_FILL_READY = "Nothing is written until you apply."
+_NORMALIZE_EMPTY = (
+    "Nothing previewed yet",
+    "Preview changes lists every file whose genre tag the mapping would change, "
+    "before and after. Nothing is written until you apply.",
+)
+_NORMALIZE_NONE = ("Nothing would change", "Every genre tag already matches the mapping.")
+# Width from which the mapping editor and its table sit side by side.
+_SIDE_BY_SIDE_MIN = 620
 
 
 # ── Workers ───────────────────────────────────────────────────────────────────
@@ -194,18 +215,17 @@ class GenresWorkspace(WorkspaceBase):
 
     def _build_ui(self) -> None:
         cl = self.content_layout
-        cl.addWidget(self._make_section_title("Genre Normalizer"))
-        cl.addWidget(self._make_subtitle(
-            "Two ways to tidy genre tags: fill in missing ones from MusicBrainz, or "
-            "collapse the messy vocabulary your library has accumulated into a "
-            "canonical one with a mapping you build once and reuse."
-        ))
-
-        tabs = QtWidgets.QTabWidget()
+        # The page header names the page and the section tabs name the view;
+        # each view carries its own one-line purpose (no repeated title).
+        tabs = mv.ViewTabs()
+        tabs.setSizePolicy(QtWidgets.QSizePolicy.Policy.Preferred, QtWidgets.QSizePolicy.Policy.Preferred)
         tabs.addTab(self._build_fill_tab(), "Fill from MusicBrainz")
         tabs.addTab(self._build_normalize_tab(), "Normalize with a mapping")
-        cl.addWidget(tabs, 1)
+        tabs.currentChanged.connect(self._on_view_changed)
+        cl.addWidget(tabs)
+        cl.addStretch(1)
         self._tabs = tabs
+        self._fit_views()
         self._refresh_library_state()
 
     # ── Sections (Metadata page: "Fill genres" / "Normalize genres") ─────
@@ -226,9 +246,40 @@ class GenresWorkspace(WorkspaceBase):
         # No pane frame either: without its tabs it would frame nothing.
         self._tabs.setDocumentMode(not visible)
 
+    @Slot(int)
+    def _on_view_changed(self, _index: int) -> None:
+        self._fit_views()
+        self._scroll_area.verticalScrollBar().setValue(0)
+        if self.isVisible():
+            # One panel serves both sections, so the page's own section
+            # transition never runs between them: cross-fade here instead
+            # (reduced motion: at once).
+            from gui.themes import motion
+
+            motion.reveal(self, duration="fast")
+
+    def _fit_views(self) -> None:
+        """Size the tab stack to the view on show, not to the taller one
+        (a stacked widget otherwise reserves the tallest page's height, which
+        left a long empty scroll under the Fill view)."""
+        current = self._tabs.currentWidget()
+        for i in range(self._tabs.count()):
+            page = self._tabs.widget(i)
+            policy = QtWidgets.QSizePolicy.Policy.Preferred if page is current \
+                else QtWidgets.QSizePolicy.Policy.Ignored
+            page.setSizePolicy(QtWidgets.QSizePolicy.Policy.Preferred, policy)
+            page.updateGeometry()
+        self._tabs.updateGeometry()
+
     @staticmethod
-    def _mono_font() -> QtGui.QFont:
-        return QtGui.QFontDatabase.systemFont(QtGui.QFontDatabase.SystemFont.FixedFont)
+    def _view_page() -> tuple[QtWidgets.QWidget, QtWidgets.QVBoxLayout]:
+        from gui.themes.tokens import SPACE
+
+        page = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(SPACE.gutter)
+        return page, layout
 
     def _emit_status(self, text: str, role: str) -> None:
         self.status_changed.emit(text, getattr(get_manager().current, role))
@@ -236,216 +287,312 @@ class GenresWorkspace(WorkspaceBase):
     # ── Tab 1: MusicBrainz fill ───────────────────────────────────────────
 
     def _build_fill_tab(self) -> QtWidgets.QWidget:
-        page = QtWidgets.QWidget()
-        layout = QtWidgets.QVBoxLayout(page)
-        layout.setContentsMargins(0, 12, 0, 0)
-        layout.setSpacing(12)
+        page, layout = self._view_page()
+        layout.addWidget(self._make_subtitle(
+            "Add MusicBrainz's most popular community tags to tracks with one genre "
+            "or none. Preview first; nothing is written until you apply."
+        ))
 
-        opt_card = self._make_card()
-        opt_layout = QtWidgets.QVBoxLayout(opt_card)
-        opt_layout.setContentsMargins(16, 16, 16, 16)
-        opt_layout.setSpacing(10)
-        opt_layout.addWidget(self._make_card_title("What this does"))
-        info = QtWidgets.QLabel(
-            "Looks each track up on MusicBrainz by its artist and title and proposes "
-            "adding the three most popular community tags to its genre field. Genres "
-            "a file already has are kept — the tags are added after them — and files "
-            "that already carry two or more genres are skipped. Nothing is written "
-            "until you review the proposals and confirm."
+        # Hero: the lookup.
+        hero = self._make_card()
+        hero.setObjectName("headerCard")
+        hl = QtWidgets.QVBoxLayout(hero)
+        hl.setContentsMargins(16, 16, 16, 16)
+        hl.setSpacing(12)
+        top = QtWidgets.QHBoxLayout()
+        top.setSpacing(10)
+        heading, _t, _s = mv.card_heading(
+            "Fill missing genres",
+            "Looks each track up by artist and title. Genres a file already has are "
+            "kept; files with two or more are skipped.",
+            hero=True,
         )
-        info.setWordWrap(True)
-        info.setObjectName("statusHint")
-        opt_layout.addWidget(info)
-        layout.addWidget(opt_card)
-
-        btn_row = QtWidgets.QHBoxLayout()
-        self._run_btn = self._make_primary_button("🔍  Look up genres (preview)")
-        self._run_btn.clicked.connect(self._on_run)
-        self._fill_apply_btn = QtWidgets.QPushButton("✎  Apply genre additions")
-        self._fill_apply_btn.setObjectName("dangerBtn")
-        self._fill_apply_btn.setEnabled(False)
-        self._fill_apply_btn.clicked.connect(self._on_fill_apply)
-        self._cancel_btn = QtWidgets.QPushButton("✕  Cancel")
+        top.addWidget(heading, 1)
+        self._cancel_btn = QtWidgets.QPushButton("Cancel")
+        self._cancel_btn.setFlat(True)
+        self._cancel_btn.setToolTip("Stop the lookup or the apply at the next file")
+        set_glyph(self._cancel_btn, "close")
         self._cancel_btn.setEnabled(False)
         self._cancel_btn.clicked.connect(self._on_cancel)
-        btn_row.addWidget(self._run_btn)
-        btn_row.addWidget(self._fill_apply_btn)
-        btn_row.addWidget(self._cancel_btn)
-        btn_row.addStretch(1)
-        layout.addLayout(btn_row)
+        self._run_btn = self._make_primary_button("Look up genres")
+        self._run_btn.setToolTip("Look every track up on MusicBrainz. Writes nothing.")
+        set_glyph(self._run_btn, "search", role="inverse")
+        self._run_btn.clicked.connect(self._on_run)
+        top.addWidget(self._cancel_btn, 0, QtCore.Qt.AlignmentFlag.AlignTop)
+        top.addWidget(self._run_btn, 0, QtCore.Qt.AlignmentFlag.AlignTop)
+        hl.addLayout(top)
+        self._prog_status = mv.status_label("Idle")
+        hl.addWidget(self._prog_status)
+        self._prog_bar = mv.thin_progress()
+        hl.addWidget(self._prog_bar)
+        layout.addWidget(hero)
 
-        self._prog_bar = QtWidgets.QProgressBar()
-        self._prog_bar.setValue(0)
-        self._prog_bar.setTextVisible(False)
-        self._prog_bar.setFixedHeight(6)
-        self._prog_status = QtWidgets.QLabel("Idle")
-        self._prog_status.setObjectName("statusHint")
-        layout.addWidget(self._prog_bar)
-        layout.addWidget(self._prog_status)
-
+        # Plan: what would be added.
         prev_card = self._make_card()
         pl = QtWidgets.QVBoxLayout(prev_card)
         pl.setContentsMargins(16, 16, 16, 16)
-        pl.setSpacing(8)
-        pl.addWidget(self._make_card_title("Proposed genre additions"))
-        self._fill_table = QtWidgets.QTableWidget(0, 4)
+        pl.setSpacing(12)
+        heading, _t, _s = mv.card_heading(
+            "Proposed additions", "Apply writes exactly these rows, and logs every change.")
+        pl.addWidget(heading)
+        self._fill_stats = StatRow([
+            ("changes", "Would get genres"), ("skipped", "Already 2+ genres"),
+            ("nomatch", "No usable match"), ("problems", "Errors / can't write"),
+        ])
+        self._fill_stats.setVisible(False)
+        pl.addWidget(self._fill_stats)
+        self._fill_empty = EmptyState(*_FILL_EMPTY)
+        pl.addWidget(self._fill_empty)
+        self._fill_table = mv.GlassTable(0, 4)
+        self._fill_table.setObjectName("genreFillPlan")
         self._fill_table.setHorizontalHeaderLabels(
             ["File", "Current genres", "After", "MusicBrainz match"]
         )
-        self._fill_table.horizontalHeader().setStretchLastSection(True)
+        mv.stretch_columns(self._fill_table.horizontalHeader(), {
+            0: "stretch", 1: "stretch", 2: "stretch", 3: "stretch",
+        })
         self._fill_table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
-        self._fill_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
-        self._fill_table.setMinimumHeight(160)
+        self._fill_table.setVisible(False)
         pl.addWidget(self._fill_table)
-        self._fill_summary = QtWidgets.QLabel("Nothing looked up yet — nothing is written until you apply.")
-        self._fill_summary.setObjectName("statusHint")
-        self._fill_summary.setWordWrap(True)
-        pl.addWidget(self._fill_summary)
+        actions = QtWidgets.QHBoxLayout()
+        actions.setSpacing(10)
+        self._fill_summary = mv.status_label(_FILL_READY)
+        actions.addWidget(self._fill_summary, 1)
+        self._fill_apply_btn = QtWidgets.QPushButton("Apply genre additions")
+        self._fill_apply_btn.setObjectName("dangerBtn")
+        self._fill_apply_btn.setToolTip("Write exactly the rows above (asks first)")
+        set_glyph(self._fill_apply_btn, "check", role="inverse")
+        self._fill_apply_btn.setEnabled(False)
+        self._fill_apply_btn.clicked.connect(self._on_fill_apply)
+        actions.addWidget(self._fill_apply_btn, 0, QtCore.Qt.AlignmentFlag.AlignVCenter)
+        pl.addLayout(actions)
         layout.addWidget(prev_card)
 
         log_card = self._make_card()
         log_layout = QtWidgets.QVBoxLayout(log_card)
         log_layout.setContentsMargins(16, 16, 16, 16)
-        log_layout.addWidget(self._make_card_title("Log"))
+        log_layout.setSpacing(10)
+        log_layout.addWidget(mv.card_heading("Log")[0])
         self._log_area = QtWidgets.QPlainTextEdit()
+        self._log_area.setObjectName("logText")
         self._log_area.setReadOnly(True)
-        self._log_area.setMinimumHeight(160)
-        self._log_area.setFont(self._mono_font())
+        self._log_area.setMinimumHeight(100)
+        self._log_area.setMaximumHeight(180)
         log_layout.addWidget(self._log_area)
-        layout.addWidget(log_card, 1)
+        layout.addWidget(log_card)
         return page
 
     # ── Tab 2: canonical mapping ──────────────────────────────────────────
 
     def _build_normalize_tab(self) -> QtWidgets.QWidget:
-        page = QtWidgets.QWidget()
-        layout = QtWidgets.QVBoxLayout(page)
-        layout.setContentsMargins(0, 12, 0, 0)
-        layout.setSpacing(12)
+        page, layout = self._view_page()
+        layout.addWidget(self._make_subtitle(
+            "Collapse your library's genre spellings into a canonical set, with a "
+            "mapping you build once and reuse. Preview first."
+        ))
 
-        # 1 · Scan
-        scan_card = self._make_card()
-        sl = QtWidgets.QVBoxLayout(scan_card)
-        sl.setContentsMargins(16, 16, 16, 16)
-        sl.setSpacing(8)
-        sl.addWidget(self._make_card_title("1 · Collect the raw genres in your library"))
-        row = QtWidgets.QHBoxLayout()
-        self._scan_btn = self._make_primary_button("🔍  Scan library")
+        # Hero: the inputs (raw genres → mapping) and the main action.
+        hero = self._make_card()
+        hero.setObjectName("headerCard")
+        hl = QtWidgets.QVBoxLayout(hero)
+        hl.setContentsMargins(16, 16, 16, 16)
+        hl.setSpacing(12)
+        top = QtWidgets.QHBoxLayout()
+        top.setSpacing(10)
+        heading, _t, _s = mv.card_heading(
+            "Build the mapping",
+            "Scan the raw genres, copy them and the prompt into an LLM, then paste "
+            "the JSON it returns. Unmapped genres pass through unchanged.",
+            hero=True,
+        )
+        top.addWidget(heading, 1)
+        self._preview_btn = self._make_primary_button("Preview changes")
+        self._preview_btn.setToolTip("Read every file and list what the mapping would change. Writes nothing.")
+        set_glyph(self._preview_btn, "list", role="inverse")
+        self._preview_btn.setEnabled(False)
+        self._preview_btn.clicked.connect(self._on_preview)
+        top.addWidget(self._preview_btn, 0, QtCore.Qt.AlignmentFlag.AlignTop)
+        hl.addLayout(top)
+
+        raw_row = mv.FlowLayout(spacing=8)
+        self._scan_btn = QtWidgets.QPushButton("Scan library")
+        self._scan_btn.setToolTip("List every distinct genre string in the library")
+        set_glyph(self._scan_btn, "search")
         self._scan_btn.clicked.connect(self._on_scan)
         self._copy_raw_btn = QtWidgets.QPushButton("Copy list")
+        self._copy_raw_btn.setToolTip("Copy the raw genres, one per line")
+        set_glyph(self._copy_raw_btn, "list")
         self._copy_raw_btn.setEnabled(False)
-        self._copy_raw_btn.clicked.connect(
-            lambda: self._copy("\n".join(self._raw_genres), "Raw genre list copied.")
-        )
-        self._scan_status = QtWidgets.QLabel("Scan to see every distinct genre string.")
-        self._scan_status.setObjectName("statusHint")
-        row.addWidget(self._scan_btn)
-        row.addWidget(self._copy_raw_btn)
-        row.addWidget(self._scan_status, 1)
-        sl.addLayout(row)
-        self._raw_list = QtWidgets.QListWidget()
-        self._raw_list.setMaximumHeight(140)
-        sl.addWidget(self._raw_list)
-        layout.addWidget(scan_card)
-
-        # 2 · Mapping
-        map_card = self._make_card()
-        ml = QtWidgets.QVBoxLayout(map_card)
-        ml.setContentsMargins(16, 16, 16, 16)
-        ml.setSpacing(8)
-        ml.addWidget(self._make_card_title("2 · Build the mapping"))
-        how = QtWidgets.QLabel(
-            "Copy the prompt, paste it and the raw list into an LLM, then paste the "
-            "JSON it returns below. Keys are raw genres; values are the canonical "
-            "name(s) to use. A value of [\"invalid\"] or null means \"drop this — "
-            "it isn't a genre\". Unmapped genres pass through unchanged."
-        )
-        how.setWordWrap(True)
-        how.setObjectName("statusHint")
-        ml.addWidget(how)
-
-        prow = QtWidgets.QHBoxLayout()
+        self._copy_raw_btn.clicked.connect(self._on_copy_raw)
         self._copy_prompt_btn = QtWidgets.QPushButton("Copy prompt")
-        self._copy_prompt_btn.clicked.connect(
-            lambda: self._copy(nc.PROMPT_TEMPLATE.strip(), "Prompt copied.")
-        )
+        self._copy_prompt_btn.setToolTip("Copy the instructions to give an LLM with the list")
+        set_glyph(self._copy_prompt_btn, "file")
+        self._copy_prompt_btn.clicked.connect(self._on_copy_prompt)
+        for b in (self._scan_btn, self._copy_raw_btn, self._copy_prompt_btn):
+            raw_row.addWidget(b)
+        hl.addLayout(raw_row)
+        self._scan_status = mv.status_label("Scan to see every distinct genre string.")
+        hl.addWidget(self._scan_status)
+        self._raw_list = mv.ChipList()
+        self._raw_list.setObjectName("genreRawList")
+        self._raw_list.setVisible(False)
+        hl.addWidget(self._raw_list)
+
+        map_row = mv.FlowLayout(spacing=8)
         self._load_map_btn = QtWidgets.QPushButton("Load saved mapping")
+        self._load_map_btn.setToolTip("Load Docs/.genre_mapping.json (asks before replacing edits)")
+        set_glyph(self._load_map_btn, "folder")
         self._load_map_btn.clicked.connect(self._on_load_mapping)
         self._save_map_btn = QtWidgets.QPushButton("Save mapping")
+        self._save_map_btn.setToolTip("Save the mapping to Docs/.genre_mapping.json for next time")
+        set_glyph(self._save_map_btn, "save")
         self._save_map_btn.clicked.connect(self._on_save_mapping)
-        prow.addWidget(self._copy_prompt_btn)
-        prow.addWidget(self._load_map_btn)
-        prow.addWidget(self._save_map_btn)
-        prow.addStretch(1)
-        ml.addLayout(prow)
+        map_row.addWidget(self._load_map_btn)
+        map_row.addWidget(self._save_map_btn)
+        hl.addLayout(map_row)
 
+        # The JSON editor next to (or, when narrow, above) the mapping as a
+        # table, where "drop" values show as a pill.
+        editors = QtWidgets.QWidget()
+        self._map_split = QtWidgets.QBoxLayout(QtWidgets.QBoxLayout.Direction.LeftToRight, editors)
+        self._map_split.setContentsMargins(0, 0, 0, 0)
+        self._map_split.setSpacing(12)
         self._map_edit = QtWidgets.QPlainTextEdit()
+        self._map_edit.setObjectName("genreMapEditor")
         self._map_edit.setPlaceholderText('{\n  "rock & roll": ["Rock"],\n  "90s": ["invalid"]\n}')
-        self._map_edit.setMinimumHeight(160)
-        self._map_edit.setFont(self._mono_font())
+        self._map_edit.setToolTip(
+            'Raw genre → canonical name(s). ["invalid"] or null means "drop this — it isn\'t a genre".'
+        )
+        self._map_edit.setMinimumHeight(180)
         self._map_edit.textChanged.connect(self._on_mapping_text_changed)
-        ml.addWidget(self._map_edit)
+        # The table view follows the editor a moment after typing stops.
+        self._map_timer = QtCore.QTimer(self)
+        self._map_timer.setSingleShot(True)
+        self._map_timer.setInterval(150)
+        self._map_timer.timeout.connect(self._refresh_map_view)
+        self._map_view = mv.GlassTree()
+        self._map_view.setObjectName("genreMapView")
+        self._map_view.setHeaderLabels(["Raw genre", "Becomes"])
+        mv.stretch_columns(self._map_view.header(), {0: "stretch", 1: "stretch"})
+        self._map_view.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.NoSelection)
+        self._map_view.setMinimumHeight(180)
+        self._map_view.set_placeholder(
+            "Your mapping shows here as rows. Genres it drops are marked with a pill.")
+        self._map_split.addWidget(self._map_edit, 1)
+        self._map_split.addWidget(self._map_view, 1)
+        editors.installEventFilter(self)
+        self._map_editors = editors
+        hl.addWidget(editors)
+        self._map_status = mv.status_label("No mapping yet.")
+        hl.addWidget(self._map_status)
+        layout.addWidget(hero)
 
-        self._map_status = QtWidgets.QLabel("No mapping yet.")
-        self._map_status.setObjectName("statusHint")
-        ml.addWidget(self._map_status)
-        layout.addWidget(map_card)
-
-        # 3 · Preview
+        # Plan: the dry run, and Apply.
         prev_card = self._make_card()
         pl = QtWidgets.QVBoxLayout(prev_card)
         pl.setContentsMargins(16, 16, 16, 16)
-        pl.setSpacing(8)
-        pl.addWidget(self._make_card_title("3 · Preview what would change"))
-        prow2 = QtWidgets.QHBoxLayout()
-        self._preview_btn = self._make_primary_button("👁  Preview changes")
-        self._preview_btn.setEnabled(False)
-        self._preview_btn.clicked.connect(self._on_preview)
-        self._preview_status = QtWidgets.QLabel("Nothing previewed yet — nothing is written until step 4.")
-        self._preview_status.setObjectName("statusHint")
-        self._preview_status.setWordWrap(True)
-        prow2.addWidget(self._preview_btn)
-        prow2.addWidget(self._preview_status, 1)
-        pl.addLayout(prow2)
-
-        self._changes_table = QtWidgets.QTableWidget(0, 3)
+        pl.setSpacing(12)
+        heading, _t, _s = mv.card_heading(
+            "Preview", "Every file whose genre tag would change. Apply writes exactly this list.")
+        pl.addWidget(heading)
+        self._norm_stats = StatRow([
+            ("changes", "Would change"), ("canonical", "Already canonical"),
+            ("untagged", "No genre tag"), ("blocked", "Can't write"),
+        ])
+        self._norm_stats.setVisible(False)
+        pl.addWidget(self._norm_stats)
+        self._preview_status = mv.status_label("")
+        pl.addWidget(self._preview_status)
+        self._norm_empty = EmptyState(*_NORMALIZE_EMPTY)
+        pl.addWidget(self._norm_empty)
+        self._changes_table = mv.GlassTable(0, 3)
+        self._changes_table.setObjectName("genreNormalizePlan")
         self._changes_table.setHorizontalHeaderLabels(["File", "Current genres", "After"])
-        self._changes_table.horizontalHeader().setStretchLastSection(True)
+        mv.stretch_columns(self._changes_table.horizontalHeader(), {
+            0: "stretch", 1: "stretch", 2: "stretch",
+        })
         self._changes_table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
-        self._changes_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
-        self._changes_table.setMinimumHeight(200)
+        self._changes_table.setVisible(False)
         pl.addWidget(self._changes_table)
-        layout.addWidget(prev_card, 1)
 
-        # 4 · Apply
-        apply_card = self._make_card()
-        al = QtWidgets.QVBoxLayout(apply_card)
-        al.setContentsMargins(16, 16, 16, 16)
-        al.setSpacing(8)
-        al.addWidget(self._make_card_title("4 · Apply"))
         arow = QtWidgets.QHBoxLayout()
-        self._apply_btn = QtWidgets.QPushButton("✎  Apply changes")
-        self._apply_btn.setObjectName("dangerBtn")
-        self._apply_btn.setEnabled(False)
-        self._apply_btn.clicked.connect(self._on_apply)
-        self._apply_cancel_btn = QtWidgets.QPushButton("✕  Cancel")
+        arow.setSpacing(10)
+        self._apply_status = mv.status_label("Apply writes exactly what the preview shows.")
+        arow.addWidget(self._apply_status, 1)
+        self._apply_cancel_btn = QtWidgets.QPushButton("Cancel")
+        self._apply_cancel_btn.setFlat(True)
+        self._apply_cancel_btn.setToolTip("Stop the apply at the next file")
+        set_glyph(self._apply_cancel_btn, "close")
         self._apply_cancel_btn.setEnabled(False)
         self._apply_cancel_btn.clicked.connect(self._on_apply_cancel)
-        self._apply_status = QtWidgets.QLabel("Preview first; Apply writes exactly what the preview shows.")
-        self._apply_status.setObjectName("statusHint")
-        self._apply_status.setWordWrap(True)
-        arow.addWidget(self._apply_btn)
-        arow.addWidget(self._apply_cancel_btn)
-        arow.addWidget(self._apply_status, 1)
-        al.addLayout(arow)
-        self._norm_bar = QtWidgets.QProgressBar()
-        self._norm_bar.setValue(0)
-        self._norm_bar.setTextVisible(False)
-        self._norm_bar.setFixedHeight(6)
-        al.addWidget(self._norm_bar)
-        layout.addWidget(apply_card)
-
+        self._apply_btn = QtWidgets.QPushButton("Apply changes")
+        self._apply_btn.setObjectName("dangerBtn")
+        self._apply_btn.setToolTip("Rewrite exactly the files listed above (asks first)")
+        set_glyph(self._apply_btn, "check", role="inverse")
+        self._apply_btn.setEnabled(False)
+        self._apply_btn.clicked.connect(self._on_apply)
+        arow.addWidget(self._apply_cancel_btn, 0, QtCore.Qt.AlignmentFlag.AlignVCenter)
+        arow.addWidget(self._apply_btn, 0, QtCore.Qt.AlignmentFlag.AlignVCenter)
+        pl.addLayout(arow)
+        self._norm_bar = mv.thin_progress()
+        pl.addWidget(self._norm_bar)
+        layout.addWidget(prev_card)
         return page
+
+    def eventFilter(self, obj: QtCore.QObject, event: QtCore.QEvent) -> bool:  # noqa: N802
+        # Editor and table side by side when there is room, stacked when not.
+        if obj is getattr(self, "_map_editors", None) and event.type() == QtCore.QEvent.Type.Resize:
+            want = (QtWidgets.QBoxLayout.Direction.LeftToRight
+                    if event.size().width() >= _SIDE_BY_SIDE_MIN
+                    else QtWidgets.QBoxLayout.Direction.TopToBottom)
+            if self._map_split.direction() != want:
+                self._map_split.setDirection(want)
+        return super().eventFilter(obj, event)
+
+    # ── View helpers ──────────────────────────────────────────────────────
+
+    @Slot()
+    def _on_copy_raw(self) -> None:
+        self._copy("\n".join(self._raw_genres), "Raw genre list copied.")
+
+    @Slot()
+    def _on_copy_prompt(self) -> None:
+        self._copy(nc.PROMPT_TEMPLATE.strip(), "Prompt copied.")
+
+    def _rel(self, path: str) -> str:
+        """``path`` relative to the library (status lines never show a full path)."""
+        if not self._library_path:
+            return path
+        try:
+            return os.path.relpath(path, self._library_path)
+        except ValueError:
+            return path
+
+    def _refresh_map_view(self) -> None:
+        """Show the editor's mapping as rows; "drop" values as a pill."""
+        self._map_view.clear()
+        text = self._map_edit.toPlainText().strip()
+        try:
+            data = json.loads(text) if text else {}
+        except json.JSONDecodeError:
+            data = None
+        if not isinstance(data, dict):
+            return
+        rows = []
+        for raw, values in nc.clean_mapping(data).items():
+            if values is None:
+                row = QtWidgets.QTreeWidgetItem([raw, "Drop"])
+                mv.mark(row, "pill", 1, tone="danger")
+                row.setToolTip(1, f'"{raw}" is removed from every file (["invalid"] or null)')
+            else:
+                shown = "; ".join(values)
+                row = QtWidgets.QTreeWidgetItem([raw, shown])
+                if [raw] != values:
+                    mv.mark(row, "accent", 1)
+                row.setToolTip(1, shown)
+            row.setToolTip(0, raw)
+            rows.append(row)
+        self._map_view.addTopLevelItems(rows)
 
     # ── Shared helpers ────────────────────────────────────────────────────
 
@@ -465,7 +612,7 @@ class GenresWorkspace(WorkspaceBase):
             mapping, path = nc.load_mapping(self._library_path)
             if mapping and not self._map_edit.toPlainText().strip():
                 self._map_edit.setPlainText(json.dumps(mapping, indent=2))
-                self._map_status.setText(f"Loaded saved mapping from {path}")
+                self._map_status.setText(f"Loaded saved mapping from {self._rel(path)}")
         self._update_fill_gate()
         self._update_preview_gate()
 
@@ -475,6 +622,8 @@ class GenresWorkspace(WorkspaceBase):
         # a stale plan wrote the *old* library's files). A confirmed apply is
         # allowed to finish — it writes exactly what was confirmed — and its
         # outcome is logged.
+        had_fill = self._fill_plan is not None or self._worker is not None
+        had_plan = self._plan is not None or self._plan_worker is not None
         for attr in ("_worker", "_scan_worker", "_plan_worker"):
             worker = getattr(self, attr)
             if worker is not None:
@@ -493,15 +642,18 @@ class GenresWorkspace(WorkspaceBase):
 
         self._raw_genres = []
         self._raw_list.clear()
+        self._raw_list.setVisible(False)
         self._copy_raw_btn.setEnabled(False)
         self._scan_status.setText("Scan to see every distinct genre string.")
-        self._invalidate_fill_plan("Library changed — look up again before applying.")
+        self._invalidate_fill_plan(
+            "Library changed — look up again before applying." if had_fill else _FILL_READY)
         self._prog_bar.setValue(0)
         if self._fill_apply_worker is None:
             self._prog_status.setText("Idle")
         draft = self._drafts.get(path)
         self._map_edit.clear()
-        self._invalidate_plan("Library changed — preview again before applying.")
+        self._invalidate_plan(
+            "Library changed — preview again before applying." if had_plan else "")
         if draft is not None:
             self._map_edit.setPlainText(draft)
             self._map_status.setText("Restored your unsaved mapping for this library.")
@@ -552,12 +704,18 @@ class GenresWorkspace(WorkspaceBase):
         if self._plan is not None and self._map_edit.toPlainText() != self._plan_mapping_text:
             self._invalidate_plan("Mapping changed — preview again before applying.")
         self._update_preview_gate()
+        self._map_timer.start()
 
     def _invalidate_plan(self, why: str) -> None:
         self._plan = None
         self._plan_mapping_text = ""
         self._changes_table.setRowCount(0)
+        self._changes_table.setVisible(False)
+        self._norm_stats.setVisible(False)
+        self._norm_empty.set_text(*_NORMALIZE_EMPTY)
+        self._norm_empty.setVisible(True)
         self._apply_btn.setEnabled(False)
+        self._apply_btn.setText("Apply changes")
         self._preview_status.setText(why)
 
     # ── Tab 1 slots ───────────────────────────────────────────────────────
@@ -576,7 +734,11 @@ class GenresWorkspace(WorkspaceBase):
     def _invalidate_fill_plan(self, why: str) -> None:
         self._fill_plan = None
         self._fill_table.setRowCount(0)
-        self._fill_apply_btn.setText("✎  Apply genre additions")
+        self._fill_table.setVisible(False)
+        self._fill_stats.setVisible(False)
+        self._fill_empty.set_text(*_FILL_EMPTY)
+        self._fill_empty.setVisible(True)
+        self._fill_apply_btn.setText("Apply genre additions")
         self._fill_summary.setText(why)
         self._update_fill_gate()
 
@@ -656,9 +818,23 @@ class GenresWorkspace(WorkspaceBase):
             for col, text in enumerate(cells):
                 item = QtWidgets.QTableWidgetItem(text)
                 item.setToolTip(change.path if col == 0 else text)
+                if col == 1 or col == 3:
+                    mv.mark(item, "muted")
+                elif col == 2:
+                    mv.mark(item, "accent")      # what would be written
                 self._fill_table.setItem(row, col, item)
-        self._fill_table.resizeColumnToContents(0)
         n = len(plan.changes)
+        problems = len(plan.errors) + len(plan.blocked)
+        stats = self._fill_stats
+        stats.tile("changes").set_value(n, tone="accent" if n else "")
+        stats.tile("skipped").set_value(len(plan.skipped_multi))
+        stats.tile("nomatch").set_value(len(plan.no_match))
+        stats.tile("problems").set_value(problems, tone="warning" if problems else "")
+        stats.setVisible(True)
+        self._fill_table.fit_rows(10, 2)
+        self._fill_table.setVisible(bool(n))
+        self._fill_empty.set_text(*_FILL_NONE)
+        self._fill_empty.setVisible(not n)
         parts = [f"{n} file(s) would get genres added"]
         if plan.skipped_multi:
             parts.append(f"{len(plan.skipped_multi)} skipped (already 2+ genres)")
@@ -671,9 +847,12 @@ class GenresWorkspace(WorkspaceBase):
             for path, reason in plan.blocked:
                 self._log_area.appendPlainText(f"can't write {path}: {reason}")
         summary = " · ".join(parts) + "."
-        self._fill_summary.setText(summary + " Nothing has been written yet.")
+        self._fill_summary.setText(
+            "Nothing has been written yet."
+            + (" Some files can't be written; see the log." if plan.blocked else "")
+        )
         self._prog_status.setText("Lookup complete — review, then apply.")
-        self._fill_apply_btn.setText(f"✎  Apply {n} addition{'s' if n != 1 else ''}")
+        self._fill_apply_btn.setText(f"Apply {n} addition{'s' if n != 1 else ''}")
         self._log(f"Genre lookup: {summary}", "ok")
         self._emit_status("Lookup complete", "success")
         self._update_fill_gate()
@@ -787,6 +966,7 @@ class GenresWorkspace(WorkspaceBase):
         self._raw_genres = list(payload)
         self._raw_list.clear()
         self._raw_list.addItems(self._raw_genres)
+        self._raw_list.setVisible(bool(self._raw_genres))
         self._copy_raw_btn.setEnabled(bool(self._raw_genres))
         self._scan_status.setText(f"Found {len(self._raw_genres)} distinct genre strings.")
         self._log(f"Genre scan: {len(self._raw_genres)} distinct raw genres.", "ok")
@@ -795,7 +975,7 @@ class GenresWorkspace(WorkspaceBase):
     def _on_load_mapping(self) -> None:
         mapping, path = nc.load_mapping(self._library_path)
         if not mapping:
-            self._map_status.setText(f"No saved mapping at {path}")
+            self._map_status.setText(f"No saved mapping at {self._rel(path)}")
             return
         text = self._map_edit.toPlainText()
         if text.strip() and self._mapping_is_dirty(self._library_path, text):
@@ -810,7 +990,7 @@ class GenresWorkspace(WorkspaceBase):
             if reply != QtWidgets.QMessageBox.StandardButton.Yes:
                 return
         self._map_edit.setPlainText(json.dumps(mapping, indent=2))
-        self._map_status.setText(f"Loaded saved mapping from {path}")
+        self._map_status.setText(f"Loaded saved mapping from {self._rel(path)}")
 
     @Slot()
     def _on_save_mapping(self) -> None:
@@ -819,7 +999,7 @@ class GenresWorkspace(WorkspaceBase):
             return
         path = nc.save_mapping(self._library_path, nc.clean_mapping(mapping))
         self._drafts.pop(self._library_path, None)
-        self._map_status.setText(f"Saved mapping to {path}")
+        self._map_status.setText(f"Saved mapping to {self._rel(path)}")
         self._log(f"Genre mapping saved to {path}", "ok")
 
     @Slot()
@@ -868,24 +1048,36 @@ class GenresWorkspace(WorkspaceBase):
             for col, text in enumerate(cells):
                 item = QtWidgets.QTableWidgetItem(text)
                 item.setToolTip(change.path if col == 0 else text)
+                if col == 1:
+                    mv.mark(item, "muted")
+                elif col == 2 and change.after:
+                    mv.mark(item, "accent")      # what would be written
+                elif col == 2:
+                    mv.mark(item, "pill", tone="danger", pill="All dropped")
                 self._changes_table.setItem(row, col, item)
-        self._changes_table.resizeColumnToContents(0)
 
         n = len(plan.changes)
-        text = (
-            f"{n} of {plan.with_genres} tagged files would change "
-            f"({plan.unchanged} already canonical, {plan.scanned - plan.with_genres} with no genre tag)."
-        )
+        stats = self._norm_stats
+        stats.tile("changes").set_value(n, tone="accent" if n else "")
+        stats.tile("canonical").set_value(plan.unchanged)
+        stats.tile("untagged").set_value(plan.scanned - plan.with_genres)
+        stats.tile("blocked").set_value(len(plan.blocked), tone="warning" if plan.blocked else "")
+        stats.setVisible(True)
+        self._changes_table.fit_rows(10, 2)
+        self._changes_table.setVisible(bool(n))
+        self._norm_empty.set_text(*_NORMALIZE_NONE)
+        self._norm_empty.setVisible(not n)
+        text = "Preview ready. Nothing has been written yet."
         if plan.blocked:
-            text += (
-                f" {len(plan.blocked)} more would change but can't be written "
+            text = (
+                f"{len(plan.blocked)} more would change but can't be written "
                 "(read-only or unsupported) and are left out — see the log."
             )
             for path, reason in plan.blocked:
                 self._log(f"  can't write {path}: {reason}", "warn")
         self._preview_status.setText(text)
         self._update_apply_gate()
-        self._apply_btn.setText(f"✎  Apply {n} change{'s' if n != 1 else ''}")
+        self._apply_btn.setText(f"Apply {n} change{'s' if n != 1 else ''}")
         self._log(f"Genre preview: {n} file(s) would change.", "ok")
 
     def _update_apply_gate(self) -> None:
