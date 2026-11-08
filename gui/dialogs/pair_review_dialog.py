@@ -10,6 +10,11 @@ from dataclasses import dataclass
 from typing import Mapping
 
 from gui.compat import QtCore, QtGui, QtWidgets, Slot
+from gui.themes.glass import apply_font
+from gui.themes.tokens import RADIUS, SPACE
+from gui.widgets.dupes_parts import GlyphLabel, PathLabel, ToneBadge, hero_title
+from gui.widgets.glass import GlassCard, GlassPanel
+from gui.widgets.glyphs import set_glyph
 from utils.reserved_folders import walk_library
 
 # ── Audio extensions (same set as simple_duplicate_finder) ─────────────────
@@ -160,43 +165,120 @@ def load_pairs(library_path: str) -> list[_Pair] | None:
 
 # ── Track-panel widget ───────────────────────���──────────────────────────────
 
-class _TrackPanel(QtWidgets.QFrame):
+class _Cover(QtWidgets.QWidget):
+    """Cover art as a rounded album tile (radius 16, inset hairline ring);
+    a well with a music glyph when there is no art."""
+
+    def __init__(self, size: int, parent: QtWidgets.QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setFixedSize(size, size)
+        self._pixmap: QtGui.QPixmap | None = None
+
+    def set_pixmap(self, pixmap: QtGui.QPixmap | None) -> None:
+        self._pixmap = pixmap if pixmap is not None and not pixmap.isNull() else None
+        self.update()
+
+    def has_art(self) -> bool:
+        return self._pixmap is not None
+
+    def paintEvent(self, event: QtGui.QPaintEvent) -> None:  # noqa: N802
+        from gui.themes.glass import current_material, paint_surface, qcolor, rounded_path
+        from gui.themes.manager import get_manager
+        from gui.themes.tokens import RADIUS
+        from gui.widgets.glyphs import paint_glyph
+
+        rect = QtCore.QRectF(self.rect())
+        m = current_material()
+        p = QtGui.QPainter(self)
+        try:
+            p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+            p.setRenderHint(QtGui.QPainter.RenderHint.SmoothPixmapTransform)
+            if self._pixmap is None:
+                paint_surface(p, rect, m.well, radius=RADIUS.md)
+                glyph = rect.adjusted(rect.width() * 0.34, rect.height() * 0.34,
+                                      -rect.width() * 0.34, -rect.height() * 0.34)
+                paint_glyph(p, glyph, "music", get_manager().current.text_muted)
+                return
+            path = rounded_path(rect, RADIUS.md)
+            p.setClipPath(path)
+            scaled = self._pixmap.scaled(
+                self.size() * self.devicePixelRatioF(),
+                QtCore.Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                QtCore.Qt.TransformationMode.SmoothTransformation,
+            )
+            scaled.setDevicePixelRatio(self.devicePixelRatioF())
+            w = scaled.width() / scaled.devicePixelRatio()
+            h = scaled.height() / scaled.devicePixelRatio()
+            p.drawPixmap(QtCore.QPointF((rect.width() - w) / 2, (rect.height() - h) / 2), scaled)
+            p.setClipping(False)
+            p.setPen(QtGui.QPen(qcolor(m.hairline), 1.0))
+            p.setBrush(QtCore.Qt.BrushStyle.NoBrush)
+            p.drawPath(rounded_path(rect.adjusted(0.5, 0.5, -0.5, -0.5), RADIUS.md - 0.5))
+        finally:
+            p.end()
+
+
+class _TrackPanel(GlassCard):
+    """One side of the pair: a glass card with the cover, title, winner
+    badge, the tags that matter and the (elided) path."""
+
+    _FIELDS = (("Artist", "artist"), ("Album", "album"), ("Year", "year"),
+               ("Track", "track"), ("Genre", "genre"))
+
     def __init__(self, title: str, parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setFrameShape(QtWidgets.QFrame.Shape.StyledPanel)
         layout = QtWidgets.QVBoxLayout(self)
-        layout.setSpacing(4)
-        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(SPACE.sm)
+        layout.setContentsMargins(16, 16, 16, 16)
 
-        self._header_lbl = QtWidgets.QLabel(f"<b>{title}</b>")
-        layout.addWidget(self._header_lbl)
+        head = QtWidgets.QHBoxLayout()
+        head.setSpacing(SPACE.sm)
+        self._header_lbl = QtWidgets.QLabel(title)
+        self._header_lbl.setObjectName("mutedLabel")
+        apply_font(self._header_lbl, "micro")
+        head.addWidget(self._header_lbl)
+        head.addStretch(1)
+        self._winner_badge = ToneBadge("", "")
+        head.addWidget(self._winner_badge, 0, QtCore.Qt.AlignmentFlag.AlignVCenter)
+        layout.addLayout(head)
 
-        self._cover_lbl = QtWidgets.QLabel()
-        self._cover_lbl.setFixedSize(_COVER_SIZE, _COVER_SIZE)
-        self._cover_lbl.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(self._cover_lbl, 0, QtCore.Qt.AlignmentFlag.AlignHCenter)
-
-        self._winner_lbl = QtWidgets.QLabel()
-        self._winner_lbl.setObjectName("sectionSubtitle")
-        layout.addWidget(self._winner_lbl)
-
+        top = QtWidgets.QHBoxLayout()
+        top.setSpacing(SPACE.md)
+        self._cover = _Cover(_COVER_SIZE)
+        top.addWidget(self._cover, 0, QtCore.Qt.AlignmentFlag.AlignTop)
+        text_col = QtWidgets.QVBoxLayout()
+        text_col.setSpacing(SPACE.xxs)
         self._title_lbl = QtWidgets.QLabel()
         self._title_lbl.setWordWrap(True)
-        font = self._title_lbl.font()
-        font.setBold(True)
-        self._title_lbl.setFont(font)
-        layout.addWidget(self._title_lbl)
+        apply_font(self._title_lbl, "heading")
+        text_col.addWidget(self._title_lbl)
+        self._format_badges = QtWidgets.QHBoxLayout()
+        self._format_badges.setSpacing(SPACE.xs)
+        self._format_badge = ToneBadge("", "")
+        self._format_badges.addWidget(self._format_badge)
+        self._format_badges.addStretch(1)
+        text_col.addLayout(self._format_badges)
+        text_col.addStretch(1)
+        top.addLayout(text_col, 1)
+        layout.addLayout(top)
 
         self._meta_lbl = QtWidgets.QLabel()
         self._meta_lbl.setWordWrap(True)
-        self._meta_lbl.setObjectName("sectionSubtitle")
+        self._meta_lbl.setObjectName("mutedLabel")
+        self._meta_lbl.setTextFormat(QtCore.Qt.TextFormat.PlainText)
+        apply_font(self._meta_lbl, "label")
         layout.addWidget(self._meta_lbl)
 
-        self._path_lbl = QtWidgets.QLabel()
-        self._path_lbl.setWordWrap(True)
+        path_row = GlassPanel("well", radius=RADIUS.sm)
+        pl = QtWidgets.QHBoxLayout(path_row)
+        pl.setContentsMargins(10, 6, 10, 6)
+        pl.setSpacing(SPACE.xs)
+        pl.addWidget(GlyphLabel("file", size=14), 0, QtCore.Qt.AlignmentFlag.AlignVCenter)
+        self._path_lbl = PathLabel("", "")
         self._path_lbl.setObjectName("mutedLabel")
-        layout.addWidget(self._path_lbl)
-
+        apply_font(self._path_lbl, "caption")
+        pl.addWidget(self._path_lbl, 1)
+        layout.addWidget(path_row)
         layout.addStretch(1)
 
     def load(
@@ -208,57 +290,39 @@ class _TrackPanel(QtWidgets.QFrame):
         has_winner: bool,
         cover_bytes: bytes | None,
     ) -> None:
-        # Cover art
-        pm = self._placeholder_cover()
+        pm = None
         if cover_bytes:
             raw = QtGui.QPixmap()
             if raw.loadFromData(cover_bytes):
-                raw = raw.scaled(
-                    _COVER_SIZE, _COVER_SIZE,
-                    QtCore.Qt.AspectRatioMode.KeepAspectRatio,
-                    QtCore.Qt.TransformationMode.SmoothTransformation,
-                )
                 pm = raw
-        self._cover_lbl.setPixmap(pm)
+        self._cover.set_pixmap(pm)
 
-        # Winner badge (theme colours come from the sectionSubtitle style)
         if not has_winner:
-            self._winner_lbl.setText("Winner: not set")
+            self._winner_badge.set_text("Winner not set", "warning")
         elif is_winner:
-            self._winner_lbl.setText("\u2705 Winner (kept)")
+            self._winner_badge.set_text("Winner (kept)", "success")
         else:
-            self._winner_lbl.setText("Not winner (would be quarantined)")
+            self._winner_badge.set_text("Would be quarantined", "")
 
-        # Title
         artist = tags.get("artist") or ""
         title  = tags.get("title")  or ""
         if artist or title:
-            display = f"{artist} \u2013 {title}" if artist and title else (artist or title)
+            display = f"{artist} – {title}" if artist and title else (artist or title)
         else:
             display = os.path.basename(path)
         self._title_lbl.setText(str(display))
 
-        # Metadata
         ext = os.path.splitext(path)[1].lower().lstrip(".") or "unknown"
-        lines = [f"Format: {ext}"]
-        for field_name, tag_key in [
-            ("Artist", "artist"), ("Title", "title"), ("Album", "album"),
-            ("Year",   "year"),   ("Track", "track"), ("Genre", "genre"),
-        ]:
-            val = tags.get(tag_key)
-            if val:
-                lines.append(f"{field_name}: {val}")
-        self._meta_lbl.setText("\n".join(str(l) for l in lines))
+        lossless = f".{ext}" in {".flac", ".wav", ".alac", ".ape", ".aiff", ".aif"}
+        self._format_badge.set_text(ext.upper(), "success" if lossless else "")
+        lines = [f"{name}: {tags.get(key)}" for name, key in self._FIELDS if tags.get(key)]
+        self._meta_lbl.setText("\n".join(str(line) for line in lines) or "No tags")
         self._path_lbl.setText(path)
 
-    def _placeholder_cover(self) -> QtGui.QPixmap:
-        pm = QtGui.QPixmap(_COVER_SIZE, _COVER_SIZE)
-        pm.fill(self.palette().color(QtGui.QPalette.ColorRole.Mid))
-        return pm
-
     def clear(self) -> None:
-        self._cover_lbl.setPixmap(self._placeholder_cover())
-        self._winner_lbl.setText("")
+        self._cover.set_pixmap(None)
+        self._winner_badge.set_text("")
+        self._format_badge.set_text("")
         self._title_lbl.setText("")
         self._meta_lbl.setText("")
         self._path_lbl.setText("")
@@ -276,54 +340,68 @@ class PairReviewDialog(QtWidgets.QDialog):
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Duplicate Pair Review")
-        # The Tools launcher creates one per click; don't keep each one alive.
+        # Its Duplicates-page launcher opens a fresh one each time; don't keep each one alive.
         self.setAttribute(QtCore.Qt.WidgetAttribute.WA_DeleteOnClose)
-        self.setMinimumSize(760, 580)
-        self.resize(880, 640)
+        self.setMinimumSize(760, 560)
+        self.resize(900, 620)
 
         self._library_path = library_path
         self._pairs: list[_Pair] = []
         self._index = 0
 
         root = QtWidgets.QVBoxLayout(self)
-        root.setSpacing(8)
+        root.setContentsMargins(SPACE.lg, SPACE.lg, SPACE.lg, SPACE.lg)
+        root.setSpacing(SPACE.md)
 
-        # Header
-        title_lbl = QtWidgets.QLabel("<b>Duplicate Pair Review</b>")
-        root.addWidget(title_lbl)
+        # Header: what this is, where we are
+        head = QtWidgets.QHBoxLayout()
+        head.setSpacing(SPACE.sm)
+        head.addWidget(hero_title("Review duplicate pairs"))
+        head.addStretch(1)
+        self._progress_lbl = QtWidgets.QLabel("")
+        self._progress_lbl.setObjectName("mutedLabel")
+        apply_font(self._progress_lbl, "label", weight=600)
+        head.addWidget(self._progress_lbl, 0, QtCore.Qt.AlignmentFlag.AlignVCenter)
+        root.addLayout(head)
         desc = QtWidgets.QLabel(
-            "Review paired duplicates. <b>Quarantine</b> moves the inferior file (the "
-            "non-winner; FLAC is preferred when no winner is set) to Quarantine/ after you "
-            "confirm, and logs it to Docs/duplicate_pair_review_log.txt. Nothing is deleted. "
-            "<b>No</b> skips. <b>Tag</b> appends the pair to Docs/duplicate_pair_tags.txt."
+            "Quarantine moves the inferior file (the non-winner; FLAC is preferred when no "
+            "winner is set) to Quarantine/ after you confirm, and logs it to "
+            "Docs/duplicate_pair_review_log.txt. Nothing is deleted. Skip moves on; Tag notes "
+            "the pair in Docs/duplicate_pair_tags.txt."
         )
         desc.setWordWrap(True)
         desc.setObjectName("sectionSubtitle")
         root.addWidget(desc)
 
-        # Progress
-        self._progress_lbl = QtWidgets.QLabel("")
-        root.addWidget(self._progress_lbl)
-
         # Two-panel comparison
         panels_row = QtWidgets.QHBoxLayout()
-        self._left_panel  = _TrackPanel("Left Track")
-        self._right_panel = _TrackPanel("Right Track")
+        panels_row.setSpacing(SPACE.md)
+        self._left_panel  = _TrackPanel("LEFT")
+        self._right_panel = _TrackPanel("RIGHT")
         panels_row.addWidget(self._left_panel,  1)
         panels_row.addWidget(self._right_panel, 1)
-        root.addLayout(panels_row)
+        root.addLayout(panels_row, 1)
 
         # Status
         self._status_lbl = QtWidgets.QLabel("Ready")
-        self._status_lbl.setObjectName("sectionSubtitle")
+        self._status_lbl.setObjectName("statusHint")
+        self._status_lbl.setWordWrap(True)
         root.addWidget(self._status_lbl)
 
         # Navigation row
         nav_row = QtWidgets.QHBoxLayout()
-        self._prev_btn   = QtWidgets.QPushButton("\u25c4 Prev")
-        self._next_btn   = QtWidgets.QPushButton("Next \u25ba")
+        nav_row.setSpacing(SPACE.sm)
+        self._prev_btn   = QtWidgets.QPushButton("Prev")
+        self._next_btn   = QtWidgets.QPushButton("Next")
         self._switch_btn = QtWidgets.QPushButton("Switch")
         self._mp3_btn    = QtWidgets.QPushButton("Prefer MP3")
+        set_glyph(self._prev_btn, "prev")
+        set_glyph(self._next_btn, "next")
+        set_glyph(self._switch_btn, "refresh")
+        self._prev_btn.setToolTip("Previous pair (Left arrow)")
+        self._next_btn.setToolTip("Next pair (Right arrow)")
+        self._switch_btn.setToolTip("Swap the two sides and make the other file the winner.")
+        self._mp3_btn.setToolTip("For an MP3/M4A pair, keep the MP3.")
         self._prev_btn.clicked.connect(self._go_previous)
         self._next_btn.clicked.connect(self._go_next)
         self._switch_btn.clicked.connect(self._handle_switch)
@@ -332,25 +410,33 @@ class PairReviewDialog(QtWidgets.QDialog):
         nav_row.addWidget(self._next_btn)
         nav_row.addWidget(self._switch_btn)
         nav_row.addWidget(self._mp3_btn)
-        nav_row.addSpacing(16)
-        nav_row.addWidget(QtWidgets.QLabel("Jump to:"))
+        nav_row.addStretch(1)
+        jump_lbl = QtWidgets.QLabel("Jump to")
+        jump_lbl.setObjectName("mutedLabel")
+        nav_row.addWidget(jump_lbl)
         self._jump_edit = QtWidgets.QLineEdit()
-        self._jump_edit.setFixedWidth(54)
+        self._jump_edit.setFixedWidth(64)
+        self._jump_edit.setAccessibleName("Jump to pair number")
+        jump_lbl.setBuddy(self._jump_edit)
         self._jump_edit.returnPressed.connect(self._jump_to_pair)
         nav_row.addWidget(self._jump_edit)
         go_btn = QtWidgets.QPushButton("Go")
         go_btn.clicked.connect(self._jump_to_pair)
         nav_row.addWidget(go_btn)
-        nav_row.addStretch(1)
         root.addLayout(nav_row)
 
         # Action row
         action_row = QtWidgets.QHBoxLayout()
+        action_row.setSpacing(SPACE.sm)
         self._yes_btn = QtWidgets.QPushButton("Quarantine inferior…")
         self._yes_btn.setObjectName("primaryBtn")
+        self._yes_btn.setToolTip("Asks first, then moves the inferior file to Quarantine/ (never deletes).")
         self._no_btn  = QtWidgets.QPushButton("No — skip")
+        self._no_btn.setToolTip("Leave both files and go to the next pair (Backspace).")
         self._tag_btn = QtWidgets.QPushButton("Tag")
+        self._tag_btn.setToolTip("Note this pair in Docs/duplicate_pair_tags.txt and go on.")
         close_btn     = QtWidgets.QPushButton("Close")
+        close_btn.setFlat(True)
         self._yes_btn.clicked.connect(self._handle_yes)
         self._no_btn.clicked.connect(self._handle_no)
         self._tag_btn.clicked.connect(self._handle_tag)

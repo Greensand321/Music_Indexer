@@ -6,6 +6,9 @@ import os
 import threading
 
 from gui.compat import QtCore, QtWidgets, Signal, Slot
+from gui.themes.tokens import SPACE
+from gui.widgets.dupes_parts import hero_title, section_card
+from gui.widgets.glyphs import set_glyph
 from gui.workers import start_worker
 
 
@@ -68,67 +71,90 @@ class ScanEngineDialog(QtWidgets.QDialog):
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Duplicate Scan Engine")
-        # The Tools launcher creates one per click; don't keep each one alive.
+        # Its Duplicates-page launcher opens a fresh one each time; don't keep each one alive.
         self.setAttribute(QtCore.Qt.WidgetAttribute.WA_DeleteOnClose)
-        self.setMinimumWidth(560)
-        self.resize(600, 580)
+        self.setMinimumWidth(600)
+        self.resize(680, 680)
         self._worker: _ScanWorker | None = None
         self._closing = False
         self._field_edits: dict[str, QtWidgets.QLineEdit] = {}
 
         root = QtWidgets.QVBoxLayout(self)
-        root.setSpacing(10)
+        root.setContentsMargins(SPACE.lg, SPACE.lg, SPACE.lg, SPACE.lg)
+        root.setSpacing(SPACE.md)
 
+        root.addWidget(hero_title("A staged duplicate scan"))
         desc = QtWidgets.QLabel(
             "Runs a staged duplicate scan (audio headers → fingerprint LSH → "
             "verification) and writes results to a SQLite database. Read-only on audio. "
             "Nothing in AlphaDEX reads that database yet: the summary below is the only output."
         )
         desc.setWordWrap(True)
+        desc.setObjectName("sectionSubtitle")
         root.addWidget(desc)
 
         # ── Paths ──────────────────────────────────────────────────────────
-        paths_group = QtWidgets.QGroupBox("Paths")
-        paths_form  = QtWidgets.QFormLayout(paths_group)
-        paths_form.setSpacing(6)
+        paths_group = section_card("Paths")
+        pl = paths_group.layout()
 
-        lib_row = QtWidgets.QHBoxLayout()
         self._lib_edit = QtWidgets.QLineEdit(library_path)
         lib_browse = QtWidgets.QPushButton("Browse…")
+        set_glyph(lib_browse, "folder")
+        lib_browse.setAccessibleName("Browse for the library root")
         lib_browse.clicked.connect(self._browse_library)
-        lib_row.addWidget(self._lib_edit, 1)
-        lib_row.addWidget(lib_browse)
-        paths_form.addRow("Library Root:", lib_row)
-
-        db_row = QtWidgets.QHBoxLayout()
         self._db_edit = QtWidgets.QLineEdit(self._default_db_path(library_path))
         db_browse = QtWidgets.QPushButton("Browse…")
+        set_glyph(db_browse, "folder")
+        db_browse.setAccessibleName("Browse for the database file")
         db_browse.clicked.connect(self._browse_db)
-        db_row.addWidget(self._db_edit, 1)
-        db_row.addWidget(db_browse)
-        paths_form.addRow("Database:", db_row)
-
+        paths = QtWidgets.QGridLayout()
+        paths.setHorizontalSpacing(SPACE.sm)
+        paths.setVerticalSpacing(SPACE.xs)
+        for row, (caption, edit, browse) in enumerate((("Library root", self._lib_edit, lib_browse),
+                                                       ("Database", self._db_edit, db_browse))):
+            lbl = QtWidgets.QLabel(caption)
+            lbl.setObjectName("mutedLabel")
+            lbl.setBuddy(edit)
+            edit.setAccessibleName(caption)
+            paths.addWidget(lbl, row, 0)
+            paths.addWidget(edit, row, 1)
+            paths.addWidget(browse, row, 2)
+        paths.setColumnStretch(1, 1)
+        pl.addLayout(paths)
         root.addWidget(paths_group)
 
         # ── Settings ───────────────────────────────────────────────────────
-        settings_group = QtWidgets.QGroupBox("Scan Settings")
-        settings_form  = QtWidgets.QFormLayout(settings_group)
-        settings_form.setSpacing(4)
-        for key, label, default in self._SETTINGS:
+        settings_group = section_card("Scan settings")
+        grid = QtWidgets.QGridLayout()
+        grid.setHorizontalSpacing(SPACE.lg)
+        grid.setVerticalSpacing(SPACE.xs)
+        for i, (key, label, default) in enumerate(self._SETTINGS):
             edit = QtWidgets.QLineEdit(default)
-            edit.setFixedWidth(100)
+            edit.setMaximumWidth(120)
+            edit.setAccessibleName(label)
             self._field_edits[key] = edit
-            settings_form.addRow(f"{label}:", edit)
+            caption = QtWidgets.QLabel(label)
+            caption.setObjectName("mutedLabel")
+            caption.setBuddy(edit)
+            row, col = i // 2, (i % 2) * 2
+            grid.addWidget(caption, row, col)
+            grid.addWidget(edit, row, col + 1)
+        grid.setColumnStretch(1, 1)
+        grid.setColumnStretch(3, 1)
+        settings_group.layout().addLayout(grid)
         root.addWidget(settings_group)
 
         # ── Controls ───────────────────────────────────────────────────────
         ctrl_row = QtWidgets.QHBoxLayout()
+        ctrl_row.setSpacing(SPACE.sm)
         self._run_btn = QtWidgets.QPushButton("Run Scan")
         self._run_btn.setObjectName("primaryBtn")
+        set_glyph(self._run_btn, "search", role="inverse")
         self._run_btn.clicked.connect(self._run_scan)
         self._status_lbl = QtWidgets.QLabel("Idle")
-        self._status_lbl.setObjectName("sectionSubtitle")
+        self._status_lbl.setObjectName("statusHint")
         close_btn = QtWidgets.QPushButton("Close")
+        close_btn.setFlat(True)
         close_btn.clicked.connect(self.close)
         ctrl_row.addWidget(self._run_btn)
         ctrl_row.addWidget(self._status_lbl)
@@ -137,14 +163,14 @@ class ScanEngineDialog(QtWidgets.QDialog):
         root.addLayout(ctrl_row)
 
         # ── Log ────────────────────────────────────────────────────────────
-        log_group  = QtWidgets.QGroupBox("Log")
-        log_layout = QtWidgets.QVBoxLayout(log_group)
+        log_group = section_card("Log")
         self._log_box = QtWidgets.QPlainTextEdit()
         self._log_box.setReadOnly(True)
-        self._log_box.setMinimumHeight(120)
-        self._log_box.setObjectName("logBox")
-        log_layout.addWidget(self._log_box)
-        root.addWidget(log_group)
+        self._log_box.setMinimumHeight(90)
+        self._log_box.setObjectName("logText")
+        self._log_box.setPlaceholderText("The engine's progress and its summary appear here.")
+        log_group.layout().addWidget(self._log_box)
+        root.addWidget(log_group, 1)
 
         missing = _missing_engine_modules()
         if missing:
