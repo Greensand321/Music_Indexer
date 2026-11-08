@@ -1,7 +1,10 @@
 """Slide-up activity log drawer anchored to the bottom of the window.
 
-Colours come from the active theme's ``log_*`` tokens and follow theme
-switches (they used to be fixed Midnight constants, DS-12 / SHELL-18).
+Under Liquid Glass the drawer is a glass strip below the pages (the
+material's card surface, radius 18): the handle carries the title, the
+status chip and Clear; the expanded log is a rounded dark inset. Text and
+status colours come from the active theme's ``log_*`` tokens and follow
+theme switches (they used to be fixed Midnight constants, DS-12 / SHELL-18).
 
 Motion (DS-18): the drawer's layout footprint changes once per toggle (the
 body gets its full height before opening, and gives it back after closing);
@@ -18,7 +21,8 @@ from gui.themes.manager import get_manager
 
 _DRAWER_EXPANDED = 220
 _DRAWER_COLLAPSED = 0
-_HANDLE_HEIGHT = 30
+_HANDLE_HEIGHT = 34
+_RADIUS = 18
 
 _LEVELS = ("info", "ok", "warn", "error")
 
@@ -44,7 +48,7 @@ def _level_colour(tokens, level: str) -> str:
 
 
 class _Handle(QtWidgets.QWidget):
-    """The always-visible strip; paints ``log_handle``."""
+    """The always-visible strip (transparent: the drawer paints the glass)."""
 
     def __init__(self, drawer: "LogDrawer") -> None:
         super().__init__(drawer)
@@ -52,11 +56,6 @@ class _Handle(QtWidgets.QWidget):
         self.setObjectName("logDrawerHandle")
         self.setFixedHeight(_HANDLE_HEIGHT)
         self.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
-
-    def paintEvent(self, event: QtGui.QPaintEvent) -> None:  # noqa: N802
-        p = QtGui.QPainter(self)
-        p.fillRect(self.rect(), QtGui.QColor(get_manager().current.log_handle))
-        p.end()
 
     def mousePressEvent(self, event: QtGui.QMouseEvent) -> None:  # noqa: N802
         self._drawer.toggle()
@@ -69,7 +68,9 @@ class _Body(QtWidgets.QWidget):
         super().__init__(parent)
         self.sheet = QtWidgets.QWidget(self)
         self.sheet.setObjectName("logDrawerSheet")
-        self.sheet.setAutoFillBackground(True)
+        # The rounded log text paints its own log_bg; the sheet stays clear
+        # so the drawer's glass shows round it.
+        self.sheet.setAutoFillBackground(False)
         self.reveal = 0.0       # 0 = sheet below the body, 1 = fully shown
 
     def place_sheet(self) -> None:
@@ -106,30 +107,27 @@ class LogDrawer(QtWidgets.QWidget):
         handle = _Handle(self)
         self._handle = handle
         handle_layout = QtWidgets.QHBoxLayout(handle)
-        handle_layout.setContentsMargins(16, 0, 16, 0)
+        handle_layout.setContentsMargins(16, 0, 10, 0)
+        handle_layout.setSpacing(10)
+
+        from gui.themes.glass import font
 
         self._toggle_icon = QtWidgets.QLabel("▲  Activity Log")
         self._toggle_icon.setObjectName("logDrawerTitle")
-        f = QtGui.QFont(self._toggle_icon.font())
-        f.setPixelSize(12)
-        f.setWeight(QtGui.QFont.Weight.DemiBold)
-        self._toggle_icon.setFont(f)
+        self._toggle_icon.setFont(font("caption", weight=600))
         handle_layout.addWidget(self._toggle_icon)
         handle_layout.addStretch(1)
 
         self._status_chip = QtWidgets.QLabel("● Idle")
         self._status_chip.setObjectName("logStatusChip")
-        f = QtGui.QFont(self._status_chip.font())
-        f.setPixelSize(12)
-        self._status_chip.setFont(f)
+        self._status_chip.setFont(font("caption"))
         handle_layout.addWidget(self._status_chip)
 
         self._clear_btn = QtWidgets.QPushButton("Clear")
         self._clear_btn.setObjectName("logClearButton")
-        self._clear_btn.setFixedSize(50, 20)
-        f = QtGui.QFont(self._clear_btn.font())
-        f.setPixelSize(11)
-        self._clear_btn.setFont(f)
+        self._clear_btn.setFlat(True)
+        self._clear_btn.setFixedSize(56, 24)
+        self._clear_btn.setFont(font("caption", weight=600))
         self._clear_btn.clicked.connect(self._on_clear)
         handle_layout.addWidget(self._clear_btn)
 
@@ -139,7 +137,7 @@ class LogDrawer(QtWidgets.QWidget):
         self._log_body = _Body(self)
         self._log_body.setFixedHeight(_DRAWER_COLLAPSED)
         sheet_layout = QtWidgets.QVBoxLayout(self._log_body.sheet)
-        sheet_layout.setContentsMargins(0, 0, 0, 0)
+        sheet_layout.setContentsMargins(8, 0, 8, 8)
 
         self._text = QtWidgets.QPlainTextEdit()
         self._text.setObjectName("logText")
@@ -219,6 +217,17 @@ class LogDrawer(QtWidgets.QWidget):
                 duration="base", easing="exit", on_finished=self._on_collapsed,
             )
 
+    # ── Painting: the glass strip ─────────────────────────────────────────
+
+    def paintEvent(self, event: QtGui.QPaintEvent) -> None:  # noqa: N802
+        from gui.themes.glass import current_material, paint_surface
+
+        p = QtGui.QPainter(self)
+        try:
+            paint_surface(p, QtCore.QRectF(self.rect()), current_material().card, radius=_RADIUS)
+        finally:
+            p.end()
+
     # ── Private ───────────────────────────────────────────────────────────
 
     def _on_reveal(self, value: float) -> None:
@@ -245,10 +254,6 @@ class LogDrawer(QtWidgets.QWidget):
         sheet_pal = self._log_body.sheet.palette()
         sheet_pal.setColor(QtGui.QPalette.ColorRole.Window, QtGui.QColor(t.log_bg))
         self._log_body.sheet.setPalette(sheet_pal)
-        self._clear_btn.setStyleSheet(
-            f"background: transparent; border: 1px solid {t.card_border}; "
-            f"color: {t.log_text}; border-radius: 4px;"
-        )
         self._paint_status()
         self._recolour_lines(t)
         self._handle.update()

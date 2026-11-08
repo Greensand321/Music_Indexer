@@ -16,9 +16,10 @@ Start-up sequence (``build_startup``; ``main`` adds the event loop)
    - Once it is fully visible (``faded_in``) the main window is built, during
      the ~600 ms logo pause, so the first landing frames are never blocked.
    - Tiles fly in; album art populates them in the background.
-   - The user confirms the saved library ("Initialize"), picks a folder, or
-     clicks an album tile. A saved library that no longer exists is shown as
-     "not found" with "Choose Library Folder" instead of "Initialize".
+   - The user confirms the saved library ("Initialize"), picks a folder
+     ("Choose another folder"), clicks an album tile, or quits (the ✕). A
+     saved library that no longer exists is shown as "not found" with
+     "Choose Library Folder" instead of "Initialize".
    - Tiles scatter; the landing cross-fades into the main window.
 2. ``AlphaDEXWindow`` — main application interface. The chosen library is
    applied **once**, when the cross-fade has finished (so the page fan-out
@@ -121,6 +122,7 @@ class Startup(QtCore.QObject):
         self.landing.faded_in.connect(self.ensure_window)
         self.landing.library_selected.connect(self._landing_to_main)
         self.landing.tile_clicked.connect(self._on_tile_clicked)
+        self.landing.quit_requested.connect(self._on_quit_requested)
 
     # ── steps ─────────────────────────────────────────────────────────────
 
@@ -168,6 +170,11 @@ class Startup(QtCore.QObject):
         self.failed.emit(self.error)
         self._on_fatal(1)
 
+    def _on_quit_requested(self) -> None:
+        """The landing's ✕: leave without opening the main window."""
+        self.exit_code = 0
+        self._app.quit()
+
     def _on_tile_clicked(self, dirpath: str) -> None:
         if not self.play_dir:   # the first click wins; the landing ignores later ones
             self.play_dir = dirpath
@@ -180,6 +187,12 @@ class Startup(QtCore.QObject):
         window = self.ensure_window()   # built now if the user was very fast
         if window is None:
             return
+
+        # The album art the landing found becomes the window's backdrop
+        # (no second scan of the same library).
+        seed = getattr(window, "seed_backdrop", None)
+        if callable(seed):
+            seed(path, self.landing.cover_images())
 
         # A clicked tile: go to the Player and start playing before the
         # window fades in, so it is ready when it appears.

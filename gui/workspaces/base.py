@@ -42,20 +42,32 @@ class WorkspaceBase(QtWidgets.QWidget):
     # ── Scroll wrapper ────────────────────────────────────────────────────
 
     def _setup_scroll(self) -> None:
-        """Wrap self in a scroll area so tall content is accessible."""
+        """Wrap self in a transparent scroll area so tall content is accessible
+        and the window backdrop shows through between (and under) the cards.
+
+        Margins: the shell's gutter left and right (the scroll area spans to
+        the sidebar and the window edge, so card shadows are not cut off at
+        the card), and ``SPACE.page_bottom`` below the content so the floating
+        Now Playing capsule never covers the last card."""
+        from gui.themes.tokens import SPACE
+
         outer = QtWidgets.QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
 
         scroll = QtWidgets.QScrollArea()
+        scroll.setObjectName("workspaceScroll")
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        scroll.viewport().setAutoFillBackground(False)
+        self._scroll_area = scroll
 
-        # GradientWidget paints the themed background; plain QWidget would be transparent.
+        # Transparent: GradientWidget only paints its cards' shadows.
         self._inner = GradientWidget()
         self._content_layout = QtWidgets.QVBoxLayout(self._inner)
-        self._content_layout.setContentsMargins(24, 20, 24, 20)
-        self._content_layout.setSpacing(16)
+        self._content_layout.setContentsMargins(
+            SPACE.gutter, SPACE.xs, SPACE.gutter, SPACE.page_bottom)
+        self._content_layout.setSpacing(SPACE.gutter)
 
         scroll.setWidget(self._inner)
         outer.addWidget(scroll)
@@ -67,11 +79,15 @@ class WorkspaceBase(QtWidgets.QWidget):
     # ── Builder helpers ───────────────────────────────────────────────────
 
     def _make_card(self) -> QtWidgets.QFrame:
-        """A themed card. Its shadow is painted by the scroll surface
+        """A glass card (``gui.widgets.glass.GlassCard``): translucent fill,
+        hairline border and top highlight, painted from the active material
+        (opaque under classic themes). Rename it ``headerCard`` for the hero
+        look. Its shadow is painted by the scroll surface
         (``GradientWidget.add_elevated``), not by a graphics effect, so the
         card's one effect slot stays free for fades (DS-02)."""
-        card = QtWidgets.QFrame()
-        card.setObjectName("workspaceCard")
+        from gui.widgets.glass import GlassCard
+
+        card = GlassCard()
         self._cards.append(card)
         surface = getattr(self, "_inner", None)
         if hasattr(surface, "add_elevated"):

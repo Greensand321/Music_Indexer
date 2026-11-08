@@ -99,8 +99,6 @@ def test_static_stylesheet_carries_no_literal_colours():
 # ── DS-02 / DS-21: painted card shadows ──────────────────────────────────────
 
 def test_cards_get_a_painted_shadow_and_keep_their_effect_slot(make_workspace, monkeypatch):
-    import gui.widgets.gradient_bg as gb
-    monkeypatch.setattr(gb, "_GRADIENT_FLAG", False)
     get_manager().apply("midnight")
     ws = make_workspace("indexer")
     process_events(20)
@@ -111,13 +109,25 @@ def test_cards_get_a_painted_shadow_and_keep_their_effect_slot(make_workspace, m
     card = ws._cards[0]
     top_left = card.mapTo(ws._inner, QtCore.QPoint(0, 0))
     probe = QtCore.QPoint(top_left.x() + card.width() // 2, top_left.y() + card.height() + 4)
-    shaded = ws._inner.grab().toImage().pixelColor(probe)
     base = QtGui.QColor(THEMES["midnight"].content_bg)
+
+    def over_page() -> QtGui.QColor:
+        # The scroll surface is transparent (the window backdrop shows
+        # through), so composite it over the page colour, as on screen.
+        shot = ws._inner.grab()
+        img = QtGui.QImage(shot.size(), QtGui.QImage.Format.Format_ARGB32)
+        img.fill(base)
+        p = QtGui.QPainter(img)
+        p.drawPixmap(0, 0, shot)
+        p.end()
+        return img.pixelColor(probe)
+
+    shaded = over_page()
     assert shaded.lightness() < base.lightness(), "no visible shadow under the card"
 
     import gui.themes.effects as fx
     monkeypatch.setattr(fx, "paint_elevation", lambda *a, **k: None)
-    flat = ws._inner.grab().toImage().pixelColor(probe)
+    flat = over_page()
     assert flat.name() == base.name()
 
 
@@ -137,8 +147,9 @@ def test_theme_switch_does_not_rebuild_shadows_in_the_base(make_workspace, monke
 def test_no_config_reads_while_painting(main_window, monkeypatch):
     import config
     import gui.widgets.gradient_bg as gb
+    from gui.themes import appearance
 
-    monkeypatch.setattr(gb, "_GRADIENT_FLAG", None)   # restored after the test
+    monkeypatch.setattr(appearance, "_mode_cache", None)   # restored after the test
     main_window.repaint()           # warm the cache
     reads = []
     real = config.load_config
@@ -185,8 +196,8 @@ def test_explicit_fonts_are_not_overridden(qtbot):
         get_manager().apply(key)
         process_events(5)
         assert btn.font().pointSize() == 20 and edit.font().pointSize() == 20
-    from gui.fonts.loader import TypeScale
-    assert plain.font().pointSize() == TypeScale.BUTTON, "role fonts still apply by default"
+    from gui.themes.tokens import TYPE
+    assert plain.font().pixelSize() == TYPE["body"].px, "role fonts still apply by default"
 
 
 # ── DS-24: the type ramp reads top-down ──────────────────────────────────────
@@ -218,8 +229,10 @@ def test_type_ramp_is_not_inverted(main_window):
 
 # ── DS-12 / SHELL-18: sidebar and log drawer follow the theme ────────────────
 
-@pytest.mark.parametrize("theme", ["pearl", "sunset", "midnight"])
-def test_sidebar_logo_and_separator_use_tokens(qtbot, theme):
+@pytest.mark.parametrize("theme", ["pearl", "sunset", "midnight", "glass"])
+def test_sidebar_brand_and_group_labels_use_tokens(qtbot, theme):
+    """The brand name and the group headings follow the theme through the
+    palette (no inline colours), and stay legible on the sidebar."""
     from gui.widgets.sidebar import Sidebar
 
     get_manager().apply(theme)
@@ -233,7 +246,9 @@ def test_sidebar_logo_and_separator_use_tokens(qtbot, theme):
     colour = logo.palette().color(R.WindowText).name()
     assert colour == t.text_primary
     assert _contrast(colour, t.sidebar_bg) >= 4.5
-    assert sb._separator.color().name() == t.card_border
+    for label in sb._labels:
+        assert label.styleSheet() == ""
+        assert label.palette().color(R.WindowText).name() == t.text_muted
 
 
 def test_log_drawer_follows_theme(qtbot):
@@ -242,6 +257,7 @@ def test_log_drawer_follows_theme(qtbot):
     get_manager().apply("midnight")
     drawer = LogDrawer()
     qtbot.addWidget(drawer)
+    drawer.resize(900, drawer.sizeHint().height())
     drawer.show()
     drawer.append("all good", "ok")
     drawer.append("broken", "error")
@@ -254,7 +270,8 @@ def test_log_drawer_follows_theme(qtbot):
         assert drawer._status_chip.palette().color(R.WindowText).name() == t.log_warn
         assert drawer._log_body.sheet.palette().color(R.Window).name() == t.log_bg
         assert drawer._toggle_icon.palette().color(R.WindowText).name() == t.log_text
-        assert drawer._handle.grab().toImage().pixelColor(2, 2).name() == t.log_handle
+        # The drawer is one surface (the material's card): opaque in classic themes.
+        assert drawer.grab().toImage().pixelColor(drawer.width() // 2, 17).name() == t.card_bg
         doc = drawer._text.document()
         first, second = doc.findBlockByNumber(0), doc.findBlockByNumber(1)
         assert first.begin().fragment().charFormat().foreground().color().name() == t.log_ok

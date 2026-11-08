@@ -1,23 +1,19 @@
-"""Subtle gradient background for workspace panels.
+"""The scroll surface of every workspace, and the legacy gradient helpers.
 
-``GradientWidget`` replaces the plain ``QWidget`` used as the scroll-area
-inner widget in ``WorkspaceBase``.  It paints two small radial glows anchored
-to opposite corners using the theme's accent colours, giving each theme a
-distinct atmospheric tint without competing with the cards laid on top.
+``GradientWidget`` is the inner widget of ``WorkspaceBase``'s scroll area.
+It is **transparent**: the window-level backdrop (``gui/widgets/backdrop.py``:
+album art, a gradient or a plain fill, chosen in Settings → Appearance)
+shows through it and through the glass cards on it. Its one job left is to
+paint the *shadow* of the cards registered with ``add_elevated()``: a card
+cannot paint outside its own rect, the surface beneath it can. Shadows are
+painted, never a ``QGraphicsDropShadowEffect`` (see
+``gui.themes.glass.paint_shadow``).
 
-The effect is controlled by the ``bg_gradient_enabled`` key in
-``~/.soundvault_config.json`` (defaults to ``True``).  Set it to ``false``
-to revert to a flat ``content_bg`` fill.
-
-The flag is read once and cached: ``paintEvent`` must never do file I/O
-(it used to re-read the config JSON on every paint of every gradient
-surface, DS-03 / SHELL-14). The cache is dropped on every theme change and
-by ``refresh_gradient_setting()``, which the Settings flow calls after
-saving.
-
-``GradientWidget`` also paints the *elevation* (soft drop shadow) of the
-cards registered with ``add_elevated()``. Shadows are painted, not a
-``QGraphicsDropShadowEffect``: see ``gui.themes.effects.paint_elevation``.
+The background setting is read once and cached (``paintEvent`` must never do
+file I/O, DS-03 / SHELL-14): ``_gradient_enabled()`` is now "the backdrop is
+not Plain" (``gui.themes.appearance``), still honouring the old
+``bg_gradient_enabled`` key. ``refresh_gradient_setting()`` (called after
+Settings saves) re-reads it and tells every backdrop to rebuild.
 """
 from __future__ import annotations
 
@@ -25,36 +21,32 @@ from gui.compat import QtCore, QtGui, QtWidgets
 from gui.themes.manager import get_manager
 
 
-_GRADIENT_FLAG: bool | None = None
-
-
 def _gradient_enabled() -> bool:
-    """Cached ``bg_gradient_enabled`` flag (safe to call from paintEvent)."""
-    global _GRADIENT_FLAG
-    if _GRADIENT_FLAG is None:
-        try:
-            from config import load_config
-            _GRADIENT_FLAG = bool(load_config().get("bg_gradient_enabled", True))
-        except Exception:
-            _GRADIENT_FLAG = True
-    return _GRADIENT_FLAG
+    """Cached: True unless the backdrop is "Plain" (safe to call from paint)."""
+    from gui.themes import appearance
+    return appearance.backdrop_mode() != "plain"
 
 
 def invalidate_gradient_setting() -> None:
-    """Forget the cached flag; the next paint re-reads it once."""
-    global _GRADIENT_FLAG
-    _GRADIENT_FLAG = None
+    """Forget the cached setting; the next read loads it once."""
+    from gui.themes import appearance
+    appearance.invalidate()
 
 
 def refresh_gradient_setting() -> bool:
-    """Re-read the flag now and repaint every window. Call after the
-    settings are saved. Returns the new value."""
-    invalidate_gradient_setting()
+    """Re-read the background setting now, rebuild every backdrop and repaint
+    every window. Call after the settings are saved. Returns True unless the
+    backdrop is "Plain"."""
+    from gui.themes import appearance
+    appearance.refresh()
     value = _gradient_enabled()
     app = QtWidgets.QApplication.instance()
     if app is not None:
         for w in app.topLevelWidgets():
             for child in [w, *w.findChildren(QtWidgets.QWidget)]:
+                rebuild = getattr(child, "on_appearance_changed", None)
+                if callable(rebuild):
+                    rebuild()
                 child.update()
     return value
 
@@ -70,27 +62,15 @@ def paint_window_gradient(
 ) -> None:
     """Paint a window-spanning radial gradient in widget-local coordinates.
 
-    The gradient origins are computed in *window* space then mapped into the
-    widget's local coordinate space.  This makes the gradient read as one
-    seamless canvas across the sidebar and the workspace, even though they are
-    separate widgets with independent paintEvents.
-
-    Parameters
-    ----------
-    painter:      Active QPainter on *widget*.
-    widget:       The widget being painted.
-    tokens:       ThemeTokens object with ``accent`` and ``accent_hover`` attrs.
-    radius_scale: Scales the glow radius relative to ``max(win_w, win_h)``.
-    alpha_tr:     Alpha (0-255) for the top-right accent glow.
-    alpha_bl:     Alpha (0-255) for the bottom-left accent_hover glow.
+    The classic themes' "Gradient" backdrop: an accent glow from the top-right
+    corner and an ``accent_hover`` glow from the bottom-left, mapped from
+    *window* space so separate widgets read as one canvas.
     """
     win = widget.window()
     ww = float(win.width())
     wh = float(win.height())
     radius = max(ww, wh) * radius_scale
 
-    # Map window-space corners to widget-local coordinates so the gradient
-    # origin is consistent across widgets that share the same window.
     tr_local = widget.mapFrom(win, QtCore.QPoint(int(ww), 0))
     bl_local = widget.mapFrom(win, QtCore.QPoint(0, int(wh)))
     tr_x, tr_y = float(tr_local.x()), float(tr_local.y())
@@ -98,7 +78,6 @@ def paint_window_gradient(
 
     rect = widget.rect()
 
-    # Top-right glow — accent colour
     g1 = QtGui.QRadialGradient(tr_x, tr_y, radius * 0.90)
     c1_on = QtGui.QColor(tokens.accent)   # type: ignore[attr-defined]
     c1_on.setAlpha(alpha_tr)
@@ -108,7 +87,6 @@ def paint_window_gradient(
     g1.setColorAt(1.0, c1_off)
     painter.fillRect(rect, QtGui.QBrush(g1))
 
-    # Bottom-left glow — accent_hover colour
     g2 = QtGui.QRadialGradient(bl_x, bl_y, radius * 0.72)
     c2_on = QtGui.QColor(tokens.accent_hover)   # type: ignore[attr-defined]
     c2_on.setAlpha(alpha_bl)
@@ -120,20 +98,13 @@ def paint_window_gradient(
 
 
 class GradientWidget(QtWidgets.QWidget):
-    """Inner scroll widget that paints a theme-aware radial gradient background.
-
-    Two radial glows are drawn:
-    - Top-right corner  → ``accent``  colour at low alpha (~9 % dark / ~6 % light)
-    - Bottom-left corner → ``accent_hover`` colour at slightly lower alpha
-
-    Both glows fade to transparent, so the middle of the workspace stays clean
-    and the cards remain the focal point.
-    """
+    """Transparent scroll surface that paints the shadows of its cards."""
 
     def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(parent)
         self._tokens = get_manager().current
         self._elevated: list[QtWidgets.QWidget] = []
+        self.setAutoFillBackground(False)
         get_manager().theme_changed.connect(self._on_theme_changed)
 
     # ── Elevation ─────────────────────────────────────────────────────────
@@ -166,52 +137,26 @@ class GradientWidget(QtWidgets.QWidget):
 
     def _on_theme_changed(self, tokens: object) -> None:
         self._tokens = tokens  # type: ignore[assignment]
-        invalidate_gradient_setting()
         self.update()
 
     # ── Painting ──────────────────────────────────────────────────────────
 
     def paintEvent(self, event: QtGui.QPaintEvent) -> None:  # noqa: N802
+        if not self._elevated:
+            return
+        from gui.themes.effects import elevation_margin, paint_elevation
+        from gui.widgets.glass import card_radius
+
         t = self._tokens
         p = QtGui.QPainter(self)
-        rect = self.rect()
-        w = float(rect.width())
-        h = float(rect.height())
-
-        # Solid base — always painted so the widget is never transparent.
-        p.fillRect(rect, QtGui.QColor(t.content_bg))
-
-        if _gradient_enabled() and w > 0 and h > 0:
-            radius = max(w, h) * 0.85
-
-            # ── Top-right glow (accent) ────────────────────────────────────
-            alpha_tr = 22 if t.variant == "dark" else 14
-            g1 = QtGui.QRadialGradient(w, 0.0, radius * 0.90)
-            c1_on  = QtGui.QColor(t.accent);  c1_on.setAlpha(alpha_tr)
-            c1_off = QtGui.QColor(t.accent);  c1_off.setAlpha(0)
-            g1.setColorAt(0.0, c1_on)
-            g1.setColorAt(1.0, c1_off)
-            p.fillRect(rect, QtGui.QBrush(g1))
-
-            # ── Bottom-left glow (accent_hover) ───────────────────────────
-            alpha_bl = 15 if t.variant == "dark" else 9
-            g2 = QtGui.QRadialGradient(0.0, h, radius * 0.72)
-            c2_on  = QtGui.QColor(t.accent_hover);  c2_on.setAlpha(alpha_bl)
-            c2_off = QtGui.QColor(t.accent_hover);  c2_off.setAlpha(0)
-            g2.setColorAt(0.0, c2_on)
-            g2.setColorAt(1.0, c2_off)
-            p.fillRect(rect, QtGui.QBrush(g2))
-
-        # ── Card elevation, beneath the (transparent-parented) cards ──────
-        if self._elevated:
-            from gui.themes.effects import elevation_margin, paint_elevation
-            dirty = event.rect().adjusted(*elevation_margin())
+        try:
+            dirty = event.rect().adjusted(*elevation_margin(t))
             for card in self.elevated_widgets():
                 r = self._shadow_rect(card)
                 if r is not None and r.intersects(dirty):
-                    paint_elevation(p, r, t)
-
-        p.end()
+                    paint_elevation(p, r, t, radius=card_radius(card))
+        finally:
+            p.end()
 
 
 _GEOMETRY_EVENTS = {

@@ -357,6 +357,57 @@ def _layout_contains(layout: QtWidgets.QLayout, widget: QtWidgets.QWidget) -> bo
     return False
 
 
+# ── Reveal (page / section transitions) ──────────────────────────────────────
+
+REVEAL_KEY = "reveal"
+
+
+def reveal(
+    widget: QtWidgets.QWidget,
+    *,
+    duration: str | int = "base",  # noqa: A002
+    on_finished: Callable[[], None] | None = None,
+) -> QtCore.QVariantAnimation | None:
+    """Fade an already-shown widget in from transparent (a page that a stack
+    just made current). Ends at opacity 1.0 with the effect disabled, so
+    nothing renders off-screen at rest; a repeated call restarts it (one
+    animation per widget, parented to it). A widget carrying another
+    graphics effect, or reduced motion, is left as is. While the fade runs,
+    Qt caches the page as one pixmap and only blends it, so a frame costs a
+    blit."""
+    effect = widget.graphicsEffect()
+    if (effect is not None and not isinstance(effect, QtWidgets.QGraphicsOpacityEffect)) \
+            or _resolve(duration) == 0:
+        stop(widget, REVEAL_KEY)
+        if isinstance(effect, QtWidgets.QGraphicsOpacityEffect):
+            effect.setOpacity(1.0)
+            effect.setEnabled(False)
+        if on_finished:
+            on_finished()
+        return None
+    if effect is None:
+        effect = QtWidgets.QGraphicsOpacityEffect(widget)
+        widget.setGraphicsEffect(effect)
+    effect.setEnabled(True)
+    effect.setOpacity(0.0)
+
+    def _value(v) -> None:
+        current = widget.graphicsEffect()
+        if isinstance(current, QtWidgets.QGraphicsOpacityEffect):
+            current.setOpacity(float(v))
+
+    def _done() -> None:
+        current = widget.graphicsEffect()
+        if isinstance(current, QtWidgets.QGraphicsOpacityEffect):
+            current.setOpacity(1.0)
+            current.setEnabled(False)
+        if on_finished:
+            on_finished()
+
+    return animate_value(widget, REVEAL_KEY, 0.0, 1.0, _value, duration=duration,
+                         easing="standard", on_finished=_done)
+
+
 # ── Fade ──────────────────────────────────────────────────────────────────────
 
 def fade(

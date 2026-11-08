@@ -5,7 +5,7 @@ and compare the sheets side by side. Runs headless (Qt "offscreen"), in a
 throw-away HOME so your real config is never touched, against a synthetic
 tagged library by default.
 
-    python scripts/gui_snapshots.py                       # midnight + pearl
+    python scripts/gui_snapshots.py                       # glass + midnight + pearl
     python scripts/gui_snapshots.py --themes all --out /tmp/shots
     python scripts/gui_snapshots.py --library "D:/Music" --themes midnight
     python scripts/gui_snapshots.py --pages indexer,duplicates/compare --size 1600x1000
@@ -38,7 +38,7 @@ def _parse_args(argv=None):
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("--out", default=str(REPO / "snapshots"),
                    help="output directory (default: ./snapshots, git-ignored)")
-    p.add_argument("--themes", default="midnight,pearl",
+    p.add_argument("--themes", default="glass,midnight,pearl",
                    help="comma-separated theme keys, or 'all'")
     p.add_argument("--pages", "--workspaces", dest="pages", default="all",
                    help="comma-separated page or page/section keys, or 'all'")

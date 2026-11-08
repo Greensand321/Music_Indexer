@@ -223,8 +223,9 @@ path.
    `gui/widgets/interactive_3d_scatter.py`, the stray repo-root files (`player_106bd0e.py`, `player_diff.txt`,
    `player_full_diff.txt`, `diff_player*.txt`, `crash_test.txt`, `crash_report.txt`, `last_path.txt`, the
    committed `soundvault_crash.log*`), and the stray `=0.13.0` file (a pip-redirect accident)?
-5. **Visual direction:** stay close to the current glassy dark look with better hierarchy, or a new direction?
-   The design system work supports either.
+5. **Visual direction:** *decided* — "Refined Liquid Glass" (translucent glass over a blurred wall of the
+   library's own album covers). Phase R1 built the design system, the shell and the landing; the classic themes
+   stay selectable. See `docs/CONTRADICTING_UPDATES.md` §F.
 6. **Startup:** keep the mosaic landing as a first-run and "change library" experience, but go straight to the
    main window when the saved library is valid?
 

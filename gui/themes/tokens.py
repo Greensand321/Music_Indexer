@@ -1,7 +1,84 @@
-"""Theme token definitions — the single source of truth for every colour in the app."""
+"""Theme token definitions — the single source of truth for every colour in the app.
+
+Three layers live here:
+
+* **Colour tokens** (``ThemeTokens``): one opaque hex per role, per theme. Every
+  theme has them; they are what the palette, the contrast tests and older
+  widgets read.
+* **Material** (``ThemeTokens.material``): how surfaces are painted, per
+  elevation — ``sidebar``, ``card``, ``raised`` (pill buttons, chips, the
+  active nav item, the segmented-control thumb), ``capsule`` (the floating
+  Now Playing bar) and ``well`` (inset fields, stat tiles, list rows) — plus
+  the backdrop. Liquid Glass is a translucent material over an album-art
+  backdrop; the classic themes get an opaque material derived from their
+  colour tokens, so both render through the same components.
+* **Scales** (theme-independent): the type ramp (``TYPE``), spacing
+  (``SPACE``) and radii (``RADIUS``), so pages ask for a role, never a literal.
+
+Surface colours are CSS-style strings: ``"#rrggbb"`` or ``"rgba(r,g,b,a)"``
+with ``a`` in 0..1; ``gui.themes.glass.qcolor`` parses both.
+"""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
+
+# Fully rounded corners ("pill"): painters clamp a radius to half the height.
+PILL = 999
+
+
+@dataclass(frozen=True)
+class Surface:
+    """How one elevation of a material is painted (see ``gui.themes.glass``)."""
+    fill: str
+    border: str = ""          # 1 px border; "" = none
+    highlight: str = ""       # 1 px inner top highlight; "" = none
+    shadow: str = ""          # soft shadow colour; "" = none
+    blur: int = 0             # shadow blur, px (CSS box-shadow blur radius)
+    offset_y: int = 0         # shadow drop, px
+    radius: int = 26          # corner radius; PILL = fully rounded
+
+
+@dataclass(frozen=True)
+class Material:
+    """Surfaces per elevation, overlays, and the backdrop of one theme."""
+    kind: str                 # "glass" | "classic"
+    sidebar: Surface
+    card: Surface
+    raised: Surface
+    capsule: Surface
+    well: Surface
+    hover: str                # hovered rows / idle items
+    pressed: str              # pressed overlay
+    selection: str            # selected rows (palette Highlight)
+    selection_text: str       # text on a selection
+    hairline: str             # row separators, dividers
+    knob: str                 # slider knobs
+    track: str                # slider / progress tracks
+    view: str                 # item views (tables, trees, lists)
+    view_alt: str             # alternate rows
+    backdrop_base: str        # solid colour under everything (also dialogs)
+    backdrop_tone: str        # average colour of the finished backdrop
+    backdrop_scrim: str = ""  # laid over the album-art wall ("" = none)
+    backdrop: str = "gradient"   # default backdrop mode: "art" | "gradient" | "plain"
+    # Album-art wall (Liquid Glass): 8 columns, gap 18, radius 24, blurred
+    # ~46 px, saturation 150 %, opacity .95, bleeding 80 px past the edges.
+    wall_columns: int = 8
+    wall_gap: int = 18
+    wall_radius: int = 24
+    blur_px: int = 46
+    saturation: float = 1.5
+    art_opacity: float = 0.95
+    bleed: int = 80
+
+    @property
+    def is_glass(self) -> bool:
+        return self.kind == "glass"
+
+    def surface(self, name: str) -> Surface:
+        return getattr(self, name)
+
+
+SURFACE_NAMES = ("sidebar", "card", "raised", "capsule", "well")
 
 
 @dataclass(frozen=True)
@@ -67,6 +144,15 @@ class ThemeTokens:
     # ── Swatch preview (theme picker card) ────────────────────────────────
     swatch_bg:       str   # large area (= sidebar_bg for dark, card_bg for light)
     swatch_accent:   str   # small accent circle
+
+    # ── Material (surfaces + backdrop) ────────────────────────────────────
+    # None only while a theme is being declared: the registry below fills a
+    # classic (opaque) material for every theme that does not bring its own.
+    material: Material | None = field(default=None, compare=True)
+
+    @property
+    def is_glass(self) -> bool:
+        return self.material is not None and self.material.is_glass
 
 
 # ── Helper ────────────────────────────────────────────────────────────────────
@@ -361,10 +447,289 @@ SUNSET = ThemeTokens(**_l(
 ))
 
 
+# ── Liquid Glass ──────────────────────────────────────────────────────────────
+#
+# The owner's chosen direction (docs/redesign: "Refined Liquid Glass"). The
+# hex tokens are the *opaque equivalents* of the glass surfaces over the
+# scrimmed album-art backdrop (what the contrast tests and older widgets
+# read); the translucent truth is in the material.
+
+GLASS_MATERIAL = Material(
+    kind="glass",
+    sidebar=Surface("rgba(22,26,38,0.46)", "rgba(255,255,255,0.14)", "rgba(255,255,255,0.24)",
+                    "rgba(0,0,0,0.38)", blur=70, offset_y=24, radius=30),
+    card=Surface("rgba(26,30,44,0.42)", "rgba(255,255,255,0.14)", "rgba(255,255,255,0.22)",
+                 "rgba(0,0,0,0.30)", blur=50, offset_y=18, radius=26),
+    raised=Surface("rgba(255,255,255,0.14)", "rgba(255,255,255,0.22)", "rgba(255,255,255,0.28)",
+                   radius=PILL),
+    capsule=Surface("rgba(28,32,46,0.56)", "rgba(255,255,255,0.18)", "rgba(255,255,255,0.30)",
+                    "rgba(0,0,0,0.45)", blur=60, offset_y=20, radius=PILL),
+    well=Surface("rgba(255,255,255,0.08)", "rgba(255,255,255,0.10)", radius=16),
+    hover="rgba(255,255,255,0.08)",
+    pressed="rgba(255,255,255,0.14)",
+    selection="rgba(169,199,255,0.28)",
+    selection_text="#ffffff",
+    hairline="rgba(255,255,255,0.08)",
+    knob="#ffffff",
+    track="rgba(255,255,255,0.16)",
+    view="rgba(255,255,255,0.03)",
+    view_alt="rgba(255,255,255,0.025)",
+    backdrop_base="#0b0d14",
+    backdrop_tone="#141826",
+    backdrop_scrim="rgba(8,10,18,0.58)",
+    backdrop="art",
+)
+
+GLASS = ThemeTokens(**_d(
+    key="glass",         name="Liquid Glass", icon="◇",
+    sidebar_bg="#141824",  sidebar_hover="#232838",  sidebar_active="#2b3142",
+    sidebar_accent="#a9c7ff", sidebar_text="#d5dae4", sidebar_hdr="#9ca4b6",
+    content_bg="#0b0d14",  card_bg="#171b29",  card_border="#363a49",
+    card_shadow="rgba(0,0,0,0.30)",
+    text_primary="#f4f6fb",  text_secondary="#bcc3d2", text_muted="#a2a9ba",
+    text_inverse="#101320",
+    accent="#a9c7ff",      accent_hover="#d3e2ff",   accent_pressed="#8fb3f5",
+    success="#9be3b5",     warning="#ffbe78",
+    danger="#ff8f8f",      danger_hover="#ff7373",
+    input_bg="#1f2331",    input_border="#3c4152",   input_focus="#a9c7ff",
+    progress_bg="#2a2f3f", progress_fg="#a9c7ff",
+    tab_bg="#171b29",      tab_active_bg="#2b3142",
+    tab_text="#bcc3d2",    tab_active_text="#ffffff",
+    log_bg="#0f121b",      log_handle="#151926",
+    log_text="#aab1c2",    log_ok="#9be3b5", log_warn="#ffcf8a", log_err="#ff9d9d",
+    swatch_bg="#0b0d14",   swatch_accent="#a9c7ff",
+    material=GLASS_MATERIAL,
+))
+
+
+# ── Accents (Liquid Glass) ────────────────────────────────────────────────────
+
+@dataclass(frozen=True)
+class Accent:
+    key: str
+    name: str
+    base: str
+    hover: str
+    pressed: str
+
+
+ACCENTS: dict[str, Accent] = {
+    a.key: a for a in (
+        Accent("blue", "Blue", "#a9c7ff", "#d3e2ff", "#8fb3f5"),
+        Accent("peach", "Peach", "#ffb37a", "#ffd2ae", "#f59a5c"),
+        Accent("mint", "Mint", "#9be3b5", "#c6f1d5", "#7dd09c"),
+        Accent("lilac", "Lilac", "#e8a6ff", "#f3ceff", "#d68bf2"),
+    )
+}
+DEFAULT_ACCENT = "blue"
+
+
+# ── Colour arithmetic (pure Python: no Qt needed to read the tokens) ──────────
+
+def parse_colour(value: str) -> tuple[int, int, int, float]:
+    """``"#rrggbb"`` / ``"rgba(r,g,b,a)"`` → ``(r, g, b, a)`` with a in 0..1."""
+    s = value.strip()
+    if s.startswith("rgba(") and s.endswith(")"):
+        r, g, b, a = (p.strip() for p in s[5:-1].split(","))
+        return int(r), int(g), int(b), float(a)
+    h = s.lstrip("#")
+    return int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16), 1.0
+
+
+def rgba(colour: str, alpha: float) -> str:
+    """``colour`` with ``alpha`` (0..1), as an ``rgba(...)`` string."""
+    r, g, b, _ = parse_colour(colour)
+    return f"rgba({r},{g},{b},{alpha:g})"
+
+
+def flatten(colour: str, under: str) -> str:
+    """``colour`` composited over the opaque ``under``, as ``#rrggbb``."""
+    r, g, b, a = parse_colour(colour)
+    ur, ug, ub, _ = parse_colour(under)
+    mix = (round(ur + (r - ur) * a), round(ug + (g - ug) * a), round(ub + (b - ub) * a))
+    return "#" + "".join(f"{c:02x}" for c in mix)
+
+
+def mix(a: str, b: str, amount: float) -> str:
+    """``b`` laid over ``a`` at ``amount`` (0..1), as ``#rrggbb``."""
+    return flatten(rgba(b, amount), a)
+
+
+def is_opaque(colour: str) -> bool:
+    return not colour or parse_colour(colour)[3] >= 1.0
+
+
+# ── Classic material: the opaque counterpart, derived from the colour tokens ──
+
+def classic_material(t: ThemeTokens) -> Material:
+    """Classic themes render through the same components as Liquid Glass with
+    opaque fills, no top highlight and a plain or gradient backdrop."""
+    return Material(
+        kind="classic",
+        sidebar=Surface(t.sidebar_bg, t.card_border, "", t.card_shadow,
+                        blur=40, offset_y=12, radius=30),
+        card=Surface(t.card_bg, t.card_border, "", t.card_shadow, blur=30, offset_y=8, radius=26),
+        raised=Surface(mix(t.card_bg, t.text_primary, 0.07), t.card_border, radius=PILL),
+        capsule=Surface(t.sidebar_bg, t.card_border, "", t.card_shadow,
+                        blur=40, offset_y=12, radius=PILL),
+        well=Surface(t.input_bg, t.input_border, radius=16),
+        hover=t.sidebar_hover,
+        pressed=t.sidebar_active,
+        selection=t.accent,
+        selection_text=t.text_inverse,
+        hairline=t.card_border,
+        knob=t.accent,
+        track=t.progress_bg,
+        view=t.card_bg,
+        view_alt=t.content_bg,
+        backdrop_base=t.content_bg,
+        backdrop_tone=t.content_bg,
+        backdrop="gradient",
+    )
+
+
+def with_accent(t: ThemeTokens, accent_key: str) -> ThemeTokens:
+    """Liquid Glass in one of the four accents (classic themes keep theirs)."""
+    accent = ACCENTS.get(accent_key)
+    if accent is None or not t.is_glass or t.accent == accent.base:
+        return t
+    material = replace(t.material, selection=rgba(accent.base, 0.28))
+    return replace(
+        t, accent=accent.base, accent_hover=accent.hover, accent_pressed=accent.pressed,
+        sidebar_accent=accent.base, input_focus=accent.base, progress_fg=accent.base,
+        swatch_accent=accent.base, material=material,
+    )
+
+
+def _flat_surface(s: Surface, under: str) -> Surface:
+    return replace(s, fill=flatten(s.fill, under),
+                   border=flatten(s.border, under) if s.border else "")
+
+
+def reduced_transparency(t: ThemeTokens) -> ThemeTokens:
+    """Opaque surfaces (Settings → Appearance → Reduce transparency): every
+    translucent fill is composited over what it usually sits on, so nothing
+    shows through any more. Classic themes are already opaque."""
+    m = t.material
+    if m is None or all(is_opaque(m.surface(n).fill) for n in SURFACE_NAMES):
+        return t
+    tone = m.backdrop_tone
+    sidebar = _flat_surface(m.sidebar, tone)
+    card = _flat_surface(m.card, tone)
+    flat = replace(
+        m,
+        sidebar=sidebar, card=card,
+        capsule=_flat_surface(m.capsule, tone),
+        raised=_flat_surface(m.raised, card.fill),
+        well=_flat_surface(m.well, card.fill),
+        hover=flatten(m.hover, card.fill),
+        pressed=flatten(m.pressed, card.fill),
+        selection=flatten(m.selection, card.fill),
+        hairline=flatten(m.hairline, card.fill),
+        track=flatten(m.track, card.fill),
+        view=flatten(m.view, card.fill),
+        view_alt=flatten(m.view_alt, card.fill),
+    )
+    return replace(t, material=flat)
+
+
+# ── Type ramp, spacing and radii (theme-independent) ──────────────────────────
+
+@dataclass(frozen=True)
+class TypeRole:
+    px: int
+    weight: int
+    tracking: float = 0.0     # em; negative = tighter
+    family: str = "ui"        # "ui" | "display" | "mono"
+    tabular: bool = False     # tabular figures (numbers that line up)
+
+
+# One px ramp. Pages ask for a role (``gui.themes.glass.font("title")``),
+# never a size. "label" (13) is the mockup's subtitle / chip / stats size.
+TYPE: dict[str, TypeRole] = {
+    "display": TypeRole(34, 700, -0.03, family="display"),
+    "title":   TypeRole(20, 650, -0.01, family="display"),
+    "heading": TypeRole(16, 650),
+    "body":    TypeRole(14, 400),
+    "label":   TypeRole(13, 400),
+    "caption": TypeRole(12, 400),
+    "micro":   TypeRole(11, 600, 0.12),
+    "mono":    TypeRole(12, 400, family="mono"),
+    "stat":    TypeRole(24, 700, -0.02, tabular=True),
+}
+
+# Preferred families, best first: Segoe UI Variable on Windows 11 (the
+# owner's platform), then Segoe UI, SF Pro, the bundled Inter, system sans.
+UI_FAMILIES: tuple[str, ...] = (
+    "Segoe UI Variable Text", "Segoe UI Variable", "Segoe UI", "SF Pro Text", "Inter",
+    "Helvetica Neue", "Arial", "sans-serif",
+)
+DISPLAY_FAMILIES: tuple[str, ...] = (
+    "Segoe UI Variable Display", "Segoe UI Variable", "Segoe UI", "SF Pro Display", "Inter",
+    "Helvetica Neue", "Arial", "sans-serif",
+)
+MONO_FAMILIES: tuple[str, ...] = (
+    "JetBrains Mono", "Cascadia Mono", "Consolas", "SF Mono", "Menlo", "monospace",
+)
+
+
+@dataclass(frozen=True)
+class Spacing:
+    hair: int = 2
+    xxs: int = 4
+    xs: int = 6
+    sm: int = 10
+    md: int = 14
+    lg: int = 18
+    xl: int = 24
+    xxl: int = 34
+    gutter: int = 18          # outer padding and the gap between panels
+    card_x: int = 24          # card padding, horizontal
+    card_y: int = 22          # card padding, vertical
+    page_bottom: int = 104    # room under page content for the Now Playing capsule
+    capsule_bottom: int = 22  # capsule distance from the bottom of the page area
+
+
+@dataclass(frozen=True)
+class Radii:
+    check: int = 6
+    xs: int = 8
+    sm: int = 12
+    nav: int = 14             # sidebar items
+    md: int = 16              # wells, stat tiles
+    lg: int = 20              # album tiles
+    card: int = 26
+    hero: int = 30
+    sidebar: int = 30
+    pill: int = PILL
+
+
+SPACE = Spacing()
+RADIUS = Radii()
+
+
+# ── Album-tile placeholders ───────────────────────────────────────────────────
+# Diagonal gradient pairs shown on landing tiles until (or unless) real album
+# art arrives.
+PLACEHOLDER_GRADIENTS: tuple[tuple[str, str], ...] = (
+    ("#6366f1", "#a78bfa"), ("#0ea5e9", "#38bdf8"), ("#10b981", "#34d399"),
+    ("#f59e0b", "#fbbf24"), ("#ef4444", "#f87171"), ("#8b5cf6", "#c4b5fd"),
+    ("#06b6d4", "#67e8f9"), ("#ec4899", "#f9a8d4"), ("#84cc16", "#a3e635"),
+    ("#f97316", "#fb923c"), ("#14b8a6", "#2dd4bf"), ("#a855f7", "#d8b4fe"),
+    ("#3b82f6", "#93c5fd"), ("#d946ef", "#f0abfc"), ("#22c55e", "#86efac"),
+    ("#eab308", "#fde047"), ("#64748b", "#94a3b8"), ("#1e40af", "#60a5fa"),
+)
+
+
 # ── Registry ──────────────────────────────────────────────────────────────────
 
+def _with_material(t: ThemeTokens) -> ThemeTokens:
+    return t if t.material is not None else replace(t, material=classic_material(t))
+
+
 THEMES: dict[str, ThemeTokens] = {
-    t.key: t for t in [
+    t.key: _with_material(t) for t in [
+        GLASS,
         MIDNIGHT, OBSIDIAN, GRAPHITE, NAVY, TWILIGHT, AURORA, FOREST, EMBER,
         PEARL, AZURE, BLOSSOM, MEADOW, LAVENDER, SUNSET,
     ]
@@ -372,6 +737,10 @@ THEMES: dict[str, ThemeTokens] = {
 
 DARK_THEMES  = [k for k, t in THEMES.items() if t.variant == "dark"]
 LIGHT_THEMES = [k for k, t in THEMES.items() if t.variant == "light"]
+# The 14 themes from before Liquid Glass, grouped as "Classic" in Settings.
+CLASSIC_THEMES = [k for k, t in THEMES.items() if not t.is_glass]
 
-DEFAULT_DARK  = "midnight"
+GLASS_KEY     = "glass"
+DEFAULT_THEME = GLASS_KEY
+DEFAULT_DARK  = GLASS_KEY
 DEFAULT_LIGHT = "pearl"

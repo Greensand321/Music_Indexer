@@ -9,8 +9,9 @@ library if the default library changed here).
 
 Sections (switched by the page's tabs; the panel's own tab bar is hidden
 then): ``services`` · ``general`` · ``appearance``. Appearance embeds the
-theme picker (themes apply instantly) and the background-gradient switch
-(applies on Save).
+theme picker (Liquid Glass, its accent, Reduce transparency and the classic
+themes: all apply instantly) and the backdrop / reduce-motion settings
+(applied on Save).
 """
 from __future__ import annotations
 
@@ -105,8 +106,9 @@ class SettingsWorkspace(WorkspaceBase):
         )), "General")
         self.theme_picker = ThemePickerPanel()
         self._tabs.addTab(self._view(
-            self._card("Theme", self.theme_picker, hint="Changes apply instantly."),
-            self._card("Background", self.form.appearance_widget,
+            self._card("Look", self.theme_picker,
+                       hint="Theme, accent and transparency apply as soon as you pick them."),
+            self._card("Backdrop and motion", self.form.appearance_widget,
                        hint="Applies when you save."),
         ), "Appearance")
         # A tab widget is as tall as its tallest page; size it to the one

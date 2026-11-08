@@ -131,63 +131,85 @@ class AlphaDEXWindow(QtWidgets.QMainWindow):
 
         self._keyboard_mode_active = False
         self._keyboard_filter_installed = False
+        self._backdrop = None
         self._build_ui()
         self._setup_shortcuts()
         self._report_config_backup()
+        self._report_theme_migration()
         # The library is NOT applied here: the startup sequence (landing →
         # set_library) or the user chooses it, exactly once.
 
     # ── UI construction ───────────────────────────────────────────────────
 
     def _build_ui(self) -> None:
-        central = QtWidgets.QWidget()
-        self.setCentralWidget(central)
+        """The Liquid Glass shell (see docs/redesign):
 
-        root = QtWidgets.QVBoxLayout(central)
-        root.setContentsMargins(0, 0, 0, 0)
+        * the central widget is the **backdrop** (album art / gradient /
+          plain), so everything above it is translucent glass;
+        * a floating **sidebar** (its shadow painted by the backdrop);
+        * the main column: the **page header** (title, library chip,
+          search, Change library), the page **stack**, the log strip;
+        * the floating **Now Playing capsule**, an overlay at the bottom
+          centre of the page area, with its shadow over the page.
+
+        The stack reaches the sidebar's edge and the window's right edge,
+        and pages pad their content by the gutter themselves, so card
+        shadows are never cut off right at a card."""
+        from gui.themes.tokens import SPACE
+        from gui.widgets.backdrop import Backdrop
+
+        central = Backdrop()
+        self.setCentralWidget(central)
+        self._backdrop = central
+
+        root = QtWidgets.QHBoxLayout(central)
+        root.setContentsMargins(SPACE.gutter, SPACE.gutter, 0, SPACE.gutter)
         root.setSpacing(0)
 
-        # ── Top bar ────────────────────────────────────────────────────────
-        self._top_bar = TopBar()
-        self._top_bar.library_changed.connect(self._on_library_changed)
-        self._top_bar.settings_requested.connect(self._on_settings)
-        self._top_bar.theme_requested.connect(self._on_theme_requested)
-        root.addWidget(self._top_bar)
-
-        # ── Body: sidebar + content ────────────────────────────────────────
-        body = QtWidgets.QWidget()
-        body_layout = QtWidgets.QHBoxLayout(body)
-        body_layout.setContentsMargins(0, 0, 0, 0)
-        body_layout.setSpacing(0)
-
+        # ── Floating sidebar ───────────────────────────────────────────────
         self._sidebar = Sidebar()
         self._sidebar.nav_changed.connect(self.select_page)
         self._sidebar.exit_requested.connect(self.close)
-        body_layout.addWidget(self._sidebar)
+        root.addWidget(self._sidebar)
+        central.add_floating(self._sidebar, "sidebar")
 
-        # Content area with stacked widget
-        content_frame = QtWidgets.QFrame()
+        # ── Main column: header, pages, log strip ──────────────────────────
+        content_frame = QtWidgets.QWidget()
         content_frame.setObjectName("contentFrame")
         content_layout = QtWidgets.QVBoxLayout(content_frame)
         content_layout.setContentsMargins(0, 0, 0, 0)
         content_layout.setSpacing(0)
 
+        self._top_bar = TopBar()
+        self._top_bar.library_changed.connect(self._on_library_changed)
+        self._top_bar.settings_requested.connect(self._on_settings)
+        self._top_bar.theme_requested.connect(self._on_theme_requested)
+        self._top_bar.search_requested.connect(self._on_header_search)
+        content_layout.addWidget(self._top_bar)
+
         self._stack = QtWidgets.QStackedWidget()
+        self._stack.setObjectName("pageStack")
+        self._stack.installEventFilter(self)
         content_layout.addWidget(self._stack, stretch=1)
 
-        # ── Now Playing bar (persistent, above log drawer) ─────────────────
-        self._now_playing_bar = NowPlayingBar()
-        content_layout.addWidget(self._now_playing_bar)
-
-        # ── Log drawer (inside content area, bottom) ───────────────────────
+        # ── Log drawer: a glass strip under the pages ──────────────────────
+        drawer_wrap = QtWidgets.QWidget()
+        drawer_layout = QtWidgets.QVBoxLayout(drawer_wrap)
+        drawer_layout.setContentsMargins(SPACE.gutter, SPACE.sm, SPACE.gutter, 0)
         self._log_drawer = LogDrawer()
-        content_layout.addWidget(self._log_drawer)
+        drawer_layout.addWidget(self._log_drawer)
+        content_layout.addWidget(drawer_wrap)
 
-        body_layout.addWidget(content_frame, stretch=1)
-        root.addWidget(body, stretch=1)
+        root.addWidget(content_frame, stretch=1)
 
-        # ── Status bar ─────────────────────────────────────────────────────
+        # ── Floating Now Playing capsule (overlay, not in a layout) ────────
+        self._now_playing_bar = NowPlayingBar(central)
+        self._now_playing_bar.attach_shadow()
+
+        # ── Status bar: kept for its messages, not shown (the page header and
+        # the log strip's status chip say the same thing) ──────────────────
         self.statusBar().showMessage("Ready")
+        self.statusBar().hide()
 
         # Pre-create every panel, then compose them into pages
         self._init_workspaces()
@@ -306,7 +328,14 @@ class AlphaDEXWindow(QtWidgets.QMainWindow):
 
         Dispatches to library navigation or queue navigation based on which
         panel the user last clicked (tracked by PlayerWorkspace._kb_target).
+
+        Also keeps the floating capsule over the page area (the page stack's
+        geometry changes on resize and when the log strip opens).
         """
+        if obj is getattr(self, "_stack", None) and event.type() in (
+            QtCore.QEvent.Type.Resize, QtCore.QEvent.Type.Move, QtCore.QEvent.Type.Show,
+        ):
+            self._place_capsule()
         if (
             self._keyboard_mode_active
             and event.type() == QtCore.QEvent.Type.KeyPress
@@ -380,6 +409,11 @@ class AlphaDEXWindow(QtWidgets.QMainWindow):
             QtGui.QKeySequence("Ctrl+W"), self
         ).activated.connect(self._log_drawer._on_clear)
 
+        # Ctrl+Q → Quit (the sidebar's Exit item is gone; same close path)
+        QtGui.QShortcut(
+            QtGui.QKeySequence("Ctrl+Q"), self
+        ).activated.connect(self.close)
+
         # Ctrl+1–9 → the first nine pages, in sidebar order
         for i, key in enumerate(_NAV_ORDER[:9], 1):
             QtGui.QShortcut(
@@ -419,8 +453,15 @@ class AlphaDEXWindow(QtWidgets.QMainWindow):
         if section_key is not None:
             page.show_section(section_key, activate=False)
         self._sidebar.activate(page_key)
+        previous = self._stack.currentWidget()
         self._stack.setCurrentWidget(page)
+        if previous is not None and previous is not page and self.isVisible():
+            # Page transition: the new page fades in over the backdrop
+            # (opacity only; instant under reduced motion).
+            from gui.themes import motion
+            motion.reveal(page, duration="base")
         self._current_page_key = page_key
+        self._top_bar.set_title(_NAV_LABELS.get(page_key, page_key))
         self.statusBar().showMessage(navigation.label(page_key, page.current_section()))
         # Optional hook: a panel can refresh itself when it is shown (e.g. the
         # Sound Map's Map reloading a newer cluster payload).
@@ -470,6 +511,7 @@ class AlphaDEXWindow(QtWidgets.QMainWindow):
 
         self._library_path = norm
         self._top_bar.set_library(norm)
+        self._backdrop.set_library(norm)
         for ws in self._workspaces.values():
             ws.set_library_path(norm)
         self._on_log_message(f"Library set to: {norm}", "ok")
@@ -513,8 +555,32 @@ class AlphaDEXWindow(QtWidgets.QMainWindow):
 
     @Slot(int)
     def _on_jobs_changed(self, count: int) -> None:
-        """The sidebar's Activity entry shows how many jobs are running."""
-        self._sidebar.set_badge("activity", count)
+        """The sidebar's Activity entry shows how many jobs are running
+        (housekeeping such as the backdrop build is not counted)."""
+        from gui.workers import job_registry
+        self._sidebar.set_badge("activity", len(job_registry().listed_jobs()))
+
+    @Slot(str)
+    def _on_header_search(self, text: str) -> None:
+        """The header's search pill: show the Player, filtered to ``text``."""
+        self._on_nav_changed("player")
+        player_ws = self._workspaces.get("player")
+        if isinstance(player_ws, PlayerWorkspace):
+            player_ws._search.setText(text)
+            player_ws._search.setFocus(QtCore.Qt.FocusReason.OtherFocusReason)
+
+    def _place_capsule(self) -> None:
+        """Float the Now Playing capsule at the bottom centre of the page area."""
+        bar = getattr(self, "_now_playing_bar", None)
+        if bar is None or self._backdrop is None:
+            return
+        top_left = self._stack.mapTo(self._backdrop, QtCore.QPoint(0, 0))
+        bar.place(QtCore.QRect(top_left, self._stack.size()))
+
+    def _report_theme_migration(self) -> None:
+        note = get_manager().take_migration_note()
+        if note:
+            self._on_log_message(note, "info")
 
     @Slot(str, str)
     def _on_status_changed(self, text: str, colour: str) -> None:
@@ -576,7 +642,13 @@ class AlphaDEXWindow(QtWidgets.QMainWindow):
         from gui.workers import job_registry
 
         registry = job_registry()
-        jobs = registry.jobs()
+        # Housekeeping (the backdrop build) is read-only and never worth a
+        # wait: cancel it and close. The registry keeps its thread alive until
+        # it really finishes, and main() waits for the registry on exit.
+        quiet = [j for j in registry.jobs() if j.quiet]
+        if quiet:
+            registry.cancel_all(quiet)
+        jobs = [j for j in registry.jobs() if not j.quiet]
         if jobs:
             if not getattr(self, "_closing", False):
                 # Read-only jobs (scans, previews, art loads) are cancelled
@@ -602,9 +674,9 @@ class AlphaDEXWindow(QtWidgets.QMainWindow):
             # closing began (nothing can be started from the UI now, but a
             # job may chain another).
             registry.cancel_all()
-            self.statusBar().showMessage(
-                f"Stopping {len(jobs)} background task(s) before closing…"
-            )
+            stopping = f"Stopping {len(jobs)} background task(s) before closing…"
+            self.statusBar().showMessage(stopping)
+            self._log_drawer.set_status(stopping, "running")
             event.ignore()
             self._maybe_offer_force_quit(jobs)
             QtCore.QTimer.singleShot(100, self.close)
@@ -680,6 +752,17 @@ class AlphaDEXWindow(QtWidgets.QMainWindow):
         library is a no-op. Returns True when *path* is the active library."""
         return self._apply_library(path)
 
+    def seed_backdrop(self, library: str, covers: list) -> None:
+        """Album art the landing already found for ``library``: the backdrop
+        uses it instead of scanning the library a second time."""
+        if library and covers:
+            norm = os.path.normpath(os.path.abspath(os.path.expanduser(library)))
+            self._backdrop.seed_covers(norm, list(covers))
+            # The library is applied after the landing's cross-fade; the
+            # backdrop can show its wall from the first frame already
+            # (_apply_library's later set_library is then a no-op for it).
+            self._backdrop.set_library(norm)
+
     def play_directory(self, dirpath: str) -> None:
         """Switch to the Player workspace and start playing all tracks in *dirpath*."""
         self._on_nav_changed("player")
@@ -743,42 +826,9 @@ class AlphaDEXWindow(QtWidgets.QMainWindow):
             home.set_library_stats(tracks, size_gb, artists)
 
 
-_AUDIO_EXTS = frozenset({".flac", ".m4a", ".aac", ".mp3", ".wav", ".ogg", ".opus"})
-
-
-def library_stats(library_path: str, should_stop=lambda: False) -> tuple[int, int, int] | None:
-    """(tracks, size_bytes, artists) for the top bar; None if stopped early.
-
-    Skips the reserved folders (Quarantine/, Trash/, Docs/, ...), never
-    follows directory symlinks, and skips files it cannot stat (broken
-    symlinks, permission errors) instead of failing the whole count.
-    "Artists" is the folder two levels above a track (``Artist/Album/track``),
-    or the folder above a track that sits one level deep (``Artist/track``);
-    tracks at the library root count no artist.
-    """
-    from utils.reserved_folders import walk_library
-
-    tracks = 0
-    size_bytes = 0
-    artists: set[str] = set()
-    for dirpath, _dirnames, filenames in walk_library(library_path):
-        if should_stop():
-            return None
-        rel = os.path.relpath(dirpath, library_path)
-        parts = () if rel in (".", "") else Path(rel).parts
-        artist = parts[-2] if len(parts) >= 2 else (parts[0] if parts else "")
-        for name in filenames:
-            if os.path.splitext(name)[1].lower() not in _AUDIO_EXTS:
-                continue
-            try:
-                size = os.stat(os.path.join(dirpath, name)).st_size
-            except OSError:
-                continue
-            tracks += 1
-            size_bytes += size
-            if artist:
-                artists.add(artist.casefold())
-    return tracks, size_bytes, len(artists)
+# Re-exported: tests (and callers) use ``gui.main_window.library_stats``; the
+# stats worker looks it up here at run time, so patching it here works.
+from gui.library_stats import AUDIO_EXTS as _AUDIO_EXTS, library_stats  # noqa: E402,F401
 
 
 class _StatsWorker(QtCore.QThread):

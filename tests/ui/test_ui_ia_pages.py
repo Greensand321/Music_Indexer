@@ -340,7 +340,8 @@ def test_settings_page_saves_under_the_same_keys(make_workspace, tmp_path):
     ws._library_entry.setText(str(lib))
     ws._near_dup_spin.setValue(0.25)
     ws._exact_dup_spin.setValue(0.15)
-    ws._bg_gradient_cb.setChecked(False)
+    ws._backdrop_combo.setCurrentIndex(ws._backdrop_combo.findData("plain"))
+    ws._reduce_motion_cb.setChecked(True)
     assert ws._on_save()
 
     cfg = config.load_config()
@@ -351,20 +352,23 @@ def test_settings_page_saves_under_the_same_keys(make_workspace, tmp_path):
     assert cfg["library_root"] == str(lib)
     assert cfg["near_duplicate_threshold"] == pytest.approx(0.25)
     assert cfg["exact_duplicate_threshold"] == pytest.approx(0.15)
-    assert cfg["bg_gradient_enabled"] is False
+    assert cfg["backdrop_mode"] == "plain"
+    assert cfg["bg_gradient_enabled"] is False      # the legacy key stays in step
+    assert cfg["reduced_motion"] is True
     assert ws.library_changed is True
 
 
 def test_settings_page_save_runs_the_main_window_flow(main_window, monkeypatch):
     import gui.widgets.gradient_bg as gb
+    from gui.themes import appearance
 
-    monkeypatch.setattr(gb, "_GRADIENT_FLAG", None)   # the cache is restored afterwards
+    monkeypatch.setattr(appearance, "_mode_cache", None)   # the cache is restored afterwards
     calls = []
     indexer = main_window._workspaces["indexer"]
     monkeypatch.setattr(indexer, "on_settings_saved", lambda: calls.append(1))
     main_window._on_nav_changed("settings/appearance")
     settings = main_window._workspaces["settings"]
-    settings._bg_gradient_cb.setChecked(False)
+    settings._backdrop_combo.setCurrentIndex(settings._backdrop_combo.findData("plain"))
     settings._save_btn.click()
     assert calls == [1]
     assert gb._gradient_enabled() is False, "cached appearance settings were refreshed"

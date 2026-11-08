@@ -20,8 +20,14 @@ MusicBrainz app / version / mail   ``musicbrainz_useragent`` = {app, version, co
 Default library                    ``library_root``
 Near-duplicate threshold           ``near_duplicate_threshold``
 Exact-duplicate threshold          ``exact_duplicate_threshold``
-Background gradient                ``bg_gradient_enabled``
+Backdrop (Album art/Gradient/Plain) ``backdrop_mode`` (+ legacy ``bg_gradient_enabled``)
+Reduce motion                      ``reduced_motion``
 =================================  ==============================================
+
+The backdrop replaced the old "Background gradient" switch: its key is still
+read when ``backdrop_mode`` is absent and is kept in step on save (``False``
+means Plain). Theme, accent and Reduce transparency are not here: they apply
+instantly from the theme picker (``gui/themes/picker.py``).
 """
 from __future__ import annotations
 
@@ -105,7 +111,7 @@ class SettingsForm(QtCore.QObject):
     The controls live in three widgets the host lays out: ``services_widget``
     (service, keys, MusicBrainz user agent, connection test),
     ``general_widget`` (default library, thresholds) and
-    ``appearance_widget`` (background gradient). ``save()`` validates, writes
+    ``appearance_widget`` (backdrop, reduce motion). ``save()`` validates, writes
     the keys above with load-modify-save, sets ``library_changed`` and emits
     ``settings_saved``.
     """
@@ -116,7 +122,8 @@ class SettingsForm(QtCore.QObject):
     WIDGET_NAMES = (
         "_service_combo", "_acoustid_frame", "_api_key_entry", "_mb_frame",
         "_mb_app", "_mb_ver", "_mb_contact", "_test_btn", "_test_status",
-        "_library_entry", "_near_dup_spin", "_exact_dup_spin", "_bg_gradient_cb",
+        "_library_entry", "_near_dup_spin", "_exact_dup_spin", "_backdrop_combo",
+        "_reduce_motion_cb",
     )
 
     def __init__(self, host: QtWidgets.QWidget | None = None) -> None:
@@ -243,20 +250,34 @@ class SettingsForm(QtCore.QObject):
         return gen_w
 
     def _build_appearance(self) -> QtWidgets.QWidget:
+        from gui.themes.appearance import BACKDROP_LABELS, BACKDROP_MODES
+
         app_w = QtWidgets.QWidget()
         app_l = QtWidgets.QFormLayout(app_w)
         app_l.setContentsMargins(0, 0, 0, 0)
         app_l.setSpacing(12)
-        self._bg_gradient_cb = QtWidgets.QCheckBox(
-            "Background gradient — subtle accent glow behind workspace panels"
+        self._backdrop_combo = QtWidgets.QComboBox()
+        for mode in BACKDROP_MODES:
+            self._backdrop_combo.addItem(BACKDROP_LABELS[mode], mode)
+        self._backdrop_combo.setToolTip(
+            "What the window shows behind its glass panels.\n"
+            "Album art: a blurred wall of covers from your library (Liquid Glass; "
+            "classic themes show their gradient).\n"
+            "Gradient: soft accent glows.  Plain: a solid colour."
         )
-        self._bg_gradient_cb.setChecked(True)
-        self._bg_gradient_cb.setToolTip(
-            "Paints two faint radial glows (accent colour) in opposing corners "
-            "of each workspace.  Uncheck for a flat, solid background."
+        app_l.addRow("Backdrop:", self._backdrop_combo)
+        self._reduce_motion_cb = QtWidgets.QCheckBox(
+            "Reduce motion — no slides, fades or fly-ins"
         )
-        app_l.addRow("Background:", self._bg_gradient_cb)
+        self._reduce_motion_cb.setToolTip(
+            "Animations jump straight to their end (the ALPHADEX_REDUCED_MOTION "
+            "environment variable does the same)."
+        )
+        app_l.addRow("Motion:", self._reduce_motion_cb)
         return app_w
+
+    def backdrop_mode(self) -> str:
+        return str(self._backdrop_combo.currentData() or "art")
 
     # ── Load / save ───────────────────────────────────────────────────────
 
@@ -278,8 +299,10 @@ class SettingsForm(QtCore.QObject):
             "library_root": self._library_entry.text().strip(),
             "near_duplicate_threshold": self._near_dup_spin.value(),
             "exact_duplicate_threshold": self._exact_dup_spin.value(),
-            "bg_gradient_enabled": self._bg_gradient_cb.isChecked(),
+            "reduced_motion": self._reduce_motion_cb.isChecked(),
         }
+        from gui.themes.appearance import config_values
+        values.update(config_values(self.backdrop_mode()))
         for svc_name, cfg_key in _KEY_CONFIG.items():
             values[cfg_key] = keys.get(svc_name, "").strip()
         return values
@@ -308,7 +331,10 @@ class SettingsForm(QtCore.QObject):
             self._library_entry.setText(self._loaded_library)
             self._near_dup_spin.setValue(float(cfg.get("near_duplicate_threshold", 0.1)))
             self._exact_dup_spin.setValue(float(cfg.get("exact_duplicate_threshold", 0.02)))
-            self._bg_gradient_cb.setChecked(bool(cfg.get("bg_gradient_enabled", True)))
+            from gui.themes.appearance import mode_from_config
+            idx = self._backdrop_combo.findData(mode_from_config(cfg))
+            self._backdrop_combo.setCurrentIndex(max(0, idx))
+            self._reduce_motion_cb.setChecked(bool(cfg.get("reduced_motion", False)))
         except Exception:
             pass
         self._key_service = None

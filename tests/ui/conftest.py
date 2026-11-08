@@ -138,10 +138,41 @@ if HAVE_QT:
 
         dialogs.uninstall()
         _reset_theme_manager()
+        _reset_appearance_caches()
         gc.collect()
 
         if problems:
             pytest.fail("\n".join(problems), pytrace=False)
+
+    def _settle_housekeeping(timeout_ms: int = 10_000) -> None:
+        """Let the window's quiet housekeeping jobs (the backdrop build) finish,
+        so a test starts from a settled window: job lists and thread counts
+        are then the test's own."""
+        import time
+
+        from gui.workers import job_registry
+
+        app = QtWidgets.QApplication.instance()
+        deadline = time.monotonic() + timeout_ms / 1000
+        while any(j.quiet for j in job_registry().jobs()) and time.monotonic() < deadline:
+            app.processEvents(QtCore.QEventLoop.ProcessEventsFlag.AllEvents, 20)
+            time.sleep(0.005)
+        app.processEvents()
+
+    def _reset_appearance_caches() -> None:
+        """Settings read once and cached (backdrop mode, reduced motion) must
+        not carry one test's config into the next (results would depend on
+        test order)."""
+        appearance = sys.modules.get("gui.themes.appearance")
+        if appearance is not None:
+            appearance.invalidate()
+        motion_mod = sys.modules.get("gui.themes.motion")
+        if motion_mod is not None:
+            motion_mod.set_reduced_motion(None)
+            motion_mod.refresh_reduced_motion()
+        backdrop = sys.modules.get("gui.widgets.backdrop")
+        if backdrop is not None:
+            backdrop.clear_caches()
 
     def _reset_theme_manager() -> None:
         """Put the ThemeManager singleton back to defaults without emitting."""
@@ -151,11 +182,17 @@ if HAVE_QT:
         mgr = mgr_mod.ThemeManager._instance
         if mgr is None:
             return
-        from gui.themes.tokens import THEMES, DEFAULT_DARK, DEFAULT_LIGHT
-        mgr._current = THEMES[DEFAULT_DARK]
+        from gui.themes.tokens import (
+            DEFAULT_ACCENT, DEFAULT_DARK, DEFAULT_LIGHT, DEFAULT_THEME, THEMES,
+        )
+        mgr._current = THEMES[DEFAULT_THEME]
+        mgr._base = THEMES[DEFAULT_THEME]
         mgr._auto_mode = False
         mgr._auto_dark = DEFAULT_DARK
         mgr._auto_light = DEFAULT_LIGHT
+        mgr._accent = DEFAULT_ACCENT
+        mgr._reduce_transparency = False
+        mgr._migration_note = None
 
     @pytest.fixture
     def dialogs(_ui) -> DialogGuard:
@@ -184,6 +221,7 @@ if HAVE_QT:
         window.resize(1300, 860)
         window.show()
         qtbot.waitExposed(window)
+        _settle_housekeeping()
         yield window
         window.close()
         _ui.threads.wait_all(timeout_ms=8000)

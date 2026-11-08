@@ -32,7 +32,8 @@ def test_every_control_persists_under_its_key(drawer, tmp_path):
     drawer._library_entry.setText(str(lib))
     drawer._near_dup_spin.setValue(0.25)
     drawer._exact_dup_spin.setValue(0.15)       # above the old 0.1 cap
-    drawer._bg_gradient_cb.setChecked(False)
+    drawer._backdrop_combo.setCurrentIndex(drawer._backdrop_combo.findData("gradient"))
+    drawer._reduce_motion_cb.setChecked(True)
     drawer._on_save()
 
     cfg = config.load_config()
@@ -42,13 +43,16 @@ def test_every_control_persists_under_its_key(drawer, tmp_path):
     assert cfg["library_root"] == str(lib)
     assert cfg["near_duplicate_threshold"] == pytest.approx(0.25)
     assert cfg["exact_duplicate_threshold"] == pytest.approx(0.15)
-    assert cfg["bg_gradient_enabled"] is False
+    assert cfg["backdrop_mode"] == "gradient"
+    assert cfg["bg_gradient_enabled"] is True       # legacy key: not Plain
+    assert cfg["reduced_motion"] is True
 
     again = SettingsDrawer()
     try:
         assert again._service_combo.currentText() == "MusicBrainz"
         assert again._exact_dup_spin.value() == pytest.approx(0.15)   # not clamped on re-open
-        assert again._bg_gradient_cb.isChecked() is False
+        assert again._backdrop_combo.currentData() == "gradient"
+        assert again._reduce_motion_cb.isChecked() is True
     finally:
         again.deleteLater()
 

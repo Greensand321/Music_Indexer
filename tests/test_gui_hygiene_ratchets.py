@@ -11,7 +11,10 @@ Introduced 2026-11-07 at hex 237 / inline sheets 168 / font-size 81 /
 direct QThread starts 28 / unparented animations 7; lowered the same day
 after the phase-2 bug fixes (see docs/redesign/README.md "Harness"), and again
 to the measured counts when the information architecture replaced the
-Utilities page (hex 103, inline sheets 88, font-size 34).
+Utilities page (hex 103, inline sheets 88, font-size 34), and again when the
+Liquid Glass shell (redesign R1) moved the landing, sidebar, header, Now
+Playing bar and log drawer onto painted tokens (hex 60, inline sheets 74,
+font-size 28).
 """
 from __future__ import annotations
 
@@ -33,12 +36,12 @@ _ANIMATIONS = {
 
 CEILINGS = {
     # Colours belong in gui/themes/tokens.py; pages should use tokens/roles.
-    "hex_colours_outside_tokens": 103,
+    "hex_colours_outside_tokens": 60,
     # Inline stylesheets outside gui/themes bypass the design system and are
     # re-parsed on every theme switch.
-    "inline_setStyleSheet_calls": 88,
+    "inline_setStyleSheet_calls": 74,
     # Type sizes belong in the type ramp (gui/fonts/loader.py TypeScale).
-    "font_size_literals_outside_themes": 34,
+    "font_size_literals_outside_themes": 28,
     # Zero tolerance since every page moved onto the JobRegistry: start QThreads
     # via WorkspaceBase._start_worker / gui.workers.start_worker so they are
     # kept alive until finished and stopped on quit.

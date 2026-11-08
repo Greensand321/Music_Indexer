@@ -1,20 +1,44 @@
-"""ThemeManager singleton — apply, persist and auto-switch themes."""
+"""ThemeManager singleton — apply, persist and auto-switch themes.
+
+The *effective* tokens (``ThemeManager.current``) are the selected theme with
+the Liquid Glass accent applied and, when "Reduce transparency" is on, every
+translucent surface flattened (``tokens.with_accent`` /
+``tokens.reduced_transparency``). Accent and transparency changes go through
+the same fast path as a theme switch.
+
+One-time migration: Liquid Glass is the default look. The first time a
+config that saved another theme is loaded, the theme is switched to Liquid
+Glass once, the old key is kept under ``theme_before_glass`` and the marker
+``theme_glass_migrated`` stops it from ever happening again (choosing a
+classic theme afterwards sticks). The main window logs the switch.
+"""
 from __future__ import annotations
 
 import datetime
+import logging
 
 from gui.compat import QtCore, QtGui, QtWidgets, Signal
 from gui.themes.tokens import (
-    ThemeTokens, THEMES, DARK_THEMES, LIGHT_THEMES,
-    DEFAULT_DARK, DEFAULT_LIGHT,
+    ACCENTS, DEFAULT_ACCENT, DEFAULT_DARK, DEFAULT_LIGHT, DEFAULT_THEME, GLASS_KEY, THEMES,
+    ThemeTokens, reduced_transparency, with_accent,
 )
 from gui.themes.effects import build_palette
 
+_log = logging.getLogger(__name__)
 
-# ── Residual QSS ─────────────────────────────────────────────────────────────
-# AlphaDEXStyle handles ALL widget painting.  This residual is only for the
-# handful of things QProxyStyle cannot reach: tooltips, plain-text areas,
-# item views, cards, the stepper and the workspace typography roles.
+# Config keys owned by the manager.
+THEME_KEY = "theme"
+ACCENT_KEY = "glass_accent"
+REDUCE_TRANSPARENCY_KEY = "reduce_transparency"
+MIGRATION_MARKER = "theme_glass_migrated"
+PREVIOUS_THEME_KEY = "theme_before_glass"
+
+
+# ── Static QSS ───────────────────────────────────────────────────────────────
+# AlphaDEXStyle paints the widgets (buttons, fields, checkboxes, tabs,
+# scrollbars, sliders, progress bars). This stylesheet covers what a
+# QProxyStyle cannot reach: tooltips, text areas, item views and headers,
+# menus and popups, card frames, the stepper and the typography roles.
 #
 # The stylesheet is STATIC: it is installed once and never replaced. Any
 # change to the application stylesheet makes Qt re-polish every widget in
@@ -22,188 +46,225 @@ from gui.themes.effects import build_palette
 # which was the ~1 s freeze on every theme switch (DS-04). Colours therefore
 # come from palette() references, and a theme switch only swaps the palette
 # and re-polishes the widgets these rules match (``_is_themed``, ~15 ms).
-# The palette roles carry these tokens (see effects.build_palette):
+# The palette roles carry these tokens (see effects.build_palette); under
+# Liquid Glass the in-window roles are translucent:
 #
-#   window -> content_bg        window-text -> text_primary
-#   button -> card_bg           base -> input_bg       text -> text_primary
-#   mid -> card_border          dark -> input_border   midlight -> sidebar_hover
-#   shadow -> text_secondary    placeholder-text -> text_muted
-#   highlight -> accent         highlighted-text -> text_inverse
-#   tool-tip-base -> log_bg     tool-tip-text -> log_text
+#   window -> content_bg (opaque: dialogs, menus, popups)
+#   window-text / text -> text_primary
+#   button -> material.view (item views)    alternate-base -> material.view_alt
+#   base -> input / well fill    mid -> card border    dark -> field border
+#   midlight -> material.hover   light -> material.hairline
+#   shadow -> text_secondary     placeholder-text -> text_muted
+#   highlight -> material.selection    highlighted-text -> its text
+#   link -> accent               tool-tip-base / -text -> log_bg / log_text
+#
+# Order matters: rules of equal specificity resolve by position, so the
+# general scroll-area rule comes before the item-view and text-area rules.
 #
 # Palette changes a QSS rule makes on a widget are not inherited by its
 # children (verified on PySide6 6.12), so a role means the same thing inside
 # a card as outside it.
 
 def _static_qss() -> str:
-    from gui.fonts.loader import UI_STACK, MONO_STACK, TypeScale
+    from gui.fonts.loader import MONO_STACK, UI_STACK
+    from gui.themes.tokens import TYPE
 
-    section_px = TypeScale.px(TypeScale.SECTION_HDR)
-    card_px = TypeScale.px(TypeScale.CARD_TITLE)
-    label_px = TypeScale.LABEL_PX
-    caption_px = TypeScale.CAPTION_PX
+    title = TYPE["title"].px
+    heading = TYPE["heading"].px
+    label = TYPE["label"].px
+    caption = TYPE["caption"].px
 
     return f"""
 QToolTip {{
     background: palette(tool-tip-base);
     color: palette(tool-tip-text);
     border: 1px solid palette(mid);
-    border-radius: 6px;
-    padding: 4px 8px;
+    border-radius: 8px;
+    padding: 5px 9px;
     font-family: {UI_STACK};
-    font-size: 9pt;
-}}
-QPlainTextEdit, QTextEdit {{
-    background: palette(base);
-    color: palette(window-text);
-    border: 1px solid palette(dark);
-    border-radius: 7px;
-    selection-background-color: palette(highlight);
-    selection-color: palette(highlighted-text);
-    font-family: {UI_STACK};
-    font-size: 10pt;
-}}
-QPlainTextEdit#logText, QTextEdit#logText {{
-    background: palette(tool-tip-base);
-    color: palette(tool-tip-text);
-    border: none;
-    font-family: {MONO_STACK};
-    font-size: 10pt;
-    line-height: 1.4;
+    font-size: {caption}px;
 }}
 QAbstractScrollArea {{
-    background: palette(window);
+    background: transparent;
 }}
 QScrollArea > QWidget > QWidget {{
     background: transparent;
 }}
-QHeaderView {{
-    background: palette(button);
-}}
-QHeaderView::section {{
-    background: palette(button);
-    color: palette(shadow);
-    border: none;
-    border-bottom: 1px solid palette(mid);
-    padding: 5px 8px;
-    font-weight: 600;
-    font-size: {label_px}px;
-}}
 QAbstractItemView {{
     background: palette(button);
-    alternate-background-color: palette(window);
+    alternate-background-color: palette(alternate-base);
     color: palette(window-text);
     selection-background-color: palette(highlight);
     selection-color: palette(highlighted-text);
+    gridline-color: palette(light);
     border: none;
     outline: 0;
 }}
 QAbstractItemView::item:hover {{
     background: palette(midlight);
 }}
+QComboBox QAbstractItemView, QCompleter QAbstractItemView {{
+    background: palette(window);
+    border: 1px solid palette(mid);
+    padding: 4px;
+}}
+QPlainTextEdit, QTextEdit {{
+    background: palette(base);
+    color: palette(window-text);
+    border: 1px solid palette(dark);
+    border-radius: 14px;
+    padding: 2px 4px;
+    selection-background-color: palette(highlight);
+    selection-color: palette(highlighted-text);
+    font-family: {UI_STACK};
+    font-size: {label}px;
+}}
+QPlainTextEdit#logText, QTextEdit#logText {{
+    background: palette(tool-tip-base);
+    color: palette(tool-tip-text);
+    border: none;
+    border-radius: 12px;
+    font-family: {MONO_STACK};
+    font-size: {caption}px;
+    line-height: 1.4;
+}}
+QHeaderView {{
+    background: transparent;
+    border: none;
+}}
+QHeaderView::section {{
+    background: transparent;
+    color: palette(shadow);
+    border: none;
+    border-bottom: 1px solid palette(mid);
+    padding: 6px 10px;
+    font-weight: 600;
+    font-size: {caption}px;
+}}
+QTableCornerButton::section {{
+    background: transparent;
+    border: none;
+}}
 QSplitter::handle {{
-    background: palette(mid);
+    background: palette(light);
     width: 1px;
     height: 1px;
 }}
 QStatusBar {{
-    background: palette(button);
+    background: transparent;
     color: palette(shadow);
-    border-top: 1px solid palette(mid);
-    font-size: {label_px}px;
+    border: none;
+    font-size: {caption}px;
 }}
 
-/* ── Workspace cards ── */
-QFrame#workspaceCard {{
+/* ── Card frames ──
+   Cards made with WorkspaceBase._make_card() are GlassCards (glass="true"):
+   they paint themselves with gui.themes.glass.paint_surface. The rule below
+   is the fallback for plain frames that only borrow the name (dialogs). */
+QFrame#workspaceCard, QFrame#headerCard, QFrame#actionCard {{
     background: palette(button);
     border: 1px solid palette(mid);
-    border-radius: 12px;
+    border-radius: 18px;
 }}
-QFrame#headerCard {{
-    background: palette(button);
-    border-top: 1px solid palette(mid);
-    border-right: 1px solid palette(mid);
-    border-bottom: 1px solid palette(mid);
-    border-left: 3px solid palette(highlight);
-    border-radius: 10px;
-}}
-QFrame#actionCard {{
-    background: palette(button);
-    border: 1px solid palette(mid);
-    border-top: 2px solid palette(highlight);
-    border-radius: 10px;
+QFrame#workspaceCard[glass="true"], QFrame#headerCard[glass="true"],
+QFrame#actionCard[glass="true"] {{
+    background: transparent;
+    border: none;
 }}
 
 /* ── Workflow stepper ── */
 QFrame#workflowStepper {{
-    background: transparent;
-    border: 1px solid palette(mid);
-    border-radius: 6px;
+    background: palette(alternate-base);
+    border: 1px solid palette(light);
+    border-radius: 12px;
 }}
 QLabel#stepActive {{
-    color: palette(highlight);
+    color: palette(link);
     font-weight: 700;
-    font-size: {label_px}px;
+    font-size: {caption}px;
 }}
 QLabel#stepInactive {{
     color: palette(placeholder-text);
-    font-size: {label_px}px;
+    font-size: {caption}px;
 }}
 QLabel#stepArrow {{
     color: palette(placeholder-text);
-    font-size: {label_px}px;
+    font-size: {caption}px;
 }}
 
-/* ── Workspace typography (one ramp: gui.fonts.loader.TypeScale) ── */
+/* ── Workspace typography (one ramp: gui.themes.tokens.TYPE) ── */
 QLabel#sectionTitle {{
     color: palette(window-text);
-    font-size: {section_px}px;
+    font-size: {title}px;
     font-weight: 700;
 }}
 QLabel#sectionSubtitle {{
     color: palette(shadow);
-    font-size: {label_px}px;
+    font-size: {label}px;
 }}
 QLabel#cardTitle {{
     color: palette(window-text);
     font-weight: 600;
-    font-size: {card_px}px;
+    font-size: {heading}px;
 }}
 QLabel#phaseLabel {{
     color: palette(window-text);
     font-weight: 600;
-    font-size: {label_px}px;
+    font-size: {label}px;
 }}
 QLabel#phaseDesc {{
     color: palette(placeholder-text);
-    font-size: {caption_px}px;
+    font-size: {caption}px;
 }}
 QLabel#statusHint {{
     color: palette(placeholder-text);
-    font-size: {label_px}px;
+    font-size: {label}px;
 }}
 QLabel#notesHint {{
     color: palette(placeholder-text);
-    font-size: {caption_px}px;
+    font-size: {caption}px;
 }}
+
+/* ── Shell text roles (fonts come from gui.themes.glass.font) ── */
+QLabel#mutedLabel, QLabel#headerStats, QLabel#capsuleMeta, QLabel#capsuleTime,
+QLabel#landingHint, QLabel#landingFolderStats {{
+    color: palette(shadow);
+}}
+QLabel#pageTitle, QLabel#brandName, QLabel#capsuleTitle, QLabel#landingTitle {{
+    color: palette(window-text);
+}}
+QLabel#sidebarSectionLabel {{
+    color: palette(placeholder-text);
+}}
+
+/* ── Menus and the menu bar (popups: opaque) ── */
 QMenuBar {{
-    background: palette(button);
+    background: transparent;
     color: palette(window-text);
 }}
 QMenuBar::item:selected {{
     background: palette(midlight);
+    border-radius: 8px;
 }}
 QMenu {{
-    background: palette(button);
+    background: palette(window);
     color: palette(window-text);
     border: 1px solid palette(mid);
+    border-radius: 12px;
+    padding: 6px;
+}}
+QMenu::item {{
+    padding: 6px 18px 6px 12px;
     border-radius: 8px;
-    padding: 4px;
 }}
 QMenu::item:selected {{
     background: palette(highlight);
     color: palette(highlighted-text);
-    border-radius: 4px;
+}}
+QMenu::separator {{
+    height: 1px;
+    background: palette(light);
+    margin: 5px 8px;
 }}
 """
 
@@ -220,6 +281,9 @@ _THEMED_OBJECT_NAMES = frozenset({
     "stepActive", "stepInactive", "stepArrow", "sectionTitle",
     "sectionSubtitle", "cardTitle", "phaseLabel", "phaseDesc",
     "statusHint", "notesHint", "logText",
+    "mutedLabel", "headerStats", "capsuleMeta", "capsuleTime", "landingHint",
+    "landingFolderStats", "pageTitle", "brandName", "capsuleTitle", "landingTitle",
+    "sidebarSectionLabel",
 })
 _THEMED_TYPES = (
     QtWidgets.QAbstractScrollArea,   # item views, headers, text edits, scroll areas
@@ -260,16 +324,20 @@ AUTO_RECHECK_MS = 15 * 60 * 1000   # Auto mode re-checks day/night this often
 class ThemeManager(QtCore.QObject):
     """Singleton.  Apply, persist, and auto-switch themes at runtime."""
 
-    theme_changed = Signal(object)   # emits ThemeTokens
+    theme_changed = Signal(object)   # emits the effective ThemeTokens
 
     _instance: "ThemeManager | None" = None
 
     def __init__(self) -> None:
         super().__init__()
-        self._current: ThemeTokens = THEMES[DEFAULT_DARK]
+        self._base: ThemeTokens = THEMES[DEFAULT_THEME]   # selected, before accent/transparency
+        self._current: ThemeTokens = THEMES[DEFAULT_THEME]
         self._auto_mode: bool = False
         self._auto_dark:  str = DEFAULT_DARK
         self._auto_light: str = DEFAULT_LIGHT
+        self._accent: str = DEFAULT_ACCENT
+        self._reduce_transparency: bool = False
+        self._migration_note: str | None = None
         self._style = None            # the one AlphaDEXStyle instance
         self._qss: str | None = None  # the static stylesheet, once installed
         # Auto mode re-checks day/night periodically (needed for the clock
@@ -290,6 +358,7 @@ class ThemeManager(QtCore.QObject):
 
     @property
     def current(self) -> ThemeTokens:
+        """The effective tokens: the theme, its accent, transparency."""
         return self._current
 
     def apply(self, key: str) -> None:
@@ -305,33 +374,63 @@ class ThemeManager(QtCore.QObject):
         self._sync_auto_timer()
         self._persist()
 
+    def selected_key(self) -> str:
+        """The theme the user chose ("auto" in Auto mode)."""
+        return "auto" if self._auto_mode else self._base.key
+
+    def accent(self) -> str:
+        return self._accent
+
+    def set_accent(self, key: str) -> None:
+        """Liquid Glass accent (blue · peach · mint · lilac); applies at once."""
+        if key not in ACCENTS or key == self._accent:
+            return
+        self._accent = key
+        self._save({ACCENT_KEY: key})
+        self._apply_tokens(self._base)
+
+    def reduce_transparency(self) -> bool:
+        return self._reduce_transparency
+
+    def set_reduce_transparency(self, on: bool) -> None:
+        """Opaque surfaces for accessibility / performance; applies at once."""
+        on = bool(on)
+        if on == self._reduce_transparency:
+            return
+        self._reduce_transparency = on
+        self._save({REDUCE_TRANSPARENCY_KEY: on})
+        self._apply_tokens(self._base)
+
+    def take_migration_note(self) -> str | None:
+        """The one-time "switched to Liquid Glass" message (once), for the log."""
+        note, self._migration_note = self._migration_note, None
+        return note
+
     def configure_auto(self, dark_key: str, light_key: str) -> None:
         """Set the dark/light pair used by Auto mode."""
         self._auto_dark  = dark_key  if dark_key  in THEMES else DEFAULT_DARK
         self._auto_light = light_key if light_key in THEMES else DEFAULT_LIGHT
-        try:
-            from config import load_config, save_config
-            cfg = load_config()
-            cfg["auto_dark_theme"]  = self._auto_dark
-            cfg["auto_light_theme"] = self._auto_light
-            save_config(cfg)
-        except Exception:
-            pass
+        self._save({"auto_dark_theme": self._auto_dark, "auto_light_theme": self._auto_light})
         if self._auto_mode:
             self._apply_tokens(self._auto_tokens())
         self._sync_auto_timer()
 
     def load_persisted(self) -> None:
-        """Load the saved theme from config and apply it."""
+        """Load the saved theme (migrating it once) and apply it."""
         try:
-            from config import load_config
+            from config import load_config, save_config
             cfg = load_config()
+            if self._migrate(cfg):
+                save_config(cfg)
             self._auto_dark  = cfg.get("auto_dark_theme",  DEFAULT_DARK)
             self._auto_light = cfg.get("auto_light_theme", DEFAULT_LIGHT)
-            key = cfg.get("theme", DEFAULT_DARK)
+            accent = cfg.get(ACCENT_KEY, DEFAULT_ACCENT)
+            self._accent = accent if accent in ACCENTS else DEFAULT_ACCENT
+            self._reduce_transparency = bool(cfg.get(REDUCE_TRANSPARENCY_KEY, False))
+            key = cfg.get(THEME_KEY, DEFAULT_THEME)
             self.apply(key)
         except Exception:
-            self.apply(DEFAULT_DARK)
+            self.apply(DEFAULT_THEME)
 
     def is_auto(self) -> bool:
         return self._auto_mode
@@ -341,11 +440,41 @@ class ThemeManager(QtCore.QObject):
 
     # ── Internal ──────────────────────────────────────────────────────────
 
+    def _migrate(self, cfg: dict) -> bool:
+        """Switch a saved theme to Liquid Glass once. True when ``cfg`` changed."""
+        if cfg.get(MIGRATION_MARKER):
+            return False
+        saved = cfg.get(THEME_KEY)
+        if saved and saved != GLASS_KEY:
+            cfg[PREVIOUS_THEME_KEY] = saved
+            cfg[THEME_KEY] = GLASS_KEY
+            name = "Auto" if saved == "auto" else (THEMES[saved].name if saved in THEMES else saved)
+            self._migration_note = (
+                f"Appearance: Liquid Glass is the new look, so your theme ({name}) was "
+                f"switched to it once. {name} is still in Settings → Appearance."
+            )
+            _log.info("Theme migrated once from %r to %r", saved, GLASS_KEY)
+        cfg[MIGRATION_MARKER] = True
+        return True
+
+    def _effective(self, base: ThemeTokens) -> ThemeTokens:
+        tokens = with_accent(base, self._accent)
+        if self._reduce_transparency:
+            tokens = reduced_transparency(tokens)
+        return tokens
+
     def _apply_tokens(self, tokens: ThemeTokens) -> None:
         app = QtWidgets.QApplication.instance()
         if app is None:
             return
+        self._base = THEMES.get(tokens.key, tokens)
+        tokens = self._effective(self._base)
         self._current = tokens
+        try:
+            from gui.themes import appearance
+            appearance.invalidate()
+        except Exception:  # pragma: no cover - never block a switch
+            pass
         if self._installed(app):
             # Fast path (DS-04): same style object, same stylesheet. Swap the
             # tokens the style paints from and the palette the stylesheet
@@ -420,24 +549,24 @@ class ThemeManager(QtCore.QObject):
 
     @staticmethod
     def _set_base_font(app: QtWidgets.QApplication) -> None:
-        """Set Inter as the application-wide default font."""
+        """The application-wide default font: the type ramp's body role."""
         try:
-            from gui.fonts.loader import UI_FAMILY, TypeScale
-            f = QtGui.QFont(UI_FAMILY, TypeScale.BODY)
-            f.setWeight(QtGui.QFont.Weight(TypeScale.W_REGULAR))
-            f.setHintingPreference(QtGui.QFont.HintingPreference.PreferNoHinting)
-            app.setFont(f)
-        except ImportError:
+            from gui.themes.glass import font
+            app.setFont(font("body"))
+        except ImportError:  # pragma: no cover
             pass
 
-    def _persist(self) -> None:
+    def _save(self, values: dict) -> None:
         try:
             from config import load_config, save_config
             cfg = load_config()
-            cfg["theme"] = "auto" if self._auto_mode else self._current.key
+            cfg.update(values)
             save_config(cfg)
         except Exception:
             pass
+
+    def _persist(self) -> None:
+        self._save({THEME_KEY: self.selected_key()})
 
     def _auto_tokens(self) -> ThemeTokens:
         dark = THEMES.get(self._auto_dark, THEMES[DEFAULT_DARK])

@@ -28,12 +28,22 @@ launch.
 | Step | What happens |
 |---|---|
 | Crash log | `main()` first installs the Qt crash log (`crash_logger.install_for_qt()`; see architecture.md). |
-| `MosaicLanding` (`gui/widgets/landing.py`) | Shown immediately. The window fades in with only the call-to-action card (the logo moment), then album-art tiles fly in, filled by a background art scanner (`_ArtScanner`, cancellable, registered with the JobRegistry). |
+| `MosaicLanding` (`gui/widgets/landing.py`) | Shown immediately. The window fades in with only the glass card (the logo moment), then a full-window 7 × 5 grid of album tiles flies in, filled by a background art scanner (`_ArtScanner`, cancellable, registered with the JobRegistry). |
 | `AlphaDEXWindow` (`gui/main_window.py`) | Built once the landing has **fully faded in** (`faded_in` signal), during the logo pause, so the first landing frames are never blocked. If the user clicks before that, it is built on demand. It opens on **Home**. |
 | Cross-fade | When a library is chosen, the landing fades out while the main window fades in over the same duration. |
 | Library applied | The chosen library is applied **once**, after the cross-fade finishes (`window.set_library(path)`). The main window never applies the saved library by itself. |
 
-The call-to-action button reads **"Initialize"** when the saved library exists, or
+The landing is Liquid Glass (redesign R1): a frosted glass card in the middle of the
+album grid holds the brand, the saved library (path, and its track and artist counts
+from a read-only background count), the main button, and — when a library is saved — a
+**Choose another folder** link and "Or click any album to start playing it.". The
+card's frost is the tiles behind it, blurred off the GUI thread. A glass **✕** at the top
+right quits (`quit_requested`; the app exits without building the main window).
+Hovering a tile lifts it (scale 1.06) with a white ring and a glass caption chip (album
+and artist), painted by a mouse-transparent overlay; tiles never move for it. With
+reduced motion the fly-in and the exit scatter are skipped.
+
+The main button reads **"Initialize"** when the saved library exists, or
 **"Choose Library Folder"** when there is none. A saved library that no longer exists
 is shown as **"Saved library not found"** with "Choose Library Folder" (the folder
 dialog opens at the nearest folder that still exists).
@@ -52,23 +62,26 @@ stderr and the crash log, and exits with status 1.
 
 `QMainWindow`, default size 1300 × 860 px, minimum 900 × 600 px.
 
-Layout (top → bottom, left → right):
+Layout (Liquid Glass shell, redesign R1). The central widget is the **backdrop**
+(`gui/widgets/backdrop.py`); everything else floats on it as glass:
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│  Top Bar                                                     │
-├──────────────┬──────────────────────────────────────────────┤
-│              │  Section tabs (only on pages with sections)  │
-│   Sidebar    ├──────────────────────────────────────────────┤
-│   (360 px)   │           Page (stacked)                     │
-│              ├──────────────────────────────────────────────┤
-│              │  Now Playing bar (hidden until a track loads)│
-│              ├──────────────────────────────────────────────┤
-│              │  Log Drawer (slide-up, collapsed by default) │
-├──────────────┴──────────────────────────────────────────────┤
-│  Status Bar  ("Page" or "Page · Section")                    │
-└─────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│ ╭────────────╮   Page title          [ search ] [Change lib.] │
+│ │  Sidebar   │   (library chip · tracks · GB · artists)       │
+│ │  (glass,   │   ( segmented section tabs, when a page has    │
+│ │   250 px,  │     several sections )          [page actions] │
+│ │   floats   │                                                │
+│ │   18 px    │   Page (stacked; transparent, cards are glass) │
+│ │   in)      │                                                │
+│ │            │        ╭ Now Playing capsule (floating) ╮      │
+│ ╰────────────╯   ╭ Activity Log strip (glass) ──────────────╮ │
+└──────────────────────────────────────────────────────────────┘
 ```
+
+The status bar still receives "Page" / "Page · Section" messages but is not shown
+(the page header and the log strip's status chip say the same). Page and section
+changes cross-fade (opacity only; instant with reduced motion).
 
 **Panels and pages.** The workspace classes are *panels*. The window builds every
 panel once (`self._workspaces[panel_key]`, signals wired as before) and composes them
@@ -88,15 +101,17 @@ tasks running" question lists them; on Yes the window disables its UI, cancels e
 job cooperatively, and closes once they stop. If a job ignores cancellation for 20 s,
 the user is asked once whether to quit anyway.
 
-### 1.1 Now Playing bar (`gui/widgets/now_playing_bar.py`)
+### 1.1 Now Playing capsule (`gui/widgets/now_playing_bar.py`)
 
-A slim transport strip above the log drawer, hidden until the first track loads and
-hidden again when nothing is loaded any more.
+A floating glass capsule at the bottom centre of the page area (22 px up, at most
+880 px wide), with its shadow over the page. Hidden until the first track loads (it
+fades in) and hidden again when nothing is loaded any more. Pages keep 104 px of room
+under their content so it never covers anything (the Player page reserves it too).
 
 | Element | Purpose |
 |---|---|
-| Art thumbnail | 44 px cover; a ♪ placeholder when the track has no art |
-| Title / artist | Current track |
+| Cover | 52 px round cover; a ♪ disc when the track has no art |
+| Title / artist · album | Current track (elided to fit) |
 | ⏮ / ▶ / ⏭ | Previous, play/pause, next (routed to the Player panel) |
 | Seek slider | Drag, wheel, keys and groove clicks all seek |
 | Volume slider | Kept in sync with the Player page's slider in both directions, without echo |
@@ -104,20 +119,23 @@ hidden again when nothing is loaded any more.
 
 ---
 
-## 2. Top Bar (`gui/widgets/top_bar.py`)
+## 2. Page header (`gui/widgets/top_bar.py`, class `TopBar`)
 
-Fixed height 64 px. Always visible.
+Above the page stack, on the backdrop (no card). Always visible.
 
 | Element | Type | Purpose |
 |---|---|---|
-| App title "AlphaDEX" | Label (`#appTitle`) | Brand |
-| Library path | Label (`#libraryPath`) with a `⌂` glyph | The last two path segments (`…  Music  /  Library`); the tooltip holds the full path. Muted colour when no library is set. |
+| Page title | Label (`#pageTitle`, display 34 px) | The sidebar label of the page on screen |
+| Library chip | Pill with the path (`#libraryPath`, elided in the middle) | The tooltip holds the full path. Muted colour when no library is set. |
 | Library stats | Labels | Tracks · GB · artists, from a background scan. The scan skips the reserved folders and unreadable files; "artists" counts `Artist/Album/track` folders. A newer library's scan cancels and replaces an older one. Shows "–" until it finishes. |
-| Change Library | Button | Folder picker; emits `library_changed(path)` |
-| Theme | Button | Goes to **Settings → Appearance** (the theme picker lives there now) |
-| Settings | Button | Goes to the **Settings** page |
+| Search | Pill line edit | Enter shows the **Player** filtered to the text (the Player's own track filter) |
+| Change library | Pill button | Folder picker; emits `library_changed(path)` (also Ctrl+O) |
 
-**Signals:** `library_changed(str)`, `settings_requested()`, `theme_requested()`.
+The brand moved to the sidebar; the Theme and Settings buttons are gone (Settings is in
+the sidebar and on Ctrl+,; the theme is in Settings → Appearance).
+
+**Signals:** `library_changed(str)`, `search_requested(str)`, and — kept for callers —
+`settings_requested()`, `theme_requested()`.
 
 ---
 
@@ -125,15 +143,18 @@ Fixed height 64 px. Always visible.
 
 ### 3.1 Sidebar (`gui/widgets/sidebar.py`)
 
-Fixed width 360 px, token `sidebar_bg`, inside a `QScrollArea`. An "AlphaDEX" logo in
-the theme's primary text colour, the groups below, and an **Exit** item pinned under a
-divider. Each item is an `AnimatedNavButton` whose hover tint eases through the motion
-tokens; the active item has an accent "pill" that slides between items. Each item's
-tooltip is the page's one-line intent. Clicking emits `nav_changed(page_key)`; Exit
-emits `exit_requested`, which closes the window (with the close protocol above).
+A floating glass panel, 250 px wide (220 px minimum), radius 30, 18 px in from the
+window edges; its shadow is painted by the backdrop. A brand tile and "AlphaDEX" at
+the top, the groups below (11 px headings), text-only items 40 px high (they shrink to
+no less than 32 px in a short window; below that the list scrolls). Each item is an
+`AnimatedNavButton` whose hover wash eases through the motion tokens; the active item
+sits on a raised glass pill that slides between items (a painter offset, never widget
+geometry). Each item's tooltip is the page's one-line intent. Clicking emits
+`nav_changed(page_key)`. There is no Exit item any more: quit with the window's close
+button or **Ctrl+Q** (same close protocol).
 
 The groups come from `gui/navigation.py` (`NAV_STRUCTURE` is derived from it). The
-untitled last group sits under a hairline instead of a heading.
+untitled last group (Activity · Settings · Help) sits at the foot of the panel.
 
 | Group | Page key | Sidebar label | What it is for |
 |---|---|---|---|
@@ -148,10 +169,9 @@ untitled last group sits under a hairline instead of a heading.
 | | `playlists` | Playlists | §6.9 |
 | **TAKE AWAY** | `mirror` | Mirror | Build the mirror · Verify the mirror (§6.10) |
 | | `exports` | Exports | Artist/Title and codec lists (§6.11) |
-| *(hairline)* | `activity` | Activity | Jobs, log, problems (§6.12). The item shows the number of running jobs (`Sidebar.set_badge`). |
+| *(foot)* | `activity` | Activity | Jobs, log, problems (§6.12). A "N running" pill shows the running jobs (`Sidebar.set_badge`; housekeeping jobs such as the backdrop build are not counted). |
 | | `settings` | Settings | Metadata services · General · Appearance (§6.13) |
 | | `help` | Help | §6.14 |
-| *(below divider)* | `exit` | Exit | |
 
 **Keyboard shortcuts** (set in `main_window.py`):
 
@@ -162,11 +182,13 @@ untitled last group sits under a hairline instead of a heading.
 | Ctrl+, | The Settings page |
 | Ctrl+L | Toggle log drawer |
 | Ctrl+W | Clear log |
+| Ctrl+Q | Quit (the close protocol) |
 
 ### 3.2 Pages and sections (`gui/navigation.py`, `gui/pages.py`)
 
-A page with more than one section shows a row of **section tabs** above its panels; a
-page with one section just shows its panel. A page remembers the section it showed
+A page with more than one section shows its **section tabs** above its panels, as a
+glass segmented control (`SegmentedTabBar`: a raised thumb slides to the chosen
+section); a page with one section just shows its panel. A page remembers the section it showed
 last. When a page or section becomes visible, the window calls the visible panel's
 optional `on_activated()` hook (Home re-reads `Docs/` if its last check is older than
 3 s; Settings re-reads the config unless there are unsaved edits; Activity refreshes;
@@ -232,7 +254,7 @@ only (fill = `warning` blended over `card_bg`, border = `warning`, text =
 
 ## 4. Log Drawer (`gui/widgets/log_drawer.py`)
 
-A slide-up panel at the bottom of the content area. Collapsed by default; expands to
+A glass strip at the bottom of the content area (the material's card surface). Collapsed by default; expands to
 **220 px** on toggle, or by itself when a `warn` or `error` line arrives. It keeps the
 last 500 lines; the Activity page keeps the session's full history (§6.12).
 
@@ -261,6 +283,13 @@ Singleton `QObject`.
 - `apply(key)` — switch to a named theme or `"auto"`, and persist it as `theme`.
 - `load_persisted()` — read the saved theme at startup.
 - `configure_auto(dark_key, light_key)` — the Auto pair (`auto_dark_theme`, `auto_light_theme`).
+- `set_accent(key)` / `set_reduce_transparency(on)` — Liquid Glass accent and opaque
+  surfaces; both apply at once through the same fast path (`glass_accent`,
+  `reduce_transparency`). `current` is the *effective* tokens (theme + accent +
+  transparency).
+- **One-time migration**: a saved theme other than Liquid Glass is switched to it once
+  (`theme_glass_migrated` marker, the old key kept as `theme_before_glass`); the main
+  window logs it. Choosing a classic theme afterwards sticks.
 - `theme_changed(tokens)` — emitted after every switch. Widgets that colour
   themselves (Top Bar, Player, log drawer, card shadows, pills, …) listen to it.
 - **Auto mode** uses the platform's colour scheme when it reports Light or Dark, and
@@ -272,12 +301,19 @@ see architecture.md, "Themes and motion", for how.
 
 ### 5.2 Themes
 
-14 named themes, persisted as `theme`. Every text role meets WCAG AA contrast on the
+15 named themes, persisted as `theme`. Every text role meets WCAG AA contrast on the
 surfaces it is drawn on, in every theme (`tests/test_design_contrast.py`).
 
-**Dark (8)**: Midnight, Obsidian, Graphite, Navy, Twilight, Aurora, Forest, Ember
+**Liquid Glass** (the default): translucent surfaces over the album-art backdrop, in
+four accents (Blue, Peach, Mint, Lilac).
 
-**Light (6)**: Pearl, Azure, Blossom, Meadow, Lavender, Sunset
+**Classic, dark (8)**: Midnight, Obsidian, Graphite, Navy, Twilight, Aurora, Forest, Ember
+
+**Classic, light (6)**: Pearl, Azure, Blossom, Meadow, Lavender, Sunset
+
+Every theme carries a *material* (`ThemeTokens.material`: sidebar, card, raised,
+capsule and well surfaces, plus the backdrop). Classic themes get an opaque one
+derived from their colours, so they render through the same glass components.
 
 ### 5.3 Theme picker (`picker.py`)
 
@@ -286,8 +322,9 @@ and the selection follows switches made elsewhere.
 
 | Element | Purpose |
 |---|---|
+| Liquid Glass row | Its swatch, the four accent discs, and **Reduce transparency** |
 | Auto card | Configure… and Select buttons; always names the configured night and day themes |
-| Dark / Light grids | Swatch cards for all 14 themes |
+| Classic themes | Swatch cards for the 14 classic themes (dark row, light row) |
 | Swatch card | Mini preview with its name drawn in the theme's own text colour; checkmark when active |
 
 `ThemePickerDialog` (the same panel in a non-modal window) still exists but the app no
@@ -298,15 +335,18 @@ longer opens it.
 Modal child of the picker ("Auto Theme — Select Pair"): a night-theme grid, a
 day-theme grid, Cancel, and **Apply Auto Theme**, which saves the pair and turns Auto on.
 
-### 5.5 The shared background glow and card shadows
+### 5.5 The backdrop, glass surfaces and card shadows
 
-Every panel and the sidebar paint the same two-corner accent glow
-(`gui/widgets/gradient_bg.py`, `GradientWidget`), switchable in Settings → Appearance →
-"Background gradient". The setting is read once and cached; saving Settings refreshes
-it. The section-tab strip above a composed page is painted flat in `content_bg`.
+The window's central widget is the **backdrop** (`gui/widgets/backdrop.py`), chosen in
+Settings → Appearance → **Backdrop**: *Album art* (a blurred wall of the library's own
+covers; Liquid Glass only, classic themes show their gradient), *Gradient*, or
+*Plain*. It is composed off the GUI thread, cached per library and size bucket, and
+painted by blitting the cached image. With no covers it falls back to the gradient.
 
-The same `GradientWidget` also **paints the soft shadow under every card** (from a
-cached 9-slice pixmap) instead of giving each card a graphics effect.
+Pages, scroll areas and the section strip are transparent. Cards are `GlassCard`s
+(`gui/widgets/glass.py`) painted with `gui.themes.glass.paint_surface`; the
+`GradientWidget` scroll surface **paints the soft shadow under every card** (a cached
+9-slice, never under the card itself) instead of giving each card a graphics effect.
 
 ---
 
@@ -763,8 +803,7 @@ Read-only.
 
 ### 6.13 Settings (`settings.py`, form in `gui/dialogs/settings_drawer.py`)
 
-A page now (Ctrl+, and the top bar's Settings button; the Theme button opens
-Appearance). **Save settings** and **Revert** sit above the sections. The controls and
+A page now (the sidebar and Ctrl+,). **Save settings** and **Revert** sit above the sections. The controls and
 the save logic are `SettingsForm`, the same form the old dialog had, so **every
 control persists under the same config key:**
 
@@ -777,18 +816,19 @@ control persists under the same config key:**
 | General | Default library (validated if you change it) | `library_root` |
 | | Near-duplicate threshold | `near_duplicate_threshold` |
 | | Exact-duplicate threshold (range wide enough that saved values aren't clamped) | `exact_duplicate_threshold` |
-| Appearance | Theme picker (§5.3) — applies instantly, no Save needed | `theme` (via ThemeManager) |
-| | Background gradient — applies on Save | `bg_gradient_enabled` |
+| Appearance | Theme picker (§5.3): theme, accent, Reduce transparency — apply instantly, no Save needed | `theme`, `glass_accent`, `reduce_transparency` (via ThemeManager) |
+| | Backdrop: Album art / Gradient / Plain — applies on Save | `backdrop_mode` (and the legacy `bg_gradient_enabled`, kept in step: False = Plain) |
+| | Reduce motion — applies on Save | `reduced_motion` |
 
 Unsaved edits survive leaving and coming back; with no edits the page re-reads the
 config when shown (so a library chosen with Change Library appears). Revert shows the
 saved values again.
 
-There is no Settings control for the mixed-codec boost (edited on the Duplicates page)
-or for reduced motion (config key `reduced_motion` or `ALPHADEX_REDUCED_MOTION=1`).
+There is no Settings control for the mixed-codec boost (edited on the Duplicates page).
+`ALPHADEX_REDUCED_MOTION=1` also turns reduced motion on.
 
-On save the panel emits `settings_saved`; the window refreshes the cached gradient and
-reduced-motion flags, calls every panel's `on_settings_saved()` (Duplicates and Similarity
+On save the panel emits `settings_saved`; the window refreshes the cached backdrop mode
+(and rebuilds the backdrop) and the reduced-motion flag, calls every panel's `on_settings_saved()` (Duplicates and Similarity
 re-read their thresholds there), and applies a changed default library through
 `_apply_library()`.
 
@@ -878,11 +918,13 @@ Every option, checkbox and committed name edit re-plans on the GUI thread with t
 |---|---|
 | `gui/navigation.py` | The information architecture as data (Qt-free): pages, sections, groups, `resolve()` |
 | `gui/pages.py` (`SectionedPage`, `SoundMapPage`) | Live — §3.2 |
-| `widgets/top_bar.py` (`TopBar`) | Live — §2 |
+| `widgets/top_bar.py` (`TopBar`) | Live — the page header, §2 |
+| `widgets/backdrop.py` (`Backdrop`) | Live — §5.5 (album-art / gradient / plain backdrop) |
+| `widgets/glass.py` (`GlassCard`, `GlassPanel`, `ShadowLayer`, `ElidedLabel`) | Live — §5.5 |
 | `widgets/sidebar.py` (`Sidebar`) | Live — §3.1 |
 | `widgets/log_drawer.py` (`LogDrawer`) | Live — §4 |
 | `widgets/now_playing_bar.py` (`NowPlayingBar`) | Live — §1.1 |
-| `widgets/gradient_bg.py` (`GradientWidget`) | Live — §5.5 (background glow and painted card shadows) |
+| `widgets/gradient_bg.py` (`GradientWidget`) | Live — §5.5 (transparent scroll surface; painted card shadows) |
 | `widgets/landing.py` (`MosaicLanding`) | Live — §0 |
 | `widgets/pill.py` (`Pill`, `ExperimentalPill`) | Live — §3.2 |
 | `widgets/interactive_scatter_plot.py` (`InteractiveScatterPlot`) | Live — the Map's plot |
@@ -890,7 +932,9 @@ Every option, checkbox and committed name edit re-plans on the GUI thread with t
 | `widgets/track_details_panel.py` (`TrackDetailsPanel`) | Live — Map details |
 
 Elsewhere under `gui/`: `playback_backend.py` (the Player's backend seam), `workers.py`
-(JobRegistry), `themes/motion.py` (motion tokens and helpers), `workspaces/label_tone.py`
+(JobRegistry), `themes/motion.py` (motion tokens and helpers), `themes/glass.py` (the
+glass painter and role fonts), `themes/appearance.py` (cached backdrop setting),
+`imaging.py` (worker-side image blur), `library_stats.py` (library counts), `workspaces/label_tone.py`
 (theme tones and a reusable flash for status labels), `workspaces/launchers.py` (the
 Duplicates dialog sections) and `compat.py` (Qt imports; QtWebEngine is imported lazily
 on first use). `gui/audio_preview.py` is used only by the legacy Tk app, and
