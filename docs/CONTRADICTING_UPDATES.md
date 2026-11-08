@@ -301,16 +301,25 @@ Status legend: **Done** (in the code now) · **Pending owner** (decision needed;
   except `tools`, which no longer has a panel.
 - **Docs now updated**: `docs/gui_inventory.md` (rewritten) and `CLAUDE.md` (layout, plus a new "Adding a page or
   a section" pattern; the Tk "Tools menu" / "Playlist Creator" patterns are marked legacy).
-- **Docs still using old names**, to fix in the docs pass after the redesign settles:
-  - `docs/architecture.md` (the sidebar table, "Settings dialog", "Utilities exports", "Utilities → View Crash
-    Log");
-  - `docs/features/duplicate_finder.md` ("Utilities → Pair Review");
-  - `docs/ROADMAP.md` ("Utilities → Diagnostics", "Crash Log viewer", "Settings dialog", "Music Graph");
-  - `docs/features/playlists_and_clustering.md` ("Music Graph room", "sidebar's Clustered");
-  - `docs/features/tag_fixer.md` (the Genre Normalizer sidebar entry);
-  - `docs/README.md`;
-  - the root `README.md` ("5 sections, 13 items", tools.py as "Export & Utilities");
-  - `docs/redesign/README.md` (its "13 sidebar entries" wording and hygiene table).
+- **Docs that used old names — now updated** (docs pass, 2026-11-08; places are written **Page → Section**):
+  - `docs/architecture.md`: the sidebar table is now the groups / pages / sections table, with an "if you knew the
+    older layout" map; "Settings dialog", "Utilities exports" and "Utilities → View Crash Log" now name the
+    Settings page, the Exports page and Activity. **Updated.**
+  - `docs/features/duplicate_finder.md`: "Utilities → Pair Review" is Duplicates → Pair review. **Updated.**
+  - `docs/ROADMAP.md`: "Utilities → Diagnostics", "Crash Log viewer", "Settings dialog" and "Music Graph" now
+    name Duplicates → Fuzzy finder, Activity, the Settings page and the Sound Map. **Updated.**
+  - `docs/features/playlists_and_clustering.md`: "Music Graph room" and "sidebar's Clustered" are Sound Map →
+    Map and Analyse; the mentions of the deleted 3-D widget are replaced by the browser page from
+    `cluster_graph_3d.py`. **Updated.**
+  - `docs/features/tag_fixer.md`: the Genre Normalizer sidebar entry is Metadata → Fill genres / Normalize
+    genres. **Updated.**
+  - `docs/README.md`. **Updated.**
+  - the root `README.md`: "5 sections, 13 items" and tools.py as "Export & Utilities" are replaced by the new
+    shell and pages. **Updated.**
+  - `docs/redesign/README.md`: its analysis is kept and marked as the pre-IA state; "13 sidebar entries" is
+    spelled out next to an "As built" structure, and the hygiene table shows today's ceilings. **Updated.**
+  - Also checked: `docs/overview.md` and `docs/features/library_sync.md` (updated: "workspaces" became pages)
+    and `docs/features/indexer.md` (no old names).
 - **Panel headings** still use old names under the new pages ("Genre Normalizer", "Library Compression",
   "Similarity Inspector"). Only Analyse and Map were retitled. The backend copy in `cluster_graph_data.py`,
   `cluster_graph_3d.py` and `clustered_playlists.py` still says "Clustered Playlists" / "Music Graph".
@@ -345,7 +354,7 @@ Status legend: **Done** (in the code now) · **Pending owner** (decision needed;
   - `docs/reorganization_spec.md` (a deferred plan that still lists `mutagen_stub/`).
   - Older mentions of the 3-D widget in `docs/features/playlists_and_clustering.md`.
 
-## D. Features being finished — **In progress**
+## D. Features being finished — **Done**
 
 ### D1. Cluster playlists — **Done**
 - **Was**: promised by the wizard and docs but never built; the current UI says "not available". "A run writes

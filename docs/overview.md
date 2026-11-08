@@ -53,6 +53,16 @@ the `features/` folder; this is the one-sentence version of each:
    way up to letting a machine-learning model group your tracks by how they actually
    *sound*.
 
+In the modern app the sidebar is grouped the same way. **Organize** holds the
+Indexer, Library Sync and File Cleanup (which strips " (1)"-style copy suffixes from
+file names). **Clean up** holds Duplicates and Metadata, where the Tag Fixer and the
+genre tools live. **Listen** holds the Player, the Sound Map (clustering and the map
+of your music) and Playlists. **Take away** holds Mirror (a portable Opus copy of the
+library) and Exports. **Home** shows the library at a glance, and Activity, Settings
+and Help sit at the foot of the sidebar. Some pages have several sections, shown as
+tabs; these documents write a place in the app as **Page → Section**, for example
+**Metadata → Tag Fixer**.
+
 ## The single most important design principle: look before you leap
 
 If you remember nothing else, remember this. **AlphaDEX never rearranges, replaces,
@@ -133,9 +143,10 @@ One practical thing to know up front: AlphaDEX currently has **two different ver
 of its user interface**, and they share the same underlying engine.
 
 - **The modern app** (started via `alpha_dex_gui.py`) is the **current, actively
-  developed** version. It has a contemporary look, smooth animations, a sidebar of
-  workspaces, and the newest features such as the interactive cluster graph. This is
-  the version these documents describe by default.
+  developed** version. It has a contemporary "Liquid Glass" look (translucent panels
+  over a blurred wall of your own album covers), smooth animations, a sidebar of pages
+  grouped by job, and the newest features such as the Sound Map. This is the version
+  these documents describe by default.
 - **The legacy app** (started via `main_gui.py`) is the **original** version. It
   still works and is kept available as a fallback and a reference, but new
   development happens on the modern app.
