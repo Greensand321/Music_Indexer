@@ -2989,16 +2989,26 @@ def build_consolidation_plan(
         if cancel_event.is_set():
             review_flags.append("Cancelled before normalization.")
             break
-        normalized.append(_normalize_track(raw, quick_state=True))
-        if len(normalized) >= max_candidates:
-            review_flags.append(f"Truncated candidate set to {max_candidates} items to protect runtime.")
+        if max_candidates and len(normalized) >= max_candidates:
+            message = (
+                f"Truncated candidate set to {max_candidates} items to protect runtime "
+                f"({len(raw_tracks) - len(normalized)} track(s) not checked)."
+            )
+            review_flags.append(message)
+            log(f"Warning: {message}")
             break
+        normalized.append(_normalize_track(raw, quick_state=True))
     log(f"Grouping phase: normalized {len(normalized)} tracks.")
     normalized, alias_notes = _collapse_same_file_aliases(normalized)
     for note in alias_notes:
         log(note)
 
     log("Grouping phase: running duplicate clustering...")
+    # The time budget is for grouping itself: measured from the start of the
+    # build, a first scan of a large library spent it all reading tags and
+    # grouping "timed out" at its first bucket (no duplicates reported).
+    grouping_start = _now()
+    flags_before = len(review_flags)
     clusters = _cluster_duplicates(
         normalized,
         exact_duplicate_threshold=exact_duplicate_threshold,
@@ -3008,10 +3018,12 @@ def build_consolidation_plan(
         max_comparisons=max_comparisons,
         timeout_sec=timeout_sec,
         progress_callback=progress_callback,
-        start_time=start_time,
+        start_time=grouping_start,
         review_flags=review_flags,
         log_callback=log_callback,
     )
+    for flag in review_flags[flags_before:]:
+        log(f"Warning: {flag}")
     log(f"Grouping phase: clustering complete ({len(clusters)} clusters).")
 
     cluster_track_map: Dict[str, DuplicateTrack] = {}

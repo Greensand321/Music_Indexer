@@ -48,6 +48,16 @@ Measured on the app's own pipeline: the same recording in any codec or bitrate
 starting 0.3–0.6 s later lands at **0.03–0.08**; different recordings sit at **0.43+**.
 `tests/test_dupes_fingerprint_distance.py` pins these ranges.
 
+**Length counts, too.** fpcalc fingerprints the first two minutes, so a
+30-second clip's fingerprint is simply the beginning of the full song's. The
+Duplicate Finder therefore scores the part of the longer fingerprint that has no
+counterpart (beyond the small alignment window) as unrelated audio: a clip is
+*not* a duplicate of the song it was cut from, a copy missing its last tenth is
+only a near duplicate (flagged for review), and copies a few fractions of a second
+apart still score 0. (Before, a clip scored 0.0 against its song and the two were
+grouped as exact duplicates — with the clip kept if it was the FLAC. The Similarity
+page and Library Sync still compare only the overlapping part.)
+
 This is the engine's entire notion of similarity. Everything else — what counts as a
 duplicate, which copy wins — is built on top of this one distance number.
 
@@ -90,15 +100,28 @@ to keep — and treat the rest as **losers** to be set aside. It decides primari
 **quality**, using the same lossless-beats-lossy logic that runs through the whole
 app:
 
-- A **FLAC** (lossless) is preferred over a **WAV** is preferred over an **MP3**, and
-  so on down the line. The higher-quality copy is the one worth keeping.
-- When two copies are of equal quality (say, two FLACs of the same track), the finder
-  falls back to a sensible tie-breaker, favoring the file whose name carries more
-  descriptive information.
+- **Lossless always beats lossy.** A FLAC/WAV/AIFF/APE copy is kept over any MP3,
+  AAC, Vorbis or Opus copy, whatever else differs.
+- **Between lossless copies**, higher resolution (sample rate, then bit depth, then
+  channels) wins; at equal resolution the format priority from the app's
+  configuration decides — **FLAC over WAV** (FLAC carries tags and artwork properly).
+  The bitrate is not used here: for lossless audio it only measures compression, so
+  an uncompressed WAV used to "out-bitrate" the same audio as FLAC and win.
+- **Between lossy copies**, the higher bitrate wins, then sample rate and the rest.
+- **Readable cover art** only breaks a tie between copies of the same class (two
+  FLACs, two MP3s). It used to come first, so an MP3 with a cover beat the FLAC
+  without one and the lossless master was the copy set aside.
+- Anything still tied is decided by the file path, deterministically — the same
+  library always gives the same winner, whatever order the files were found in.
 
 The reasoning is simple and consistent: when you have the same song twice, there is no
 reason to keep the worse-sounding version, so the best copy survives and the
 redundant ones step aside.
+
+**A file and a link to it are not duplicates.** A symlink (or hard link) to a library
+file fingerprints identically to it. The finder recognises paths that lead to the same
+underlying file and considers only one of them, so it can never "keep" the link and
+quarantine the real file behind it (the scan log names any alias it ignored).
 
 ## Quarantine, not delete
 
@@ -117,6 +140,15 @@ be set to "Keep loser in place (retain)". And whichever path you choose,
 every action is **logged**: the finder writes detailed records into the `Docs` folder
 describing exactly which files were grouped, which won, which lost, and where each one
 went. Nothing happens without a paper trail.
+
+Quarantined files keep their own name (`Quarantine/Song.mp3`); a name that is already
+taken gets a copy number (`Song (1).mp3`). Names are compared the way Windows and
+macOS compare them — `Song.mp3`/`song.mp3` and the two Unicode spellings of `Café`
+count as the same name — so one loser can never replace another, or a file quarantined
+by an earlier run. When `Quarantine/` is on another drive, the loser is copied there
+first and only then removed; if the original cannot be removed (it is open in a player,
+read-only, …) the copy is removed again and the loser simply stays in the library,
+reported as not moved.
 
 The one-pair-at-a-time tool, **Utilities → Pair Review**, follows the same rule. It
 used to delete the inferior file with a single click; its action is now
@@ -156,17 +188,47 @@ Concretely, execution always happens in the same seven steps, in the same order:
 ```
 1. Back up any playlist that will change
 2. Rewrite those playlists to point at the surviving copy
-3. Validate the rewrite (every referenced file must still exist)
+3. Validate the rewrite (every entry it changed must point at an existing file)
 4. Apply artwork transfers
 5. Apply metadata normalization
 6. Quarantine or delete the losers
-7. Clean up now-unnecessary numeric suffixes on the winners
+7. Give a winner back the name its same-named loser just vacated
 ```
 
 The ordering is not arbitrary: playlists are fixed and *checked* **before** any loser
 is touched, specifically so a mid-run failure can never leave a playlist pointing at
 a file that's already gone. If a playlist rewrite still references a file about to be
 quarantined, the executor refuses to continue rather than risk a dangling reference.
+
+Some details of each step, because they are what keep your files safe:
+
+- **Playlists** (`.m3u` and `.m3u8` under `Playlists/`) are rewritten in their own
+  encoding and line endings — a Windows-made cp1252 `.m3u` keeps every other entry
+  byte for byte — and an absolute entry stays absolute. Entries that already pointed
+  at missing files before the run are left as they were and do not stop it; an entry
+  the playlist's encoding cannot spell stops the run before any loser moves.
+- **Artwork and tag changes on the winner** (steps 4–5) are written to a copy beside
+  it, and the copy replaces the winner only when the write succeeded, so a crash or a
+  full disk can never leave a half-written winner. Cover art is embedded the way each
+  format expects (FLAC pictures, Vorbis/Opus picture comments, ID3 in MP3/WAV/AIFF,
+  MP4 atoms); formats without a known way are left untouched. Only the tag changes the
+  preview listed are written, and no tag is ever removed.
+- **Before each loser is touched** (step 6) the executor checks, at that moment, that
+  its winner still exists, that the winner is not the very same file reached through a
+  link, and that the loser is unchanged since the preview. If any check fails, that
+  loser is left in place and reported; the other groups carry on.
+- **Cancel and errors stop at a safe point.** Nothing new starts after you cancel or
+  after a file operation fails; the few operations already running finish, and every
+  operation that happened is in the report (with its destination), while the ones that
+  never started are listed as "not attempted". The summary counts match what is on
+  disk.
+- **Step 7** only drops a copy number — `Song (1).flac` becomes `Song.flac` — when
+  `Song.flac` was a loser of the same group that really left in this run; the preview
+  shows the rename ("Then renamed to"). It never overwrites anything. (It used to strip
+  any trailing number in brackets from every winner, unpreviewed — `Live (1986).flac`
+  became `Live.flac`.)
+- Plans whose groups overlap (one file a loser in two groups, or a loser that is
+  another group's winner) are refused before anything moves.
 
 Groups the planner is unsure about carry **review flags** (missing or unreadable
 artwork, placeholder metadata, a near rather than exact match, …). The executor refuses
@@ -247,6 +309,16 @@ file's size and last-modified date — if those shift, the old fingerprint is tr
 stale and refreshed. The practical result is dramatic: a first scan of ten thousand
 tracks might take many minutes, while a follow-up scan of the same library finishes in
 seconds, because almost nothing needs to be re-analyzed.
+
+The cache is only ever a shortcut. If its file is damaged ("file is not a database"),
+it is renamed to `….corrupt-<date>` — not deleted — and a fresh cache is started; a
+row the cache cannot read is simply a cache miss. (A damaged cache used to make every
+scan fail.)
+
+Every scanner of the library — this one, the legacy finder and the two experimental
+engines — skips the reserved top-level folders (`Quarantine/`, `Trash/`, `Docs/`,
+`Playlists/`, `Not Sorted/`, `Manual Review/`), so quarantined losers never come back
+as "duplicates" of the copies they were consolidated into.
 
 ## Tuning, in plain terms
 
