@@ -561,11 +561,6 @@ class EnhancedClusteredWorkspace(WorkspaceBase):
         if cfg.get("create_playlists"):
             text += " Offers to save them when the run finishes."
         self._settings_summary.setText(text)
-        nothing = not any(cfg["features"].values())
-        self._advanced_btn.setToolTip(
-            "Tick at least one feature to listen for." if nothing
-            else "Analyse the library with the settings above"
-        )
         self._set_busy(self.is_busy())
 
     # ── Running ───────────────────────────────────────────────────────────
@@ -574,15 +569,22 @@ class EnhancedClusteredWorkspace(WorkspaceBase):
         return self._worker is not None
 
     def _set_busy(self, busy: bool) -> None:
+        """Enable the Run buttons (and say why not) for the current state:
+        a run of our own, Save cluster playlists running on the page, or no
+        feature ticked on the settings card."""
         blocked = busy or self._external_busy
-        for btn in self._run_buttons:
-            btn.setEnabled(not blocked)
-            if self._external_busy and not busy:
-                btn.setToolTip("Wait for Save cluster playlists to finish.")
-            elif btn is self._quick_btn:
-                btn.setToolTip("Analyse the library with the recommended settings")
-        if not blocked and not any(t.isChecked() for t in self._feature_toggles.values()):
-            self._advanced_btn.setEnabled(False)
+        no_features = not any(t.isChecked() for t in self._feature_toggles.values())
+        self._quick_btn.setEnabled(not blocked)
+        self._advanced_btn.setEnabled(not blocked and not no_features)
+        if self._external_busy and not busy:
+            wait = "Wait for Save cluster playlists to finish."
+            self._quick_btn.setToolTip(wait)
+            self._advanced_btn.setToolTip(wait)
+        else:
+            self._quick_btn.setToolTip("Analyse the library with the recommended settings")
+            self._advanced_btn.setToolTip(
+                "Tick at least one feature to listen for." if no_features
+                else "Analyse the library with the settings above")
         self._wizard_btn.setEnabled(not busy)
 
     def set_external_busy(self, busy: bool) -> None:
