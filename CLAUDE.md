@@ -88,7 +88,7 @@ audio_norm.py                # Audio normalization helpers
 controllers/                 # Thin wrappers wiring backend to GUI
 plugins/                     # Metadata service integrations
 utils/                       # Metadata readers, path helpers
-tests/                       # pytest suite (42 modules)
+tests/                       # pytest suite (~106 modules + ~40 GUI modules in tests/ui/)
 docs/                        # HTML docs, design notes, GUI inventory
 library_sync_indexer_engine/ # A SEPARATELY MAINTAINED, DRIFTED COPY of the
                              #   indexer/fingerprint-cache engine, used only

@@ -295,7 +295,7 @@ Status legend: **Done** (in the code now) · **Pending owner** (decision needed;
   - `CLAUDE.md`'s "~14 user-facing workspaces" and the "Adding a Playlist Creator sub-panel" notes, which are
     Tk-era.
   - The page names used throughout `docs/features/*.md` ("Genre Normalizer", "Clustered", "Music Graph",
-    "Compression", "Utilities").
+    "Compression", "Utilities"). *Updated 2026-11-08: the docs now use "Page → Section" names.*
 - **Old keys still route**: `similarity`, `tag_fixer`, `genres`, `clustered`, `graph`, `compression` and `tools`
   open the right page and section. `main_window._workspaces[old_key]` still returns the panel for every old key
   except `tools`, which no longer has a panel.
@@ -352,7 +352,9 @@ Status legend: **Done** (in the code now) · **Pending owner** (decision needed;
   `last_path.txt` and `crash_report.txt` are untracked and ignored.
 - **Contradicts**:
   - `docs/reorganization_spec.md` (a deferred plan that still lists `mutagen_stub/`).
-  - Older mentions of the 3-D widget in `docs/features/playlists_and_clustering.md`.
+  - Older mentions of the 3-D widget in `docs/features/playlists_and_clustering.md`. *Updated 2026-11-08: the
+    doc now describes the browser page from `cluster_graph_3d.py`, and names the deleted widget only in a
+    historical note.*
 
 ## D. Features being finished — **Done**
 
