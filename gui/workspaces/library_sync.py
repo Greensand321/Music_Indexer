@@ -17,12 +17,61 @@ import webbrowser
 from collections import Counter, defaultdict
 from pathlib import Path
 
-from gui.compat import QtCore, QtWidgets, Signal, Slot
+from gui.compat import QtCore, QtGui, QtWidgets, Signal, Slot
+from gui.themes import motion
 from gui.themes.manager import get_manager
+from gui.widgets.glass_parts import EmptyState, StatRow
+from gui.widgets.glyphs import glyph_icon, set_glyph
 from gui.workspaces.base import WorkspaceBase
 from gui.workspaces.label_tone import refresh_tones, set_tone
+from gui.workspaces.organize_parts import (
+    FlowLayout, GlassRowDelegate, ReflowBox, ReflowSplitter, StepPills, caption, glyph_button,
+    hero_title, icon_button, style_item_view, thin_bar,
+)
 
-_STEPS = ("1. Configure paths", "2. Scan & match", "3. Build & execute plan")
+# The step pills show real state (``_refresh_controls``): 0 until a scan of
+# the current folders exists, 1 while reviewing it, 2 once a plan is built
+# or being built/executed.
+_STEPS = ("Choose folders", "Scan and match", "Build and execute")
+# Short labels (five tiles share 560 px at the minimum window); the tooltip
+# says it in full.
+_SCAN_TILES = (
+    ("incoming", "incoming"),
+    ("new", "new"),
+    ("matched", "in library"),
+    ("upgrades", "upgrades"),
+    ("low_confidence", "uncertain"),
+)
+_SCAN_TIPS = {
+    "incoming": "Audio files found in the incoming folder.",
+    "new": "Incoming tracks with no match in your library: they are added.",
+    "matched": "Incoming tracks already in your library: they are skipped unless you flag them.",
+    "upgrades": "Matches where the incoming file is better quality (flag Replace to swap it in).",
+    "low_confidence": "Low-confidence matches: left for review, never transferred automatically.",
+}
+_PLAN_TILES = (
+    ("add", "to add"),
+    ("replace", "to replace"),
+    ("skip", "skipped"),
+    ("review", "need review"),
+)
+_NO_SCAN = (
+    "No matches yet",
+    "Choose the incoming folder and scan both folders. Every incoming track appears "
+    "here with its closest match in your library.",
+)
+# Flag column text (plain words: no emoji in item views).
+_FLAG_COPY = "Copy"
+_FLAG_REPLACE = "Replace"
+
+
+class _StatusDelegate(GlassRowDelegate):
+    """Shows the engine's status names in words ("EXACT_MATCH" → "Exact
+    match"); the item keeps the raw name (tests, the inspector)."""
+
+    def displayText(self, value, locale) -> str:  # noqa: N802
+        text = str(value or "")
+        return text.replace("_", " ").capitalize() if text.isupper() else text
 
 
 def _threshold_defaults() -> tuple[float, tuple[float, ...], str, float]:
@@ -145,6 +194,7 @@ class SyncScanWorker(QtCore.QThread):
         self.incoming = incoming
         self.thresholds = thresholds
         self.rematch_from = rematch_from
+        self.counts: dict = {}      # library_sync.summarize_matches of the result
         self.outcome = ""
         self._cancel_event = threading.Event()
         self._last_progress = 0.0
@@ -216,6 +266,7 @@ class SyncScanWorker(QtCore.QThread):
                 finish(False, "Scan cancelled.", None)
                 return
             counts = library_sync.summarize_matches(result.get("match_objects", []))
+            self.counts = counts
             self.outcome = "ok"
             finish(True, _scan_summary(counts), result)
         except Exception as exc:  # noqa: BLE001
@@ -390,7 +441,6 @@ class LibrarySyncWorkspace(WorkspaceBase):
         self._plan = None
         self._plan_inputs: tuple | None = None
         self._plan_preview_path = ""
-        self._step_labels: list[QtWidgets.QLabel] = []
         self._current_step = 0
 
         # Initialize review state store for per-item user flags
@@ -407,145 +457,65 @@ class LibrarySyncWorkspace(WorkspaceBase):
     def _build_ui(self) -> None:
         cl = self.content_layout
 
-        # ── Header card ───────────────────────────────────────────────────
-        header_card = self._make_card()
-        header_card.setObjectName("headerCard")
-        hl = QtWidgets.QVBoxLayout(header_card)
-        hl.setContentsMargins(20, 16, 16, 16)
-        hl.setSpacing(8)
-        hl.addWidget(self._make_section_title("Library Sync"))
-        hl.addWidget(self._make_subtitle(
-            "Compare an existing library to an incoming folder. "
-            "The sync matcher fingerprints both sides, identifies new tracks, "
-            "potential upgrades, and collisions, then builds a copy/move plan."
+        # ── Hero: the two folders and the scan ────────────────────────────
+        hero = self._make_card()
+        hero.setObjectName("headerCard")
+        hl = QtWidgets.QVBoxLayout(hero)
+        hl.setContentsMargins(16, 16, 16, 16)
+        hl.setSpacing(12)
+        title_box = QtWidgets.QVBoxLayout()
+        title_box.setSpacing(4)
+        title_box.addWidget(hero_title("Merge an incoming folder"))
+        title_box.addWidget(self._make_subtitle(
+            "Compare new music with your library, review every match, then copy or move "
+            "only what you choose. Nothing changes until you execute the plan."
         ))
+        hl.addLayout(title_box)
+        self._steps = StepPills(_STEPS)
+        hl.addWidget(self._steps)
 
-        stepper = QtWidgets.QFrame()
-        stepper.setObjectName("workflowStepper")
-        sl = QtWidgets.QHBoxLayout(stepper)
-        sl.setContentsMargins(12, 8, 12, 8)
-        sl.setSpacing(4)
-        for i, step in enumerate(_STEPS):
-            lbl = QtWidgets.QLabel(step)
-            lbl.setObjectName("stepActive" if i == 0 else "stepInactive")
-            sl.addWidget(lbl)
-            self._step_labels.append(lbl)
-            if i < len(_STEPS) - 1:
-                arr = QtWidgets.QLabel("→")
-                arr.setObjectName("stepArrow")
-                sl.addWidget(arr)
-        sl.addStretch(1)
-        hl.addWidget(stepper)
-        cl.addWidget(header_card)
-
-        # ── Folders card ───────────────────────────────────────────────────
-        folders_card = self._make_card()
-        folders_layout = QtWidgets.QFormLayout(folders_card)
-        folders_layout.setContentsMargins(16, 16, 16, 16)
-        folders_layout.setSpacing(10)
-        folders_layout.setFieldGrowthPolicy(
-            QtWidgets.QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow
-        )
-
-        self._existing_entry, existing_browse = self._make_browse_row(
-            "Existing Library:", "Path to your main library…"
-        )
+        folders = QtWidgets.QGridLayout()
+        folders.setHorizontalSpacing(10)
+        folders.setVerticalSpacing(8)
+        folders.setColumnStretch(1, 1)
+        self._existing_entry = QtWidgets.QLineEdit()
+        self._existing_entry.setPlaceholderText("Your main library folder")
         if self._library_path:
             self._existing_entry.setText(self._library_path)
-        existing_row = QtWidgets.QHBoxLayout()
-        existing_row.addWidget(self._existing_entry, 1)
-        existing_row.addWidget(existing_browse)
+        existing_browse = icon_button("folder", "Choose the library folder…")
+        existing_browse.setObjectName("syncExistingBrowse")
         existing_browse.clicked.connect(
             lambda: self._browse_folder(self._existing_entry, "Select Existing Library")
         )
-        folders_layout.addRow("Existing Library:", existing_row)
-
-        self._incoming_entry, incoming_browse = self._make_browse_row(
-            "Incoming Folder:", "Path to new content to compare…"
-        )
-        incoming_row = QtWidgets.QHBoxLayout()
-        incoming_row.addWidget(self._incoming_entry, 1)
-        incoming_row.addWidget(incoming_browse)
+        self._incoming_entry = QtWidgets.QLineEdit()
+        self._incoming_entry.setPlaceholderText("Folder with the new music to compare")
+        incoming_browse = icon_button("folder", "Choose the incoming folder…")
+        incoming_browse.setObjectName("syncIncomingBrowse")
         incoming_browse.clicked.connect(
             lambda: self._browse_folder(self._incoming_entry, "Select Incoming Folder")
         )
-        folders_layout.addRow("Incoming Folder:", incoming_row)
+        for row, (text, entry, browse) in enumerate((
+            ("Library", self._existing_entry, existing_browse),
+            ("Incoming", self._incoming_entry, incoming_browse),
+        )):
+            lbl = QtWidgets.QLabel(text)
+            lbl.setBuddy(entry)
+            entry.setMinimumWidth(120)
+            folders.addWidget(lbl, row, 0)
+            folders.addWidget(entry, row, 1)
+            folders.addWidget(browse, row, 2)
+        hl.addLayout(folders)
         self._existing_entry.textChanged.connect(self._on_inputs_changed)
         self._incoming_entry.textChanged.connect(self._on_inputs_changed)
-        cl.addWidget(folders_card)
-
-        # ── Config card ────────────────────────────────────────────────────
-        cfg_card = self._make_card()
-        cfg_layout = QtWidgets.QFormLayout(cfg_card)
-        cfg_layout.setContentsMargins(16, 16, 16, 16)
-        cfg_layout.setSpacing(10)
-        cfg_layout.setFieldGrowthPolicy(
-            QtWidgets.QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow
-        )
-
-        default, _legacy, _scale, floor = _threshold_defaults()
-        self._threshold_entry = QtWidgets.QLineEdit(_format_threshold(default))
-        self._threshold_entry.setToolTip(
-            "Fingerprint distance (0–1) at or below which two tracks count as the same "
-            f"recording. Default {_format_threshold(default)}: the same recording in another "
-            "codec measures about 0.01, a slightly shifted start up to about 0.15, different "
-            f"recordings 0.43 or more — from {_format_threshold(floor)} up, unrelated tracks match."
-        )
-        cfg_layout.addRow("Global threshold:", self._threshold_entry)
-        self._threshold_warning = QtWidgets.QLabel()
-        self._threshold_warning.setObjectName("syncThresholdWarning")
-        self._threshold_warning.setWordWrap(True)
-        self._threshold_warning.setVisible(False)
-        set_tone(self._threshold_warning, "warning")
-        cfg_layout.addRow("", self._threshold_warning)
-
-        self._preset_entry = QtWidgets.QLineEdit()
-        self._preset_entry.setPlaceholderText("Optional label for this session")
-        self._preset_entry.setEnabled(False)
-        self._preset_entry.setToolTip("Not used yet: presets are not implemented.")
-        cfg_layout.addRow("Preset name:", self._preset_entry)
-
-        self._overrides_text = QtWidgets.QPlainTextEdit()
-        self._overrides_text.setPlaceholderText(
-            "Per-format overrides, one per line:\n"
-            ".flac=0.15\n.opus=0.25"
-        )
-        self._overrides_text.setFixedHeight(80)
-        cfg_layout.addRow("Format overrides:", self._overrides_text)
-        self._threshold_entry.textChanged.connect(self._update_threshold_warning)
-        self._overrides_text.textChanged.connect(self._update_threshold_warning)
-
-        btn_row_cfg = QtWidgets.QHBoxLayout()
-        self._recompute_btn = QtWidgets.QPushButton("↺  Recompute Matches")
-        self._recompute_btn.setEnabled(False)
-        self._recompute_btn.setToolTip(
-            "Re-match the last scan with the current thresholds, without re-reading "
-            "or re-fingerprinting any file."
-        )
-        self._recompute_btn.clicked.connect(self._on_recompute)
-        self._save_session_btn = QtWidgets.QPushButton("💾  Save Session")
-        self._save_session_btn.setToolTip(
-            "Remember the incoming folder and threshold; they are restored next time."
-        )
-        self._save_session_btn.clicked.connect(self._on_save_session)
-        btn_row_cfg.addWidget(self._recompute_btn)
-        btn_row_cfg.addWidget(self._save_session_btn)
-        btn_row_cfg.addStretch(1)
-        cfg_layout.addRow("", btn_row_cfg)
-        cl.addWidget(cfg_card)
-
-        # ── Scan card ──────────────────────────────────────────────────────
-        scan_card = self._make_card()
-        scan_card.setObjectName("actionCard")
-        sc_layout = QtWidgets.QVBoxLayout(scan_card)
-        sc_layout.setContentsMargins(16, 14, 16, 14)
-        sc_layout.setSpacing(10)
-        sc_layout.addWidget(self._make_card_title("Scan"))
 
         scan_row = QtWidgets.QHBoxLayout()
-        self._scan_btn = self._make_primary_button("🔍  Scan Both Libraries")
+        scan_row.setSpacing(10)
+        self._scan_btn = glyph_button("Scan both folders", "search", object_name="primaryBtn",
+                                      tooltip="Fingerprint both folders and match every incoming "
+                                              "track against the library. Nothing is copied.")
         self._scan_btn.clicked.connect(self._on_scan)
-        self._cancel_btn = QtWidgets.QPushButton("✕  Cancel")
+        self._cancel_btn = glyph_button("Cancel", "close",
+                                        tooltip="Stop the running scan, plan build or execution.")
         self._cancel_btn.setEnabled(False)
         self._cancel_btn.clicked.connect(self._on_cancel)
         self._state_lbl = QtWidgets.QLabel("State: Idle")
@@ -554,111 +524,229 @@ class LibrarySyncWorkspace(WorkspaceBase):
         scan_row.addWidget(self._cancel_btn)
         scan_row.addStretch(1)
         scan_row.addWidget(self._state_lbl)
-        sc_layout.addLayout(scan_row)
-        cl.addWidget(scan_card)
+        hl.addLayout(scan_row)
 
-        # ── Progress ───────────────────────────────────────────────────────
-        prog_card = self._make_card()
-        prog_layout = QtWidgets.QVBoxLayout(prog_card)
-        prog_layout.setContentsMargins(16, 12, 16, 12)
-        prog_layout.setSpacing(8)
-
-        sides = QtWidgets.QHBoxLayout()
-        for side_name in ("Existing Library", "Incoming Folder"):
-            side_col = QtWidgets.QVBoxLayout()
-            lbl = QtWidgets.QLabel(side_name)
-            lbl.setObjectName("phaseLabel")
-            bar = QtWidgets.QProgressBar()
-            bar.setValue(0)
-            bar.setTextVisible(False)
-            bar.setFixedHeight(6)
+        sides = ReflowBox(spacing=18)
+        for side_name in ("Library", "Incoming"):
+            col_w = QtWidgets.QWidget()
+            col = QtWidgets.QVBoxLayout(col_w)
+            col.setContentsMargins(0, 0, 0, 0)
+            col.setSpacing(6)
+            bar = thin_bar()
             status = QtWidgets.QLabel("Idle")
             status.setObjectName("statusHint")
-            side_col.addWidget(lbl)
-            side_col.addWidget(bar)
-            side_col.addWidget(status)
-            sides.addLayout(side_col)
-            if side_name == "Existing Library":
-                self._exist_bar = bar
-                self._exist_status = status
+            head = QtWidgets.QHBoxLayout()
+            head.addWidget(caption(side_name))
+            head.addStretch(1)
+            head.addWidget(status)
+            col.addLayout(head)
+            col.addWidget(bar)
+            sides.add_widget(col_w, 1)
+            if side_name == "Library":
+                self._exist_bar, self._exist_status = bar, status
             else:
-                self._incoming_bar = bar
-                self._incoming_status = status
-        prog_layout.addLayout(sides)
-        cl.addWidget(prog_card)
+                self._incoming_bar, self._incoming_status = bar, status
+        hl.addWidget(sides)
+        cl.addWidget(hero)
 
-        # ── Results ────────────────────────────────────────────────────────
-        results_card = self._make_card()
-        results_layout = QtWidgets.QHBoxLayout(results_card)
-        results_layout.setContentsMargins(16, 16, 16, 16)
-        results_layout.setSpacing(12)
+        # ── Matching thresholds ───────────────────────────────────────────
+        cfg_card = self._make_card()
+        cfg = QtWidgets.QVBoxLayout(cfg_card)
+        cfg.setContentsMargins(16, 16, 16, 16)
+        cfg.setSpacing(12)
+        cfg.addWidget(self._make_card_title("Matching"))
+        cfg.addWidget(self._make_subtitle(
+            "How close two fingerprints must be to count as the same recording."
+        ))
+        form = QtWidgets.QFormLayout()
+        form.setHorizontalSpacing(14)
+        form.setVerticalSpacing(10)
+        form.setRowWrapPolicy(QtWidgets.QFormLayout.RowWrapPolicy.WrapLongRows)
+        form.setFieldGrowthPolicy(QtWidgets.QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+        form.setLabelAlignment(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter)
 
-        # Incoming tracks
-        left = QtWidgets.QVBoxLayout()
-        left.addWidget(self._make_card_title("Incoming Tracks"))
+        default, _legacy, _scale, floor = _threshold_defaults()
+        self._threshold_entry = QtWidgets.QLineEdit(_format_threshold(default))
+        self._threshold_entry.setMaximumWidth(120)
+        self._threshold_entry.setToolTip(
+            "Fingerprint distance (0–1) at or below which two tracks count as the same "
+            f"recording. Default {_format_threshold(default)}: the same recording in another "
+            "codec measures about 0.01, a slightly shifted start up to about 0.15, different "
+            f"recordings 0.43 or more — from {_format_threshold(floor)} up, unrelated tracks match."
+        )
+        form.addRow("Threshold", self._threshold_entry)
+        self._threshold_warning = QtWidgets.QLabel()
+        self._threshold_warning.setObjectName("syncThresholdWarning")
+        self._threshold_warning.setWordWrap(True)
+        self._threshold_warning.setVisible(False)
+        set_tone(self._threshold_warning, "warning")
+        form.addRow(self._threshold_warning)
+
+        self._overrides_text = QtWidgets.QPlainTextEdit()
+        self._overrides_text.setPlaceholderText(
+            "Per-format overrides, one per line:\n"
+            ".flac=0.15\n.opus=0.25"
+        )
+        self._overrides_text.setFixedHeight(80)
+        self._overrides_text.setToolTip(
+            "Optional. One “.ext=value” per line overrides the threshold for that format."
+        )
+        form.addRow("Format overrides", self._overrides_text)
+        self._threshold_entry.textChanged.connect(self._update_threshold_warning)
+        self._overrides_text.textChanged.connect(self._update_threshold_warning)
+
+        self._preset_entry = QtWidgets.QLineEdit()
+        self._preset_entry.setPlaceholderText("Optional label for this session")
+        self._preset_entry.setEnabled(False)
+        self._preset_entry.setMaximumWidth(320)
+        self._preset_entry.setToolTip("Not used yet: presets are not implemented.")
+        form.addRow("Preset name", self._preset_entry)
+        cfg.addLayout(form)
+
+        cfg_buttons = FlowLayout()
+        self._recompute_btn = glyph_button(
+            "Recompute matches", "refresh",
+            tooltip="Re-match the last scan with the current thresholds, without re-reading "
+                    "or re-fingerprinting any file.",
+        )
+        self._recompute_btn.setEnabled(False)
+        self._recompute_btn.clicked.connect(self._on_recompute)
+        self._save_session_btn = glyph_button(
+            "Save session", "save",
+            tooltip="Remember the folders and the threshold; they are restored next time.",
+        )
+        self._save_session_btn.clicked.connect(self._on_save_session)
+        cfg_buttons.addWidget(self._recompute_btn)
+        cfg_buttons.addWidget(self._save_session_btn)
+        cfg.addLayout(cfg_buttons)
+        cl.addWidget(cfg_card)
+
+        # ── Review the matches ────────────────────────────────────────────
+        review_card = self._make_card()
+        rl = QtWidgets.QVBoxLayout(review_card)
+        rl.setContentsMargins(16, 16, 16, 16)
+        rl.setSpacing(12)
+        head = QtWidgets.QHBoxLayout()
+        head.setSpacing(12)
+        head_text = QtWidgets.QVBoxLayout()
+        head_text.setSpacing(4)
+        head_text.addWidget(self._make_card_title("Review matches"))
+        head_text.addWidget(self._make_subtitle(
+            "Right-click an incoming track to flag it Copy or Replace, or to add a note."
+        ))
+        head.addLayout(head_text, 1)
+        self._export_report_btn = glyph_button(
+            "Export report", "download",
+            tooltip="Save a report of all match results, flags, and notes as HTML, JSON, or CSV.",
+        )
+        self._export_report_btn.setEnabled(False)
+        self._export_report_btn.clicked.connect(self._on_export_report)
+        head.addWidget(self._export_report_btn, 0, QtCore.Qt.AlignmentFlag.AlignTop)
+        rl.addLayout(head)
+
+        self._review_empty = EmptyState(*_NO_SCAN)
+        self._review_empty.setObjectName("syncReviewEmpty")
+        rl.addWidget(self._review_empty)
+
+        self._review_box = QtWidgets.QWidget()
+        rb = QtWidgets.QVBoxLayout(self._review_box)
+        rb.setContentsMargins(0, 0, 0, 0)
+        rb.setSpacing(12)
+        self._scan_stats = StatRow(list(_SCAN_TILES))
+        self._scan_stats.setObjectName("syncScanStats")
+        for key, tip in _SCAN_TIPS.items():
+            self._scan_stats.tile(key).setToolTip(tip)
+        rb.addWidget(self._scan_stats)
+
         self._incoming_table = QtWidgets.QTreeWidget()
+        self._incoming_table.setObjectName("syncIncomingTree")
         self._incoming_table.setHeaderLabels(["Track", "Status", "Distance", "Flag", "Note"])
-        self._incoming_table.setColumnWidth(0, 200)
-        self._incoming_table.setColumnWidth(1, 80)
-        self._incoming_table.setColumnWidth(2, 70)
-        self._incoming_table.setColumnWidth(3, 60)
-        self._incoming_table.setColumnWidth(4, 100)
-        self._incoming_table.setMinimumHeight(200)
-        self._incoming_table.setAlternatingRowColors(True)
+        self._incoming_table.setRootIsDecorated(False)
+        style_item_view(self._incoming_table, elide=QtCore.Qt.TextElideMode.ElideMiddle)
+        self._incoming_table.setItemDelegateForColumn(1, _StatusDelegate(self._incoming_table))
+        header = self._incoming_table.header()
+        header.setStretchLastSection(False)
+        header.setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeMode.Stretch)
+        for col, width in ((1, 112), (2, 76), (3, 84), (4, 120)):
+            header.setSectionResizeMode(col, QtWidgets.QHeaderView.ResizeMode.Interactive)
+            self._incoming_table.setColumnWidth(col, width)
+        self._incoming_table.setMinimumHeight(220)
         self._incoming_table.currentItemChanged.connect(self._on_incoming_selected)
-        # Enable context menu for flagging items
+        # Per-item flags and notes: right-click.
         self._incoming_table.setContextMenuPolicy(QtCore.Qt.ContextMenuPolicy.CustomContextMenu)
         self._incoming_table.customContextMenuRequested.connect(self._on_incoming_context_menu)
-        left.addWidget(self._incoming_table)
 
-        # Existing tracks the incoming ones matched
-        right = QtWidgets.QVBoxLayout()
-        right.addWidget(self._make_card_title("Matched Existing Tracks"))
         self._existing_table = QtWidgets.QTreeWidget()
-        self._existing_table.setHeaderLabels(["Track", "Status", "Best Matches"])
-        self._existing_table.setColumnWidth(0, 260)
-        self._existing_table.setColumnWidth(1, 100)
-        self._existing_table.setMinimumHeight(200)
-        self._existing_table.setAlternatingRowColors(True)
-        right.addWidget(self._existing_table)
+        self._existing_table.setObjectName("syncExistingTree")
+        self._existing_table.setHeaderLabels(["Track", "Status", "Best matches"])
+        self._existing_table.setRootIsDecorated(False)
+        style_item_view(self._existing_table, elide=QtCore.Qt.TextElideMode.ElideMiddle)
+        eheader = self._existing_table.header()
+        eheader.setStretchLastSection(False)
+        eheader.setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeMode.Stretch)
+        eheader.setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeMode.Interactive)
+        eheader.setSectionResizeMode(2, QtWidgets.QHeaderView.ResizeMode.Stretch)
+        self._existing_table.setColumnWidth(1, 130)
+        self._existing_table.setMinimumHeight(220)
 
-        results_layout.addLayout(left, 1)
-        results_layout.addLayout(right, 1)
-        cl.addWidget(results_card)
+        self._review_split = ReflowSplitter(breakpoint=880)
+        self._review_split.setObjectName("syncReviewSplit")
+        for title, view in (("Incoming tracks", self._incoming_table),
+                            ("Matched in your library", self._existing_table)):
+            pane = QtWidgets.QWidget()
+            pl = QtWidgets.QVBoxLayout(pane)
+            pl.setContentsMargins(0, 0, 0, 0)
+            pl.setSpacing(6)
+            pl.addWidget(caption(title))
+            pl.addWidget(view, 1)
+            self._review_split.addWidget(pane)
+        self._review_split.setStretchFactor(0, 3)
+        self._review_split.setStretchFactor(1, 2)
+        rb.addWidget(self._review_split, 1)
 
-        # Inspector
-        insp_card = self._make_card()
-        insp_layout = QtWidgets.QVBoxLayout(insp_card)
-        insp_layout.setContentsMargins(16, 16, 16, 16)
-        insp_layout.addWidget(self._make_card_title("Match Inspector"))
+        rb.addWidget(caption("Match details"))
         self._inspector = QtWidgets.QPlainTextEdit()
         self._inspector.setReadOnly(True)
         self._inspector.setFixedHeight(120)
-        self._inspector.setPlaceholderText("Select a track to see match details…")
-        insp_layout.addWidget(self._inspector)
+        self._inspector.setPlaceholderText("Select an incoming track to see how it matched.")
+        rb.addWidget(self._inspector)
+        self._review_box.setVisible(False)
+        rl.addWidget(self._review_box)
+
         self._match_summary_lbl = QtWidgets.QLabel("No matches yet.")
         self._match_summary_lbl.setObjectName("statusHint")
         self._match_summary_lbl.setWordWrap(True)
-        insp_layout.addWidget(self._match_summary_lbl)
-        cl.addWidget(insp_card)
+        rl.addWidget(self._match_summary_lbl)
+        cl.addWidget(review_card)
 
-        # ── Plan & Execution ───────────────────────────────────────────────
+        # ── Plan & execution ──────────────────────────────────────────────
         plan_card = self._make_card()
-        plan_layout = QtWidgets.QVBoxLayout(plan_card)
-        plan_layout.setContentsMargins(16, 16, 16, 16)
-        plan_layout.setSpacing(10)
-        plan_layout.addWidget(self._make_card_title("Plan & Execution"))
+        pl = QtWidgets.QVBoxLayout(plan_card)
+        pl.setContentsMargins(16, 16, 16, 16)
+        pl.setSpacing(12)
+        pl.addWidget(self._make_card_title("Plan and execute"))
+        pl.addWidget(self._make_subtitle(
+            "The plan follows your matches and flags. Execute runs exactly the plan you "
+            "previewed, after you confirm."
+        ))
 
-        plan_btn_row = QtWidgets.QHBoxLayout()
-        self._build_plan_btn = QtWidgets.QPushButton("📋  Build Plan")
+        plan_buttons = FlowLayout()
+        self._build_plan_btn = glyph_button(
+            "Build plan", "list", object_name="primaryBtn",
+            tooltip="Build the copy/move plan from the reviewed matches and flags, and write "
+                    "its HTML preview (Docs/LibrarySyncPreview.html).",
+        )
         self._build_plan_btn.setEnabled(False)
         self._build_plan_btn.clicked.connect(self._on_build_plan)
 
-        self._preview_plan_btn = QtWidgets.QPushButton("👁  Preview Plan")
+        self._preview_plan_btn = glyph_button(
+            "Preview plan", "external", tooltip="Open the plan's HTML preview in your browser.",
+        )
         self._preview_plan_btn.setEnabled(False)
         self._preview_plan_btn.clicked.connect(self._on_preview_plan)
 
-        self._transfer_toggle = QtWidgets.QPushButton("Copy Originals")
+        self._transfer_toggle = QtWidgets.QPushButton("Copy originals")
+        self._transfer_toggle.setObjectName("syncTransferToggle")
         self._transfer_toggle.setCheckable(True)
         self._transfer_toggle.setChecked(True)
         self._transfer_toggle.setToolTip(
@@ -666,61 +754,106 @@ class LibrarySyncWorkspace(WorkspaceBase):
             "Changing it requires building the plan again."
         )
         self._transfer_toggle.toggled.connect(self._on_transfer_toggled)
-
-        self._execute_plan_btn = QtWidgets.QPushButton("▶  Execute Plan")
-        self._execute_plan_btn.setObjectName("dangerBtn")
-        self._execute_plan_btn.setEnabled(False)
-        self._execute_plan_btn.clicked.connect(self._on_execute_plan)
-
-        self._export_report_btn = QtWidgets.QPushButton("📤  Export Report")
-        self._export_report_btn.setEnabled(False)
-        self._export_report_btn.setToolTip(
-            "Save a report of all match results, flags, and notes as HTML, JSON, or CSV."
-        )
-        self._export_report_btn.clicked.connect(self._on_export_report)
+        set_glyph(self._transfer_toggle, "file")
 
         self._output_playlist_cb = QtWidgets.QCheckBox("Write transfer playlist (.m3u8)")
 
-        plan_btn_row.addWidget(self._build_plan_btn)
-        plan_btn_row.addWidget(self._preview_plan_btn)
-        plan_btn_row.addWidget(self._transfer_toggle)
-        plan_btn_row.addWidget(self._execute_plan_btn)
-        plan_btn_row.addWidget(self._export_report_btn)
-        plan_btn_row.addWidget(self._output_playlist_cb)
-        plan_btn_row.addStretch(1)
-        plan_layout.addLayout(plan_btn_row)
+        self._execute_plan_btn = glyph_button(
+            "Execute plan", "play", object_name="dangerBtn",
+            tooltip="Apply exactly the previewed plan to your library (asks first).",
+        )
+        self._execute_plan_btn.setEnabled(False)
+        self._execute_plan_btn.clicked.connect(self._on_execute_plan)
+
+        plan_buttons.addWidget(self._build_plan_btn)
+        plan_buttons.addWidget(self._preview_plan_btn)
+        plan_buttons.addWidget(self._transfer_toggle)
+        plan_buttons.addWidget(self._output_playlist_cb)
+        plan_buttons.addWidget(self._execute_plan_btn)
+        pl.addLayout(plan_buttons)
+
+        self._plan_stats = StatRow(list(_PLAN_TILES))
+        self._plan_stats.setObjectName("syncPlanStats")
+        self._plan_stats.setVisible(False)
+        pl.addWidget(self._plan_stats)
 
         self._plan_status_lbl = QtWidgets.QLabel("No plan built.")
         self._plan_status_lbl.setObjectName("statusHint")
         self._plan_status_lbl.setWordWrap(True)
-        self._plan_bar = QtWidgets.QProgressBar()
-        self._plan_bar.setValue(0)
-        self._plan_bar.setTextVisible(False)
-        self._plan_bar.setFixedHeight(6)
-        plan_layout.addWidget(self._plan_status_lbl)
-        plan_layout.addWidget(self._plan_bar)
+        self._plan_bar = thin_bar()
+        pl.addWidget(self._plan_status_lbl)
+        pl.addWidget(self._plan_bar)
         cl.addWidget(plan_card)
 
-        # ── Log ────────────────────────────────────────────────────────────
+        # ── Log ───────────────────────────────────────────────────────────
         log_card = self._make_card()
-        log_layout = QtWidgets.QVBoxLayout(log_card)
-        log_layout.setContentsMargins(16, 16, 16, 16)
-        log_btn_row = QtWidgets.QHBoxLayout()
-        log_btn_row.addWidget(self._make_card_title("Log"))
-        log_btn_row.addStretch(1)
-        self._export_log_btn = QtWidgets.QPushButton("Export Logs…")
+        ll = QtWidgets.QVBoxLayout(log_card)
+        ll.setContentsMargins(16, 16, 16, 16)
+        ll.setSpacing(8)
+        log_head = QtWidgets.QHBoxLayout()
+        log_head.addWidget(self._make_card_title("Log"))
+        log_head.addStretch(1)
+        self._export_log_btn = glyph_button("Export log…", "save",
+                                            tooltip="Save this log as a text file.")
         self._export_log_btn.clicked.connect(self._on_export_log)
-        log_btn_row.addWidget(self._export_log_btn)
-        log_layout.addLayout(log_btn_row)
+        log_head.addWidget(self._export_log_btn)
+        ll.addLayout(log_head)
 
         self._log_area = QtWidgets.QPlainTextEdit()
+        self._log_area.setObjectName("organizeLog")
         self._log_area.setReadOnly(True)
         self._log_area.setMinimumHeight(130)
-        self._log_area.setStyleSheet("font-family: 'Consolas', monospace; font-size: 12px;")
-        log_layout.addWidget(self._log_area)
+        self._log_area.setPlaceholderText("Scan, plan and execute steps are logged here.")
+        ll.addWidget(self._log_area)
         cl.addWidget(log_card)
 
         cl.addStretch(1)
+
+    # ── Review / plan display ─────────────────────────────────────────────
+
+    def _show_review(self, has_results: bool, empty: tuple[str, str] | None = None) -> None:
+        """Results (stats, the two lists, the inspector) or the empty state."""
+        if empty is not None:
+            self._review_empty.set_text(*empty)
+        was_hidden = self._review_box.isHidden()
+        self._review_empty.setVisible(not has_results)
+        self._review_box.setVisible(has_results)
+        if has_results and was_hidden and self._review_box.isVisible():
+            motion.reveal(self._review_box)
+
+    def _show_scan_stats(self, counts: dict) -> None:
+        """``counts``: ``library_sync.summarize_matches`` of the scan (computed
+        by the worker, so the GUI thread never imports the engine)."""
+        for key, _label in _SCAN_TILES:
+            value = counts.get(key, 0)
+            tone = "warning" if key == "low_confidence" and value else (
+                "accent" if key == "upgrades" and value else "")
+            self._scan_stats.tile(key).set_value(value, tone=tone)
+
+    def scan_stats(self) -> dict[str, str]:
+        """The scan summary tiles, ``{key: value}`` (tests, accessibility)."""
+        return {k: self._scan_stats.tile(k).value() for k, _ in _SCAN_TILES}
+
+    def plan_stats(self) -> dict[str, str] | None:
+        """The plan summary tiles, or None while no up-to-date plan exists."""
+        if self._plan_stats.isHidden():
+            return None
+        return {k: self._plan_stats.tile(k).value() for k, _ in _PLAN_TILES}
+
+    def _update_plan_stats(self, plan_fresh: bool) -> None:
+        if not plan_fresh or self._plan is None:
+            self._plan_stats.setVisible(False)
+            return
+        c = self._plan.counts()
+        values = {"add": c.get("copy", 0) + c.get("move", 0), "replace": c.get("replace", 0),
+                  "skip": c.get("skip", 0), "review": c.get("review", 0)}
+        for key, value in values.items():
+            self._plan_stats.tile(key).set_value(
+                value, tone="warning" if key == "review" and value else "")
+        if self._plan_stats.isHidden():
+            self._plan_stats.setVisible(True)
+            if self._plan_stats.isVisible():
+                motion.reveal(self._plan_stats)
 
     # ── State ─────────────────────────────────────────────────────────────
 
@@ -752,12 +885,7 @@ class LibrarySyncWorkspace(WorkspaceBase):
 
     def _set_step(self, index: int) -> None:
         self._current_step = index
-        for i, lbl in enumerate(self._step_labels):
-            name = "stepActive" if i == index else "stepInactive"
-            if lbl.objectName() != name:
-                lbl.setObjectName(name)
-                lbl.style().unpolish(lbl)
-                lbl.style().polish(lbl)
+        self._steps.set_current(index)
 
     def _refresh_controls(self) -> None:
         scanning = self._worker is not None
@@ -775,6 +903,7 @@ class LibrarySyncWorkspace(WorkspaceBase):
         self._export_report_btn.setEnabled(not scanning and bool(self._current_match_results))
         self._cancel_btn.setEnabled(busy)
         self._transfer_toggle.setEnabled(not executing)
+        self._update_plan_stats(plan_fresh)
 
         if not busy and self._plan is not None and not plan_fresh:
             self._plan_status_lbl.setText(
@@ -801,7 +930,7 @@ class LibrarySyncWorkspace(WorkspaceBase):
 
     @Slot(bool)
     def _on_transfer_toggled(self, checked: bool) -> None:
-        self._transfer_toggle.setText("Copy Originals" if checked else "Move Originals")
+        self._transfer_toggle.setText("Copy originals" if checked else "Move originals")
         self._refresh_controls()
 
     # ── Thresholds ────────────────────────────────────────────────────────
@@ -854,7 +983,7 @@ class LibrarySyncWorkspace(WorkspaceBase):
         value, key = high[-1]
         where = "The global threshold" if key == "default" else f"The {key} threshold"
         self._threshold_warning.setText(
-            f"⚠ {where} ({_format_threshold(value)}) is at or above {_format_threshold(floor)}: "
+            f"{where} ({_format_threshold(value)}) is at or above {_format_threshold(floor)}: "
             "different recordings measure about 0.43 apart, so unrelated tracks will be treated "
             f"as duplicates and skipped. The default is {_format_threshold(_threshold_defaults()[0])}."
         )
@@ -955,6 +1084,8 @@ class LibrarySyncWorkspace(WorkspaceBase):
         self._incoming_table.clear()
         self._existing_table.clear()
         self._inspector.clear()
+        self._show_review(False, ("Matching…", "The matches appear here when the scan finishes."))
+        self._match_summary_lbl.setText("")
         self._plan_status_lbl.setText("No plan built.")
         self._plan_bar.setValue(0)
         self._state_lbl.setText("State: Scanning…" if worker.rematch_from is None else "State: Re-matching…")
@@ -1247,11 +1378,14 @@ class LibrarySyncWorkspace(WorkspaceBase):
             self._log(message, "ok")
             self.status_changed.emit("Scan complete", _chip_colour("ok"))
             self._populate_results(result)
-            summary = message
+            self._show_scan_stats(worker.counts)
+            self._show_review(True)
+            # The tiles carry the numbers; the line says what to do next.
+            summary = "Scan complete. Flag anything you want handled differently, then build the plan."
             if warnings:
                 for warning in warnings:
                     self._log(warning, "warn")
-                    self._log_area.appendPlainText(f"⚠ {warning}")
+                    self._log_area.appendPlainText(f"Warning: {warning}")
                 summary += f" {len(warnings)} earlier flag(s) or note(s) could not be carried over — see the log."
                 QtWidgets.QMessageBox.information(self, "Flags Updated", "\n\n".join(warnings[:10]))
             self._match_summary_lbl.setText(summary)
@@ -1259,12 +1393,14 @@ class LibrarySyncWorkspace(WorkspaceBase):
             self._state_lbl.setText("State: Cancelled")
             self._exist_status.setText("Cancelled")
             self._incoming_status.setText("Cancelled")
+            self._show_review(False, ("Scan cancelled", "Nothing was matched. Scan again to compare the folders."))
             self._log(message, "warn")
             self.status_changed.emit("Cancelled", _chip_colour("neutral"))
         else:
             self._state_lbl.setText("State: Error")
             self._exist_status.setText("Error")
             self._incoming_status.setText("Error")
+            self._show_review(False, ("The scan failed", "See the log for the reason, then scan again."))
             self._log(message, "error")
             self.status_changed.emit("Error", _chip_colour("error"))
             QtWidgets.QMessageBox.warning(self, "Scan Failed", message)
@@ -1282,6 +1418,12 @@ class LibrarySyncWorkspace(WorkspaceBase):
             self._plan = worker.plan
             self._plan_inputs = worker.inputs
             self._plan_preview_path = worker.preview_html_path
+            # The tiles carry the counts; the line says what happens next.
+            mode = "copies" if self._plan.transfer_mode == "copy" else "moves"
+            self._plan_status_lbl.setText(
+                f"Plan ready: it {mode} the incoming files. Its preview opened in your browser; "
+                "Execute applies exactly this plan."
+            )
             self._log(message, "ok")
             self.status_changed.emit("Plan ready", _chip_colour("ok"))
             self._plan_bar.setValue(100)
@@ -1388,6 +1530,8 @@ class LibrarySyncWorkspace(WorkspaceBase):
                 worker.cancel()
                 setattr(self, attr, None)
                 self._log(f"Library changed — the running {label} was cancelled.", "warn")
+        if not self._current_match_results:
+            self._show_review(False, _NO_SCAN)
         if self._exec_worker is not None:
             self._log("Library changed — the running execute continues on its own plan.", "warn")
         else:
@@ -1406,11 +1550,11 @@ class LibrarySyncWorkspace(WorkspaceBase):
             return
 
         menu = QtWidgets.QMenu(self)
-        menu.addAction("📋 Copy", lambda: self._flag_for_copy(track_id))
-        menu.addAction("↻ Replace", lambda: self._flag_for_replace(track_id))
-        menu.addAction("✕ Clear flag", lambda: self._flag_clear(track_id))
+        menu.addAction(glyph_icon("plus"), _FLAG_COPY, lambda: self._flag_for_copy(track_id))
+        menu.addAction(glyph_icon("refresh"), _FLAG_REPLACE, lambda: self._flag_for_replace(track_id))
+        menu.addAction(glyph_icon("close"), "Clear flag", lambda: self._flag_clear(track_id))
         menu.addSeparator()
-        menu.addAction("📝 Add note", lambda: self._edit_note(track_id))
+        menu.addAction(glyph_icon("file"), "Add note…", lambda: self._edit_note(track_id))
         menu.exec(self._incoming_table.mapToGlobal(pos))
         menu.deleteLater()
 
@@ -1465,9 +1609,9 @@ class LibrarySyncWorkspace(WorkspaceBase):
             if item.data(0, QtCore.Qt.ItemDataRole.UserRole) == track_id:
                 # Update flag column (index 3)
                 if self._review_state_store.is_copy_flagged(track_id):
-                    item.setText(3, "📋 Copy")
+                    item.setText(3, _FLAG_COPY)
                 elif self._review_state_store.replace_target(track_id):
-                    item.setText(3, "↻ Replace")
+                    item.setText(3, _FLAG_REPLACE)
                 else:
                     item.setText(3, "")
 
