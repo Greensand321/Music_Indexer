@@ -185,6 +185,40 @@ def _keyboard(s, f):
     _poly(s, [(8, 14), (16, 14)])
 
 
+def _move(s, f):
+    # Four-way arrows: drag to pan.
+    _poly(s, [(12, 3.5), (12, 20.5)])
+    _poly(s, [(3.5, 12), (20.5, 12)])
+    _poly(s, [(9.5, 6), (12, 3.5), (14.5, 6)])
+    _poly(s, [(9.5, 18), (12, 20.5), (14.5, 18)])
+    _poly(s, [(6, 9.5), (3.5, 12), (6, 14.5)])
+    _poly(s, [(18, 9.5), (20.5, 12), (18, 14.5)])
+
+
+def _marquee(s, f):
+    # A dashed selection rectangle.
+    for a, b in (((4.5, 5), (8, 5)), ((10.25, 5), (13.75, 5)), ((16, 5), (19.5, 5)),
+                 ((4.5, 19), (8, 19)), ((10.25, 19), (13.75, 19)), ((16, 19), (19.5, 19)),
+                 ((4.5, 8), (4.5, 10.5)), ((4.5, 13.5), (4.5, 16)),
+                 ((19.5, 8), (19.5, 10.5)), ((19.5, 13.5), (19.5, 16))):
+        _poly(s, [a, b])
+
+
+def _lasso(s, f):
+    # A freehand loop with a short tail.
+    s.addEllipse(_p(12.5, 9.5), 8, 5.5)
+    s.moveTo(7.5, 13.8)
+    s.cubicTo(_p(6, 16), _p(8.5, 17.5), _p(8, 20.5))
+
+
+def _fit(s, f):
+    # Four corner brackets: fit everything in view.
+    _poly(s, [(4.5, 9), (4.5, 4.5), (9, 4.5)])
+    _poly(s, [(15, 4.5), (19.5, 4.5), (19.5, 9)])
+    _poly(s, [(19.5, 15), (19.5, 19.5), (15, 19.5)])
+    _poly(s, [(9, 19.5), (4.5, 19.5), (4.5, 15)])
+
+
 GLYPHS = {
     "search": _search, "play": _play, "pause": _pause, "prev": _prev, "next": _next,
     "stop": _stop, "shuffle": _shuffle, "repeat": _repeat, "folder": _folder,
@@ -193,6 +227,7 @@ GLYPHS = {
     "external": _external, "save": _save, "trash": _trash, "list": _list,
     "music": _music, "chevron_right": _chevron_right, "chevron_down": _chevron_down,
     "undo": _undo, "download": _download, "keyboard": _keyboard,
+    "move": _move, "marquee": _marquee, "lasso": _lasso, "fit": _fit,
 }
 
 
