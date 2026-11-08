@@ -86,7 +86,12 @@ class SimilarityWorker(QtCore.QThread):
 
     def run(self) -> None:
         try:
-            from near_duplicate_detector import LOSSLESS_EXTS, decode_chromaprint, fingerprint_distance
+            from near_duplicate_detector import (
+                LOSSLESS_EXTS,
+                decode_chromaprint,
+                duplicate_fingerprint_distance,
+                fingerprint_distance,
+            )
 
             fp_a, source_a = self._fingerprint(self.path_a)
             if self._cancel.is_set():
@@ -106,7 +111,11 @@ class SimilarityWorker(QtCore.QThread):
                 self.done.emit(False, "\n".join(lines))
                 return
 
-            distance = fingerprint_distance(fp_a, fp_b)
+            # The verdict uses the Duplicate Finder's own distance, which counts
+            # the length the two prints don't share: a 30-second clip is not a
+            # duplicate of its full song even though the overlap is identical.
+            distance = duplicate_fingerprint_distance(fp_a, fp_b)
+            overlap = fingerprint_distance(fp_a, fp_b)
             near_thresh = self.params["near_threshold"]
             exact_thresh = self.params["exact_threshold"]
             codec_boost = self.params["codec_boost"]
@@ -140,6 +149,8 @@ class SimilarityWorker(QtCore.QThread):
                 "",
                 f"Fingerprint distance:     {distance:.6f}"
                 "   (bit error rate: 0 = identical, about 0.5 = unrelated)",
+                f"Overlap-only distance:    {overlap:.6f}"
+                "   (ignores length the two don't share; a clip of a song scores near 0 here)",
                 f"Exact threshold:          {exact_thresh:.4f}",
                 f"Near threshold:           {near_thresh:.4f}",
                 f"Codec boost applied:      {codec_boost if mixed else 0.0:.4f}",

@@ -186,3 +186,38 @@ def test_summarize_execution_surfaces_preflight_reasons(tmp_path):
         playlist_reports=[], quarantine_index={}, report_paths={},
     )
     assert summarize_execution(done) == (True, "Execution complete: 1 quarantined, 1 deleted, 1 kept in place.")
+
+
+def test_summarize_execution_names_safety_refusals_apart_from_errors():
+    """The executor now leaves a loser in place when touching it would be unsafe;
+    the summary must say so, not call it an I/O error."""
+    from duplicate_consolidation_executor import ExecutionAction, ExecutionResult
+    from gui.workspaces.duplicates import summarize_execution
+
+    result = ExecutionResult(
+        success=False,
+        actions=[
+            ExecutionAction("loser_cleanup", "/a.mp3", "success", "Loser quarantined.",
+                            metadata={"disposition": "quarantine"}),
+            ExecutionAction("loser_cleanup", "/b.mp3", "failed", "Not removed: its winner is missing (/w.flac).",
+                            metadata={"disposition": "quarantine", "skip_reason": "winner_missing"}),
+            ExecutionAction("loser_cleanup", "/c.mp3", "failed", "Not removed: changed since the preview (size).",
+                            metadata={"disposition": "quarantine", "skip_reason": "changed_since_preview"}),
+        ],
+        playlist_reports=[], quarantine_index={}, report_paths={},
+    )
+    ok, message = summarize_execution(result)
+    assert not ok
+    assert "error" not in message
+    assert message == (
+        "Execution finished: 1 quarantined, 0 deleted, 0 kept in place, 2 left in place for safety "
+        "(changed since the preview; winner missing). See the report for each file left in place."
+    )
+
+    result.actions.append(ExecutionAction("loser_cleanup", "/d.mp3", "failed", "Permission denied",
+                                          metadata={"disposition": "quarantine"}))
+    result.actions.append(ExecutionAction("loser_cleanup", "/e.mp3", "skipped", "Execution stopped.",
+                                          metadata={"skip_reason": "not_attempted"}))
+    ok, message = summarize_execution(result)
+    assert not ok and message.startswith("Execution finished with 1 error(s): Permission denied")
+    assert "2 left in place for safety" in message and "1 not attempted" in message

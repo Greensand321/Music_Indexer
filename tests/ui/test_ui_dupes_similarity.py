@@ -193,3 +193,22 @@ def test_backend_lossless_set_is_used(make_workspace, tmp_path, qtbot, fpcalc):
     report = _run(ws, qtbot, a, b)
     assert "Codec A: .aiff (lossless)" in report
     assert "Mixed-codec: No" in report
+
+
+def test_a_clip_of_a_song_is_not_called_a_duplicate(make_workspace, files, qtbot, monkeypatch):
+    """Compare two files gives the Duplicate Finder's verdict: a 30-second clip's
+    print is a prefix of the song's, so the overlap alone scored it identical."""
+    import chromaprint_utils
+    from _helpers.dupes_chromaprint import compress_chromaprint, fake_raw_print
+
+    full = fake_raw_print("full song", 950)
+    _root, a, b = files
+    monkeypatch.setattr(chromaprint_utils, "missing_tools", lambda *a, **k: [])
+    monkeypatch.setattr(
+        chromaprint_utils, "fingerprint_fpcalc",
+        lambda path, **kw: compress_chromaprint(full if str(path).endswith(".flac") else full[:240]),
+    )
+    ws = make_workspace("similarity")
+    report = _run(ws, qtbot, a, b)
+    assert "VERDICT: NOT A DUPLICATE" in report, report
+    assert float(report.split("Overlap-only distance:")[1].split()[0]) == 0.0

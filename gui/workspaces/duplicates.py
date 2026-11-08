@@ -194,6 +194,18 @@ def _gather_tracks_for_plan(
     return tracks
 
 
+#: Executor ``skip_reason`` values that mean "left in place on purpose", with
+#: the words the summary uses for them.
+_SAFETY_REFUSALS = {
+    "winner_missing": "winner missing",
+    "same_file": "same file as its winner",
+    "changed_since_preview": "changed since the preview",
+    "no_snapshot": "not in the preview",
+    "no_winner": "no winner in the plan",
+    "winner_unreadable": "winner unreadable",
+}
+
+
 def summarize_execution(result) -> tuple[bool, str]:
     """(success, one-line message) describing an ``ExecutionResult`` honestly.
 
@@ -220,16 +232,29 @@ def summarize_execution(result) -> tuple[bool, str]:
     deleted = sum(1 for a in cleanup if a.status == "success" and a.metadata.get("disposition") == "delete")
     retained = sum(1 for a in cleanup if a.metadata.get("skip_reason") == "retain")
     counts = f"{quarantined} quarantined, {deleted} deleted, {retained} kept in place"
+    # Safety refusals: the executor left the loser untouched on purpose (its
+    # winner vanished, it is the winner through a link, or it changed since the
+    # preview). They are recorded as "failed" but are not I/O errors.
+    refused = [a for a in cleanup if a.status == "failed"
+               and a.metadata.get("skip_reason") in _SAFETY_REFUSALS]
+    not_attempted = sum(1 for a in actions if a.metadata.get("skip_reason") == "not_attempted")
+    if refused:
+        reasons = sorted({_SAFETY_REFUSALS[a.metadata["skip_reason"]] for a in refused})
+        counts += f", {len(refused)} left in place for safety ({'; '.join(reasons)})"
+    if not_attempted:
+        counts += f", {not_attempted} not attempted"
 
     if any(a.status == "cancelled" for a in actions):
         return False, f"Execution cancelled at a safe point ({counts} before stopping). See the report."
-    failures = [a for a in actions if a.status == "failed"]
-    if failures or not getattr(result, "success", False):
-        first = failures[0].detail if failures else "see the report"
+    refused_ids = {id(a) for a in refused}
+    failures = [a for a in actions if a.status == "failed" and id(a) not in refused_ids]
+    if failures:
         return False, (
-            f"Execution finished with {len(failures)} error(s): {first} ({counts}). "
+            f"Execution finished with {len(failures)} error(s): {failures[0].detail} ({counts}). "
             "Some changes may have been applied — see the report."
         )
+    if refused or not getattr(result, "success", False):
+        return False, f"Execution finished: {counts}. See the report for each file left in place."
     return True, f"Execution complete: {counts}."
 
 

@@ -125,9 +125,9 @@ Status legend: **Done** (in the code now) · **Pending owner** (decision needed;
 - **Why**: measured with real Chromaprint, two *unrelated* 5 s clips scored 0.011–0.014 (under the 0.02
   exact-duplicate threshold). 20 s clips scored about 0.05 and 40 s clips about 0.1, both under Library Sync's
   0.2. So intros, skits and interludes could be matched to each other as duplicates.
-- **Still open**: fingerprints already cached were made padded and stay that way until those files are
-  fingerprinted again. Targeted invalidation of short-track entries is being handled with the duplicate-finder
-  audit.
+- **Old cached fingerprints**: the root cache marks rows with a new `fp_scheme`, and old rows whose fingerprint
+  ends in silence padding are recomputed (only those; see A30). Library Sync's separate cache gets the same
+  treatment (A31).
 
 ### A16. M4A track and disc numbers read as "3/12", not the integer 3 — **Done**
 - `test_audio_metadata_reader.py` asserted an integer. Every other format already returned "N/T", and the M4A
@@ -179,6 +179,82 @@ Status legend: **Done** (in the code now) · **Pending owner** (decision needed;
 ### A22. A failed genre write records why — **Done**
 - `apply_genre_changes` now logs the writer's reason in the change log (for example a file open in another
   program), not just "write failed".
+
+### A23. Duplicates: the lossless copy always wins — **Done**
+- **Was**: readable cover art ranked first, so an MP3 with art beat the FLAC without it, and the FLAC was
+  quarantined.
+- **Is**: lossless first. Cover art only breaks ties within the same class. Between lossless copies,
+  resolution decides, then `config.FORMAT_PRIORITY` (FLAC > WAV), so an uncompressed WAV no longer beats the
+  same audio as FLAC on bitrate.
+- **Docs** used to say equal-quality ties favour "more descriptive names". They are broken by path,
+  deterministically, and the docs now say so.
+
+### A24. Duplicates: the winner is no longer renamed by a blanket "(digits)" rule — **Done**
+- **Was**: execution step 7 stripped any trailing "(digits)" from every winner, without a preview, so
+  `Live (1986).flac` became `Live.flac`.
+- **Is**: a winner only takes back the exact name of a same-group loser that really left (1–2 digits). It never
+  overwrites, and the preview shows the rename.
+
+### A25. Duplicates: playlists — **Done**
+- Execution used to require every playlist entry to exist. One dead entry already in a playlist blocked the
+  whole run. Now only the entries the rewrite changes must exist.
+- Rewritten absolute entries stay absolute (they used to be made relative).
+- `.m3u8` playlists are rewritten too (they were never touched).
+- Non-UTF-8 playlists are read with fallback encodings and written back in their own encoding and line
+  endings (they crashed the scan).
+
+### A26. Duplicates: the metadata step writes only the previewed changes — **Done**
+- **Was**: it wrote the whole planned tag dict, adding stray `TRACK=`/`YEAR=` fields.
+- **Is**: only the previewed `metadata_changes`. A previewed year goes into `date`. Artwork and tag writes go
+  to a copy that replaces the winner only on success. Covers are embedded each format's own way: the old ID3
+  fallback made OGG/Opus/WAV/AIFF winners unreadable.
+
+### A27. Duplicates: Cancel really stops — **Done**
+- **Was**: the docs said "Cancel stops after the current operation", but every loser went to a thread pool up
+  front, and the pool kept moving and deleting after a cancel or a failed move. None of those moves were
+  reported.
+- **Is**: at most the operations already running finish (≤ 16). Everything that happened is reported, and the
+  rest are listed as "not attempted". A per-loser safety refusal doesn't stop other groups; a real I/O error
+  stops the run.
+
+### A28. Duplicates: new safety refusals — **Done**
+- A loser is left in place (and reported) if:
+  - its winner is missing;
+  - the winner is the same file through a symlink or hard link;
+  - the loser changed since the preview.
+- Plans whose groups overlap are refused at preflight.
+- Symlinks and hard links are no longer counted as duplicates of their target.
+- Quarantine names are claimed with a placeholder file, so names differing only by case or Unicode form
+  can't collide on Windows/macOS.
+- A cross-drive move whose original can't be deleted removes its copy again and reports the loser as not
+  moved.
+
+### A29. Duplicates: short clips vs. full songs — **Done**
+- A 30–60 s clip used to score 0.0 against its full song. Grouping now uses a length-aware
+  `duplicate_fingerprint_distance`, so a clip is not called a duplicate of the song.
+- `fingerprint_distance` itself is unchanged, because the vendored parity test relies on it.
+- **Compare two files** now gives the Duplicate Finder's verdict, using the length-aware distance. Its report
+  also shows the old overlap-only distance, labelled.
+- The Duplicates page's result line separates **"left in place for safety"** (with the reasons) and **"not
+  attempted"** from real errors. It used to call every refusal an error.
+
+### A30. Duplicates: other changed behaviour — **Done**
+- **Reserved folders**: the legacy scanners skipped "Not Sorted"/"Playlists" at any depth. Now all reserved
+  folders are skipped, but only at the top level, so `Artist/Playlists/` is scanned.
+- **Review flags**: missing year or artwork no longer raises "Placeholder metadata" / "unreadable" flags.
+  Groups with no artwork are still flagged "No artwork candidates".
+- **Grouping timeout** (120 s) now starts when grouping starts, not at the start of the build. Tag reading
+  used to eat it, so first scans of big libraries found almost nothing. Limits hit are logged.
+- **Fingerprint cache**:
+  - a corrupt cache file is renamed `.corrupt-<time>` and rebuilt (it used to be fatal);
+  - one bad row no longer kills the writer thread;
+  - the schema gains `fp_scheme`;
+  - old fingerprints that end in silence padding are recomputed; nothing else is re-fingerprinted.
+- **Still open, for the owner**:
+  - the executor writes an unpreviewed `<winner>.artwork` sidecar for every artwork transfer, and the readers
+    depend on it;
+  - the planner limits (20,000 candidates, 500,000 comparisons, 120 s) still truncate very large libraries.
+    It is now logged and flagged.
 
 ## B. Structure that changed (adopted IA) — **Done**
 
