@@ -69,6 +69,37 @@ def _memo_clear(db_path: str | None = None) -> None:
             del _memo[key]
 
 
+def _is_corruption(exc: BaseException) -> bool:
+    """A damaged/non-SQLite file — not a busy one ("database is locked")."""
+    return isinstance(exc, sqlite3.DatabaseError) and not isinstance(exc, sqlite3.OperationalError)
+
+
+def _set_aside_corrupt_db(db_path: str, exc: BaseException) -> str | None:
+    """Rename a corrupt cache (and its -wal/-shm files) out of the way.
+
+    The cache only holds recomputable fingerprints, but it is renamed rather
+    than deleted so nothing is destroyed. Returns the new name, or None.
+    """
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    target = f"{db_path}.corrupt-{stamp}"
+    counter = 1
+    while os.path.exists(target):
+        target = f"{db_path}.corrupt-{stamp}-{counter}"
+        counter += 1
+    try:
+        os.replace(db_path, target)
+    except OSError:
+        return None
+    for suffix in ("-wal", "-shm"):
+        try:
+            os.replace(db_path + suffix, target + suffix)
+        except OSError:
+            pass
+    _memo_clear(db_path)
+    _dlog("FP", f"fingerprint cache {db_path} was unreadable ({exc}); moved it to {target} and started a new one")
+    return target
+
+
 def _initialize_db(conn: sqlite3.Connection) -> None:
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute(
@@ -132,6 +163,29 @@ def _initialize_db(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+_INSERT_SQL = """
+    INSERT OR REPLACE INTO fingerprints (
+        path,
+        mtime,
+        size,
+        duration,
+        fingerprint,
+        ext,
+        bitrate,
+        sample_rate,
+        bit_depth,
+        channels,
+        codec,
+        container,
+        tags_json,
+        artwork_json,
+        normalized_artist,
+        normalized_title,
+        normalized_album
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+"""
+
+
 class FingerprintWriter:
     def __init__(
         self,
@@ -150,12 +204,9 @@ class FingerprintWriter:
         # ``fingerprints`` table, and readers failed with "no such table".
         # It also surfaces an unopenable DB to the caller instead of silently
         # killing the worker thread (which made ``flush()`` wait forever).
-        self._conn = sqlite3.connect(db_path, check_same_thread=False)
-        try:
-            _initialize_db(self._conn)
-        except Exception:
-            self._conn.close()
-            raise
+        self._conn = _connect_initialized(db_path, check_same_thread=False)
+        self._state_lock = threading.Lock()
+        self._closed = False
         self._thread = threading.Thread(
             target=self._run,
             name="FingerprintCacheWriter",
@@ -184,37 +235,51 @@ class FingerprintWriter:
         normalized_title: str | None = None,
         normalized_album: str | None = None,
     ) -> None:
-        self._queue.put(
-            (
-                "write",
-                (
-                    path,
-                    mtime,
-                    size,
-                    duration,
-                    fingerprint,
-                    ext,
-                    bitrate,
-                    sample_rate,
-                    bit_depth,
-                    channels,
-                    codec,
-                    container,
-                    tags_json,
-                    artwork_json,
-                    normalized_artist,
-                    normalized_title,
-                    normalized_album,
-                ),
-            )
+        row = (
+            path,
+            mtime,
+            size,
+            duration,
+            fingerprint,
+            ext,
+            bitrate,
+            sample_rate,
+            bit_depth,
+            channels,
+            codec,
+            container,
+            tags_json,
+            artwork_json,
+            normalized_artist,
+            normalized_title,
+            normalized_album,
         )
+        with self._state_lock:
+            if not self._closed and self._thread.is_alive():
+                self._queue.put(("write", row))
+                return
+        # This writer was shut down (another cache became current) or its
+        # thread died: write the row directly instead of leaving it in a
+        # queue nobody reads any more.
+        conn = sqlite3.connect(self._db_path)
+        try:
+            self._flush_pending(conn, [row])
+        finally:
+            conn.close()
+
+    def is_alive(self) -> bool:
+        return self._thread.is_alive() and not self._closed
 
     def flush(self, timeout: float | None = None) -> None:
+        if not self._thread.is_alive():
+            return  # nothing will ever answer; waiting with timeout=None hung forever
         event = threading.Event()
         self._queue.put(("flush", event))
         event.wait(timeout=timeout)
 
     def shutdown(self) -> None:
+        with self._state_lock:
+            self._closed = True
         event = threading.Event()
         self._queue.put(("shutdown", event))
         self._thread.join()
@@ -282,7 +347,28 @@ class FingerprintWriter:
                     # writer called get(timeout=0) in a tight loop forever
                     # (a 100% CPU thread that starved the GUI of the GIL).
                     last_flush = time.monotonic()
+        except Exception as exc:  # pragma: no cover - _flush_pending already contains sqlite errors
+            _dlog("FP", f"fingerprint cache writer stopped: {exc}")
         finally:
+            with self._state_lock:
+                self._closed = True
+            # Write what is still queued, and release anybody waiting on a
+            # flush that will now never run.
+            leftovers = []
+            while True:
+                try:
+                    kind, payload = self._queue.get_nowait()
+                except queue.Empty:
+                    break
+                if kind == "write":
+                    leftovers.append(payload)
+                elif isinstance(payload, threading.Event):
+                    payload.set()
+            if leftovers and conn is not None:
+                try:
+                    self._flush_pending(conn, leftovers)  # type: ignore[arg-type]
+                except Exception:  # pragma: no cover - best effort
+                    pass
             if conn is not None:
                 conn.close()
 
@@ -315,30 +401,7 @@ class FingerprintWriter:
             return
         for attempt in range(3):
             try:
-                conn.executemany(
-                    """
-                    INSERT OR REPLACE INTO fingerprints (
-                        path,
-                        mtime,
-                        size,
-                        duration,
-                        fingerprint,
-                        ext,
-                        bitrate,
-                        sample_rate,
-                        bit_depth,
-                        channels,
-                        codec,
-                        container,
-                        tags_json,
-                        artwork_json,
-                        normalized_artist,
-                        normalized_title,
-                        normalized_album
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    pending,
-                )
+                conn.executemany(_INSERT_SQL, pending)
                 conn.commit()
                 return
             except sqlite3.OperationalError as exc:
@@ -346,6 +409,25 @@ class FingerprintWriter:
                     _dlog("FP", f"cache write failed: {exc}")
                     return
                 time.sleep(0.05)
+            except sqlite3.Error as exc:
+                # One row sqlite cannot bind (or a damaged file) used to raise
+                # out of here and kill the writer thread: every later write
+                # was silently lost and flush(timeout=None) hung forever.
+                # Write the rows one by one, skipping only the bad ones.
+                try:
+                    conn.rollback()
+                except sqlite3.Error:
+                    pass
+                for row in pending:
+                    try:
+                        conn.execute(_INSERT_SQL, row)
+                    except sqlite3.Error as row_exc:
+                        _dlog("FP", f"cache write skipped for {row[0]!r}: {row_exc} ({exc})")
+                try:
+                    conn.commit()
+                except sqlite3.Error as commit_exc:
+                    _dlog("FP", f"cache write failed: {commit_exc}")
+                return
 
     def _drain_remaining(self, conn: sqlite3.Connection) -> None:
         pending: list[
@@ -382,10 +464,25 @@ class FingerprintWriter:
             self._flush_pending(conn, pending)
 
 
+def _connect_initialized(db_path: str, **kwargs) -> sqlite3.Connection:
+    """Open ``db_path`` with the schema in place; a corrupt file is set aside once."""
+    for attempt in range(2):
+        conn = sqlite3.connect(db_path, **kwargs)
+        try:
+            _initialize_db(conn)
+            return conn
+        except Exception as exc:
+            conn.close()
+            if attempt == 0 and _is_corruption(exc) and _set_aside_corrupt_db(db_path, exc):
+                continue
+            raise
+    raise AssertionError("unreachable")  # pragma: no cover
+
+
 def _get_writer(db_path: str) -> FingerprintWriter:
     global _writer, _writer_db_path
     with _writer_lock:
-        if _writer is None or _writer_db_path != db_path:
+        if _writer is None or _writer_db_path != db_path or not _writer.is_alive():
             if _writer is not None:
                 _writer.shutdown()
                 _writer = None
@@ -424,6 +521,20 @@ def _open_readonly_connection(db_path: str) -> sqlite3.Connection | None:
     return conn
 
 
+def _row_is_current(cached_mtime: object, cached_size: object, mtime: float, size: int) -> bool:
+    """True when a cache row was written for the file as it is now.
+
+    Rows from before the ``mtime``/``size`` columns existed have NULLs there;
+    comparing them raised ``TypeError`` out of the cached-lookup helpers.
+    """
+    if cached_mtime is None or cached_size is None:
+        return False
+    try:
+        return abs(float(cached_mtime) - mtime) < 1e-6 and int(cached_size) == int(size)
+    except (TypeError, ValueError):
+        return False
+
+
 def _decode_fingerprint(fp: object) -> str | None:
     if not isinstance(fp, (bytes, bytearray)):
         return fp  # type: ignore[return-value]
@@ -442,14 +553,15 @@ def _ensure_db(db_path: str) -> sqlite3.Connection:
 
 
 def ensure_fingerprint_cache(db_path: str) -> None:
-    """Ensure the fingerprint cache schema exists and is up to date."""
+    """Ensure the fingerprint cache schema exists and is up to date.
+
+    A corrupt cache file (``file is not a database``, ``disk image is
+    malformed``) used to make every duplicate scan fail; it is now renamed to
+    ``<name>.corrupt-<time>`` and a fresh cache is started.
+    """
     if not os.path.exists(db_path):
         os.makedirs(os.path.dirname(db_path), exist_ok=True)
-    conn = sqlite3.connect(db_path)
-    try:
-        _initialize_db(conn)
-    finally:
-        conn.close()
+    _connect_initialized(db_path).close()
 
 
 def get_fingerprint(
@@ -504,12 +616,7 @@ def get_fingerprint(
 
     cached_mtime = row[0] if row else None
     cached_size = row[1] if row else None
-    if (
-        row
-        and cached_mtime is not None
-        and abs(cached_mtime - mtime) < 1e-6
-        and int(cached_size or 0) == int(size)
-    ):
+    if row and _row_is_current(cached_mtime, cached_size, mtime, size):
         _dlog("FP", f"cache hit {path}", log_callback)
         fp = _decode_fingerprint(row[2])
         if fp is None:
@@ -593,9 +700,7 @@ def get_cached_fingerprint(
                 "SELECT mtime, size, fingerprint FROM fingerprints WHERE path=?",
                 (key,),
             ).fetchone()
-            cached_mtime = row[0] if row else None
-            cached_size = row[1] if row else None
-            if row and abs(cached_mtime - mtime) < 1e-6 and int(cached_size or 0) == int(size):
+            if row and _row_is_current(row[0], row[1], mtime, size):
                 fp = row[2]
                 _dlog("FP", f"cache hit {path}", log_callback)
                 fp = _decode_fingerprint(fp)
@@ -614,8 +719,9 @@ def get_cached_fingerprint(
             trace["source"] = "missing"
             trace["error"] = ""
             return None
-        except sqlite3.OperationalError as e:
-            if "locked" not in str(e).lower() or attempt >= retries - 1:
+        except sqlite3.Error as e:
+            # A corrupt or half-upgraded cache is a cache miss, never a crash.
+            if not isinstance(e, sqlite3.OperationalError) or "locked" not in str(e).lower() or attempt >= retries - 1:
                 log_callback(f"! Fingerprint cache read failed: {e}")
                 trace["source"] = "cache_error"
                 trace["error"] = str(e)
@@ -693,9 +799,7 @@ def get_cached_fingerprint_metadata(
                 """,
                 (key,),
             ).fetchone()
-            cached_mtime = row[0] if row else None
-            cached_size = row[1] if row else None
-            if row and abs(cached_mtime - mtime) < 1e-6 and int(cached_size or 0) == int(size):
+            if row and _row_is_current(row[0], row[1], mtime, size):
                 fp = _decode_fingerprint(row[2])
                 _dlog("FP", f"cache hit {path}", log_callback)
                 if fp is None:
@@ -727,8 +831,9 @@ def get_cached_fingerprint_metadata(
             trace["source"] = "missing"
             trace["error"] = ""
             return None, None
-        except sqlite3.OperationalError as e:
-            if "locked" not in str(e).lower() or attempt >= retries - 1:
+        except sqlite3.Error as e:
+            # A corrupt or half-upgraded cache is a cache miss, never a crash.
+            if not isinstance(e, sqlite3.OperationalError) or "locked" not in str(e).lower() or attempt >= retries - 1:
                 log_callback(f"! Fingerprint cache read failed: {e}")
                 trace["source"] = "cache_error"
                 trace["error"] = str(e)
@@ -804,11 +909,14 @@ def store_fingerprint(
             if flush:
                 flush_fingerprint_writes(db_path)
             return True
-        except sqlite3.OperationalError as e:
-            if "locked" not in str(e).lower() or attempt >= retries - 1:
+        except sqlite3.Error as e:
+            if not isinstance(e, sqlite3.OperationalError) or "locked" not in str(e).lower() or attempt >= retries - 1:
                 log_callback(f"! Fingerprint cache write failed: {e}")
                 return False
             time.sleep(retry_delay)
+        except (TypeError, ValueError) as e:  # tags that json cannot encode
+            log_callback(f"! Fingerprint cache write failed for {path}: {e}")
+            return False
     return False
 
 
