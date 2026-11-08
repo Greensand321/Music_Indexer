@@ -452,3 +452,39 @@ The owner chose "Refined Liquid Glass" (docs/redesign). Everything below is undo
 ### F10. Reduce motion has a control
 - **Was**: config key / environment variable only.
 - **Is**: Settings → Appearance → Reduce motion (same key).
+
+## G. Page contents in Liquid Glass (redesign R2) — **In progress**
+
+Every page drops its in-page title. The shell header and the section tabs already name it. Each page keeps one
+short muted line saying what it is for, and buttons use painted glyphs instead of emoji. Shared parts:
+`gui/widgets/glass_parts.py` (stat tiles, empty states) and `gui/widgets/glyphs.py` (icons).
+
+### G1. Duplicates
+- **Find duplicates**:
+  - The "1. Scan & fingerprint → 2. Review groups → 3. Execute plan" stepper → a pill row "Scan · Review ·
+    Execute". It shows real state.
+  - The groups table (#, Winner, Losers, Review ⚑) → one glass row per group. Each row shows the kept copy and
+    each loser with its disposition, with format and bitrate pills. A row lists at most 3 losers plus "+ N more";
+    the details box lists them all.
+  - Results are stat tiles. The plan tiles are groups, files, space and flagged; after Execute, outcome tiles
+    show quarantined, deleted, left in place for safety, not attempted, and errors. Every sentence
+    `summarize_execution` produces is unchanged.
+  - Buttons: "Scan Library" → **Find duplicates**, "Open Report" → **Report**, "Execute" → **Execute…**.
+  - "Delete losers permanently (cannot be undone)" → "Delete losers permanently" plus a red "Cannot be undone"
+    pill. The typed DELETE confirmation is unchanged.
+  - Cancel and the progress bar show only while a job runs. They were always visible but disabled.
+- **Compare two files**:
+  - Editable path fields → elided path rows filled by Browse or drag-and-drop. **You can no longer type a path.**
+  - The verdict is a large pill, followed by four distance tiles (including the overlap-only distance). The full
+    text report folds behind "Full report".
+  - The advanced overrides fold away when off, with a line naming the thresholds in use.
+  - "⚖ Run Comparison" → **Compare**.
+- **Pair review and the Experimental launchers**: one card each, titled by what the tool is for. The Experimental
+  pill sits beside the title. Inside Pair review:
+  - "Left Track" / "Right Track" → LEFT / RIGHT;
+  - "◄ Prev" / "Next ►" → glyph buttons;
+  - the ✅ winner mark → a toned "Kept" badge;
+  - "Not winner (would be quarantined)" → a "Would be quarantined" badge.
+- **Scan engine dialog**: the log uses the shared mono log style (`logBox` → `logText`).
+- **Wording**: "Run Duplicate Finder first" → "Run Find duplicates first". The job name "Similarity" → "Compare
+  two files".
