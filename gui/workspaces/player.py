@@ -29,6 +29,9 @@ from gui import playback_backend
 from gui.compat import QtCore, QtGui, QtWidgets, Signal, Slot
 from gui.playback_backend import ACTIVE_STATES, PlaybackBackend, PlaybackState
 from gui.themes.manager import get_manager
+from gui.widgets.glass import ElidedLabel, GlassCard, GlassPanel
+from gui.widgets.glass_parts import EmptyState
+from gui.widgets.glyphs import glyph_icon, set_glyph
 from gui.widgets.gradient_bg import GradientWidget
 from gui.workspaces.base import WorkspaceBase
 from utils.reserved_folders import NON_LIBRARY_FOLDERS, walk_library
@@ -36,10 +39,11 @@ from utils.reserved_folders import NON_LIBRARY_FOLDERS, walk_library
 _AUDIO_EXTS = {".flac", ".m4a", ".aac", ".mp3", ".wav", ".ogg", ".opus"}
 _ART_SIZE = 200
 
-# Repeat modes
+# Repeat modes (cycled Off → Track → All) and their names on the capsule
 _REPEAT_OFF   = 0
 _REPEAT_TRACK = 1
 _REPEAT_ALL   = 2
+_REPEAT_NAMES = {_REPEAT_OFF: "off", _REPEAT_TRACK: "track", _REPEAT_ALL: "all"}
 
 # 30-second highlight: seek to this position, auto-advance after duration
 _HIGHLIGHT_START_MS    = 30_000
@@ -58,13 +62,6 @@ _PENDING = "_pending"   # row-dict key: tags not read yet (placeholder row)
 # ─────────────────────────────────────────────────────────────────────────────
 # Helpers
 # ─────────────────────────────────────────────────────────────────────────────
-
-def _fmt_ms(ms: int) -> str:
-    """Format milliseconds as M:SS."""
-    ms = max(0, ms)
-    m, s = divmod(ms // 1000, 60)
-    return f"{m}:{s:02d}"
-
 
 def _load_row(path: str) -> dict:
     """Read tags for one audio file and return a row dict.  Never raises.
@@ -161,13 +158,100 @@ def _decode_m3u(data: bytes, path: str) -> str:
     return data.decode("utf-8", errors="replace")
 
 
-def _rgba(hex_color: str, alpha: int) -> str:
-    c = QtGui.QColor(hex_color)
-    return f"rgba({c.red()},{c.green()},{c.blue()},{alpha})"
+#: Sidecar images next to a track, used when it has no embedded art (the
+#: same names, in the same order, as the landing's album tiles).
+_FOLDER_ART = (
+    "cover.jpg", "folder.jpg", "album.jpg", "artwork.jpg",
+    "front.jpg", "cover.png", "folder.png", "album.png",
+)
+
+
+def _folder_art_bytes(path: str) -> bytes | None:
+    """The first sidecar cover in ``path``'s folder (worker threads only)."""
+    folder = os.path.dirname(path)
+    for name in _FOLDER_ART:
+        candidate = os.path.join(folder, name)
+        try:
+            if os.path.isfile(candidate):
+                with open(candidate, "rb") as fh:
+                    data = fh.read()
+                if data:
+                    return data
+        except OSError:
+            continue
+    return None
 
 
 def _tokens():
     return get_manager().current
+
+
+def _rounded(pm: QtGui.QPixmap, size: int, radius: float) -> QtGui.QPixmap:
+    """``pm`` centre-cropped to a ``size`` square with rounded corners."""
+    dpr = pm.devicePixelRatio() or 1.0
+    px = max(1, int(round(size * dpr)))
+    scaled = pm.scaled(px, px, QtCore.Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                       QtCore.Qt.TransformationMode.SmoothTransformation)
+    out = QtGui.QPixmap(px, px)
+    out.fill(QtCore.Qt.GlobalColor.transparent)
+    p = QtGui.QPainter(out)
+    try:
+        p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+        path = QtGui.QPainterPath()
+        path.addRoundedRect(QtCore.QRectF(0, 0, px, px), radius * dpr, radius * dpr)
+        p.setClipPath(path)
+        p.drawPixmap(-(scaled.width() - px) // 2, -(scaled.height() - px) // 2, scaled)
+    finally:
+        p.end()
+    out.setDevicePixelRatio(dpr)
+    return out
+
+
+def _tile_surface(radius: int):
+    """An album tile: a faint well (only seen while there is no art), the
+    mockup's ``0 14 30 rgba(0,0,0,.4)`` shadow (the capsule's shadow colour
+    under every theme) and an inset 1 px ring in the card border colour."""
+    from gui.themes.glass import current_material
+    from gui.themes.tokens import Surface
+
+    m = current_material()
+    return Surface(m.well.fill, m.card.border, "", m.capsule.shadow or m.card.shadow,
+                   blur=30, offset_y=14, radius=radius)
+
+
+def _paint_tile(p: QtGui.QPainter, rect: QtCore.QRectF, pm: QtGui.QPixmap | None,
+                radius: float, *, shadow: bool = True) -> None:
+    """A glass album tile: painted shadow, the art (or a music glyph on the
+    well), and the inset ring on top."""
+    from gui.themes.glass import paint_shadow, qcolor
+    from gui.widgets.glyphs import paint_glyph
+
+    spec = _tile_surface(int(radius))
+    if shadow:
+        paint_shadow(p, rect, spec, radius=radius)
+    path = QtGui.QPainterPath()
+    path.addRoundedRect(rect, radius, radius)
+    p.save()
+    p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+    p.setRenderHint(QtGui.QPainter.RenderHint.SmoothPixmapTransform)
+    if pm is not None and not pm.isNull():
+        p.setClipPath(path)
+        side = int(round(rect.width()))
+        scaled = pm.scaled(side, side, QtCore.Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                           QtCore.Qt.TransformationMode.SmoothTransformation)
+        p.drawPixmap(QtCore.QPointF(rect.x() - (scaled.width() - side) / 2,
+                                    rect.y() - (scaled.height() - side) / 2), scaled)
+        p.setClipping(False)
+    else:
+        p.fillPath(path, qcolor(spec.fill))
+        g = rect.width() * 0.34
+        c = rect.center()
+        paint_glyph(p, QtCore.QRectF(c.x() - g / 2, c.y() - g / 2, g, g), "music",
+                    qcolor(_tokens().text_muted))
+    p.setPen(QtGui.QPen(qcolor(spec.border), 1.0))
+    p.setBrush(QtCore.Qt.BrushStyle.NoBrush)
+    p.drawRoundedRect(rect.adjusted(0.5, 0.5, -0.5, -0.5), radius - 0.5, radius - 0.5)
+    p.restore()
 
 
 class _SortItem(QtWidgets.QTableWidgetItem):
@@ -311,6 +395,9 @@ class _ArtLoader(_CancellableThread):
             _, covers, _, _ = read_metadata(self._path, include_cover=True)
             if self._stopped():
                 return
+            if not covers:
+                folder_art = _folder_art_bytes(self._path)
+                covers = [folder_art] if folder_art else []
             if covers:
                 img = QtGui.QImage()
                 if img.loadFromData(covers[0]):
@@ -333,20 +420,22 @@ class _ArtLoader(_CancellableThread):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# _BgArtWidget — blurred album-art background behind the library table
+# _LibraryCard — the library's glass card, lit by the playing track's cover
 # ─────────────────────────────────────────────────────────────────────────────
 
-class _BgArtWidget(QtWidgets.QWidget):
-    """Wraps the library table with a slowly cross-fading blurred album-art background.
+class _LibraryCard(GlassCard):
+    """The glass card that holds the library table.
 
-    The table is laid out as a transparent child so the blurred art bleeds
-    through each row at low opacity, giving a subtle ambient-art effect without
-    hurting readability. Base fill and vignette come from the theme.
-    """
+    While a track plays, its cover, blurred, glows faintly through the card
+    and cross-fades to the next track's (3.5 s). The table on top is a
+    transparent item view, so the rows sit on the glass and the art: there
+    is no opaque block. ``has_art`` / ``set_art`` keep the old background
+    widget's API."""
 
-    _BLUR_DIV   = 10    # scale-down factor for cheap Gaussian approximation
-    _ART_OPACITY = 0.30  # max opacity of the art layer
-    _FADE_MS    = 3500   # cross-fade duration in ms
+    _BLUR_DIV    = 10    # scale-down factor for a cheap blur
+    _ART_OPACITY = 0.22  # glass: how strongly the art shows through
+    _CLASSIC_ART_OPACITY = 0.12   # opaque classic cards: a tint, no more
+    _FADE_MS     = 3500   # cross-fade duration in ms
 
     def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(parent)
@@ -354,14 +443,11 @@ class _BgArtWidget(QtWidgets.QWidget):
         self._pm_nxt: QtGui.QPixmap | None = None
         self._fading = False
         self._fade_val: float = 1.0
+        self._scaled: dict[tuple[int, int, int], QtGui.QPixmap] = {}
 
         self._anim = QtCore.QPropertyAnimation(self, b"crossfade", self)
         self._anim.setDuration(self._FADE_MS)
         self._anim.setEasingCurve(QtCore.QEasingCurve.Type.InOutSine)
-
-        layout = QtWidgets.QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
 
     # Qt property for the animation target
     def _get_cf(self) -> float:
@@ -373,6 +459,7 @@ class _BgArtWidget(QtWidgets.QWidget):
             self._pm_cur = self._pm_nxt
             self._pm_nxt = None
             self._fading = False
+            self._prune_scaled()
         self.update()
 
     crossfade = QtCore.Property(float, _get_cf, _set_cf)
@@ -396,6 +483,7 @@ class _BgArtWidget(QtWidgets.QWidget):
             return
         if self._pm_cur is None:
             self._pm_cur = new
+            self._prune_scaled()
             self.update()
             return
         self._pm_nxt = new
@@ -420,180 +508,408 @@ class _BgArtWidget(QtWidgets.QWidget):
         )
         return QtGui.QPixmap.fromImage(big)
 
+    def _prune_scaled(self) -> None:
+        live = {id(pm) for pm in (self._pm_cur, self._pm_nxt) if pm is not None}
+        self._scaled = {k: v for k, v in self._scaled.items() if k[0] in live}
+
+    def _fitted(self, pm: QtGui.QPixmap, w: int, h: int) -> QtGui.QPixmap:
+        """``pm`` scaled to cover w×h, cached per size (the table scrolling
+        over the card repaints it often)."""
+        key = (id(pm), w, h)
+        out = self._scaled.get(key)
+        if out is None:
+            out = pm.scaled(w, h, QtCore.Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                            QtCore.Qt.TransformationMode.FastTransformation)
+            self._scaled = {k: v for k, v in self._scaled.items() if k[1:] == (w, h)}
+            self._scaled[key] = out
+        return out
+
     def paintEvent(self, event: QtGui.QPaintEvent) -> None:  # noqa: N802
+        from gui.themes.glass import current_material, paint_surface
+
+        m = current_material()
+        rect = QtCore.QRectF(self.rect())
+        radius = self.radius()
         p = QtGui.QPainter(self)
-        r = self.rect()
-        base = QtGui.QColor(_tokens().content_bg)
-
-        p.fillRect(r, base)
-
-        def _blit(pm: QtGui.QPixmap | None, op: float) -> None:
-            if pm is None or pm.isNull():
+        try:
+            paint_surface(p, rect, m.card, radius=radius)
+            if self._pm_cur is None and self._pm_nxt is None:
                 return
-            s = pm.scaled(
-                r.width(), r.height(),
-                QtCore.Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-                QtCore.Qt.TransformationMode.FastTransformation,
-            )
-            p.setOpacity(op)
-            p.drawPixmap((r.width() - s.width()) // 2,
-                         (r.height() - s.height()) // 2, s)
+            clip = QtGui.QPainterPath()
+            clip.addRoundedRect(rect.adjusted(1, 1, -1, -1), radius - 1, radius - 1)
+            p.setClipPath(clip)
+            w, h = self.width(), self.height()
+            strength = self._ART_OPACITY if m.is_glass else self._CLASSIC_ART_OPACITY
 
-        op = self._ART_OPACITY
-        if self._fading:
-            _blit(self._pm_cur, op * (1.0 - self._fade_val))
-            _blit(self._pm_nxt, op * self._fade_val)
-        else:
-            _blit(self._pm_cur, op)
+            def _blit(pm: QtGui.QPixmap | None, op: float) -> None:
+                if pm is None or pm.isNull() or op <= 0.0:
+                    return
+                s = self._fitted(pm, w, h)
+                p.setOpacity(op)
+                p.drawPixmap((w - s.width()) // 2, (h - s.height()) // 2, s)
 
-        # Theme-coloured vignette so table text stays readable in any theme
-        p.setOpacity(0.70)
-        p.fillRect(r, base)
-        p.setOpacity(1.0)
-        p.end()
+            if self._fading:
+                _blit(self._pm_cur, strength * (1.0 - self._fade_val))
+                _blit(self._pm_nxt, strength * self._fade_val)
+            else:
+                _blit(self._pm_cur, strength)
+        finally:
+            p.end()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# NowPlayingCovers — prev / current / next album-art strip
+# NowPlayingCovers — prev / current / next album tiles
 # ─────────────────────────────────────────────────────────────────────────────
 
 class NowPlayingCovers(QtWidgets.QWidget):
-    """Three-panel cover display: [prev] [current] [next].
+    """The previous, current and next covers as glass album tiles.
 
-    * *Current* (center) is drawn larger.
-    * *Prev* / *Next* (sides) are drawn smaller and slightly faded.
-    * Themed placeholder with a ♪ icon when no art is available.
+    * *Current* is a 130 px tile (radius 20, the mockup's painted shadow and
+      inset ring), centred.
+    * *Previous* / *next* are smaller tiles tucked behind it, faded; each is
+      drawn only when the queue has such a neighbour.
+    * Without art a tile is a faint well with a music glyph, never an opaque
+      square.
+    The tiles shrink with the widget's width (narrow side column).
     """
 
-    _SIDE = 80       # side cover size
-    _MAIN = 130      # center cover size
-    _RAD  = 8        # corner radius
+    _SIDE = 80       # side tile size at full width
+    _MAIN = 130      # centre tile size at full width
+    _RAD  = 20       # centre tile corner radius (side tiles scale with it)
+    _TOP = 8
+    _BOTTOM = 26     # room for the centre tile's shadow
+    _SIDE_OPACITY = 0.55
 
     def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(parent)
         self._prev_pm:    QtGui.QPixmap | None = None
         self._current_pm: QtGui.QPixmap | None = None
         self._next_pm:    QtGui.QPixmap | None = None
-        total_w = self._SIDE * 2 + self._MAIN + 24
-        self.setMinimumSize(total_w, self._MAIN + 16)
+        self._has_prev = False
+        self._has_next = False
+        self.setMinimumSize(150, self._MAIN + self._TOP + self._BOTTOM)
         self.setSizePolicy(
             QtWidgets.QSizePolicy.Policy.Expanding,
             QtWidgets.QSizePolicy.Policy.Fixed,
         )
 
     def sizeHint(self) -> QtCore.QSize:
-        total_w = self._SIDE * 2 + self._MAIN + 24
-        return QtCore.QSize(total_w, self._MAIN + 16)
+        return QtCore.QSize(self._MAIN + self._SIDE * 2, self._MAIN + self._TOP + self._BOTTOM)
 
     def set_current(self, pm: QtGui.QPixmap | None) -> None:
         self._current_pm = pm
         self.update()
 
-    def set_prev(self, pm: QtGui.QPixmap | None) -> None:
+    def set_prev(self, pm: QtGui.QPixmap | None, present: bool = True) -> None:
+        """``pm`` None with ``present`` True: a neighbour without art."""
         self._prev_pm = pm
+        self._has_prev = present or pm is not None
         self.update()
 
-    def set_next(self, pm: QtGui.QPixmap | None) -> None:
+    def set_next(self, pm: QtGui.QPixmap | None, present: bool = True) -> None:
         self._next_pm = pm
+        self._has_next = present or pm is not None
         self.update()
 
     def clear_neighbors(self) -> None:
         self._prev_pm = None
         self._next_pm = None
+        self._has_prev = self._has_next = False
         self.update()
 
     def clear_all(self) -> None:
-        self._prev_pm = None
         self._current_pm = None
-        self._next_pm = None
-        self.update()
+        self.clear_neighbors()
 
     # ── painting ────────────────────────────────────────────────────────
 
-    def paintEvent(self, event: QtGui.QPaintEvent) -> None:  # noqa: N802
-        p = QtGui.QPainter(self)
-        p.setRenderHints(
-            QtGui.QPainter.RenderHint.Antialiasing
-            | QtGui.QPainter.RenderHint.SmoothPixmapTransform,
-        )
+    def _geometry(self) -> tuple[QtCore.QRectF, QtCore.QRectF, QtCore.QRectF, float, float]:
         w = self.width()
-        h = self.height()
+        main = float(min(self._MAIN, max(64, int(w * 0.5))))
+        side = round(main * self._SIDE / self._MAIN)
+        mx = (w - main) / 2
+        my = float(self._TOP)
+        sy = my + (main - side) / 2
+        tuck = side * 0.62          # how far a side tile shows beside the centre
+        cur = QtCore.QRectF(mx, my, main, main)
+        prev = QtCore.QRectF(mx - tuck, sy, side, side)
+        nxt = QtCore.QRectF(mx + main + tuck - side, sy, side, side)
+        r_main = self._RAD * main / self._MAIN
+        r_side = max(10.0, self._RAD * side / self._MAIN)
+        return prev, cur, nxt, r_main, r_side
 
-        # Positions
-        main_x = (w - self._MAIN) // 2
-        main_y = (h - self._MAIN) // 2
-        side_gap = 6
-        prev_x = main_x - self._SIDE - side_gap
-        prev_y = (h - self._SIDE) // 2
-        next_x = main_x + self._MAIN + side_gap
-        next_y = prev_y
-
-        # Draw prev
-        self._draw_cover(p, self._prev_pm, prev_x, prev_y, self._SIDE, 0.60)
-        # Draw next
-        self._draw_cover(p, self._next_pm, next_x, next_y, self._SIDE, 0.60)
-        # Draw current (on top)
-        self._draw_shadow(p, main_x, main_y, self._MAIN)
-        self._draw_cover(p, self._current_pm, main_x, main_y, self._MAIN, 1.0)
-
-        p.end()
-
-    def _draw_shadow(self, p: QtGui.QPainter, x: int, y: int, sz: int) -> None:
-        p.setPen(QtCore.Qt.PenStyle.NoPen)
-        p.setBrush(QtGui.QColor(0, 0, 0, 80))
-        p.drawRoundedRect(x + 3, y + 4, sz, sz, self._RAD, self._RAD)
-
-    def _draw_cover(
-        self,
-        p: QtGui.QPainter,
-        pm: QtGui.QPixmap | None,
-        x: int, y: int, sz: int,
-        opacity: float,
-    ) -> None:
-        p.save()
-        p.setOpacity(opacity)
-
-        if pm and not pm.isNull():
-            scaled = pm.scaled(
-                sz, sz,
-                QtCore.Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-                QtCore.Qt.TransformationMode.SmoothTransformation,
+    def paintEvent(self, event: QtGui.QPaintEvent) -> None:  # noqa: N802
+        prev, cur, nxt, r_main, r_side = self._geometry()
+        p = QtGui.QPainter(self)
+        try:
+            p.setRenderHints(
+                QtGui.QPainter.RenderHint.Antialiasing
+                | QtGui.QPainter.RenderHint.SmoothPixmapTransform,
             )
-            # Center-crop to square
-            if scaled.width() > sz or scaled.height() > sz:
-                sx = max(0, (scaled.width() - sz) // 2)
-                sy = max(0, (scaled.height() - sz) // 2)
-                scaled = scaled.copy(sx, sy, sz, sz)
-            clip = QtGui.QPainterPath()
-            clip.addRoundedRect(QtCore.QRectF(x, y, sz, sz), self._RAD, self._RAD)
-            p.setClipPath(clip)
-            p.drawPixmap(x, y, scaled)
-        else:
-            # Placeholder
-            t = _tokens()
-            p.setPen(QtCore.Qt.PenStyle.NoPen)
-            p.setBrush(QtGui.QColor(t.card_bg))
-            p.drawRoundedRect(x, y, sz, sz, self._RAD, self._RAD)
-            p.setPen(QtGui.QColor(t.text_muted))
-            fnt = p.font()
-            fnt.setPointSize(max(10, sz // 5))
-            p.setFont(fnt)
-            p.drawText(QtCore.QRect(x, y, sz, sz), QtCore.Qt.AlignmentFlag.AlignCenter, "♪")
+            p.setOpacity(self._SIDE_OPACITY)
+            if self._has_prev:
+                _paint_tile(p, prev, self._prev_pm, r_side, shadow=False)
+            if self._has_next:
+                _paint_tile(p, nxt, self._next_pm, r_side, shadow=False)
+            p.setOpacity(1.0)
+            _paint_tile(p, cur, self._current_pm, r_main)
+        finally:
+            p.end()
 
-        p.restore()
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Row delegates: transparent glass rows for the table and the lists
+# ─────────────────────────────────────────────────────────────────────────────
+
+_ROLE_TITLE   = int(QtCore.Qt.ItemDataRole.UserRole) + 1
+_ROLE_ARTIST  = int(QtCore.Qt.ItemDataRole.UserRole) + 2
+_ROLE_LEAD    = int(QtCore.Qt.ItemDataRole.UserRole) + 3   # "1", "2"… (queue position)
+_ROLE_PLAYING = int(QtCore.Qt.ItemDataRole.UserRole) + 4
+
+_COL_NUM, _COL_TITLE, _COL_ARTIST, _COL_ALBUM, _COL_TIME = range(5)
+
+
+def _row_fill(selected: bool, playing: bool, hovered: bool, *, base: bool = False):
+    """The fill of one row (``None``: nothing): selection, the playing
+    track's accent tint, hover, or (lists) the resting glass row."""
+    from gui.themes.glass import qcolor
+
+    t = _tokens()
+    m = t.material
+    if selected:
+        return qcolor(m.selection)
+    if playing:
+        return qcolor(t.accent, 0.16)
+    if hovered:
+        return qcolor(m.pressed if base else m.hover)
+    if base:
+        return qcolor(m.hover, 0.75)
+    return None
+
+
+def _paint_state_glyph(p: QtGui.QPainter, rect: QtCore.QRectF, playing_now: bool,
+                       colour: QtGui.QColor) -> None:
+    """The playing track's marker: a play glyph while it plays, pause while
+    it is paused."""
+    from gui.widgets.glyphs import paint_glyph
+
+    g = 13.0
+    paint_glyph(p, QtCore.QRectF(rect.x(), rect.center().y() - g / 2, g, g),
+                "play" if playing_now else "pause", colour)
+
+
+class _TrackTableDelegate(QtWidgets.QStyledItemDelegate):
+    """Library rows: 34 px, no grid, a rounded glass row for hover and
+    selection, the playing track tinted with the accent and marked with a
+    play glyph in the # column. Title 14, artist/album 13 muted, # and time
+    12 with tabular figures."""
+
+    ROW_H = 34
+    _PAD = 10
+
+    def __init__(self, table: QtWidgets.QTableView, playing) -> None:
+        super().__init__(table)
+        self._table = table
+        self._playing = playing          # () -> (path or "", is playing now)
+        self.hover_row = -1
+
+    @staticmethod
+    def font_for(column: int) -> QtGui.QFont:
+        from gui.themes.glass import font
+        if column == _COL_TITLE:
+            return font("body")
+        if column in (_COL_NUM, _COL_TIME):
+            return font("caption", tabular=True)
+        return font("label")
+
+    def sizeHint(self, option: QtWidgets.QStyleOptionViewItem,  # noqa: N802
+                 index: QtCore.QModelIndex) -> QtCore.QSize:
+        text = str(index.data(QtCore.Qt.ItemDataRole.DisplayRole) or "")
+        fm = QtGui.QFontMetrics(self.font_for(index.column()))
+        return QtCore.QSize(fm.horizontalAdvance(text) + 2 * self._PAD + 2, self.ROW_H)
+
+    def paint(self, p: QtGui.QPainter, option: QtWidgets.QStyleOptionViewItem,
+              index: QtCore.QModelIndex) -> None:
+        from gui.themes.glass import qcolor
+
+        t = _tokens()
+        m = t.material
+        col = index.column()
+        playing_path, playing_now = self._playing()
+        playing = bool(playing_path) and index.data(QtCore.Qt.ItemDataRole.UserRole) == playing_path
+        selected = bool(option.state & QtWidgets.QStyle.StateFlag.State_Selected)
+        hovered = index.row() == self.hover_row
+
+        p.save()
+        try:
+            p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+            cell = QtCore.QRectF(option.rect)
+            fill = _row_fill(selected, playing, hovered)
+            if fill is not None:
+                vp_w = self._table.viewport().width()
+                row = QtCore.QRectF(2, cell.top() + 1, max(4.0, vp_w - 4.0), cell.height() - 2)
+                path = QtGui.QPainterPath()
+                path.addRoundedRect(row, 10, 10)
+                p.setClipRect(cell)
+                p.fillPath(path, fill)
+                p.setClipping(False)
+
+            if selected:
+                ink = qcolor(m.selection_text)
+                quiet = ink
+            elif playing:
+                ink = qcolor(t.accent)
+                quiet = qcolor(t.text_secondary)
+            else:
+                ink = qcolor(t.text_primary)
+                quiet = qcolor(t.text_secondary)
+
+            text_rect = cell.adjusted(self._PAD, 0, -self._PAD, 0)
+            if col == _COL_NUM and playing:
+                g_rect = QtCore.QRectF(text_rect.right() - 13, text_rect.top(), 13, text_rect.height())
+                _paint_state_glyph(p, g_rect, playing_now, ink)
+                return
+            text = str(index.data(QtCore.Qt.ItemDataRole.DisplayRole) or "")
+            if not text:
+                return
+            f = self.font_for(col)
+            if col == _COL_TITLE and playing:
+                f.setWeight(QtGui.QFont.Weight(650))
+            p.setFont(f)
+            p.setPen(ink if col == _COL_TITLE else quiet)
+            align = QtCore.Qt.AlignmentFlag.AlignVCenter | (
+                QtCore.Qt.AlignmentFlag.AlignRight if col in (_COL_NUM, _COL_TIME)
+                else QtCore.Qt.AlignmentFlag.AlignLeft)
+            fm = QtGui.QFontMetrics(f)
+            p.drawText(text_rect, int(align),
+                       fm.elidedText(text, QtCore.Qt.TextElideMode.ElideRight, int(text_rect.width())))
+        finally:
+            p.restore()
+
+
+class _QueueRowDelegate(QtWidgets.QStyledItemDelegate):
+    """Queue and Recently played rows: glass rows (34 px, radius 12, a faint
+    fill, 4 px apart) with the position (or the playing glyph), the title
+    and a muted "· artist"."""
+
+    ROW_H = 38   # 34 px row + 4 px gap
+
+    def __init__(self, view: QtWidgets.QListWidget, playing=None) -> None:
+        super().__init__(view)
+        self._playing = playing or (lambda: ("", False))
+
+    def sizeHint(self, option: QtWidgets.QStyleOptionViewItem,  # noqa: N802
+                 index: QtCore.QModelIndex) -> QtCore.QSize:
+        return QtCore.QSize(max(80, option.rect.width()), self.ROW_H)
+
+    def paint(self, p: QtGui.QPainter, option: QtWidgets.QStyleOptionViewItem,
+              index: QtCore.QModelIndex) -> None:
+        from gui.themes.glass import font, qcolor
+
+        t = _tokens()
+        m = t.material
+        playing = bool(index.data(_ROLE_PLAYING))
+        selected = bool(option.state & QtWidgets.QStyle.StateFlag.State_Selected)
+        hovered = bool(option.state & QtWidgets.QStyle.StateFlag.State_MouseOver)
+        row = QtCore.QRectF(option.rect).adjusted(0, 2, -1, -2)
+        p.save()
+        try:
+            p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+            path = QtGui.QPainterPath()
+            path.addRoundedRect(row, 12, 12)
+            p.fillPath(path, _row_fill(selected, playing, hovered, base=True))
+
+            if selected:
+                ink = quiet = qcolor(m.selection_text)
+            else:
+                ink = qcolor(t.accent if playing else t.text_primary)
+                quiet = qcolor(t.text_secondary)
+
+            x = row.left() + 12
+            lead = str(index.data(_ROLE_LEAD) or "")
+            if playing:
+                _, playing_now = self._playing()
+                _paint_state_glyph(p, QtCore.QRectF(x + 4, row.top(), 13, row.height()),
+                                   playing_now, ink)
+                x += 26
+            elif lead:
+                f = font("caption", tabular=True)
+                p.setFont(f)
+                p.setPen(quiet)
+                p.drawText(QtCore.QRectF(x, row.top(), 20, row.height()),
+                           int(QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter),
+                           lead)
+                x += 26
+
+            title = str(index.data(_ROLE_TITLE) or index.data(QtCore.Qt.ItemDataRole.DisplayRole) or "")
+            artist = str(index.data(_ROLE_ARTIST) or "")
+            avail = row.right() - 12 - x
+            tf = font("label", weight=650 if playing else 500)
+            tm = QtGui.QFontMetrics(tf)
+            title_txt = tm.elidedText(title, QtCore.Qt.TextElideMode.ElideRight, int(avail))
+            p.setFont(tf)
+            p.setPen(ink)
+            p.drawText(QtCore.QRectF(x, row.top(), avail, row.height()),
+                       int(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter),
+                       title_txt)
+            used = tm.horizontalAdvance(title_txt)
+            rest = avail - used
+            if artist and title_txt == title and rest > 40:
+                af = font("caption")
+                am = QtGui.QFontMetrics(af)
+                p.setFont(af)
+                p.setPen(quiet)
+                p.drawText(QtCore.QRectF(x + used, row.top(), rest, row.height()),
+                           int(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter),
+                           am.elidedText(f"  ·  {artist}", QtCore.Qt.TextElideMode.ElideRight, int(rest)))
+        finally:
+            p.restore()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # _TrackHoverPopup — album-art + metadata popup near cursor
 # ─────────────────────────────────────────────────────────────────────────────
 
+class _CoverLabel(QtWidgets.QLabel):
+    """A rounded cover; a faint well with a music glyph while there is no
+    art (``text()`` is then "♪", the state marker; the glyph is painted)."""
+
+    def __init__(self, size: int, radius: int, parent: QtWidgets.QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._size = size
+        self._radius = radius
+        self.setFixedSize(size, size)
+        self.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        self.setText("♪")
+
+    def set_cover(self, pm: QtGui.QPixmap) -> None:
+        self.setText("")
+        self.setPixmap(_rounded(pm, self._size, self._radius))
+
+    def clear_cover(self) -> None:
+        self.setPixmap(QtGui.QPixmap())
+        self.setText("♪")
+
+    def paintEvent(self, event: QtGui.QPaintEvent) -> None:  # noqa: N802
+        pm = self.pixmap()
+        if pm is not None and not pm.isNull():
+            super().paintEvent(event)
+            return
+        p = QtGui.QPainter(self)
+        try:
+            _paint_tile(p, QtCore.QRectF(self.rect()), None, self._radius, shadow=False)
+        finally:
+            p.end()
+
+
 class _TrackHoverPopup(QtWidgets.QFrame):
     """Floating card shown after hovering a library row for 1.5 s.
 
     A ``ToolTip``-type window: it never grabs the mouse or keyboard. Text
     comes from the row cache; the cover arrives later from an ``_ArtLoader``
-    (``set_art``), so showing it never blocks the GUI thread.
-    """
+    (``set_art``), so showing it never blocks the GUI thread. It is a
+    window of its own, so it paints an opaque card (nothing of the app's
+    glass is behind it)."""
 
     _ART_SZ = 120
     _DELAY_MS = 1500
@@ -603,6 +919,8 @@ class _TrackHoverPopup(QtWidgets.QFrame):
             parent,
             QtCore.Qt.WindowType.ToolTip | QtCore.Qt.WindowType.FramelessWindowHint,
         )
+        from gui.themes.glass import font
+
         self.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAttribute(QtCore.Qt.WidgetAttribute.WA_ShowWithoutActivating)
         self.setFixedWidth(self._ART_SZ + 200)
@@ -610,41 +928,47 @@ class _TrackHoverPopup(QtWidgets.QFrame):
         self.path: str = ""
 
         lay = QtWidgets.QHBoxLayout(self)
-        lay.setContentsMargins(12, 12, 12, 12)
+        lay.setContentsMargins(12, 12, 14, 12)
         lay.setSpacing(12)
 
-        self._art_lbl = QtWidgets.QLabel()
+        self._art_lbl = _CoverLabel(self._ART_SZ, 14)
         self._art_lbl.setObjectName("trackHoverArt")
-        self._art_lbl.setFixedSize(self._ART_SZ, self._ART_SZ)
-        self._art_lbl.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         lay.addWidget(self._art_lbl)
 
         info = QtWidgets.QVBoxLayout()
-        info.setSpacing(4)
+        info.setSpacing(3)
         self._title_lbl = QtWidgets.QLabel("")
         self._title_lbl.setObjectName("trackHoverTitle")
+        self._title_lbl.setFont(font("body", weight=650))
         self._title_lbl.setWordWrap(True)
         self._artist_lbl = QtWidgets.QLabel("")
-        self._artist_lbl.setObjectName("trackHoverArtist")
+        self._artist_lbl.setObjectName("mutedLabel")
+        self._artist_lbl.setFont(font("label"))
         self._album_lbl = QtWidgets.QLabel("")
-        self._album_lbl.setObjectName("trackHoverAlbum")
+        self._album_lbl.setObjectName("mutedLabel")
+        self._album_lbl.setFont(font("caption"))
         self._album_lbl.setWordWrap(True)
         info.addWidget(self._title_lbl)
         info.addWidget(self._artist_lbl)
         info.addWidget(self._album_lbl)
         info.addStretch()
         lay.addLayout(info, 1)
-        self.apply_theme(_tokens())
 
-    def apply_theme(self, t) -> None:
-        self.setStyleSheet(
-            f"#trackHoverPopup {{ background: {t.card_bg}; border: 1px solid {t.card_border};"
-            f" border-radius: 10px; }}"
-            f"#trackHoverArt {{ background: {t.content_bg}; border-radius: 8px; color: {t.text_muted}; }}"
-            f"#trackHoverTitle {{ color: {t.text_primary}; font-size: 13px; font-weight: 600; }}"
-            f"#trackHoverArtist {{ color: {t.text_secondary}; font-size: 11px; }}"
-            f"#trackHoverAlbum {{ color: {t.text_muted}; font-size: 11px; }}"
-        )
+    def apply_theme(self, t=None) -> None:
+        """Colours are read at paint time (and from the label roles)."""
+        self.update()
+
+    def paintEvent(self, event: QtGui.QPaintEvent) -> None:  # noqa: N802
+        from gui.themes.glass import paint_surface
+        from gui.themes.tokens import RADIUS, Surface
+
+        t = _tokens()
+        p = QtGui.QPainter(self)
+        try:
+            paint_surface(p, QtCore.QRectF(self.rect()),
+                          Surface(t.card_bg, t.card_border, radius=RADIUS.md))
+        finally:
+            p.end()
 
     def cancel(self) -> None:
         """Hide and forget the current track."""
@@ -658,8 +982,7 @@ class _TrackHoverPopup(QtWidgets.QFrame):
         self._title_lbl.setText(row.get("title") or Path(path).stem)
         self._artist_lbl.setText(row.get("artist", ""))
         self._album_lbl.setText(row.get("album", ""))
-        self._art_lbl.setPixmap(QtGui.QPixmap())
-        self._art_lbl.setText("♪")
+        self._art_lbl.clear_cover()
 
         self.adjustSize()
         # Position near cursor but keep on-screen
@@ -679,18 +1002,7 @@ class _TrackHoverPopup(QtWidgets.QFrame):
     def set_art(self, path: str, img: QtGui.QImage | None) -> None:
         if path != self.path or img is None or img.isNull():
             return
-        pm = QtGui.QPixmap.fromImage(img)
-        if pm.width() > self._ART_SZ or pm.height() > self._ART_SZ:
-            pm = pm.scaled(
-                self._ART_SZ, self._ART_SZ,
-                QtCore.Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-                QtCore.Qt.TransformationMode.SmoothTransformation,
-            )
-            sx = max(0, (pm.width() - self._ART_SZ) // 2)
-            sy = max(0, (pm.height() - self._ART_SZ) // 2)
-            pm = pm.copy(sx, sy, self._ART_SZ, self._ART_SZ)
-        self._art_lbl.setText("")
-        self._art_lbl.setPixmap(pm)
+        self._art_lbl.set_cover(QtGui.QPixmap.fromImage(img))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -698,7 +1010,15 @@ class _TrackHoverPopup(QtWidgets.QFrame):
 # ─────────────────────────────────────────────────────────────────────────────
 
 class PlayerWorkspace(WorkspaceBase):
-    """Full-featured audio player: library browser, queue, playlist management."""
+    """Library browser, queue and playlists; the Now Playing capsule is its
+    transport.
+
+    The page has no transport of its own ("the bar is the only transport",
+    docs/redesign/README.md): play/pause, previous/next, seek, volume,
+    shuffle and repeat are on the capsule, which the main window wires to
+    the public slots and signals below. Showing this page pins the capsule
+    (``transport_pinned``), so the Player is never without a transport.
+    """
 
     # ── Signals for NowPlayingBar ──────────────────────────────────────────
     # pm: QPixmap with art; None = art still loading (keep what is shown);
@@ -708,13 +1028,22 @@ class PlayerWorkspace(WorkspaceBase):
     playback_state_changed = Signal(bool)                   # is_playing
     position_changed       = Signal(int, int)               # pos_ms, dur_ms
     volume_changed         = Signal(int)                    # 0-100, any source
+    shuffle_changed        = Signal(bool)
+    repeat_changed         = Signal(str)                    # "off" | "track" | "all"
+    # available (a backend), can_play (something to play), reason (why not)
+    transport_changed      = Signal(bool, bool, str)
+    transport_pinned       = Signal(bool)                   # this page is on screen
+
+    #: Library table widths below which a column is hidden (still searchable).
+    _HIDE_ALBUM_BELOW = 470
+    _HIDE_NUMBER_BELOW = 360
 
     # ── Setup ──────────────────────────────────────────────────────────────
 
     def _setup_scroll(self) -> None:
-        """Override: no scroll area — player fills the viewport with a fixed
-        layout. It still keeps the shell's room at the bottom, so the
-        floating Now Playing capsule never covers its controls."""
+        """Override: no scroll area — the page fills the viewport (the table
+        and the queue scroll themselves). It keeps the shell's room at the
+        bottom, so the floating Now Playing capsule never covers anything."""
         from gui.themes.tokens import SPACE
 
         outer = QtWidgets.QVBoxLayout(self)
@@ -722,8 +1051,8 @@ class PlayerWorkspace(WorkspaceBase):
         outer.setSpacing(0)
         self._inner = GradientWidget()
         self._content_layout = QtWidgets.QVBoxLayout(self._inner)
-        self._content_layout.setContentsMargins(0, 0, 0, 0)
-        self._content_layout.setSpacing(0)
+        self._content_layout.setContentsMargins(SPACE.gutter, SPACE.xs, SPACE.gutter, 0)
+        self._content_layout.setSpacing(SPACE.sm)
         outer.addWidget(self._inner)
 
     def __init__(
@@ -746,6 +1075,8 @@ class PlayerWorkspace(WorkspaceBase):
         self._stopped_row:  dict | None = None  # direct track that was stopped / ended
         self._shuffle:      bool       = False
         self._repeat:       int        = _REPEAT_OFF
+        self._volume:       int        = 80     # 0-100 (the capsule's knob)
+        self._playing_now:  bool       = False  # last state sent to the capsule
         self._keyboard_mode: bool      = False  # arrow-key navigation mode
         self._kb_target: str           = "library"  # "library" or "queue"
         self._lib_kb_row: int          = -1  # last-played row in library table for kb nav
@@ -811,71 +1142,105 @@ class PlayerWorkspace(WorkspaceBase):
         self._install_shortcuts()
         get_manager().theme_changed.connect(self._apply_theme)
         self._apply_theme(get_manager().current)
+        self._update_library_empty()
 
     # ── UI construction ────────────────────────────────────────────────────
 
+    def _icon_button(self, glyph: str, tip: str, slot) -> QtWidgets.QPushButton:
+        """A 34 px round ghost button with a painted glyph."""
+        btn = QtWidgets.QPushButton()
+        btn.setFlat(True)
+        btn.setFixedSize(34, 34)
+        btn.setToolTip(tip)
+        btn.setAccessibleName(tip.rstrip("…"))
+        btn.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
+        set_glyph(btn, glyph, role="muted", size=17)
+        btn.clicked.connect(slot)
+        return btn
+
+    def _elevate(self, card: QtWidgets.QWidget) -> None:
+        """Register a card made here for its painted shadow."""
+        self._cards.append(card)
+        self._inner.add_elevated(card)
+
+    @staticmethod
+    def _overlay(base: QtWidgets.QWidget, cover: QtWidgets.QWidget) -> QtWidgets.QGridLayout:
+        """``cover`` (an empty state) over ``base`` in one grid cell; the
+        base stays in place (and keeps keyboard focus) underneath."""
+        grid = QtWidgets.QGridLayout()
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.addWidget(base, 0, 0)
+        grid.addWidget(cover, 0, 0)
+        return grid
+
     def _build_ui(self) -> None:
+        from gui.themes.glass import font
+        from gui.themes.tokens import SPACE
+
         cl = self._content_layout
 
-        # ── Toolbar ───────────────────────────────────────────────────────
-        toolbar = QtWidgets.QWidget()
-        toolbar.setFixedHeight(50)
-        tb = QtWidgets.QHBoxLayout(toolbar)
-        tb.setContentsMargins(16, 6, 16, 6)
-        tb.setSpacing(8)
+        # ── Purpose (one line; the header already says "Player") ──────────
+        self._subtitle = ElidedLabel(
+            "Double-click a track to play it, or build a queue. "
+            "The bar at the bottom is the transport.")
+        self._subtitle.setObjectName("sectionSubtitle")
+        self._subtitle.setFont(font("label"))
+        cl.addWidget(self._subtitle)
 
-        title_lbl = self._make_section_title("Player")
-        title_lbl.setFixedWidth(68)
-        tb.addWidget(title_lbl)
+        # ── "Playback unavailable": a quiet notice, shown without a backend ─
+        self._notice = GlassPanel(surface="well")
+        self._notice.setObjectName("playerNotice")
+        nl = QtWidgets.QHBoxLayout(self._notice)
+        nl.setContentsMargins(12, 7, 14, 7)
+        nl.setSpacing(8)
+        self._notice_icon = QtWidgets.QLabel()
+        self._notice_icon.setFixedSize(16, 16)
+        nl.addWidget(self._notice_icon)
+        self._vlc_status_lbl = QtWidgets.QLabel("")
+        self._vlc_status_lbl.setObjectName("playerBackendStatus")
+        self._vlc_status_lbl.setFont(font("label", weight=600))
+        nl.addWidget(self._vlc_status_lbl)
+        self._vlc_reason_lbl = ElidedLabel("")
+        self._vlc_reason_lbl.setObjectName("mutedLabel")
+        self._vlc_reason_lbl.setFont(font("label"))
+        nl.addWidget(self._vlc_reason_lbl, 1)
+        self._notice.setVisible(False)
+        cl.addWidget(self._notice)
 
+        row = QtWidgets.QHBoxLayout()
+        row.setSpacing(SPACE.gutter)
+        cl.addLayout(row, 1)
+
+        # ── Library card (the table on glass; the playing cover glows) ────
+        self._bg_art = _LibraryCard()
+        self._bg_art.setObjectName("playerLibraryCard")
+        self._bg_art.setMinimumWidth(330)
+        self._elevate(self._bg_art)
+        lib = QtWidgets.QVBoxLayout(self._bg_art)
+        lib.setContentsMargins(14, 14, 14, 10)
+        lib.setSpacing(8)
+
+        head = QtWidgets.QHBoxLayout()
+        head.setSpacing(4)
         self._search = QtWidgets.QLineEdit()
-        self._search.setPlaceholderText("Search tracks…")
+        self._search.setObjectName("playerSearch")
+        self._search.setPlaceholderText("Search titles, artists, albums")
+        self._search.setAccessibleName("Search the library")
         self._search.setClearButtonEnabled(True)
+        self._search.setMinimumWidth(120)
+        self._search_action = self._search.addAction(
+            QtGui.QIcon(), QtWidgets.QLineEdit.ActionPosition.LeadingPosition)
         self._search.textChanged.connect(self._apply_filter)
-        tb.addWidget(self._search, 2)
+        head.addWidget(self._search, 1)
+        head.addSpacing(4)
+        self._reload_btn = self._icon_button("refresh", "Re-scan the library folder",
+                                             self._reload_library)
+        self._browse_btn = self._icon_button("file", "Open and play an audio file…",
+                                             self._on_browse_file)
+        head.addWidget(self._reload_btn)
+        head.addWidget(self._browse_btn)
+        lib.addLayout(head)
 
-        self._scan_progress = QtWidgets.QProgressBar()
-        self._scan_progress.setRange(0, 0)
-        self._scan_progress.setFixedHeight(6)
-        self._scan_progress.setTextVisible(False)
-        self._scan_progress.setVisible(False)
-        tb.addWidget(self._scan_progress, 1)
-
-        self._reload_btn = QtWidgets.QPushButton("⟳  Reload")
-        self._reload_btn.setToolTip("Re-scan the library folder")
-        self._reload_btn.clicked.connect(self._reload_library)
-        tb.addWidget(self._reload_btn)
-
-        browse_btn = QtWidgets.QPushButton("Browse…")
-        browse_btn.setToolTip("Open and play a single audio file")
-        browse_btn.clicked.connect(self._on_browse_file)
-        tb.addWidget(browse_btn)
-
-        load_pl_btn = QtWidgets.QPushButton("Load M3U")
-        load_pl_btn.setToolTip("Load an M3U playlist into the queue")
-        load_pl_btn.clicked.connect(self._load_m3u)
-        tb.addWidget(load_pl_btn)
-
-        self._highlight_chk = QtWidgets.QCheckBox("30s Preview")
-        self._highlight_chk.setToolTip(
-            "Skip to the 30s mark and auto-advance after 15s — good for quick audits"
-        )
-        self._highlight_chk.toggled.connect(self._on_highlight_toggled)
-        tb.addWidget(self._highlight_chk)
-
-        cl.addWidget(toolbar)
-
-        # Thin separator
-        self._sep = QtWidgets.QFrame()
-        self._sep.setFrameShape(QtWidgets.QFrame.Shape.HLine)
-        self._sep.setFixedHeight(1)
-        cl.addWidget(self._sep)
-
-        # ── Main splitter: library table (left) + info/queue (right) ──────
-        splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
-        splitter.setChildrenCollapsible(False)
-
-        # ── Library table (inside a background-art container) ────────────
         self._lib_table = QtWidgets.QTableWidget(0, 5)
         self._lib_table.setObjectName("playerLibraryTable")
         self._lib_table.setHorizontalHeaderLabels(["#", "Title", "Artist", "Album", "Time"])
@@ -888,39 +1253,50 @@ class PlayerWorkspace(WorkspaceBase):
         self._lib_table.setEditTriggers(
             QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers
         )
-        self._lib_table.setAlternatingRowColors(True)
-        self._lib_table.verticalHeader().setVisible(False)
-        self._lib_table.verticalHeader().setDefaultSectionSize(24)
+        self._lib_table.setAlternatingRowColors(False)
         self._lib_table.setShowGrid(False)
+        self._lib_table.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        self._lib_table.setWordWrap(False)
+        self._lib_table.setVerticalScrollMode(
+            QtWidgets.QAbstractItemView.ScrollMode.ScrollPerPixel)
+        self._lib_table.setHorizontalScrollBarPolicy(
+            QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._lib_table.verticalHeader().setVisible(False)
+        self._lib_table.verticalHeader().setDefaultSectionSize(_TrackTableDelegate.ROW_H)
+        self._lib_table.verticalHeader().setMinimumSectionSize(_TrackTableDelegate.ROW_H)
+        self._lib_delegate = _TrackTableDelegate(self._lib_table, self._playing_marker)
+        self._lib_table.setItemDelegate(self._lib_delegate)
 
         hh = self._lib_table.horizontalHeader()
         hh.setStretchLastSection(False)
+        hh.setHighlightSections(False)
+        hh.setDefaultAlignment(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter)
         hh.setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeMode.Fixed)
         hh.setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeMode.Stretch)
         hh.setSectionResizeMode(2, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
         hh.setSectionResizeMode(3, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
         hh.setSectionResizeMode(4, QtWidgets.QHeaderView.ResizeMode.Fixed)
-        self._lib_table.setColumnWidth(0, 36)
-        self._lib_table.setColumnWidth(4, 52)
+        for col in (_COL_NUM, _COL_TIME):
+            item = self._lib_table.horizontalHeaderItem(col)
+            if item is not None:
+                item.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignRight
+                                      | QtCore.Qt.AlignmentFlag.AlignVCenter)
+        self._lib_table.setColumnWidth(0, 40)
+        self._lib_table.setColumnWidth(4, 60)
         # Default order: Artist → Album → Track, ascending.
         hh.setSortIndicator(2, QtCore.Qt.SortOrder.AscendingOrder)
         self._lib_table.setSortingEnabled(True)
-
-        # Semi-transparent items so the background art bleeds through subtly
-        self._lib_table.setAutoFillBackground(False)
-        self._lib_table.viewport().setAutoFillBackground(False)
-        self._lib_table.viewport().setAttribute(
-            QtCore.Qt.WidgetAttribute.WA_TranslucentBackground, True
-        )
 
         self._lib_table.doubleClicked.connect(self._on_table_double_click)
         self._lib_table.setContextMenuPolicy(
             QtCore.Qt.ContextMenuPolicy.CustomContextMenu
         )
         self._lib_table.customContextMenuRequested.connect(self._on_table_context_menu)
+        self._lib_table.installEventFilter(self)   # width → which columns fit
 
         # Hover popup for album art preview (1.5 s dwell). Mouse tracking is
-        # needed for button-less MouseMove events to reach the filter.
+        # needed for button-less MouseMove events to reach the filter (it
+        # also drives the hovered-row highlight).
         self._hover_popup = _TrackHoverPopup(self)
         self._hover_timer = QtCore.QTimer(self)
         self._hover_timer.setSingleShot(True)
@@ -933,50 +1309,95 @@ class PlayerWorkspace(WorkspaceBase):
         # Track which panel was last interacted with for keyboard mode targeting
         self._lib_table.viewport().installEventFilter(self._make_focus_tracker("library"))
 
-        # Wrap the table in the background-art container
-        self._bg_art = _BgArtWidget()
-        self._bg_art.layout().addWidget(self._lib_table)
-        splitter.addWidget(self._bg_art)
+        self._lib_empty = EmptyState("No library selected")
+        lib.addLayout(self._overlay(self._lib_table, self._lib_empty), 1)
 
-        # ── Right panel ───────────────────────────────────────────────────
-        right = QtWidgets.QWidget()
-        right.setMinimumWidth(240)
-        right.setMaximumWidth(340)
-        rl = QtWidgets.QVBoxLayout(right)
-        rl.setContentsMargins(12, 10, 12, 10)
-        rl.setSpacing(8)
+        foot = QtWidgets.QHBoxLayout()
+        foot.setSpacing(10)
+        self._status_lbl = ElidedLabel("Load a library to begin.")
+        self._status_lbl.setObjectName("mutedLabel")
+        self._status_lbl.setFont(font("caption"))
+        foot.addWidget(self._status_lbl, 1)
+        self._scan_progress = QtWidgets.QProgressBar()
+        self._scan_progress.setRange(0, 0)
+        self._scan_progress.setFixedSize(72, 4)
+        self._scan_progress.setTextVisible(False)
+        self._scan_progress.setVisible(False)
+        foot.addWidget(self._scan_progress)
+        self._highlight_chk = QtWidgets.QCheckBox("30 s preview")
+        self._highlight_chk.setToolTip(
+            "Audition mode: each track starts at 0:30 and moves on after 15 s"
+        )
+        self._highlight_chk.toggled.connect(self._on_highlight_toggled)
+        foot.addWidget(self._highlight_chk)
+        lib.addLayout(foot)
+        row.addWidget(self._bg_art, 1)
 
-        # Now-playing covers: prev / current / next
+        # ── Side column: now playing (covers) + queue / recently played ───
+        self._side = QtWidgets.QWidget()
+        self._side.setObjectName("playerSide")
+        self._side.setMinimumWidth(250)
+        self._side.setMaximumWidth(330)
+        self._side.setSizePolicy(QtWidgets.QSizePolicy.Policy.Preferred,
+                                 QtWidgets.QSizePolicy.Policy.Preferred)
+        self._side.installEventFilter(self)          # height → covers or not
+        side = QtWidgets.QVBoxLayout(self._side)
+        side.setContentsMargins(0, 0, 0, 0)
+        side.setSpacing(SPACE.gutter)
+
+        self._np_card = GlassCard()
+        self._np_card.setObjectName("playerNowPlayingCard")
+        self._elevate(self._np_card)
+        npl = QtWidgets.QVBoxLayout(self._np_card)
+        npl.setContentsMargins(12, 10, 12, 14)
+        npl.setSpacing(2)
         self._covers = NowPlayingCovers()
-        rl.addWidget(self._covers)
-
-        # Now-playing metadata
-        self._np_title = QtWidgets.QLabel("—")
+        npl.addWidget(self._covers)
+        self._np_title = ElidedLabel("Nothing playing")
         self._np_title.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-        self._np_title.setWordWrap(True)
-        self._np_title.setStyleSheet("font-size: 13px; font-weight: 600; padding: 0 4px;")
-
-        self._np_artist = QtWidgets.QLabel("")
+        self._np_title.setFont(font("body", weight=650))
+        self._np_artist = ElidedLabel("")
+        self._np_artist.setObjectName("mutedLabel")
         self._np_artist.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        self._np_artist.setFont(font("caption"))
+        npl.addWidget(self._np_title)
+        npl.addWidget(self._np_artist)
+        self._np_card.setFixedHeight(self._np_card_height())
+        side.addWidget(self._np_card)
 
-        rl.addWidget(self._np_title)
-        rl.addWidget(self._np_artist)
+        self._queue_card = GlassCard()
+        self._queue_card.setObjectName("playerQueueCard")
+        self._elevate(self._queue_card)
+        ql = QtWidgets.QVBoxLayout(self._queue_card)
+        ql.setContentsMargins(14, 12, 12, 10)
+        ql.setSpacing(6)
 
-        # Queue header + list
-        q_hdr_row = QtWidgets.QHBoxLayout()
-        q_hdr = QtWidgets.QLabel("Queue")
-        q_hdr.setObjectName("cardTitle")
+        q_head = QtWidgets.QHBoxLayout()
+        q_head.setSpacing(0)
+        self._q_title = QtWidgets.QLabel("Queue")
+        self._q_title.setObjectName("cardTitle")
+        q_head.addWidget(self._q_title)
+        q_head.addSpacing(8)
         self._q_count_lbl = QtWidgets.QLabel("")
-        q_hdr_row.addWidget(q_hdr)
-        q_hdr_row.addStretch()
-        q_hdr_row.addWidget(self._q_count_lbl)
-        rl.addLayout(q_hdr_row)
+        self._q_count_lbl.setObjectName("mutedLabel")
+        self._q_count_lbl.setFont(font("caption", tabular=True))
+        q_head.addWidget(self._q_count_lbl, 0, QtCore.Qt.AlignmentFlag.AlignBaseline)
+        q_head.addStretch(1)
+        self._add_queue_btn = self._icon_button(
+            "plus", "Add the selected library tracks to the queue", self._add_selected_to_queue)
+        self._load_m3u_btn = self._icon_button(
+            "folder", "Load an M3U playlist into the queue…", self._load_m3u)
+        self._save_m3u_btn = self._icon_button(
+            "save", "Save the queue as an M3U playlist…", self._save_m3u)
+        self._clear_queue_btn = self._icon_button("trash", "Clear the queue", self._clear_queue)
+        for b in (self._add_queue_btn, self._load_m3u_btn, self._save_m3u_btn,
+                  self._clear_queue_btn):
+            q_head.addWidget(b)
+        ql.addLayout(q_head)
 
         self._queue_list = QtWidgets.QListWidget()
-        self._queue_list.setAlternatingRowColors(True)
-        self._queue_list.setHorizontalScrollBarPolicy(
-            QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff
-        )
+        self._queue_list.setObjectName("playerQueueList")
+        self._style_row_list(self._queue_list)
         self._queue_list.doubleClicked.connect(self._on_queue_double_click)
         self._queue_list.setContextMenuPolicy(
             QtCore.Qt.ContextMenuPolicy.CustomContextMenu
@@ -984,175 +1405,95 @@ class PlayerWorkspace(WorkspaceBase):
         self._queue_list.customContextMenuRequested.connect(self._on_queue_context_menu)
         # Track keyboard mode focus on queue panel
         self._queue_list.viewport().installEventFilter(self._make_focus_tracker("queue"))
-        rl.addWidget(self._queue_list, 1)
+        self._queue_empty = EmptyState("Queue is empty", "Select tracks and press +.")
+        ql.addLayout(self._overlay(self._queue_list, self._queue_empty), 1)
 
-        # Queue action buttons
-        q_btns1 = QtWidgets.QHBoxLayout()
-        self._add_queue_btn = QtWidgets.QPushButton("+ Add Selected")
-        self._add_queue_btn.setToolTip("Add selected library tracks to the queue")
-        self._add_queue_btn.clicked.connect(self._add_selected_to_queue)
-        self._clear_queue_btn = QtWidgets.QPushButton("Clear")
-        self._clear_queue_btn.clicked.connect(self._clear_queue)
-        q_btns1.addWidget(self._add_queue_btn, 1)
-        q_btns1.addWidget(self._clear_queue_btn)
-        rl.addLayout(q_btns1)
-
-        save_m3u_btn = QtWidgets.QPushButton("💾  Save Queue as M3U…")
-        save_m3u_btn.clicked.connect(self._save_m3u)
-        rl.addWidget(save_m3u_btn)
-
-        # Recently played (collapsed by default — expands in-place)
-        rp_hdr_row = QtWidgets.QHBoxLayout()
-        rp_hdr = QtWidgets.QLabel("Recently Played")
-        rp_hdr.setObjectName("cardTitle")
-        self._rp_toggle_btn = QtWidgets.QPushButton("▶")
+        # Recently played (collapsed by default — expands in place)
+        rp_row = QtWidgets.QHBoxLayout()
+        rp_row.setSpacing(4)
+        self._rp_hdr = QtWidgets.QLabel("Recently played")
+        self._rp_hdr.setObjectName("mutedLabel")
+        self._rp_hdr.setFont(font("caption", weight=600))
+        rp_row.addWidget(self._rp_hdr)
+        rp_row.addStretch(1)
+        self._rp_toggle_btn = QtWidgets.QPushButton()
         self._rp_toggle_btn.setFlat(True)
-        self._rp_toggle_btn.setFixedSize(22, 18)
+        self._rp_toggle_btn.setFixedSize(28, 26)
         self._rp_toggle_btn.setToolTip("Show / hide recently played")
+        self._rp_toggle_btn.setAccessibleName("Show recently played")
+        self._rp_toggle_btn.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
+        set_glyph(self._rp_toggle_btn, "chevron_right", role="muted", size=14)
         self._rp_toggle_btn.clicked.connect(self._toggle_recent)
-        rp_hdr_row.addWidget(rp_hdr)
-        rp_hdr_row.addStretch()
-        rp_hdr_row.addWidget(self._rp_toggle_btn)
-        rl.addLayout(rp_hdr_row)
+        rp_row.addWidget(self._rp_toggle_btn)
+        ql.addLayout(rp_row)
 
         self._recent_list = QtWidgets.QListWidget()
+        self._recent_list.setObjectName("playerRecentList")
+        self._style_row_list(self._recent_list, playing=False)
         self._recent_list.setFixedHeight(0)   # collapsed initially
-        self._recent_list.setAlternatingRowColors(True)
-        self._recent_list.setHorizontalScrollBarPolicy(
-            QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff
-        )
         self._recent_list.doubleClicked.connect(self._on_recent_double_click)
-        rl.addWidget(self._recent_list)
+        ql.addWidget(self._recent_list)
+        side.addWidget(self._queue_card, 1)
+        # An explicit minimum: what the column holds never props the page
+        # open; _fit_side_column drops the carousel when it runs short.
+        self._side.setMinimumHeight(self._queue_card.minimumSizeHint().height())
+        row.addWidget(self._side)
 
-        splitter.addWidget(right)
-        splitter.setSizes([720, 280])
-        cl.addWidget(splitter, 1)
+    def _style_row_list(self, view: QtWidgets.QListWidget, *, playing: bool = True) -> None:
+        """A transparent list of glass rows (see ``_QueueRowDelegate``)."""
+        view.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        view.setAlternatingRowColors(False)
+        view.setUniformItemSizes(True)
+        view.setMouseTracking(True)
+        view.viewport().setAttribute(QtCore.Qt.WidgetAttribute.WA_Hover, True)
+        view.setVerticalScrollMode(QtWidgets.QAbstractItemView.ScrollMode.ScrollPerPixel)
+        view.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        view.setItemDelegate(_QueueRowDelegate(view, self._playing_marker if playing else None))
 
-        # ── Transport bar ─────────────────────────────────────────────────
-        transport = QtWidgets.QWidget()
-        transport.setFixedHeight(84)
-        transport.setObjectName("transportBar")
-        tl = QtWidgets.QVBoxLayout(transport)
-        tl.setContentsMargins(16, 6, 16, 4)
-        tl.setSpacing(4)
+    # ── Responsive pieces ─────────────────────────────────────────────────
 
-        # Seek row
-        seek_row = QtWidgets.QHBoxLayout()
-        self._pos_lbl = QtWidgets.QLabel("0:00")
-        self._pos_lbl.setFixedWidth(36)
-        self._seek_slider = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
-        self._seek_slider.setRange(0, 1000)
-        # valueChanged covers drags, wheel, keys and groove clicks; while the
-        # knob is held only the release seeks. Programmatic updates from the
-        # position timer block signals, so they never seek.
-        self._seek_slider.valueChanged.connect(self._on_seek_value_changed)
-        self._seek_slider.sliderReleased.connect(self._on_seek_released)
-        self._dur_lbl = QtWidgets.QLabel("0:00")
-        self._dur_lbl.setFixedWidth(36)
-        self._dur_lbl.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight)
-        seek_row.addWidget(self._pos_lbl)
-        seek_row.addWidget(self._seek_slider, 1)
-        seek_row.addWidget(self._dur_lbl)
-        tl.addLayout(seek_row)
+    def _fit_side_column(self) -> None:
+        """Show the cover carousel only when the column has room for it at
+        full size *and* a usable queue under it (the capsule shows the
+        current cover anyway). The column's own minimum is explicit, so the
+        card never props the page open: it is hidden first."""
+        from gui.themes.tokens import SPACE
 
-        # Buttons row
-        ctrl_row = QtWidgets.QHBoxLayout()
-        ctrl_row.setSpacing(4)
+        card_h = self._np_card_height()
+        queue_min = self._queue_card.minimumSizeHint().height()
+        show = self._side.height() >= card_h + SPACE.gutter + queue_min
+        if self._np_card.isVisibleTo(self._side) != show:
+            self._np_card.setVisible(show)
+        # A narrow column drops the queue count from the header (the title
+        # keeps its room; the tooltip still says it).
+        self._q_count_lbl.setVisible(self._side.width() >= 300)
 
-        def _tbtn(icon: str, size: tuple = (34, 30)) -> QtWidgets.QPushButton:
-            b = QtWidgets.QPushButton(icon)
-            b.setFixedSize(*size)
-            return b
+    def _np_card_height(self) -> int:
+        lay = self._np_card.layout()
+        m = lay.contentsMargins()
+        cm = self._np_card.contentsMargins()
+        inner = (self._covers.sizeHint().height() + self._np_title.sizeHint().height()
+                 + self._np_artist.sizeHint().height() + 2 * lay.spacing())
+        return inner + m.top() + m.bottom() + cm.top() + cm.bottom()
 
-        self._prev_btn = _tbtn("⏮")
-        self._prev_btn.setToolTip("Previous track  [P]")
-        self._prev_btn.clicked.connect(self.play_prev)
-
-        self._play_btn = self._make_primary_button("▶")
-        self._play_btn.setFixedSize(46, 34)
-        self._play_btn.setEnabled(False)
-        self._play_btn.setToolTip("Play / Pause  [Space]")
-        self._play_btn.clicked.connect(self._on_play_pause)
-
-        self._next_btn = _tbtn("⏭")
-        self._next_btn.setToolTip("Next track  [N]")
-        self._next_btn.clicked.connect(self.play_next)
-
-        self._stop_btn = _tbtn("■")
-        self._stop_btn.setEnabled(False)
-        self._stop_btn.setToolTip("Stop")
-        self._stop_btn.clicked.connect(self._on_stop)
-
-        self._shuffle_btn = _tbtn("🔀")
-        self._shuffle_btn.setCheckable(True)
-        self._shuffle_btn.setToolTip("Shuffle")
-        self._shuffle_btn.toggled.connect(self._on_shuffle_toggled)
-
-        self._repeat_btn = _tbtn("🔁")
-        self._repeat_btn.setToolTip("Repeat: Off")
-        self._repeat_btn.clicked.connect(self._cycle_repeat)
-
-        ctrl_row.addWidget(self._prev_btn)
-        ctrl_row.addWidget(self._play_btn)
-        ctrl_row.addWidget(self._next_btn)
-        ctrl_row.addWidget(self._stop_btn)
-        ctrl_row.addSpacing(8)
-        ctrl_row.addWidget(self._shuffle_btn)
-        ctrl_row.addWidget(self._repeat_btn)
-        ctrl_row.addStretch(1)
-
-        vol_lbl = QtWidgets.QLabel("🔊")
-        vol_lbl.setStyleSheet("font-size: 12px;")
-        self._vol_slider = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
-        self._vol_slider.setRange(0, 100)
-        self._vol_slider.setValue(80)
-        self._vol_slider.setFixedWidth(90)
-        self._vol_slider.setToolTip("Volume")
-        # valueChanged: drags, wheel, keys and groove clicks all reach the
-        # backend. set_volume() only calls setValue, which is idempotent, so
-        # syncing from the Now Playing bar cannot loop.
-        self._vol_slider.valueChanged.connect(self._on_volume_value_changed)
-
-        self._vlc_status_lbl = QtWidgets.QLabel("")
-        self._vlc_status_lbl.setObjectName("playerBackendStatus")
-        self._vlc_status_lbl.setWordWrap(True)
-
-        ctrl_row.addWidget(vol_lbl)
-        ctrl_row.addWidget(self._vol_slider)
-        ctrl_row.addSpacing(10)
-        ctrl_row.addWidget(self._vlc_status_lbl, 1)
-        tl.addLayout(ctrl_row)
-
-        cl.addWidget(transport)
-
-        # Status strip
-        self._status_lbl = QtWidgets.QLabel("Load a library to begin.")
-        cl.addWidget(self._status_lbl)
+    def _fit_table_columns(self) -> None:
+        """Narrow table: hide Album, then #, so Title keeps room (the search
+        still matches the hidden Album text)."""
+        w = self._lib_table.width()
+        self._lib_table.setColumnHidden(_COL_ALBUM, w < self._HIDE_ALBUM_BELOW)
+        self._lib_table.setColumnHidden(_COL_NUM, w < self._HIDE_NUMBER_BELOW)
 
     def _apply_theme(self, tokens=None) -> None:
-        """(Re)style everything that isn't covered by the app stylesheet."""
+        """Repaint what paints itself; re-tint the icons that aren't glyph
+        buttons (those follow the theme on their own)."""
         t = tokens if tokens is not None else get_manager().current
-        muted = f"color: {t.text_secondary}; font-size: 11px;"
-        self._scan_progress.setStyleSheet(
-            "QProgressBar { background: transparent; border: none; border-radius: 3px; }"
-            f"QProgressBar::chunk {{ background: {t.accent}; border-radius: 3px; }}"
-        )
-        self._sep.setStyleSheet(f"background: {t.card_border}; border: none;")
-        self._lib_table.setStyleSheet(
-            "QTableWidget { background: transparent; border: none; }"
-            f"QTableWidget::item {{ background: {_rgba(t.content_bg, 210)}; color: {t.text_primary}; }}"
-            f"QTableWidget::item:alternate {{ background: {_rgba(t.card_bg, 210)}; }}"
-            f"QTableWidget::item:selected {{ background: {_rgba(t.accent, 100)};"
-            f" color: {t.text_primary}; }}"
-            f"QHeaderView::section {{ background: {_rgba(t.card_bg, 240)};"
-            f" color: {t.text_secondary}; border: none; padding: 2px 4px; }}"
-        )
-        for lbl in (self._np_artist, self._q_count_lbl, self._pos_lbl, self._dur_lbl,
-                    self._vlc_status_lbl):
-            lbl.setStyleSheet(muted)
-        self._status_lbl.setStyleSheet(muted + " padding: 2px 18px 4px;")
+        self._search_action.setIcon(glyph_icon("search", t.text_secondary, 16))
+        self._notice_icon.setPixmap(
+            glyph_icon("warning", t.warning, 16).pixmap(16, 16))
         self._hover_popup.apply_theme(t)
         self._refresh_queue_list()
+        self._lib_table.viewport().update()
+        self._recent_list.viewport().update()
         self._bg_art.update()
         self._covers.update()
 
@@ -1160,19 +1501,20 @@ class PlayerWorkspace(WorkspaceBase):
         b = self._backend
         if b.available:
             self._vlc_status_lbl.setText(f"{b.name}: ready")
-            self._vlc_status_lbl.setToolTip("")
-            self._apply_volume(self._vol_slider.value())
+            self._vlc_reason_lbl.setText("")
+            self._notice.setToolTip("")
+            self._notice.setVisible(False)
+            self._apply_volume(self._volume)
         else:
             reason = b.unavailable_reason or "No playback backend is available."
             self._vlc_status_lbl.setText("Playback unavailable")
-            self._vlc_status_lbl.setToolTip(reason)
+            self._vlc_reason_lbl.setText(reason)
+            self._notice.setToolTip(reason)
+            self._notice.setVisible(True)
             # "info", not "warn": a missing optional dependency is reported on
             # the page itself, and a warning would pop the Activity Log open
             # on every launch of a machine without VLC.
             self._log(f"Playback unavailable: {reason}", "info")
-            for w in (self._play_btn, self._prev_btn, self._next_btn, self._stop_btn,
-                      self._seek_slider):
-                w.setToolTip(f"Playback unavailable — {reason}")
         self._refresh_transport()
 
     @property
@@ -1205,6 +1547,7 @@ class PlayerWorkspace(WorkspaceBase):
             self._reload_library()
         else:
             self._scanned_path = ""
+        self._update_library_empty()
 
     def _cancel_scan(self) -> None:
         scanner = self._lib_scanner
@@ -1245,6 +1588,7 @@ class PlayerWorkspace(WorkspaceBase):
         self._lib_scanner = scanner
         self._scanned_path = os.path.normcase(os.path.abspath(self._library_path))
         self._start_worker(scanner, "Player library scan", ask_before_quit=False)
+        self._update_library_empty()
         try:
             scanner.setPriority(QtCore.QThread.Priority.LowPriority)
         except RuntimeError:
@@ -1273,6 +1617,8 @@ class PlayerWorkspace(WorkspaceBase):
 
         loaded = self._lib_table.rowCount()
         self._status_lbl.setText(f"Loading… {loaded} tracks found")
+        if loaded == len(batch):
+            self._update_library_empty()     # the first rows: show the table
 
         # Report latency back to scanner for dynamic backpressure
         if self._lib_scanner is not None:
@@ -1304,18 +1650,48 @@ class PlayerWorkspace(WorkspaceBase):
         self._status_lbl.setText(f"Loaded {n} {suffix}.")
 
         self._scan_progress.setVisible(False)
+        self._update_library_empty()
 
     def _apply_filter(self, text: str) -> None:
         query = text.strip().lower()
+        shown = 0
         for r in range(self._lib_table.rowCount()):
             if not query:
                 self._lib_table.setRowHidden(r, False)
+                shown += 1
                 continue
             row_text = " ".join(
                 (self._lib_table.item(r, c) or QtWidgets.QTableWidgetItem()).text().lower()
                 for c in range(1, 4)  # Title, Artist, Album
             )
-            self._lib_table.setRowHidden(r, query not in row_text)
+            hidden = query not in row_text
+            self._lib_table.setRowHidden(r, hidden)
+            shown += not hidden
+        self._update_library_empty(no_matches=bool(query) and shown == 0)
+
+    def _update_library_empty(self, *, no_matches: bool = False) -> None:
+        """What the library card shows when the table has nothing to show."""
+        empty = self._lib_empty
+        if self._lib_table.rowCount() and not no_matches:
+            empty.setVisible(False)
+            return
+        if no_matches:
+            empty.set_text("No matches",
+                           f"Nothing in the library matches \u201c{self._search.text().strip()}\u201d.")
+        elif not self._library_path:
+            empty.set_text("No library selected",
+                           "Choose your music folder with Change library at the top; "
+                           "its tracks will be listed here.")
+        elif self._lib_scanner is not None:
+            empty.set_text("Reading your library…", "Tracks appear here as they are found.")
+        elif not self._scan_finished:
+            empty.set_text("Not scanned yet",
+                           "Press the reload button to list this folder's tracks.")
+        else:
+            empty.set_text("No tracks found",
+                           "This folder has no audio files (Docs, Playlists, Trash and "
+                           "Quarantine are not searched).")
+        empty.setVisible(True)
 
     # ── Rows for paths (scan cache first, tags read off the GUI thread) ───
 
@@ -1389,12 +1765,17 @@ class PlayerWorkspace(WorkspaceBase):
         rows = self._get_selected_paths()
         if not rows:
             return
+        ink = _tokens().text_secondary
         menu = QtWidgets.QMenu(self)
-        menu.addAction("▶  Play now",         lambda: self._play_directly(rows[0]))
-        menu.addAction("+ Add to queue",      lambda: self._add_paths_to_queue(rows))
+        menu.addAction(glyph_icon("play", ink), "Play now",
+                       lambda: self._play_directly(rows[0]))
+        menu.addAction(glyph_icon("plus", ink), "Add to queue",
+                       lambda: self._add_paths_to_queue(rows))
         menu.addSeparator()
-        menu.addAction("📂  Open folder",      lambda: self._open_in_explorer(rows[0]))
-        menu.addAction("💾  Save selection as M3U…", lambda: self._save_paths_as_m3u(rows))
+        menu.addAction(glyph_icon("folder", ink), "Open folder",
+                       lambda: self._open_in_explorer(rows[0]))
+        menu.addAction(glyph_icon("save", ink), "Save selection as M3U…",
+                       lambda: self._save_paths_as_m3u(rows))
         menu.exec(self._lib_table.viewport().mapToGlobal(pos))
 
     def _get_selected_paths(self) -> list[str]:
@@ -1419,20 +1800,43 @@ class PlayerWorkspace(WorkspaceBase):
         self._status_lbl.setText(f"Playback unavailable — {reason}")
 
     def _refresh_transport(self) -> None:
+        """Tell the capsule what it can do: a backend at all, and something
+        to play (Play is disabled before anything is queued or loaded)."""
+        self.transport_changed.emit(*self.transport_state())
+        self._lib_table.viewport().update()     # the playing-row marker
+
+    def transport_state(self) -> tuple[bool, bool, str]:
+        """(available, can_play, reason): what ``transport_changed`` says."""
         avail = self._backend.available
-        active = avail and self._backend_state() in ACTIVE_STATES
         has_something = bool(self._queue) or self._current_playing_row() is not None \
             or self._stopped_row is not None
-        self._play_btn.setEnabled(avail and has_something)
-        self._prev_btn.setEnabled(avail)
-        self._next_btn.setEnabled(avail)
-        self._stop_btn.setEnabled(active)
-        self._seek_slider.setEnabled(avail)
+        reason = "" if avail else (self._backend.unavailable_reason
+                                   or "No playback backend is available.")
+        return avail, avail and has_something, reason
+
+    def _set_playing_state(self, playing: bool) -> None:
+        """Playing / paused / stopped: tell the capsule, re-mark the rows."""
+        self._playing_now = playing
+        self.playback_state_changed.emit(playing)
+        self._lib_table.viewport().update()
+        self._queue_list.viewport().update()
+
+    def is_playing(self) -> bool:
+        return self._playing_now
+
+    def _playing_marker(self) -> tuple[str, bool]:
+        """(path of the loaded track or "", whether it is playing) for the
+        row delegates."""
+        row = self._current_playing_row()
+        return (row["path"] if row else ""), self._playing_now
 
     def _show_now_playing_text(self, row: dict) -> None:
-        self._np_title.setText(row.get("title") or Path(row["path"]).stem)
+        title = row.get("title") or Path(row["path"]).stem
+        self._np_title.setText(title)
+        self._np_title.setToolTip(title)
         sub = "  ·  ".join(p for p in [row.get("artist", ""), row.get("album", "")] if p)
         self._np_artist.setText(sub)
+        self._np_artist.setToolTip(sub)
 
     def _start_playback(self, row: dict) -> bool:
         """Load and play ``row``; update the page and notify the bar. The
@@ -1452,13 +1856,10 @@ class PlayerWorkspace(WorkspaceBase):
             self._on_track_error(error or "the backend refused to play it")
             return False
 
-        self._apply_volume(self._vol_slider.value())
+        self._apply_volume(self._volume)
         self._vol_apply_timer.start()   # VLC drops volume set before the stream opens
 
         self._dur_ms = 0
-        self._play_btn.setText("⏸")
-        self._set_seek_value(0)
-        self._pos_lbl.setText("0:00")
         self._pos_timer.start()
 
         self._show_now_playing_text(row)
@@ -1468,7 +1869,8 @@ class PlayerWorkspace(WorkspaceBase):
 
         title = row.get("title") or Path(path).stem
         self.now_playing_changed.emit(title, row.get("artist", ""), row.get("album", ""), None)
-        self.playback_state_changed.emit(True)
+        self.position_changed.emit(0, 0)
+        self._set_playing_state(True)
         self._log(f"Playing: {title}", "ok")
 
         if self._highlight_chk.isChecked():
@@ -1607,9 +2009,8 @@ class PlayerWorkspace(WorkspaceBase):
                 self._log(f"Could not pause: {exc}", "error")
                 return
             self._pause_preview()
-            self._play_btn.setText("▶")
             self._pos_timer.stop()
-            self.playback_state_changed.emit(False)
+            self._set_playing_state(False)
         elif st is PlaybackState.PAUSED and self._current_playing_row() is not None:
             try:
                 ok = self._backend.play()
@@ -1619,9 +2020,8 @@ class PlayerWorkspace(WorkspaceBase):
                 self._on_track_error("could not resume playback")
                 return
             self._resume_preview()
-            self._play_btn.setText("⏸")
             self._pos_timer.start()
-            self.playback_state_changed.emit(True)
+            self._set_playing_state(True)
         else:
             self._start_from_idle()
         self._refresh_transport()
@@ -1648,44 +2048,14 @@ class PlayerWorkspace(WorkspaceBase):
         if self._direct_row is not None:
             self._stopped_row = self._direct_row
         self._direct_row = None
-        self._play_btn.setText("▶")
         self._pos_timer.stop()
         self._vol_apply_timer.stop()
         self._skip_timer.stop()
         self._clear_preview_timers()
-        self._set_seek_value(0)
-        self._pos_lbl.setText("0:00")
         self._refresh_transport()
         self._refresh_queue_list()
-        self.playback_state_changed.emit(False)
+        self._set_playing_state(False)
         self.position_changed.emit(0, self._dur_ms)
-
-    def _set_seek_value(self, value: int) -> None:
-        was = self._seek_slider.blockSignals(True)
-        self._seek_slider.setValue(value)
-        self._seek_slider.blockSignals(was)
-
-    @Slot(int)
-    def _on_seek_value_changed(self, value: int) -> None:
-        if self._seek_slider.isSliderDown():
-            if self._dur_ms > 0:   # live time readout while dragging
-                self._pos_lbl.setText(_fmt_ms(int(value / 1000.0 * self._dur_ms)))
-            return
-        self._seek_to_fraction(value)
-
-    @Slot()
-    def _on_seek_released(self) -> None:
-        self._seek_to_fraction(self._seek_slider.value())
-
-    def _seek_to_fraction(self, value: int) -> None:
-        if not self._backend.available or self._current_playing_row() is None:
-            return
-        dur = self._backend.length_ms()
-        if dur > 0:
-            try:
-                self._backend.set_time_ms(int(value / 1000.0 * dur))
-            except Exception:  # noqa: BLE001
-                pass
 
     def _seek_relative(self, delta_ms: int) -> None:
         if not self._backend.available or self._current_playing_row() is None:
@@ -1699,11 +2069,6 @@ class PlayerWorkspace(WorkspaceBase):
 
     # ── Volume ────────────────────────────────────────────────────────────
 
-    @Slot(int)
-    def _on_volume_value_changed(self, value: int) -> None:
-        self._apply_volume(value)
-        self.volume_changed.emit(value)
-
     def _apply_volume(self, value: int) -> None:
         """Send *value* (0-100) to the backend, guarded against failures."""
         if self._backend.available:
@@ -1714,19 +2079,23 @@ class PlayerWorkspace(WorkspaceBase):
 
     @Slot()
     def _reapply_volume(self) -> None:
-        self._apply_volume(self._vol_slider.value())
+        self._apply_volume(self._volume)
 
     def set_volume(self, value: int) -> None:
-        """Public API — update the slider position and apply to the backend.
+        """Public API — set the volume (0-100) and apply it to the backend.
 
-        Safe to call from the Now Playing bar: ``setValue`` with the current
-        value emits nothing, so a bar ↔ page sync cannot loop.
+        A change is announced on ``volume_changed`` (the capsule's knob
+        follows); setting the current value again only re-applies it, so a
+        capsule ↔ player sync cannot loop.
         """
         value = max(0, min(100, int(value)))
-        if self._vol_slider.value() != value:
-            self._vol_slider.setValue(value)   # → _on_volume_value_changed
-        else:
-            self._apply_volume(value)
+        self._apply_volume(value)
+        if value != self._volume:
+            self._volume = value
+            self.volume_changed.emit(value)
+
+    def volume(self) -> int:
+        return self._volume
 
     def seek_to_ms(self, ms: int) -> None:
         """Public API — seek to an absolute position in milliseconds."""
@@ -1752,10 +2121,6 @@ class PlayerWorkspace(WorkspaceBase):
         if dur > 0:
             self._dur_ms = dur
             pos = max(0, pos)
-            if not self._seek_slider.isSliderDown():
-                self._set_seek_value(int((pos / dur) * 1000))
-                self._pos_lbl.setText(_fmt_ms(pos))
-            self._dur_lbl.setText(_fmt_ms(dur))
             self.position_changed.emit(pos, dur)
 
         if st is PlaybackState.ENDED:
@@ -1879,6 +2244,17 @@ class PlayerWorkspace(WorkspaceBase):
     # ── Shuffle / Repeat ───────────────────────────────────────────────────
 
     @Slot(bool)
+    def set_shuffle(self, on: bool) -> None:
+        """Public API (the capsule's shuffle toggle). Announced on
+        ``shuffle_changed``."""
+        on = bool(on)
+        if on != self._shuffle:
+            self._on_shuffle_toggled(on)
+        self.shuffle_changed.emit(on)   # also keeps a toggle that disagreed in step
+
+    def shuffle_enabled(self) -> bool:
+        return self._shuffle
+
     def _on_shuffle_toggled(self, checked: bool) -> None:
         self._shuffle = checked
         if checked:
@@ -1895,11 +2271,21 @@ class PlayerWorkspace(WorkspaceBase):
         self._load_neighbor_art()
 
     def _cycle_repeat(self) -> None:
-        self._repeat = (self._repeat + 1) % 3
-        labels = {_REPEAT_OFF: ("🔁", "Repeat: Off"), _REPEAT_TRACK: ("🔂", "Repeat: Track"), _REPEAT_ALL: ("🔁", "Repeat: All")}
-        icon, tip = labels[self._repeat]
-        self._repeat_btn.setText(icon)
-        self._repeat_btn.setToolTip(tip)
+        """Off → Track → All → Off (the capsule's repeat button)."""
+        self.set_repeat(_REPEAT_NAMES[(self._repeat + 1) % 3])
+
+    def cycle_repeat(self) -> None:
+        self._cycle_repeat()
+
+    @Slot(str)
+    def set_repeat(self, mode: str) -> None:
+        """Public API: "off", "track" or "all". Announced on ``repeat_changed``."""
+        by_name = {name: value for value, name in _REPEAT_NAMES.items()}
+        self._repeat = by_name.get(mode, _REPEAT_OFF)
+        self.repeat_changed.emit(_REPEAT_NAMES[self._repeat])
+
+    def repeat_mode(self) -> str:
+        return _REPEAT_NAMES[self._repeat]
 
     def _on_highlight_toggled(self, checked: bool) -> None:
         if not checked and self._preview_source == "checkbox":
@@ -1934,7 +2320,7 @@ class PlayerWorkspace(WorkspaceBase):
         self._shuffle_history.clear()
         self._shuffle_next_idx = None
         self._refresh_queue_list()
-        self._np_title.setText("—")
+        self._np_title.setText("Nothing playing")
         self._np_artist.setText("")
         self._covers.clear_all()
         self._bg_art.set_art(None)
@@ -1957,7 +2343,14 @@ class PlayerWorkspace(WorkspaceBase):
                 label += f"  –  {artist}"
             item = QtWidgets.QListWidgetItem(label)
             item.setData(QtCore.Qt.ItemDataRole.UserRole, i)
+            item.setData(_ROLE_TITLE, title)
+            item.setData(_ROLE_ARTIST, artist)
+            item.setData(_ROLE_LEAD, str(i + 1))
+            item.setToolTip(label)
             if i == playing_idx:
+                # The delegate paints the accent and the play glyph; the
+                # item's own font/colour say the same to accessibility.
+                item.setData(_ROLE_PLAYING, True)
                 item.setForeground(accent)
                 f = item.font()
                 f.setBold(True)
@@ -1966,9 +2359,12 @@ class PlayerWorkspace(WorkspaceBase):
         # Scroll to current
         if 0 <= playing_idx < self._queue_list.count():
             self._queue_list.scrollToItem(self._queue_list.item(playing_idx))
-        self._q_count_lbl.setText(
-            f"{len(self._queue)} track{'s' if len(self._queue) != 1 else ''}"
-        )
+        n = len(self._queue)
+        self._q_count_lbl.setText(f"{n} track{'s' if n != 1 else ''}" if n else "")
+        self._q_title.setToolTip(self._q_count_lbl.text())
+        self._queue_empty.setVisible(n == 0)
+        for b in (self._save_m3u_btn, self._clear_queue_btn):
+            b.setEnabled(n > 0)
 
     @Slot(QtCore.QModelIndex)
     def _on_queue_double_click(self, index: QtCore.QModelIndex) -> None:
@@ -1983,9 +2379,11 @@ class PlayerWorkspace(WorkspaceBase):
         if not item:
             return
         qi = item.data(QtCore.Qt.ItemDataRole.UserRole)
+        ink = _tokens().text_secondary
         menu = QtWidgets.QMenu(self)
-        menu.addAction("▶  Play now",         lambda: self._jump_queue(qi))
-        menu.addAction("✕  Remove from queue", lambda: self._remove_from_queue(qi))
+        menu.addAction(glyph_icon("play", ink), "Play now", lambda: self._jump_queue(qi))
+        menu.addAction(glyph_icon("close", ink), "Remove from queue",
+                       lambda: self._remove_from_queue(qi))
         menu.exec(self._queue_list.mapToGlobal(pos))
 
     def _jump_queue(self, qi: int) -> None:
@@ -2051,12 +2449,20 @@ class PlayerWorkspace(WorkspaceBase):
             label  = f"{title}  –  {artist}" if artist else title
             item   = QtWidgets.QListWidgetItem(label)
             item.setData(QtCore.Qt.ItemDataRole.UserRole, row["path"])
+            item.setData(_ROLE_TITLE, title)
+            item.setData(_ROLE_ARTIST, artist)
+            item.setToolTip(label)
             self._recent_list.addItem(item)
+        n = len(self._recent_plays)
+        self._rp_hdr.setText(f"Recently played  ·  {n}" if n else "Recently played")
 
     def _toggle_recent(self) -> None:
         collapsed = self._recent_list.height() == 0
-        self._recent_list.setFixedHeight(120 if collapsed else 0)
-        self._rp_toggle_btn.setText("▼" if collapsed else "▶")
+        self._recent_list.setFixedHeight(_QueueRowDelegate.ROW_H * 3 + 4 if collapsed else 0)
+        set_glyph(self._rp_toggle_btn, "chevron_down" if collapsed else "chevron_right",
+                  role="muted", size=14)
+        self._rp_toggle_btn.setAccessibleName(
+            "Hide recently played" if collapsed else "Show recently played")
 
     @Slot(QtCore.QModelIndex)
     def _on_recent_double_click(self, index: QtCore.QModelIndex) -> None:
@@ -2184,16 +2590,18 @@ class PlayerWorkspace(WorkspaceBase):
         token = self._nb_gen
 
         if prev_idx is not None and 0 <= prev_idx < len(self._queue):
+            self._covers.set_prev(None)       # a neighbour; its art follows
             self._prev_art_loader = self._start_art_loader(
                 self._queue[prev_idx]["path"], 100, token, self._on_prev_art_ready)
         else:
-            self._covers.set_prev(None)
+            self._covers.set_prev(None, present=False)
 
         if next_idx is not None and 0 <= next_idx < len(self._queue):
+            self._covers.set_next(None)
             self._next_art_loader = self._start_art_loader(
                 self._queue[next_idx]["path"], 100, token, self._on_next_art_ready)
         else:
-            self._covers.set_next(None)
+            self._covers.set_next(None, present=False)
 
     @Slot(object, str, int)
     def _on_prev_art_ready(self, img_or_none, path: str, token: int = 0) -> None:
@@ -2302,7 +2710,7 @@ class PlayerWorkspace(WorkspaceBase):
     def load_tracks_and_play(self, paths: list[str], label: str = "") -> None:
         """Replace the queue with *paths* and start playing from the first track.
 
-        Called by other workspaces (the Music Graph today) and the landing
+        Called by other pages (the Sound Map's Map today) and the landing
         page. Replacing a non-empty queue is logged, never silent.
         """
         paths = [p for p in paths if p]
@@ -2328,15 +2736,17 @@ class PlayerWorkspace(WorkspaceBase):
         self._refresh_transport()
 
     def toggle_shuffle(self) -> None:
-        self._shuffle_btn.setChecked(not self._shuffle)
+        self.set_shuffle(not self._shuffle)
 
     # ── Event filter for hover popup ────────────────────────────────────
 
     def eventFilter(self, obj, event):  # noqa: N802
+        et = event.type()
         if obj is self._lib_table.viewport():
-            et = event.type()
             if et == QtCore.QEvent.Type.MouseMove:
-                path = self._get_lib_path_at(self._lib_table.rowAt(int(event.position().y())))
+                row = self._lib_table.rowAt(int(event.position().y()))
+                self._set_hover_row(row)
+                path = self._get_lib_path_at(row)
                 if path:
                     if path != self._hover_path:
                         self._hover_popup.cancel()
@@ -2346,8 +2756,20 @@ class PlayerWorkspace(WorkspaceBase):
                     self._cancel_hover()
             elif et in (QtCore.QEvent.Type.Leave, QtCore.QEvent.Type.MouseButtonPress,
                         QtCore.QEvent.Type.Wheel):
+                if et == QtCore.QEvent.Type.Leave:
+                    self._set_hover_row(-1)
                 self._cancel_hover()
+        elif et == QtCore.QEvent.Type.Resize:
+            if obj is self._lib_table:
+                self._fit_table_columns()
+            elif obj is self._side:
+                self._fit_side_column()
         return super().eventFilter(obj, event)
+
+    def _set_hover_row(self, row: int) -> None:
+        if row != self._lib_delegate.hover_row:
+            self._lib_delegate.hover_row = row
+            self._lib_table.viewport().update()
 
     def _cancel_hover(self) -> None:
         self._hover_timer.stop()
@@ -2370,8 +2792,19 @@ class PlayerWorkspace(WorkspaceBase):
         if token == self._hover_gen and self._hover_popup.isVisible():
             self._hover_popup.set_art(path, img_or_none)
 
+    def showEvent(self, event: QtGui.QShowEvent) -> None:  # noqa: N802
+        """On screen: pin the capsule (this page's transport) and bring it up
+        to date."""
+        super().showEvent(event)
+        self._refresh_transport()
+        self.shuffle_changed.emit(self._shuffle)
+        self.repeat_changed.emit(_REPEAT_NAMES[self._repeat])
+        self.transport_pinned.emit(True)
+
     def hideEvent(self, event: QtGui.QHideEvent) -> None:  # noqa: N802
         self._cancel_hover()
+        self._set_hover_row(-1)
+        self.transport_pinned.emit(False)
         super().hideEvent(event)
 
     def _make_focus_tracker(self, target: str):
@@ -2497,7 +2930,7 @@ class PlayerWorkspace(WorkspaceBase):
             pass
 
     def toggle_repeat(self) -> None:
-        self._cycle_repeat()
+        self.cycle_repeat()
 
     # ── Shutdown ───────────────────────────────────────────────────────────
 

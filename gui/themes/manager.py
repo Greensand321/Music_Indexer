@@ -307,7 +307,13 @@ QPlainTextEdit#genreMapEditor {{
 
 
 /* [area:player] begin */
-
+/* Player + Playlists item views sit on their glass card: no view fill (the
+   row delegates paint hover, selection and the playing row). */
+QTableWidget#playerLibraryTable, QListWidget#playerQueueList,
+QListWidget#playerRecentList, QListWidget#playlistResults,
+QListWidget#playlistRepairList {{
+    background: transparent;
+}}
 /* [area:player] end */
 
 

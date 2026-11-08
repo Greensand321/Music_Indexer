@@ -7,11 +7,12 @@ from __future__ import annotations
 import sys
 
 import pytest
+from PySide6 import QtCore
 
 from gui import playback_backend as pb
 from gui.playback_backend import PlaybackState
 from gui.workspaces import player as player_mod
-from player_helpers import FakeBackend, make_player, make_tracks
+from player_helpers import FakeBackend, make_player, make_player_with_bar, make_tracks
 
 
 @pytest.fixture
@@ -45,7 +46,7 @@ def test_window_builds_when_libvlc_is_missing(qtbot, monkeypatch, tmp_path, thre
 
 
 def test_no_backend_never_shows_a_fake_playing_state(qtbot, tracks):
-    ws, _ = make_player(qtbot, backend=pb.NullBackend("libVLC not found"))
+    ws, _, bar = make_player_with_bar(qtbot, backend=pb.NullBackend("libVLC not found"))
     states = []
     ws.playback_state_changed.connect(states.append)
     now = []
@@ -56,9 +57,11 @@ def test_no_backend_never_shows_a_fake_playing_state(qtbot, tracks):
     ws._on_play_pause()
 
     assert True not in states
-    assert now == []                              # the bar never appears
-    assert ws._play_btn.text() == "▶"
-    assert not ws._play_btn.isEnabled()
+    assert now == []                              # no track info ever reaches the bar
+    assert bar._play_btn.text() == "▶"
+    assert not bar._play_btn.isEnabled()          # the capsule is the transport
+    assert not bar.is_loaded()
+    assert bar._title_lbl.text() == "Playback unavailable"
     assert not ws._pos_timer.isActive()
     assert "Playback unavailable" in ws._status_lbl.text()
     assert "libVLC not found" in ws._status_lbl.text()
@@ -68,12 +71,13 @@ def test_no_backend_never_shows_a_fake_playing_state(qtbot, tracks):
 # ── PLY-03: build a queue, then Play ────────────────────────────────────────
 
 def test_add_to_queue_then_play_plays_first_item(qtbot, tracks):
-    ws, fake = make_player(qtbot)
+    ws, fake, bar = make_player_with_bar(qtbot)
+    assert not bar._play_btn.isEnabled()          # nothing to play yet
     ws._add_paths_to_queue(tracks[:3])
-    assert ws._play_btn.isEnabled()
-    ws._on_play_pause()
+    assert bar._play_btn.isEnabled()
+    qtbot.mouseClick(bar._play_btn, QtCore.Qt.MouseButton.LeftButton)
     assert fake.plays() == [tracks[0]]
-    assert ws._play_btn.text() == "⏸"
+    assert bar._play_btn.text() == "⏸"
     assert ws._np_title.text() == "01 - Track 1"
 
 
@@ -126,13 +130,13 @@ def test_direct_play_mid_queue_resumes_after_the_interrupted_item(qtbot, tracks)
 
 
 def test_queue_end_stops_and_rewinds(qtbot, tracks):
-    ws, fake = make_player(qtbot)
+    ws, fake, bar = make_player_with_bar(qtbot)
     ws.load_tracks_and_play(tracks[:2])
     fake.finish(); ws._tick_position()
     fake.finish(); ws._tick_position()
     assert fake.plays() == [tracks[0], tracks[1]]
-    assert ws._play_btn.text() == "▶"
-    ws._on_play_pause()                       # starts over
+    assert bar._play_btn.text() == "▶"
+    qtbot.mouseClick(bar._play_btn, QtCore.Qt.MouseButton.LeftButton)   # starts over
     assert fake.plays()[-1] == tracks[0]
 
 
@@ -233,7 +237,7 @@ def test_error_state_is_reported_and_skipped(qtbot, tracks):
 
 
 def test_a_queue_of_unplayable_files_stops_instead_of_looping(qtbot, tracks):
-    ws, fake = make_player(qtbot)
+    ws, fake, bar = make_player_with_bar(qtbot)
     fake.fail_paths = set(tracks[:3])
     ws._cycle_repeat(); ws._cycle_repeat()   # Repeat: All
     states = []
@@ -242,7 +246,7 @@ def test_a_queue_of_unplayable_files_stops_instead_of_looping(qtbot, tracks):
     qtbot.wait(400)
     assert fake.count("load") == 3           # each tried once, then stop
     assert True not in states
-    assert ws._play_btn.text() == "▶"
+    assert bar._play_btn.text() == "▶"
 
 
 # ── PLY-20 / PLY-21 ─────────────────────────────────────────────────────────
@@ -280,12 +284,15 @@ def test_repeat_track_only_repeats_at_track_end(qtbot, tracks):
 
 
 def test_transport_buttons_reflect_backend(qtbot):
-    ws, _ = make_player(qtbot)
-    assert ws._next_btn.isEnabled() and not ws._play_btn.isEnabled()
-    ws2, _ = make_player(qtbot, backend=pb.NullBackend("nope"))
-    assert not ws2._next_btn.isEnabled()
-    assert not ws2._prev_btn.isEnabled()
-    assert "nope" in ws2._play_btn.toolTip()
+    _, _, bar = make_player_with_bar(qtbot)
+    assert bar._next_btn.isEnabled() and not bar._play_btn.isEnabled()
+    assert bar._shuffle_btn.isEnabled() and bar._repeat_btn.isEnabled()
+    _, _, bar2 = make_player_with_bar(qtbot, backend=pb.NullBackend("nope"))
+    assert not bar2._next_btn.isEnabled()
+    assert not bar2._prev_btn.isEnabled()
+    assert not bar2._seek_slider.isEnabled()
+    assert not bar2._shuffle_btn.isEnabled() and not bar2._repeat_btn.isEnabled()
+    assert "nope" in bar2._play_btn.toolTip()
 
 
 def test_shutdown_releases_backend(qtbot, tracks):

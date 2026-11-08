@@ -111,6 +111,47 @@ def make_player(qtbot, library_path: str = "", backend: PlaybackBackend | None =
     return ws, fake
 
 
+def wire_bar(ws, bar) -> None:
+    """Connect ``bar`` (a NowPlayingBar) to ``ws`` the way AlphaDEXWindow
+    does (gui/main_window.py, "Wire PlayerWorkspace ↔ NowPlayingBar"); the
+    capsule is the Player's only transport, so transport tests click it."""
+    ws.now_playing_changed.connect(bar.update_now_playing)
+    ws.playback_state_changed.connect(bar.set_playing)
+    ws.position_changed.connect(bar.update_position)
+    bar.play_pause_requested.connect(ws._on_play_pause)
+    bar.next_requested.connect(ws.play_next)
+    bar.prev_requested.connect(ws.play_prev)
+    bar.seek_requested.connect(ws.seek_to_ms)
+    bar.volume_changed.connect(ws.set_volume)
+    ws.volume_changed.connect(bar.set_volume)
+    bar.shuffle_requested.connect(ws.set_shuffle)
+    bar.repeat_requested.connect(ws.set_repeat)
+    ws.shuffle_changed.connect(bar.set_shuffle)
+    ws.repeat_changed.connect(bar.set_repeat)
+    ws.transport_changed.connect(bar.set_transport_state)
+    ws.transport_pinned.connect(bar.set_pinned)
+    bar.set_transport_state(*ws.transport_state())
+
+
+def make_player_with_bar(qtbot, library_path: str = "", backend: PlaybackBackend | None = None,
+                         show=True):
+    """``(ws, fake, bar)``: a PlayerWorkspace and a NowPlayingBar wired to it."""
+    from gui.widgets.now_playing_bar import NowPlayingBar
+
+    bar = NowPlayingBar()
+    qtbot.addWidget(bar)
+    bar.resize(880, NowPlayingBar.HEIGHT)
+    fake = backend if backend is not None else FakeBackend()
+    from gui.workspaces.player import PlayerWorkspace
+    ws = PlayerWorkspace(library_path=library_path, backend=fake)
+    qtbot.addWidget(ws)
+    wire_bar(ws, bar)
+    if show:
+        ws.resize(1100, 760)
+        ws.show()
+    return ws, fake, bar
+
+
 def wait_scan(ws, threads, timeout_ms: int = 15_000) -> None:
     """Wait for the library scan (and any tag/art workers) to finish."""
     assert threads.wait_all(timeout_ms) == []

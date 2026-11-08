@@ -104,18 +104,28 @@ the user is asked once whether to quit anyway.
 ### 1.1 Now Playing capsule (`gui/widgets/now_playing_bar.py`)
 
 A floating glass capsule at the bottom centre of the page area (22 px up, at most
-880 px wide), with its shadow over the page. Hidden until the first track loads (it
-fades in) and hidden again when nothing is loaded any more. Pages keep 104 px of room
-under their content so it never covers anything (the Player page reserves it too).
+880 px wide), with its shadow over the page. It is **the app's only transport**: the
+Player page has none of its own. It appears when the first track loads (it fades in)
+and stays on every page; with nothing loaded it hides, **except on the Player page**,
+which pins it (idle: "Nothing playing", or "Playback unavailable" without VLC). Pages
+keep 104 px of room under their content so it never covers anything.
 
 | Element | Purpose |
 |---|---|
-| Cover | 52 px round cover; a ♪ disc when the track has no art |
-| Title / artist · album | Current track (elided to fit) |
-| ⏮ / ▶ / ⏭ | Previous, play/pause, next (routed to the Player panel) |
-| Seek slider | Drag, wheel, keys and groove clicks all seek |
-| Volume slider | Kept in sync with the Player page's slider in both directions, without echo |
+| Cover | 52 px round cover; a glass disc with a music glyph when the track has no art |
+| Title / artist · album | Current track (elided to fit, full text in the tooltip); idle text when nothing is loaded |
+| Shuffle | Glyph toggle (accent + dot when on) |
+| ⏮ / ▶ ⏸ / ⏭ | Previous (restarts after 3 s), play/pause (46 px white disc), next |
+| Repeat | Glyph button cycling Off → Track ("1" badge) → All |
+| Seek slider + times | Drag, wheel, keys and groove clicks all seek; 11 px tabular times |
+| Volume | Speaker + slider (kept in sync with the Player without echo) |
 | ⌨ toggle | Turns **keyboard mode** on and off (see §6.7) |
+
+Without a playback backend every transport control is disabled and its tooltip gives the
+reason. **Width tiers** keep it inside its width: *full* (as above), *compact* (the volume
+slider moves into a popup behind the speaker button), *narrow* (the times move into the
+seek bar's tooltip). At the 900 px minimum window it uses the narrow tier. There is no Stop
+button: pause, Previous (restart) and the queue's Clear cover it.
 
 ---
 
@@ -686,38 +696,36 @@ Selecting another apply drops the shown preview. A library change drops the prev
 
 ### 6.7 Player (`player.py`)
 
-An in-app audio player behind a **playback backend seam** (`gui/playback_backend.py`).
-With no working backend (python-vlc missing, or installed without libVLC) the page
-says **"Playback unavailable"** next to the controls (the tooltip gives the reason),
-disables transport, and never pretends to play.
+An in-app audio player behind a **playback backend seam** (`gui/playback_backend.py`). The
+page is the library and the queue; **the Now Playing capsule (§1.1) is its transport**, and
+the page pins it so it is always there. With no working backend (python-vlc missing, or
+installed without libVLC) a quiet **"Playback unavailable"** notice (warning glyph and the
+reason) sits under the purpose line, the capsule's transport is disabled, and nothing ever
+pretends to play.
 
 | Element | Type | Purpose |
 |---|---|---|
-| Search | Field | Filters the library table |
-| ⟳ Reload | Button | Re-scan the library (reserved folders Playlists/Docs/Trash/Quarantine are skipped; Not Sorted and Manual Review are listed) |
-| Browse… | Button | Open and play a single file |
-| Load M3U | Button | Load a playlist into the queue (cp1252 / latin-1 fallback for non-UTF-8 files) |
-| 30s Preview | Checkbox | Seek to 0:30 and auto-advance after 15 s; pauses and resumes with playback |
-| Library table | Sortable table | #, Title, Artist, Album, Time (default sort Artist / Album / Track); right-click: Play now, Add to queue, Open folder, Save selection as M3U… |
-| Now-playing covers | Display | Previous / current / next art |
-| Blurred background art | Backdrop | Cross-fading blurred art behind the table |
-| Hover popup | Tooltip-like panel | After a 1.5 s dwell over a row: art and tags (loaded asynchronously) |
-| Queue | List + buttons | + Add Selected, Clear, 💾 Save Queue as M3U…; right-click: Play now, Remove from queue |
-| Recently Played | Collapsible list | Up to 30 entries |
-| Seek slider + times | Slider | |
-| ⏮ ▶ ⏭ ■ | Buttons | Previous, play/pause, next, **stop** |
-| 🔀 / 🔁 | Toggles | Shuffle (with history); repeat cycles Off / Track / All |
-| Volume | Slider | Kept in sync with the Now Playing bar |
-| Backend status | Label | "VLC: ready" or "Playback unavailable" |
+| Purpose line | Muted text | "Double-click a track to play it, or build a queue. The bar at the bottom is the transport." |
+| Library card | Glass card | The table on glass; the playing track's cover glows faintly through it (cross-fades between tracks) |
+| Search | Glass pill | Filters Title / Artist / Album (the page header's search routes here); "No matches" when nothing does |
+| Reload | Glyph button | Re-scan the library (reserved folders Playlists/Docs/Trash/Quarantine are skipped; Not Sorted and Manual Review are listed) |
+| Open file | Glyph button | Open and play a single file |
+| Library table | Sortable table | #, Title, Artist, Album, Time (default sort Artist / Album / Track); 34 px rows, muted header, the playing row tinted with the accent and marked ▶/⏸; narrow tables hide Album, then #. Right-click: Play now, Add to queue, Open folder, Save selection as M3U… |
+| Status line · 30 s preview | Footer | Scan / play status; the audition toggle (seek to 0:30, advance after 15 s; pauses and resumes with playback) |
+| Empty states | Text | No library selected / Reading your library… / No tracks found / No matches |
+| Cover carousel | Display | Previous / current / next as glass album tiles; shown when the column has room for it and the queue |
+| Hover popup | Tooltip-like card | After a 1.5 s dwell over a row: art and tags (loaded asynchronously) |
+| Queue | Glass rows + glyph buttons | Add selected (+), Load M3U (folder), Save queue as M3U (save), Clear (trash); right-click: Play now, Remove from queue; "Queue is empty" state |
+| Recently played | Collapsible glass rows | Chevron toggle; up to 30 entries |
 
-There are **no** seek-back / seek-forward buttons and no "Open File" button (Browse…
-does that).
+Tracks without embedded art use the folder's cover image (`cover.jpg`, `folder.jpg`, …).
+There are **no** seek-back / seek-forward buttons and no Stop button.
 
 **Shortcuts** (active while the Player page is showing): `Space` play/pause, `N` next,
 `P` previous, `Shift+Right` / `Shift+Left` seek ±30 s. There is no plain Left/Right
 ±5 s seek.
 
-**Keyboard mode** (the ⌨ toggle on the Now Playing bar) maps the plain arrow keys to
+**Keyboard mode** (the ⌨ toggle on the Now Playing capsule) maps the plain arrow keys to
 Down = preview the next track, Right = next, Left = previous, Up = restart. It applies
 to the library table or the queue, whichever you last clicked. It is **scoped**: the
 app-wide key filter is installed only while the mode is on, and it only takes arrow
@@ -799,21 +807,29 @@ inlined at generation; a built-in sample set when opened with none).
 
 ### 6.9 Playlists (`playlists.py`)
 
-Every mode is **preview-first**: a background job works out exactly which `.m3u`
+Every kind is **preview-first**: a background job works out exactly which `.m3u`
 files would be written and which existing ones replaced, a confirmation lists them,
 and only then is exactly that plan written, with a timestamped `.bak` of anything it
 replaces and a line in `Docs/playlist_writes.log`.
 
-| Tab | Controls |
-|---|---|
-| Folder Playlists | Output folder (blank = `Playlists/`), Generate. One playlist per album folder; reserved folders skipped. |
-| Tempo / Energy | Tempo range (BPM) and Energy range, **now used**: tracks outside them are left out. Generate. |
-| Auto-DJ | Track count, Seed track (must be a library track outside the reserved folders), Generate → `Playlists/autodj.m3u` |
-| Playlist Repair | Add Playlists… / Remove Selected / Clear (empty list = every playlist in `Playlists/`), **"Prefer Opus when searching for missing FLAC" (now read)**, Run Repair |
+**Make playlists** (hero card): a segmented control picks the kind, a one-line
+description explains it, its options sit in a well, and one primary button previews it
+(its text names the kind). While a job runs the button is disabled and a busy bar and
+**Cancel** (neutral "Cancelled" status) appear beside it.
 
-A shared Cancel button (neutral "Cancelled" status), Run buttons disabled while busy,
-and a Log. Writes check the library-write lock before the confirmation. A library
-change cancels planning but not a confirmed write.
+| Kind | Options |
+|---|---|
+| Folder | Save to (blank = `Playlists/`; folder glyph to choose). One playlist per album folder; reserved folders skipped. |
+| Tempo & energy | Tempo range (BPM) and Energy range: tracks outside them are left out. |
+| Auto-DJ | Length (track count), Start from (seed track: must be a library track outside the reserved folders) → `Playlists/autodj.m3u` |
+| Repair | Playlists to check: glass rows with add (+), remove (−) and clear glyphs (empty = every playlist in `Playlists/`), **Prefer Opus when a FLAC entry is missing** |
+
+**Preview** card: an empty state before the first run; then the planned files as glass
+rows (pills: *new*, *replace*, then *written* / *failed* after the write; track counts)
+under a stat row (playlists · tracks · replaced, or for Repair: entries re-pointed · still
+missing). Cancel, "Nothing to write" and errors show here too. **Details** opens the job's
+log. Writes check the library-write lock before the confirmation. A library change cancels
+planning (and clears the preview) but not a confirmed write.
 
 ### 6.10 Mirror
 
@@ -1075,8 +1091,10 @@ WorkspaceBase.status_changed ─► LogDrawer.set_status() + QStatusBar
 WorkspaceBase.play_tracks_requested ─► AlphaDEXWindow.play_tracks
                               └─► PlayerWorkspace.load_tracks_and_play(paths, label)
 
-PlayerWorkspace ⇄ NowPlayingBar   (now-playing / position / state / volume_changed one way;
-                                    play-pause / next / prev / seek / volume / keyboard mode the other)
+PlayerWorkspace ⇄ NowPlayingBar   (now-playing / position / state / volume / shuffle / repeat /
+                                    transport_changed / transport_pinned one way;
+                                    play-pause / next / prev / seek / volume / shuffle / repeat /
+                                    keyboard mode the other)
 
 MosaicLanding.tile_clicked ──► Startup.play_dir ──► AlphaDEXWindow.play_directory()
                               └─► Player page, begins playback

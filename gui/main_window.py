@@ -258,10 +258,18 @@ class AlphaDEXWindow(QtWidgets.QMainWindow):
             npb.seek_requested.connect(self._on_bar_seek)
             npb.volume_changed.connect(self._on_bar_volume)
             npb.keyboard_mode_toggled.connect(self.set_keyboard_mode_global)
-            # Keep bar volume knob in sync with the workspace slider
-            # Any volume change on the page (drag, wheel, keys, groove click)
-            # updates the bar's knob; set_volume() there doesn't echo back.
+            # Any volume change in the player (set_volume from anywhere)
+            # moves the bar's knob; set_volume() there doesn't echo back.
             player_ws.volume_changed.connect(npb.set_volume)
+            # The bar is the only transport: shuffle / repeat live on it, it
+            # mirrors what the player can do, and the Player page pins it.
+            npb.shuffle_requested.connect(player_ws.set_shuffle)
+            npb.repeat_requested.connect(player_ws.set_repeat)
+            player_ws.shuffle_changed.connect(npb.set_shuffle)
+            player_ws.repeat_changed.connect(npb.set_repeat)
+            player_ws.transport_changed.connect(npb.set_transport_state)
+            player_ws.transport_pinned.connect(npb.set_pinned)
+            npb.set_transport_state(*player_ws.transport_state())
 
     def _init_pages(self) -> None:
         for spec in navigation.PAGES:
