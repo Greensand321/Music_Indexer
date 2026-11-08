@@ -20,9 +20,18 @@ from gui.workspaces.base import WorkspaceBase
 _STEPS = ("1. Preview (dry run)", "2. Review HTML report", "3. Execute changes")
 _RUN_PREVIEW_TEXT = "▶  Run Preview"
 _RUN_EXECUTE_TEXT = "▶  Execute Previewed Plan"
-_IGNORED_TIP = (
-    "Not used: the current indexer engine ignores this option "
-    "(kept visible until the redesign decides its fate)."
+_PHASE_C_TIP = (
+    "Not used: the current indexer engine has no cross-album phase, so it ignores "
+    "this option (kept visible until the redesign decides its fate)."
+)
+_FLUSH_TIP = (
+    "Not used: the Indexer computes no fingerprints and keeps no cache, so there is "
+    "nothing to flush. Each preview always reads every file's tags fresh."
+)
+_WORKERS_TIP = (
+    "How many files have their tags read at once during a preview.\n"
+    "1 is fastest on a local disk (tag reading is CPU-bound). Raise it for a "
+    "network share or a slow external drive, where each read waits on the device."
 )
 
 
@@ -50,10 +59,11 @@ class IndexerWorker(QtCore.QThread):
     EXECUTE = "execute"
 
     def __init__(self, library_path: str, mode: str = PREVIEW, plan=None,
-                 create_playlists: bool = True) -> None:
+                 create_playlists: bool = True, max_workers: int = 1) -> None:
         super().__init__()
         self.library_path = library_path
         self.mode = mode
+        self.max_workers = max(1, int(max_workers or 1))
         self.plan = plan                 # execute: input; preview: result
         self.create_playlists = create_playlists
         self.summary: dict | None = None
@@ -119,6 +129,7 @@ class IndexerWorker(QtCore.QThread):
             log_callback=log,
             progress_callback=progress,
             cancel_event=self._cancel_event,
+            max_workers=self.max_workers,
         )
         if self._cancel_event.is_set():
             self.outcome = "cancelled"
@@ -255,28 +266,27 @@ class IndexerWorkspace(WorkspaceBase):
         self._playlists_cb.setChecked(True)
         self._cross_album_cb = QtWidgets.QCheckBox("Cross-album scan (Phase C)")
         self._cross_album_cb.setEnabled(False)
-        self._cross_album_cb.setToolTip(_IGNORED_TIP)
+        self._cross_album_cb.setToolTip(_PHASE_C_TIP)
         row2.addWidget(self._playlists_cb)
         row2.addWidget(self._cross_album_cb)
         row2.addStretch(1)
         opt_layout.addLayout(row2)
 
-        # Advanced options. The engine ignores both, so they are shown disabled
-        # (a checkable group box would re-enable them when ticked).
-        adv_group = QtWidgets.QGroupBox("Advanced (not used by the current engine)")
+        # Advanced options. Flush is shown disabled (there is no cache to flush;
+        # a checkable group box would re-enable it when ticked).
+        adv_group = QtWidgets.QGroupBox("Advanced")
         adv_form = QtWidgets.QFormLayout(adv_group)
         adv_form.setContentsMargins(8, 4, 8, 8)
 
         self._flush_cache_cb = QtWidgets.QCheckBox("Flush fingerprint cache before scan")
         self._flush_cache_cb.setEnabled(False)
-        self._flush_cache_cb.setToolTip(_IGNORED_TIP)
+        self._flush_cache_cb.setToolTip(_FLUSH_TIP)
         adv_form.addRow(self._flush_cache_cb)
 
         self._max_workers_spin = QtWidgets.QSpinBox()
         self._max_workers_spin.setRange(1, 32)
-        self._max_workers_spin.setValue(4)
-        self._max_workers_spin.setEnabled(False)
-        self._max_workers_spin.setToolTip(_IGNORED_TIP)
+        self._max_workers_spin.setValue(1)
+        self._max_workers_spin.setToolTip(_WORKERS_TIP)
         adv_form.addRow("Max workers:", self._max_workers_spin)
 
         opt_layout.addWidget(adv_group)
@@ -397,6 +407,7 @@ class IndexerWorkspace(WorkspaceBase):
         dry = self._dry_run_cb.isChecked()
         plan = self._fresh_plan()
         self._dry_run_cb.setEnabled(not busy)
+        self._max_workers_spin.setEnabled(not busy)
         if dry:
             self._run_btn.setText(_RUN_PREVIEW_TEXT)
             self._run_btn.setEnabled(not busy)
@@ -439,7 +450,11 @@ class IndexerWorkspace(WorkspaceBase):
             return
 
         if self._dry_run_cb.isChecked():
-            self._start(IndexerWorker(path, IndexerWorker.PREVIEW), "preview")
+            self._start(
+                IndexerWorker(path, IndexerWorker.PREVIEW,
+                              max_workers=self._max_workers_spin.value()),
+                "preview",
+            )
             return
 
         plan = self._fresh_plan()

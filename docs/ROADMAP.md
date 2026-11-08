@@ -43,9 +43,8 @@ either build what it promises or remove it in the redesign.
 
 - **Indexer: "Cross-album scan (Phase C)" and "Flush fingerprint cache before scan"**
   *(Disabled, no backend).* The engine has no Phase C and keeps no cache to flush (the
-  Indexer computes no fingerprints). "Max workers" now has a real backend: the tag phase
-  reads on a bounded thread pool. It only helps on slow or network storage; on a local
-  disk 1 worker is fastest, because tag parsing is CPU-bound.
+  Indexer computes no fingerprints). ("Max workers" is no longer on this list: it is
+  enabled, defaults to 1, and only helps on slow or network storage.)
 - **Library Sync: "Preset name"** *(Disabled, no backend).* Presets are not
   implemented.
 - **Clustering wizard: dimensionality reduction (PCA / t-SNE / UMAP), the
