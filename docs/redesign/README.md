@@ -2,6 +2,16 @@
 
 _Started 2026-11-07. This folder holds the groundwork for redesigning the Qt app (`alpha_dex_gui.py`)._
 
+> **Read this first: much of this page describes the app before its new page structure.** The information
+> architecture proposed in §5 was **adopted** on 2026-11-07, with the changes listed there under "As built".
+> Sections 1–3, the report table below and the per-area reports in [`pages/`](pages/) describe the app as it
+> was *before* that change (and, for the reports, before the fix phase), under the old page names: a flat
+> sidebar of 13 entries — Indexer, Library Sync, Duplicates, Similarity, Tag Fixer, Genre Normalizer,
+> Playlists, Clustered, Music Graph, Player, Compression, Utilities, Help — plus a Settings dialog. They are
+> kept as the record of *why* the structure changed. For the structure as it is now, see §5 below,
+> [`../gui_inventory.md`](../gui_inventory.md) §3 and `gui/navigation.py`; every change is recorded in
+> [`../CONTRADICTING_UPDATES.md`](../CONTRADICTING_UPDATES.md) §B (structure) and §F (the Liquid Glass look).
+
 The goal of the redesign is an app that is cleaner, looks far better, moves well, and is stable. Before anything
 is redrawn, this phase did three things:
 
@@ -11,20 +21,25 @@ is redrawn, this phase did three things:
    and the Harness section below.
 3. **Fixed the bugs** found on the way, crashes and data-loss first. See Bug status.
 
-| Report | Area |
-|---|---|
-| [01_shell_navigation.md](pages/01_shell_navigation.md) | Startup, landing, main window, sidebar, top bar, log drawer, Settings, config |
-| [02_design_system_motion.md](pages/02_design_system_motion.md) | Tokens, themes, style, typography, every animation, theme switching |
-| [03_indexer_library_sync.md](pages/03_indexer_library_sync.md) | Indexer, Library Sync |
-| [04_duplicates_similarity.md](pages/04_duplicates_similarity.md) | Duplicate Finder, Similarity, and the four diagnostic duplicate dialogs |
-| [05_tag_fixer_genres.md](pages/05_tag_fixer_genres.md) | Tag Fixer, Genre Normalizer (Fill / Normalize) |
-| [06_playlists_clustering_graph.md](pages/06_playlists_clustering_graph.md) | Playlists, Clustered, clustering wizard, quality report, Music Graph |
-| [07_player.md](pages/07_player.md) | Player, Now Playing bar, keyboard mode |
-| [08_tools_compression_help.md](pages/08_tools_compression_help.md) | Utilities (11 sub-tools), Compression, Help |
+The reports use the old page names; the right-hand column of the table below says where each area lives now.
+
+| Report | Area (old names) | Now |
+|---|---|---|
+| [01_shell_navigation.md](pages/01_shell_navigation.md) | Startup, landing, main window, sidebar, top bar, log drawer, Settings, config | The shell; the top bar is now the page header; Settings is a page (Metadata services · General · Appearance) |
+| [02_design_system_motion.md](pages/02_design_system_motion.md) | Tokens, themes, style, typography, every animation, theme switching | The same, now with Liquid Glass as the default theme |
+| [03_indexer_library_sync.md](pages/03_indexer_library_sync.md) | Indexer, Library Sync | Organize → Indexer, Library Sync |
+| [04_duplicates_similarity.md](pages/04_duplicates_similarity.md) | Duplicate Finder, Similarity, and the four diagnostic duplicate dialogs | Duplicates → Find duplicates, Compare two files, Pair review, and the Experimental Fuzzy finder, Scan engine, Bucketing |
+| [05_tag_fixer_genres.md](pages/05_tag_fixer_genres.md) | Tag Fixer, Genre Normalizer (Fill / Normalize) | Metadata → Tag Fixer, Fill genres, Normalize genres (plus the new Undo changes) |
+| [06_playlists_clustering_graph.md](pages/06_playlists_clustering_graph.md) | Playlists, Clustered, clustering wizard, quality report, Music Graph | Playlists; Sound Map → Analyse, Map |
+| [07_player.md](pages/07_player.md) | Player, Now Playing bar, keyboard mode | Player; the bar is now the Now Playing capsule |
+| [08_tools_compression_help.md](pages/08_tools_compression_help.md) | Utilities (11 sub-tools), Compression, Help | Utilities is gone: File Cleanup and Exports are pages, the Validator is on Home, the crash log on Activity, the testers in Mirror → Verify the mirror; Compression is Mirror → Build the mirror; Help |
 
 ---
 
 ## 1. What the app is for: the user's jobs
+
+_This section describes the pages as they were before the adopted structure (§5): "today" in its tables means
+2026-11-07, before the change._
 
 AlphaDEX serves one person with one big music library. Every page is really in service of one of six jobs:
 
@@ -76,6 +91,11 @@ The redesign column is a *proposal* (see the open decisions in §6).
 ---
 
 ## 2. How the pages connect
+
+_As it was before the fix phase and the adopted structure (13 sidebar pages). Under the new names, Clustered and
+Music Graph are Sound Map → Analyse and Map, Pair Review is Duplicates → Pair review, and Tag Fixer / Fill /
+Normalize are the Metadata page. The problems marked here were fixed in the fix phase (§8): for example, the Qt
+Duplicate Finder now writes the `Docs/duplicate_preview.json` that Pair review reads._
 
 ```
                  ┌──────────── library path broadcast (set_library_path → all 13 pages) ────────────┐
@@ -191,9 +211,10 @@ From [02_design_system_motion.md](pages/02_design_system_motion.md), refined by 
 
 ---
 
-## 5. Proposed information architecture
+## 5. Proposed information architecture — **adopted**
 
-A recommendation for the owner to decide on (§6), grouped by the jobs in §1:
+The recommendation below was put to the owner (§6) and adopted on 2026-11-07. It is kept as proposed; what was
+actually built follows it under "As built". It is grouped by the jobs in §1:
 
 ```
 LIBRARY      Home (library health: counts of untagged, duplicate candidates, Manual Review, last runs)
@@ -206,28 +227,62 @@ TAKE AWAY    Mirror (Opus) · Exports (artist/title, codec list)
              Activity (jobs + log + problems) · Settings (incl. appearance) · Help
 ```
 
-That is 13 sidebar entries becoming about 11, each with one clear job, and no developer prototypes in the user's
-path.
+The proposal described this as the old sidebar's 13 entries "becoming about 11": that is, 11 main pages, plus
+Activity, Settings and Help at the foot (14 entries in all), each with one clear job, and no developer prototypes in
+the user's path.
+
+**As built** (`gui/navigation.py`; detail in [`../gui_inventory.md`](../gui_inventory.md) §3). The sidebar has 14
+entries: 11 main pages in five groups, and Activity, Settings and Help at the foot. Where it differs from the
+proposal:
+
+```
+LIBRARY      Home
+ORGANIZE     Indexer · Library Sync · File Cleanup
+CLEAN UP     Duplicates (Find duplicates · Compare two files · Pair review ·
+                         Fuzzy finder, Scan engine, Bucketing — each marked Experimental)
+             Metadata (Tag Fixer · Fill genres · Normalize genres · Undo changes)
+LISTEN       Player · Sound Map (Analyse · Map) · Playlists
+TAKE AWAY    Mirror (Build the mirror · Verify the mirror) · Exports
+             ─────────
+             Activity · Settings (Metadata services · General · Appearance) · Help
+```
+
+- **Duplicates** is a page of sections, not yet one Scan → Review → Preview → Execute flow. "Explain match" is the
+  Compare two files section (the former Similarity page). Pair Review and the three prototypes are sections that
+  open their old dialogs; the prototypes **are** in the user's path, but each carries an "Experimental — not ready
+  to test" pill (CONTRADICTING_UPDATES §B2).
+- **Metadata** has a fourth section, **Undo changes**, which was not in the proposal (§B5), and its sections are
+  still separate panels rather than one review grid.
+- **Home** shows the library's statistics, a "Library health" card (the old Validator, plus counts for
+  `Manual Review/`, `Quarantine/` and `Not Sorted/`), the latest runs and quick actions. It does not count untagged
+  tracks or duplicate candidates.
+- **Mirror** gained a second section, Verify the mirror, which holds the old Opus and M4A testers.
+- **Settings** has three sections; the theme picker is its Appearance section.
+- The old navigation keys (`similarity`, `genres`, `clustered`, `graph`, `compression`, `tools`, …) still route to
+  the right page and section.
 
 ---
 
 ## 6. Open decisions for the owner
 
 1. **IA:** adopt §5 (merge Clustered + Graph into Sound Map; fold Similarity and Pair Review into Duplicates; one
-   Metadata page)?
+   Metadata page)? *Decided — adopted; see §5 "As built" and `docs/CONTRADICTING_UPDATES.md` §B.*
 2. **Permanent delete:** Duplicates now really deletes when asked, behind a confirm listing every deletion and a
    typed `DELETE` (the executor's existing double gate); quarantine is the default. Keep that in the redesign,
-   or make quarantine the only disposition?
+   or make quarantine the only disposition? *Decided — keep (`docs/CONTRADICTING_UPDATES.md` §A5).*
 3. **Prototype dialogs** (Fuzzy Finder, Scan Engine, Bucketing POC): delete, or keep behind a developer menu?
+   *Still open. For now they are Duplicates sections marked Experimental (§5 "As built").*
 4. **Dead files:** OK to delete `gui/widgets/splash.py`, `gui/workspaces/clustered.py`,
    `gui/widgets/interactive_3d_scatter.py`, the stray repo-root files (`player_106bd0e.py`, `player_diff.txt`,
    `player_full_diff.txt`, `diff_player*.txt`, `crash_test.txt`, `crash_report.txt`, `last_path.txt`, the
-   committed `soundvault_crash.log*`), and the stray `=0.13.0` file (a pip-redirect accident)?
+   committed `soundvault_crash.log*`), and the stray `=0.13.0` file (a pip-redirect accident)? *Decided —
+   deleted (`docs/CONTRADICTING_UPDATES.md` §C; `crash_report.txt` and `last_path.txt` are untracked and
+   ignored instead).*
 5. **Visual direction:** *decided* — "Refined Liquid Glass" (translucent glass over a blurred wall of the
    library's own album covers). Phase R1 built the design system, the shell and the landing; the classic themes
    stay selectable. See `docs/CONTRADICTING_UPDATES.md` §F.
 6. **Startup:** keep the mosaic landing as a first-run and "change library" experience, but go straight to the
-   main window when the saved library is valid?
+   main window when the saved library is valid? *Still open: the landing is shown on every launch.*
 
 ---
 
@@ -272,8 +327,8 @@ detailed record.
 | Design system & motion (`DS-`) | 26 | 26 | none |
 | Indexer & Library Sync (`LIB-`) | 24 | 24 | LIB-12 / LIB-17: controls the engine ignores are disabled with an explanatory tooltip, not implemented |
 | Duplicates & Similarity (`DUP-`) | 21 | 21 | Proof-of-concept dialogs fixed so they don't crash or lie; folding them in is a redesign decision |
-| Tag Fixer & Genres (`META-`) | 25 | 25 | META-23: every write is logged with before/after values; an in-app *revert* is not built yet |
-| Playlists, clustering & graph (`PL-`) | 32 | 32 | PL-15: cluster playlists are honestly marked "not available" rather than built; PL-23: hard-coded colours remain in files that weren't otherwise rewritten |
+| Tag Fixer & Genres (`META-`) | 25 | 25 | META-23: every write is logged with before/after values; an in-app *revert* is not built yet *(since built: Metadata → Undo changes, CONTRADICTING_UPDATES §A13)* |
+| Playlists, clustering & graph (`PL-`) | 32 | 32 | PL-15: cluster playlists are honestly marked "not available" rather than built *(since built: Sound Map → Save cluster playlists…, §D1; the other wizard options stay switched off)*; PL-23: hard-coded colours remain in files that weren't otherwise rewritten |
 | Player (`PLY-`) | 27 | 27 | none (the direct-play vs queue model is a redesign decision) |
 | Tools, Compression & Help (`TOOL-`) | 23 | 23 | none |
 | **Total** | **205** | **204** | 1 partial (SHELL-27), plus the noted limitations |
@@ -319,14 +374,17 @@ GUI concurrency) turned up further real bugs. The serious ones:
 
 ### Hygiene ratchets (gui/)
 
-| Metric | Before | After |
-|---|---|---|
-| Hard-coded hex colours outside tokens | 237 | 116 |
-| Inline `setStyleSheet` calls | 168 | 94 |
-| `font-size` literals outside the theme | 81 | 38 |
-| Direct `QThread.start()` (bypassing the JobRegistry) | 28 | **0** (now zero tolerance) |
-| Unparented animations | 7 | 2 (both in the Tk-only `qt_launcher.py`) |
-| Lambdas connected to the theme singleton | 3 | 0 (zero tolerance) |
+"After" is the end of the fix phase. The ceilings have kept going down since (the Liquid Glass work lowered them
+again); the live values are the `CEILINGS` in `tests/test_gui_hygiene_ratchets.py`, which wins over this table.
+
+| Metric | Before | After the fix phase | Ceiling on 2026-11-08 |
+|---|---|---|---|
+| Hard-coded hex colours outside tokens | 237 | 116 | 60 |
+| Inline `setStyleSheet` calls | 168 | 94 | 74 |
+| `font-size` literals outside the theme | 81 | 38 | 28 |
+| Direct `QThread.start()` (bypassing the JobRegistry) | 28 | **0** (now zero tolerance) | 0 |
+| Unparented animations | 7 | 2 (both in the Tk-only `qt_launcher.py`) | 2 |
+| Lambdas connected to the theme singleton | 3 | 0 (zero tolerance) | 0 |
 
 ### Tests
 
