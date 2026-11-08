@@ -276,10 +276,10 @@ library's `Docs/` folder (timestamps make each run's files unique):
 | Library Sync | `LibrarySyncPreview.html` | `LibrarySyncAudit_<run>.json` and `LibrarySyncExecuted_<run>.html` per run (`LibrarySyncAudit.json` / `LibrarySyncExecuted.html` are copies of the latest); replaced files are backed up under `Backups/LibrarySync/<run>/` |
 | Duplicate Finder | `duplicate_preview.html` and `.json` | `duplicate_execution_reports/` (playlist backups included) |
 | Pair Review | — | `duplicate_pair_review_log.txt` (quarantines), `duplicate_pair_tags.txt` |
-| Tag Fixer, Genre fill, Genre normalize | the on-screen table | `tag_changes_<tool>_<timestamp>.jsonl` — the before and after values of every write, failure and skip (`utils/tag_change_log.py`) |
+| Tag Fixer, Genre fill, Genre normalize | the on-screen table | `tag_changes_<tool>_<timestamp>.jsonl` — the before and after values of every write, failure and skip (`utils/tag_change_log.py`). Metadata → Undo changes previews and writes a revert from one of these logs, logged as `tag_changes_revert_<timestamp>.jsonl` (`controllers/tag_revert.py`) |
 | File Cleanup | the preview dialog | `file_cleanup_<timestamp>.jsonl`; "Undo Last Cleanup" reads it back and appends each restore to it |
 | Playlist writes | the confirmation list | `playlist_writes.log`; the generator leaves a timestamped `.bak` beside a playlist it replaces, and `update_playlists` (run after renames and moves) backs each playlist up to `playlist_backups/` before editing only the changed entries |
-| Opus mirror | the estimate | `<destination>/Docs/opus_library_mirror_reports/` |
+| Opus mirror | the estimate; for orphan removal, the list of orphaned files | `<destination>/Docs/opus_library_mirror_reports/` — the run report (stale files, orphaned files with no source any more, leftover temporary files removed) and, when orphans are removed after review, a log of every deletion, refusal and failure (`remove_mirror_orphans`) |
 
 Execution never overwrites an existing file: a destination that has appeared since
 the preview is skipped and reported, and plans snapshot what they will touch so that
