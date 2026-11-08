@@ -279,11 +279,22 @@ library's `Docs/` folder (timestamps make each run's files unique):
 | Tag Fixer, Genre fill, Genre normalize | the on-screen table | `tag_changes_<tool>_<timestamp>.jsonl` — the before and after values of every write, failure and skip (`utils/tag_change_log.py`) |
 | File Cleanup | the preview dialog | `file_cleanup_<timestamp>.jsonl`; "Undo Last Cleanup" reads it back and appends each restore to it |
 | Playlist writes | the confirmation list | `playlist_writes.log`; the generator leaves a timestamped `.bak` beside a playlist it replaces, and `update_playlists` (run after renames and moves) backs each playlist up to `playlist_backups/` before editing only the changed entries |
+| Clustering (Sound Map → Analyse) | — (an analysis changes no library file) | `cluster_members.json` (the run's full membership, never downsampled), `cluster_info.json` (the map, downsampled above 5,000 tracks), `cluster_graph.html`; both JSON files carry the same `run` block (`run_id`, method, parameters, features, library root) |
+| Save cluster playlists (Sound Map) | the Save cluster playlists dialog | one `.m3u` per cluster in a per-run folder, `Playlists/Clusters/<date time> <method>/` (earlier runs' folders are never touched); `playlist_writes.log` and a `.bak` beside each replaced file, as for every playlist write |
 | Opus mirror | the estimate | `<destination>/Docs/opus_library_mirror_reports/` |
 
 Execution never overwrites an existing file: a destination that has appeared since
 the preview is skipped and reported, and plans snapshot what they will touch so that
 a file changed since the preview is skipped rather than acted on blind.
+
+**Cluster arrays are index-aligned.** In both `cluster_info.json` and
+`cluster_members.json`, element *i* of every per-track array (`X_2d`, `X_3d`,
+`labels`, `tracks` in the map; `tracks`, `labels`, `centroid_distance`,
+`tempo_bpm`, `energy` in the members file) describes the same track, and they are
+consumed positionally. Never subset one array without the others. The members file
+is never downsampled; the map records which members it kept (`X_indices`), and the
+cluster playlist export refuses a map and members file that are not the same run
+(`cluster_graph_data.check_members_match_payload`).
 
 **One thing the indexer deliberately does *not* do**, worth stating because it
 clarifies the boundary between the Indexer and the Duplicate Finder: the indexer's
@@ -467,7 +478,7 @@ group/room names differ from what you might expect from the feature name):
 | **Tag Fixer** | Look up and correct the artist/album/title/genre information on your tracks. |
 | **Genre Normalizer** | Two tabs: fill missing genres from MusicBrainz, or collapse messy genre spellings with a mapping you build. Both preview first (see **features/tag_fixer.md**). |
 | **Playlists** | Build playlists by folder, tempo, energy, or automatic DJ flow. |
-| **Clustered** | Group tracks by sound (K-Means / HDBSCAN), with a Quick Start or a step-by-step wizard. Analysis only: playlists are exported from the Music Graph. |
+| **Clustered** | Group tracks by sound (K-Means / HDBSCAN), with a Quick Start or a step-by-step wizard. The analysis writes no playlists itself; the Sound Map's **Save cluster playlists…** previews and saves one per cluster. |
 | **Music Graph** | Explore the clusters on an in-app 2-D map (select, inspect, play, export a playlist), or open the browser-based 3-D view. |
 | **Player** | A built-in audio player — library table, queue, recently-played, shuffle/repeat, a persistent now-playing bar at the bottom of the whole app window. |
 | **Compression** | Mirror your library into a space-saving Opus copy (FLAC → Opus transcoding), estimating savings before you run it. |

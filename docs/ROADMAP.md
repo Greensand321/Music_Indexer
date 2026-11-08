@@ -49,9 +49,13 @@ either build what it promises or remove it in the redesign.
 - **Library Sync: "Preset name"** *(Disabled, no backend).* Presets are not
   implemented.
 - **Clustering wizard: dimensionality reduction (PCA / t-SNE / UMAP), the
-  post-processing step (remove small clusters, merge into "Miscellaneous"), and the
-  output options (create playlists, generate report, open graph)** *(Disabled, no
-  backend).* Clusters are turned into playlists from the Music Graph instead.
+  post-processing step (remove small clusters, merge into "Miscellaneous"), and two
+  of the output options (generate report, open graph)** *(Disabled, no backend).* The
+  report is always offered when the scores can be computed, and "Open the map" is on
+  the Results tab. (The third output option, now "Offer to save a playlist per
+  cluster when the analysis finishes", works: it opens the Save cluster playlists
+  preview.) Save cluster playlists' own *Minimum tracks* is the playlist-only
+  counterpart of "remove small clusters".
 - **Fuzzy Finder (Utilities → Diagnostics): the metadata word-matching group,
   "Include pairs without fingerprints", "Skip fingerprint check", "Include
   non-matching FP pairs in review", "Send Matches to Duplicate Pair Review"**
@@ -75,6 +79,16 @@ library is valid.
 ---
 
 ## Recently completed
+
+**Save cluster playlists (2026-11-08).** The Sound Map's **Save cluster playlists…**
+previews and saves one `.m3u` per cluster into a per-run folder under
+`Playlists/Clusters/`, through the shared playlist writer (backups, log, "changed
+since the preview" checks). A clustering run now also writes the full, never
+downsampled membership (`Docs/cluster_members.json`), so a big library's small
+clusters are no longer lost to the map's 5,000-point sample. The wizard's old
+"Create M3U playlists" option is back as "Offer to save a playlist per cluster when
+the analysis finishes", and the map's lasso **Export playlist…** now backs up what it
+replaces and logs it. Spec: `docs/specs/cluster_playlists.md`.
 
 **The fix phase (2026-11-07).** About 200 bugs across every Qt page were fixed. The
 headlines, so they don't get re-raised:
@@ -288,10 +302,16 @@ tuning layer on top of them.
 - **Retire the dead `clustered.py` workspace** *(Housekeeping).* It is unreachable and
   now says so in its docstring; deleting it is one of the open decisions above.
 
-- **Playlists straight from a clustering run** *(Designed, not started).* Today a run
-  writes only the analysis, and you export a cluster as a playlist from the Music
-  Graph. A previewed "one playlist per cluster" export would let the wizard's disabled
-  "Create M3U playlists" option come back.
+- **Cluster playlists: follow-ups** *(Designed, not started).* Save cluster playlists
+  (`docs/specs/cluster_playlists.md`) shipped without these, each a clean addition:
+  a **"smooth path through the cluster"** order (a nearest-neighbour chain, spec CP-5;
+  it needs a size limit and an extra `path_rank` array in `cluster_members.json`);
+  **"Save as playlist…" on a legend row's right-click** (CP-38); **playing a cluster
+  from inside the save preview** (CP-40; it needs the non-modal "Save playlist
+  sheet" from the redesign, because the Player is another page); **retiring earlier
+  cluster playlist sets** (every generated file carries an `#ALPHADEX-CLUSTER` marker
+  for this); remembering custom names across runs; and `.m3u8` / absolute-path
+  output options.
 
 - **A choice of "map flattening" methods in the interface** *(Partially built).* The
   app already flattens many-dimensional sound data into a 2-D or 3-D picture. A planned
