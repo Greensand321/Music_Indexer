@@ -227,6 +227,12 @@ worker, a confirmation or a library-write lock. Current screens:
 - **Overlaps:** none functionally. A future in-app doc viewer could render `docs/*.md` instead of shelling out to a browser.
 - **Redesign notes:** link the maintained docs suite; add version/build info from a single source; add an F1 shortcut; consider contextual "?" help per workspace that deep-links to `docs/features/<page>.md`.
 - **Testability seams:** patch `webbrowser.open` and `QMessageBox.information`. The doc buttons are the only `QPushButton`s apart from "Report an Issue", so clicking each and asserting the opened URIs works (see probe).
+- **Status (Liquid Glass R2):** TOOL-12 and TOOL-16 (Help part) are fixed. Help links the maintained suite with the
+  current page names (Indexer, Library Sync, Duplicates, Metadata, Sound Map and Playlists), each as an
+  accent-coloured text link with a one-line note (`ws._doc_buttons`, `LinkButton`, still clickable buttons), in
+  glass cards with real card titles; no emoji. The shortcut table became key chips and now lists Ctrl+Q and the
+  Player page's own keys. The About card has no hard-coded colour. Still open: F1, a version string, contextual
+  per-page help.
 
 ## Cross-page relationships
 - **Main window → all three:** `set_library_path(path)` on library change. Tools ignores it (no `_on_library_changed` override, so state goes stale). Compression copies it into Source only. Help ignores it. None of the three emits `status_changed` or `navigate_requested`. Everything goes to the LogDrawer via `log_message`.

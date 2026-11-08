@@ -320,6 +320,13 @@ settings and the Crash Log viewer have no effect. The global "keyboard mode" gra
 - **Redesign notes:** decide between one global log and per-page logs. Add filter by page and level, copy, and
   "save to Docs/".
 - **Testability seams:** objectNames `logDrawer`, `logText`. `_expanded`, `_status_chip`.
+- **Status (Liquid Glass R2):** the theme issues above are fixed. The strip is a glass pill (the material's card
+  surface) with a chevron, a muted 12 px "Activity Log" caption, a status dot that carries the status colour
+  (`status_colour()`, `_status_dot`) next to muted status text, and Clear. Open and close are instant (the body
+  is shown or hidden once; 220 px with room, at least 96 px in a short window); only the chevron turns, painter
+  only. The Now Playing capsule floats inside the page area above the strip's row and never covers its controls
+  (`tests/ui/test_ui_home_glass.py`). The global-versus-per-page log question is still open; the Activity page
+  keeps the session's full log.
 
 ### Workspace template (`gui/workspaces/base.py`, class `WorkspaceBase`)
 - **Intent:** the shared scaffolding of every page: scrolling content, themed background, card helpers, and the

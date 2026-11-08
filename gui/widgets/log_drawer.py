@@ -1,16 +1,26 @@
-"""Slide-up activity log drawer anchored to the bottom of the window.
+"""The Activity Log strip at the bottom of the window.
 
-Under Liquid Glass the drawer is a glass strip below the pages (the
-material's card surface, radius 18): the handle carries the title, the
-status chip and Clear; the expanded log is a rounded dark inset. Text and
-status colours come from the active theme's ``log_*`` tokens and follow
-theme switches (they used to be fixed Midnight constants, DS-12 / SHELL-18).
+A glass strip consistent with the shell. Collapsed, it is a pill-shaped bar
+(the material's card surface; radius 18 is fully round at its 34 px height)
+holding a chevron, the muted 12 px "Activity Log" caption, the status dot
+with the active page's status in the same muted caption, and Clear.
+Expanded, the same surface grows to hold the log: a rounded dark inset
+(``logText``). It expands by itself when a warning or an error arrives.
 
-Motion (DS-18): the drawer's layout footprint changes once per toggle (the
-body gets its full height before opening, and gives it back after closing);
-in between, only a "sheet" child slides inside the body, positioned by hand
-in a widget that has no layout. So the window is laid out once per toggle,
-not on every frame, and the slide always covers the full distance.
+Expanding and collapsing are instant: the body is shown or hidden once per
+toggle (220 px when the window has room, at least 96 px in a short one). Nothing is animated but the chevron's turn, which is
+painter-only (``motion.animate_value``; reduced motion makes it instant). So
+the window is laid out once per toggle and nothing slides under the pointer.
+
+Text and status colours come from the active theme (the status dot and the
+log lines from its ``log_*`` tokens, the captions from ``text_secondary``)
+and follow theme switches, including lines already shown.
+
+The Now Playing capsule floats over the page area *above* this strip: the
+main window places it inside the page stack's rectangle, which ends where
+the strip's row begins and shrinks when the strip expands. So the capsule
+never covers the strip's controls, collapsed or expanded
+(``tests/ui/test_ui_home_glass.py`` checks it).
 """
 from __future__ import annotations
 
@@ -19,15 +29,16 @@ import datetime
 from gui.compat import QtCore, QtGui, QtWidgets
 from gui.themes.manager import get_manager
 
-_DRAWER_EXPANDED = 220
-_DRAWER_COLLAPSED = 0
+_DRAWER_EXPANDED = 220   # the open log's height when the window has room
+_BODY_MIN = 96           # … and the least it shrinks to in a short window
 _HANDLE_HEIGHT = 34
 _RADIUS = 18
+_DOT = 8
 
 _LEVELS = ("info", "ok", "warn", "error")
 
 # Workspaces still emit Midnight hex values with status_changed; map them
-# (and semantic names) onto the theme's log tokens so the chip follows the
+# (and semantic names) onto the theme's log tokens so the dot follows the
 # theme. Anything else is used verbatim.
 _STATUS_TOKENS = {
     "#22c55e": "log_ok", "#4ade80": "log_ok", "ok": "log_ok", "success": "log_ok",
@@ -56,34 +67,75 @@ class _Handle(QtWidgets.QWidget):
         self.setObjectName("logDrawerHandle")
         self.setFixedHeight(_HANDLE_HEIGHT)
         self.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
+        self.setToolTip("Show or hide the Activity Log (Ctrl+L)")
 
     def mousePressEvent(self, event: QtGui.QMouseEvent) -> None:  # noqa: N802
         self._drawer.toggle()
 
 
-class _Body(QtWidgets.QWidget):
-    """Viewport for the sliding sheet. Has no layout on purpose."""
+class _Chevron(QtWidgets.QWidget):
+    """Points up while the log is closed (it opens upward), down while open."""
 
     def __init__(self, parent: QtWidgets.QWidget) -> None:
         super().__init__(parent)
-        self.sheet = QtWidgets.QWidget(self)
-        self.sheet.setObjectName("logDrawerSheet")
-        # The rounded log text paints its own log_bg; the sheet stays clear
-        # so the drawer's glass shows round it.
-        self.sheet.setAutoFillBackground(False)
-        self.reveal = 0.0       # 0 = sheet below the body, 1 = fully shown
+        self.turn = 0.0          # 0 = closed (up) … 1 = open (down)
+        self.setFixedSize(14, 14)
+        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
 
-    def place_sheet(self) -> None:
-        h = self.height()
-        self.sheet.setGeometry(0, int(round((1.0 - self.reveal) * h)), self.width(), h)
+    def paintEvent(self, event: QtGui.QPaintEvent) -> None:  # noqa: N802
+        from gui.widgets.glyphs import paint_glyph
 
-    def resizeEvent(self, event: QtGui.QResizeEvent) -> None:  # noqa: N802
-        super().resizeEvent(event)
-        self.place_sheet()
+        p = QtGui.QPainter(self)
+        try:
+            p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+            c = QtCore.QPointF(self.width() / 2.0, self.height() / 2.0)
+            p.translate(c)
+            p.rotate(180.0 * (1.0 - self.turn))
+            p.translate(-c)
+            paint_glyph(p, QtCore.QRectF(self.rect()), "chevron_down",
+                        get_manager().current.text_secondary, weight=2.2)
+        finally:
+            p.end()
+
+
+class _StatusDot(QtWidgets.QWidget):
+    """The status dot (8 px, the status colour) in a faint ring."""
+
+    def __init__(self, drawer: "LogDrawer") -> None:
+        super().__init__(drawer)
+        self._drawer = drawer
+        self.setFixedSize(_DOT + 8, _DOT + 8)
+        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+
+    def colour(self) -> QtGui.QColor:
+        return QtGui.QColor(self._drawer.status_colour())
+
+    def paintEvent(self, event: QtGui.QPaintEvent) -> None:  # noqa: N802
+        from gui.themes.glass import current_material, qcolor
+
+        p = QtGui.QPainter(self)
+        try:
+            p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+            p.setPen(QtCore.Qt.PenStyle.NoPen)
+            c = QtCore.QPointF(self.width() / 2.0, self.height() / 2.0)
+            p.setBrush(qcolor(current_material().hover))
+            p.drawEllipse(c, self.width() / 2.0, self.height() / 2.0)
+            p.setBrush(self.colour())
+            p.drawEllipse(c, _DOT / 2.0, _DOT / 2.0)
+        finally:
+            p.end()
+
+
+class _Body(QtWidgets.QWidget):
+    """The open log: 220 px when the window has room, never under 96 px
+    (a short window shrinks it instead of pushing it past the edge)."""
+
+    def sizeHint(self) -> QtCore.QSize:  # noqa: N802
+        return QtCore.QSize(super().sizeHint().width(), _DRAWER_EXPANDED)
 
 
 class LogDrawer(QtWidgets.QWidget):
-    """A collapsible log panel that slides up from the bottom of the window.
+    """A collapsible log strip at the bottom of the window.
 
     Usage::
 
@@ -94,6 +146,9 @@ class LogDrawer(QtWidgets.QWidget):
 
     def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(parent)
+        from gui.themes.glass import font
+        from gui.widgets.glass import ElidedLabel
+
         self.setObjectName("logDrawer")
         self._expanded = False
         self._status_key: str = "log_ok"
@@ -103,47 +158,57 @@ class LogDrawer(QtWidgets.QWidget):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
-        # ── Toggle handle ─────────────────────────────────────────────────
+        # ── Handle: chevron, caption, status dot and text, Clear ──────────
         handle = _Handle(self)
         self._handle = handle
         handle_layout = QtWidgets.QHBoxLayout(handle)
-        handle_layout.setContentsMargins(16, 0, 10, 0)
-        handle_layout.setSpacing(10)
+        handle_layout.setContentsMargins(16, 0, 8, 0)
+        handle_layout.setSpacing(8)
 
-        from gui.themes.glass import font
-
-        self._toggle_icon = QtWidgets.QLabel("▲  Activity Log")
+        self._chevron = _Chevron(handle)
+        handle_layout.addWidget(self._chevron)
+        self._toggle_icon = QtWidgets.QLabel("Activity Log")
         self._toggle_icon.setObjectName("logDrawerTitle")
         self._toggle_icon.setFont(font("caption", weight=600))
         handle_layout.addWidget(self._toggle_icon)
         handle_layout.addStretch(1)
 
-        self._status_chip = QtWidgets.QLabel("● Idle")
+        self._status_dot = _StatusDot(self)
+        handle_layout.addWidget(self._status_dot)
+        self._status_chip = ElidedLabel("Idle")
         self._status_chip.setObjectName("logStatusChip")
         self._status_chip.setFont(font("caption"))
+        self._status_chip.setSizePolicy(QtWidgets.QSizePolicy.Policy.Preferred,
+                                        QtWidgets.QSizePolicy.Policy.Preferred)
         handle_layout.addWidget(self._status_chip)
 
         self._clear_btn = QtWidgets.QPushButton("Clear")
         self._clear_btn.setObjectName("logClearButton")
         self._clear_btn.setFlat(True)
-        self._clear_btn.setFixedSize(56, 24)
+        self._clear_btn.setFixedSize(56, 26)
         self._clear_btn.setFont(font("caption", weight=600))
+        self._clear_btn.setToolTip("Clear the Activity Log (Ctrl+W); the Activity page keeps its copy")
         self._clear_btn.clicked.connect(self._on_clear)
         handle_layout.addWidget(self._clear_btn)
 
         root.addWidget(handle)
 
-        # ── Log body: a fixed-height viewport with a sliding sheet ────────
+        # ── Log body: shown at its full height, or not at all ─────────────
         self._log_body = _Body(self)
-        self._log_body.setFixedHeight(_DRAWER_COLLAPSED)
-        sheet_layout = QtWidgets.QVBoxLayout(self._log_body.sheet)
-        sheet_layout.setContentsMargins(8, 0, 8, 8)
+        self._log_body.setObjectName("logDrawerBody")
+        self._log_body.setSizePolicy(QtWidgets.QSizePolicy.Policy.Preferred,
+                                     QtWidgets.QSizePolicy.Policy.Maximum)
+        self._log_body.setMinimumHeight(_BODY_MIN)
+        self._log_body.setMaximumHeight(_DRAWER_EXPANDED)
+        body_layout = QtWidgets.QVBoxLayout(self._log_body)
+        body_layout.setContentsMargins(8, 0, 8, 8)
 
         self._text = QtWidgets.QPlainTextEdit()
         self._text.setObjectName("logText")
         self._text.setReadOnly(True)
         self._text.setMaximumBlockCount(500)
-        sheet_layout.addWidget(self._text)
+        body_layout.addWidget(self._text)
+        self._log_body.hide()
 
         root.addWidget(self._log_body)
 
@@ -178,17 +243,22 @@ class LogDrawer(QtWidgets.QWidget):
             self.toggle()
 
     def set_status(self, text: str, colour: str = "ok") -> None:
-        """Update the status chip. ``colour`` is a semantic name ("ok",
-        "warn", "error", "running", "idle") or a hex; the hex values the
-        workspaces send are mapped to the theme's log tokens."""
+        """Update the status. ``colour`` is a semantic name ("ok", "warn",
+        "error", "running", "idle") or a hex; the hex values the workspaces
+        send are mapped to the theme's log tokens. The dot shows the colour;
+        the text stays muted."""
         key = _STATUS_TOKENS.get(str(colour).strip().lower())
         self._status_key = key or ""
         self._status_literal = None if key else colour
-        self._status_chip.setText(f"● {text}")
-        self._paint_status()
+        self._status_chip.setText(text)
+        self._status_chip.setToolTip(text)
+        self._status_dot.update()
+
+    def status_text(self) -> str:
+        return self._status_chip.text()
 
     def status_colour(self) -> str:
-        """The chip's current colour (resolved against the active theme)."""
+        """The dot's current colour (resolved against the active theme)."""
         if self._status_literal:
             return QtGui.QColor(self._status_literal).name()
         return getattr(get_manager().current, self._status_key or "log_ok")
@@ -197,25 +267,16 @@ class LogDrawer(QtWidgets.QWidget):
         return self._expanded
 
     def toggle(self) -> None:
+        """Open or close the log at once (one relayout); the chevron turns."""
         from gui.themes import motion
 
         self._expanded = not self._expanded
-        icon = "▼" if self._expanded else "▲"
-        self._toggle_icon.setText(f"{icon}  Activity Log")
-        body = self._log_body
-        if self._expanded:
-            # One relayout: take the full height, then slide the sheet in.
-            body.setFixedHeight(_DRAWER_EXPANDED)
-            body.place_sheet()
-            motion.animate_value(
-                self, "drawer", body.reveal, 1.0, self._on_reveal,
-                duration="base", easing="standard",
-            )
-        else:
-            motion.animate_value(
-                self, "drawer", body.reveal, 0.0, self._on_reveal,
-                duration="base", easing="exit", on_finished=self._on_collapsed,
-            )
+        self._log_body.setVisible(self._expanded)
+        self.update()
+        motion.animate_value(
+            self, "chevron", self._chevron.turn, 1.0 if self._expanded else 0.0,
+            self._on_chevron, duration="fast", easing="standard",
+        )
 
     # ── Painting: the glass strip ─────────────────────────────────────────
 
@@ -230,13 +291,9 @@ class LogDrawer(QtWidgets.QWidget):
 
     # ── Private ───────────────────────────────────────────────────────────
 
-    def _on_reveal(self, value: float) -> None:
-        self._log_body.reveal = float(value)
-        self._log_body.place_sheet()
-
-    def _on_collapsed(self) -> None:
-        if not self._expanded:
-            self._log_body.setFixedHeight(_DRAWER_COLLAPSED)
+    def _on_chevron(self, value: float) -> None:
+        self._chevron.turn = float(value)
+        self._chevron.update()
 
     def _on_clear(self) -> None:
         self._text.clear()
@@ -250,19 +307,12 @@ class LogDrawer(QtWidgets.QWidget):
             pal.setColor(QtGui.QPalette.ColorRole.WindowText, QtGui.QColor(colour))
             widget.setPalette(pal)
 
-        _fg(self._toggle_icon, t.log_text)
-        sheet_pal = self._log_body.sheet.palette()
-        sheet_pal.setColor(QtGui.QPalette.ColorRole.Window, QtGui.QColor(t.log_bg))
-        self._log_body.sheet.setPalette(sheet_pal)
-        self._paint_status()
+        _fg(self._toggle_icon, t.text_secondary)
+        _fg(self._status_chip, t.text_secondary)
+        self._status_dot.update()
+        self._chevron.update()
         self._recolour_lines(t)
         self._handle.update()
-
-    def _paint_status(self) -> None:
-        _colour = self.status_colour()
-        pal = self._status_chip.palette()
-        pal.setColor(QtGui.QPalette.ColorRole.WindowText, QtGui.QColor(_colour))
-        self._status_chip.setPalette(pal)
 
     def _recolour_lines(self, t) -> None:
         doc = self._text.document()
