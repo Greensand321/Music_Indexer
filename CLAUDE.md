@@ -375,7 +375,9 @@ section kept separate from planned-but-unbuilt features. Summary:
   positionally. `clustered_playlists` previously subset the coordinates when
   downsampling (>5,000 tracks) without subsetting labels/tracks, which broke the 3-D
   generator outright and would have mislabelled points. If you touch that block,
-  keep every array subset together.
+  keep every array subset together. `Docs/cluster_members.json` (the full membership
+  that "Save cluster playlists" reads) is **never** downsampled; it and
+  `cluster_info.json` carry the same `run` block, which is how the two are matched.
 - **Decorative controls were wired or switched off** in the 2026-11 fix phase (the
   Duplicates per-group disposition, the Playlist Generator's tempo/energy ranges and
   "Prefer Opus" now work; controls the engine ignores — e.g. the Indexer's Phase C /

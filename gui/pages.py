@@ -13,8 +13,7 @@ view to show (``panel.set_section(view)``), and forwards the
 
 Page-level actions (buttons that belong to the whole page, not one section)
 go to the right of the section tabs: ``add_action(widget)``. The Sound Map
-uses that for its quality report and is where "Save clusters as playlists"
-belongs.
+uses that for "Save cluster playlists…" and its quality report.
 """
 from __future__ import annotations
 

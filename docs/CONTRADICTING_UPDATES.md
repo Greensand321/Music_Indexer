@@ -347,13 +347,28 @@ Status legend: **Done** (in the code now) · **Pending owner** (decision needed;
 
 ## D. Features being finished — **In progress**
 
-### D1. Cluster playlists
-- **Was**: promised by the wizard and docs but never built; the current UI says "not available".
-- **Is**: being built from `docs/specs/cluster_playlists.md` (audited first).
-- **Contradicts** `docs/features/playlists_and_clustering.md` ("not available") and the clustering wizard's
-  disabled output options.
-- One consequence: maps analysed before the feature must be re-analysed before they can be saved as playlists.
-  The old map file is downsampled to 5,000 points, so it can't be used to build complete playlists.
+### D1. Cluster playlists — **Done**
+- **Was**: promised by the wizard and docs but never built; the current UI says "not available". "A run writes
+  no playlists; export clusters by hand from the map" (docstrings, log line, Results hint, wizard tooltip,
+  feature doc).
+- **Is**: **Sound Map → Save cluster playlists…**, built from `docs/specs/cluster_playlists.md` (spec, then an
+  independent audit, then the build).
+  - It previews one `.m3u` per cluster: a descriptive name, the order inside the playlist, a minimum size,
+    files that are missing, and new / replace / skip for each row. Then it writes exactly that into a per-run
+    folder under `Playlists/Clusters/`. Replaced files are backed up and every write is logged.
+  - An analysis now also writes `Docs/cluster_members.json`, the full membership, never downsampled.
+- **Also changed**:
+  - The wizard's "Create M3U playlists" option is live, as "Offer to save a playlist per cluster when the
+    analysis finishes" (off by default).
+  - The map's lasso **Export playlist…** used to write the file raw. It now checks the library-write lock,
+    then uses the shared writer, which leaves a `.bak` and a log line.
+  - `write_playlist_plan` always returns a `cancelled` key.
+  - The Analyse Run buttons pause while a cluster-playlist preview or write runs.
+- **One consequence**: maps analysed before this feature must be re-analysed once before they can be saved as
+  playlists. The old map file is downsampled to 5,000 points, so it can't build complete playlists.
+- **Owner's open questions** (spec §12): every one has a default in use. For example, earlier runs' playlist
+  folders are kept, HDBSCAN's unclustered tracks never become a playlist, the order is closest to the centre
+  first, and the minimum is 5 tracks.
 
 ## E. Process / tooling
 - **E1.** Windows CI is a required job (it was informational).
