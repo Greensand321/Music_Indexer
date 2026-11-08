@@ -403,6 +403,11 @@ class SoundMapPage(SectionedPage):
       buttons while a preview or write runs.
     * **Quality report** — the latest analysis' cluster quality report,
       enabled once an analysis with scores has finished in this session.
+
+    Both carry glyphs. The Analyse results card repeats *Save cluster
+    playlists…* next to *Open the map*: it starts the same flow
+    (``save_playlists_requested``) and mirrors the page button's enabled
+    state and tooltip.
     """
 
     def __init__(
@@ -426,28 +431,60 @@ class SoundMapPage(SectionedPage):
         return getattr(self.map_panel, "cluster_playlists_flow", None)
 
     def _build_actions(self) -> None:
+        from gui.widgets.glyphs import set_glyph
+
         flow = self.cluster_playlists_flow
+        analysis = self.analysis_panel
         if flow is not None:
             flow.set_show_target(self)
+            set_glyph(flow.button, "save")
             self.add_action(flow.button)
-            analysis = self.analysis_panel
             succeeded = getattr(analysis, "analysis_succeeded", None)
             if succeeded is not None:
                 succeeded.connect(flow.offer_after_run)
             pause = getattr(analysis, "set_external_busy", None)
             if callable(pause):
                 flow.busy_changed.connect(pause)
+            # The results card's own "Save cluster playlists…" runs the same
+            # flow and mirrors its button (enabled state and tooltip).
+            requested = getattr(analysis, "save_playlists_requested", None)
+            if requested is not None:
+                requested.connect(self._on_save_playlists_requested)
+            flow.button.installEventFilter(self)
+            self._mirror_save_state()
 
         self._report_btn = QtWidgets.QPushButton("Quality report")
         self._report_btn.setObjectName("soundMapReportBtn")
+        set_glyph(self._report_btn, "info")
         self._report_btn.setToolTip("How well the latest analysis separated your tracks")
         self._report_btn.clicked.connect(self._on_quality_report)
         self.add_action(self._report_btn)
-        analysis = self.analysis_panel
         signal = getattr(analysis, "result_changed", None)
         if signal is not None:
             signal.connect(self._sync_actions)
         self._sync_actions()
+
+    def _on_save_playlists_requested(self) -> None:
+        flow = self.cluster_playlists_flow
+        if flow is not None and flow.button.isEnabled() and not flow.is_busy():
+            flow.start()
+
+    def _mirror_save_state(self) -> None:
+        flow = self.cluster_playlists_flow
+        mirror = getattr(self.analysis_panel, "set_save_playlists_state", None)
+        if flow is None or not callable(mirror):
+            return
+        # While a preview runs the flow button reads "Cancel preview"; the
+        # results card only ever starts one.
+        mirror(flow.button.isEnabled() and not flow.is_busy(), flow.button.toolTip())
+
+    def eventFilter(self, obj: QtCore.QObject, event: QtCore.QEvent) -> bool:  # noqa: N802
+        flow = self.cluster_playlists_flow
+        if flow is not None and obj is flow.button and event.type() in (
+            QtCore.QEvent.Type.EnabledChange, QtCore.QEvent.Type.ToolTipChange,
+        ):
+            self._mirror_save_state()
+        return super().eventFilter(obj, event)
 
     def _sync_actions(self, *_args) -> None:
         available = getattr(self.analysis_panel, "quality_report_available", None)

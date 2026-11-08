@@ -682,61 +682,65 @@ worker.
 ### 6.8 Sound Map
 
 Analyse → map → select → play / save. `SoundMapPage` (`gui/pages.py`) adds page
-actions right of the tabs, visible in both sections:
+actions right of the tabs, visible in both sections, both glass pills with glyphs:
 
 | Action | Purpose |
 |---|---|
-| Save cluster playlists… | Previews one playlist per cluster of the latest analysis (§7.6), then saves them to `Playlists/Clusters/<date time> <method>/`. The button belongs to a `ClusterPlaylistFlow` (`gui/cluster_playlist_jobs.py`) owned by the Map panel; the page places it. Enabled when the library has `Docs/cluster_members.json` (it does not need the map, or PyQtGraph); disabled with a tooltip without one ("Analyse your library first…") and while an analysis runs anywhere ("Wait for the analysis to finish."). While the read-only preview job runs it reads **Cancel preview**. The preview job is read-only (`ask_before_quit=False`); the save job takes the library-write lock. Both check the lock first ("Library Busy"). A result line ("Saved N cluster playlists to … (K replaced, backed up as .bak; E failed).") goes to the log and the Map's status line. |
-| Quality report | The latest analysis' cluster quality report (§7.3); enabled once an analysis with scores finished in this session (`EnhancedClusteredWorkspace.result_changed` / `quality_report_available()`). |
+| Save cluster playlists… (save glyph) | Previews one playlist per cluster of the latest analysis (§7.6), then saves them to `Playlists/Clusters/<date time> <method>/`. The button belongs to a `ClusterPlaylistFlow` (`gui/cluster_playlist_jobs.py`) owned by the Map panel; the page places it. Enabled when the library has `Docs/cluster_members.json` (it does not need the map, or PyQtGraph); disabled with a tooltip without one ("Analyse your library first…") and while an analysis runs anywhere ("Wait for the analysis to finish."). While the read-only preview job runs it reads **Cancel preview**. The preview job is read-only (`ask_before_quit=False`); the save job takes the library-write lock. Both check the lock first ("Library Busy"). A result line ("Saved N cluster playlists to … (K replaced, backed up as .bak; E failed).") goes to the log and the Map's status line. |
+| Quality report (info glyph) | The latest analysis' cluster quality report (§7.3); enabled once an analysis with scores finished in this session (`EnhancedClusteredWorkspace.result_changed` / `quality_report_available()`). |
 
-While Save cluster playlists runs, Analyse's Run buttons wait for it. When the
-wizard's "Offer to save a playlist per cluster" was ticked, a successful run opens the
-preview (`analysis_succeeded` → `offer_after_run`); if the Sound Map is not on screen
-then, the offer waits until it is shown.
+While Save cluster playlists runs, Analyse's Run buttons wait for it. When the run's
+"Offer to save a playlist per cluster" was ticked (settings card or wizard), a
+successful run opens the preview (`analysis_succeeded` → `offer_after_run`); if the
+Sound Map is not on screen then, the offer waits until it is shown. The Analyse results
+card repeats **Save cluster playlists…**: it starts the same flow
+(`save_playlists_requested` → `flow.start()`) and mirrors the page button's enabled
+state and tooltip (the page watches the flow button's enabled/tooltip changes).
 
 #### 6.8.1 Analyse (`clustered_enhanced.py`)
 
-Formerly the Clustered page; titled "Analyse your music". **Analysis only:** a run writes the feature
-cache, `Docs/cluster_members.json` (full membership), `Docs/cluster_info.json` and
-`Docs/cluster_graph.html`; it does **not** write playlists (Save cluster playlists…
-does, after its preview). The analysis job is named `Clustering`
-(`gui.cluster_playlist_jobs.ANALYSIS_JOB_NAME`).
+Formerly the Clustered page. One muted intro line, then three glass cards. **Analysis
+only:** a run writes the feature cache, `Docs/cluster_members.json` (full membership),
+`Docs/cluster_info.json` and `Docs/cluster_graph.html`; it does **not** write playlists
+(Save cluster playlists… does, after its preview). The analysis job is named
+`Clustering` (`gui.cluster_playlist_jobs.ANALYSIS_JOB_NAME`).
 
-| Tab | Contents |
+| Card | Contents |
 |---|---|
-| 🚀 Quick Start | States the fixed settings (8 K-Means clusters; tempo, MFCC and energy; standard normalization) and a Run Quick Start button. |
-| ⚙ Advanced | Configure with Wizard… (§7.2), the chosen configuration as read-only text, and Run. Kept separate from Quick Start. |
-| 📊 Results | Progress bar, status, live log and a **Cancel** button during the run (cooperative; finishes the files being analysed). Then: clusters created, total tracks, unclustered (noise) count, tracks that could not be analysed, silhouette score, a hint pointing at **Save cluster playlists…** (or a lasso export from the map), **View Quality Report** and **Open the map**. |
+| **Quick Start** (hero, `headerCard`) | The fixed settings in one line (8 K-Means clusters, listening for timbre, tempo and energy, standard scaling), **Run Quick Start** (primary, play glyph) and **Guided setup…** (the wizard, §7.2), which opens on the settings card's current choices and writes its answers back into it. |
+| **Results** | Before the first run an `EmptyState` ("No analysis yet"). During a run: a title with **Cancel** (cooperative; finishes the files being analysed), the progress bar, status and live log. After: "Latest analysis" with the method and features, a `StatRow` (Clusters, Tracks, Unclustered when HDBSCAN left any, Not analysed when tracks failed, Silhouette · Good/Fair/Poor toned success/warning/danger), the hint pointing at **Save cluster playlists…** (or a lasso export from the map), and **Open the map** (primary), **Save cluster playlists…** (the page flow, see above) and **Quality report** (ghost; only with scores). A failure shows a warning glyph, "The analysis did not finish" and the error; a cancel "Analysis cancelled". Results fade in (`motion.reveal`). |
+| **Your own settings** | *Listen for*: one `PillToggle` per feature block in `clustered_playlists.FEATURE_ORDER` (Timbre, Tempo, Harmony, Brightness, Energy, Rhythm density; six in a row when the content is ≥ 900 px wide, three per row otherwise). *Algorithm* (K-Means / HDBSCAN), *Scaling* (Standard / MinMax / Robust), *Clusters* (K-Means) or *Min cluster size* and *Min samples* (HDBSCAN). **Offer to save a playlist per cluster when the analysis finishes** (run-config key `create_playlists`, never saved to the settings file). A summary line of what Run will do, and **Run with these settings** (disabled while no feature is ticked). Starts from the Quick Start settings; a Quick Start run never changes it. |
 
 Noise is not counted as a cluster and is excluded from the scores. Reserved folders
 are not clustered. A library change cancels a run and resets the results (and
 disables the Sound Map's Quality report). "Open the map" emits
-`navigate_requested("graph")`, which switches to the Map section. (The old "View Playlists" button,
-which used a Linux-only `xdg-open` on a folder with no cluster playlists in it, is gone.)
+`navigate_requested("graph")`, which switches to the Map section.
 
 #### 6.8.2 Map (`graph.py`)
 
-Formerly the Music Graph page; titled "Explore the map". The in-app interactive
-cluster map, plus the browser-based 3-D view. With no cluster data it says to run an
-analysis first (the Analyse tab). Loading,
+Formerly the Music Graph page. One muted intro line; the map is the hero card. Loading,
 validation and export live in the Qt-free `cluster_graph_data.py`.
 
 | Element | Type | Purpose |
 |---|---|---|
-| Pan / Rectangle / Lasso | Exclusive toggles | Drag behaviour; Ctrl or Shift adds to the selection |
-| Fit view / Clear selection | Buttons | |
-| ↻ Reload | Button | Re-read the cluster data |
-| Open 3D view | Button | Opens (generating if needed) the browser 3-D page |
-| Scatter plot | `InteractiveScatterPlot` | One dot per track, coloured by cluster; noise grey. Hover identifies; **a click pins** the track in the details panel (hover no longer replaces it). |
-| Cluster legend | `ClusterLegendWidget` | Colour key and counts; checkbox hides a cluster (and drops its tracks from the selection); clicking a row selects it; Show all / Hide all |
-| Track details | `TrackDetailsPanel` | Art and tags of the hovered or pinned track, with Play and Open-folder |
-| Selection bar | Label + buttons | "N tracks selected", ▶ Play selection, Export CSV…, Export playlist… (checks the library-write lock first; written through `playlist_generator`, so a replaced playlist gets a `.bak` beside it and a line in `Docs/playlist_writes.log`) |
+| Pan / Box / Lasso | Segmented control (exclusive, glyphs move / marquee / lasso) | Drag behaviour; Ctrl or Shift adds to the selection. The chosen mode is a raised pill on a well track. |
+| Fit view / Clear selection / Reload | Icon pills (fit / close / refresh glyphs, tooltips and accessible names) | Fit every point; clear the selection; re-read the cluster data |
+| 3-D view | Glyph pill (external) | Opens (generating if needed) the browser 3-D page |
+| Selection bar | Label + buttons, above the plot | "N tracks selected" with the map summary or the last result under it (middle-elided, full text in the tooltip); **CSV…**, **Export playlist…** (checks the library-write lock first; written through `playlist_generator`, so a replaced playlist gets a `.bak` beside it and a line in `Docs/playlist_writes.log`) and **Play selection** (primary) |
+| Scatter plot | `InteractiveScatterPlot` | On a glass well with a hairline grid that pans and zooms with the points (no axes: the embedding has no units). One dot per track, a vivid core with a soft ring, coloured by cluster; noise grey. Hover rings the point and identifies it; **a click pins** the track in the details card. The selection is ringed in the accent and the rest dims; the lasso / box marquee is a dashed accent line. |
+| Empty state | `EmptyState` on the same well | "No map yet" + **Go to Analyse** (no data), "The map could not be loaded" + the error (bad data), "Choose a library first" (no library). Without PyQtGraph the plot's own notice shows instead. |
+| Cluster legend | `ClusterLegendWidget` in a glass card | Glass rows: the colour dot is the show/hide toggle (hiding drops the cluster's tracks from the selection; a hidden row's text dims), name, genres · tempo, count; clicking a row selects the cluster; Show all / Hide all |
+| Track details | `TrackDetailsPanel` in a glass card | Empty state until a track is hovered or pinned; then the cover (rounded, or a music glyph), title, artist, album, Genre / Year / Cluster, the path (middle-elided) and **Play** / **Open folder** |
+
+Layout: the legend and details cards are a 300 px column right of the map when the
+content is at least 900 px wide; below the map, side by side, from 680 px; stacked in a
+900 px window. The page never scrolls sideways.
 
 The page **reloads itself when shown** if `Docs/cluster_info.json` changed; a failed
-reload clears the plot and legend. The plot background, selection outline and marquee
-follow theme switches. Without a working PyQtGraph, the real import error is shown and
-the graph controls stay disabled. Selections go to the Player via
-`play_tracks_requested`.
+reload clears the plot and legend. The well, grid, selection ring and marquee follow
+theme switches (the point sprites do not depend on the theme, so a switch never redraws
+the points). Without a working PyQtGraph, the real import error is shown and the graph
+controls stay disabled. Selections go to the Player via `play_tracks_requested`.
 
 The browser page: orbit/zoom, hover tooltip, click-to-select with CSV / `.m3u` export,
 legend visibility toggles, a spread slider with 1×/10×/30×/50×/100× presets, axes /
@@ -866,12 +870,15 @@ app no longer opens it** (Settings is a page, §6.13); it is kept as a thin wrap
 
 ### 7.2 ClusteringWizardDialog (`gui/dialogs/clustering_wizard_dialog.py`)
 
-A 5-step wizard from Analyse's Advanced tab. It keeps every choice when you
-go Back and Next.
+A 5-step wizard, opened by **Guided setup…** on Analyse. It opens on the settings card's
+current choices (`set_config`) and its answers fill that card in; it keeps every choice
+when you go Back and Next. A title, a step counter and a row of step pills (done steps
+carry a check, the current one is raised) over one glass card per step; Cancel on the
+left, Back and **Next / Finish** (primary) on the right.
 
 | Step | Contents |
 |---|---|
-| 1. Feature Selection | tempo / mfcc / chroma / spectral / energy / onset_rate checkboxes with tooltips, plus Fast / Balanced / Complete presets. All six are computed when ticked. |
+| 1. Feature Selection | One pill toggle per feature block in the engine's order (Timbre, Tempo, Harmony, Brightness, Energy, Rhythm density) with tooltips, plus Fast / Balanced / Complete presets. All six are computed when ticked. |
 | 2. Normalization & Preprocessing | Standard / MinMax / Robust (used). Dimensionality reduction (None / PCA / t-SNE / UMAP) is **disabled: not available yet**. |
 | 3. Algorithm Selection | K-Means (cluster count) or HDBSCAN (min cluster size, min samples); the choice is passed through correctly. |
 | 4. Post-Processing | Remove small clusters / merge into "Miscellaneous": **disabled, not available yet**. |
@@ -881,9 +888,13 @@ Refuses to proceed if every feature is unticked.
 
 ### 7.3 ClusterQualityReportDialog
 
-Silhouette / Davies-Bouldin / Calinski-Harabasz with verdicts, a per-cluster breakdown
-and suggestions. Opened from Analyse's results ("View Quality Report") and the Sound
-Map's **Quality report** action.
+Glass cards: **Overall** is a `StatRow` (Silhouette · good / fair / poor, Davies–Bouldin,
+Calinski–Harabasz, and Unclustered when HDBSCAN left any), toned success / warning /
+danger; the silhouette uses the same thresholds as the Analyse results and the
+suggestions (good above 0.5, fair above 0.3). **Per cluster** lists glass rows (name,
+genres · tempo range, size, its silhouette in the tone colour). **Suggestions** follow.
+Opened from Analyse's results ("Quality report") and the Sound Map's **Quality report**
+action.
 
 ### 7.4 ThemePickerDialog / AutoThemeDialog
 
@@ -910,18 +921,19 @@ the same crash-log tail (`gui/workspaces/activity.py` reuses its `crash_log_path
 
 ### 7.6 ClusterPlaylistsDialog (`gui/dialogs/cluster_playlists_dialog.py`)
 
-The Save cluster playlists preview, opened by the Sound Map's page action (§6.8) after
-the read-only summary job (`cluster_playlist_export.summarize_cluster_run`). Modal;
-nothing is written from it. Spec: `docs/specs/cluster_playlists.md`.
+The Save cluster playlists preview, opened by the Sound Map's page action (§6.8) or the
+Analyse results card's button, after the read-only summary job
+(`cluster_playlist_export.summarize_cluster_run`). Modal; nothing is written from it.
+Spec: `docs/specs/cluster_playlists.md`.
 
 | Element | Purpose |
 |---|---|
 | Header | Method and parameter, number of clusters and tracks, when the analysis ran, and the destination (`Playlists/Clusters/<folder>/`). On a downsampled map: "The map shows 5,000 of 20,000 tracks; the playlists include all of them." |
-| Warnings | Shown only when there are any: the library was moved (paths mapped), tracks added since the analysis, "changed a lot; consider re-analysing", the map shows an older analysis, earlier sets kept in `Playlists/Clusters/`. |
-| Order / Minimum tracks | *Closest to the centre first* (default) or *Library order*; minimum 2–500, default 5, counted in present tracks. |
-| Table | One row per cluster (noise last): Save checkbox (pre-ticked: every cluster except those hidden in the map legend; locked, with the reason as tooltip, while too small or too long for Windows), colour swatch (an icon, not a style sheet), **editable name**, tracks present, missing (tooltip lists up to 20 paths), and the action: New, Replace or Skip · reason. "Unclustered (N) — not saved" has no checkbox. Two ticked rows with the same name (ignoring case) disable Save. |
+| Warnings | A well with a warning glyph, shown only when there are any: the library was moved (paths mapped), tracks added since the analysis, "changed a lot; consider re-analysing", the map shows an older analysis, earlier sets kept in `Playlists/Clusters/`. |
+| Order / Minimum tracks | In the table's glass card. *Closest to the centre first* (default) or *Library order*; minimum 2–500, default 5, counted in present tracks. |
+| Table | Transparent, 34 px rows, no grid lines. One row per cluster (noise last): Save checkbox (pre-ticked: every cluster except those hidden in the map legend; locked, with the reason as tooltip, while too small or too long for Windows), the cluster's map colour as a round dot (an icon, not a style sheet), **editable name**, tracks present, missing (tooltip lists up to 20 paths), and the action: New, Replace or Skip · reason. "Unclustered (N) — not saved" has no checkbox. Two ticked rows with the same name (ignoring case) disable Save. |
 | Left unchanged | Files already in the run folder that this save does not touch. |
-| Buttons | Select all / Select none, Open folder (only when the run folder exists; `QDesktopServices`), **Save N playlists (K replace)** and Cancel (the default button). |
+| Buttons | Select all / Select none / Open folder as ghost buttons with glyphs (Open folder only when the run folder exists; `QDesktopServices`), Cancel (the default button) and **Save N playlists (K replace)** (primary, save glyph). |
 
 Every option, checkbox and committed name edit re-plans on the GUI thread with the pure
 `plan_cluster_playlists`. After Save the flow asks once if anything would be replaced

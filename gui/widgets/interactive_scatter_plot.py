@@ -4,12 +4,24 @@ Display-only: it renders points it is handed and reports what the user did with
 them. Loading, validating and exporting cluster data lives in
 ``cluster_graph_data``.
 
-Rendering is split in two layers so a click does not redraw the whole map:
+The plot sits on the glass: the widget paints a translucent *well* (the
+material's ``well`` surface, opaque under classic themes and Reduce
+transparency) and the PyQtGraph view on top of it is transparent. A hairline
+grid (``_HairlineGrid``) moves with pan and zoom; the embedding's axes carry
+no units, so they stay hidden.
 
-* ``scatter`` — every *visible* point, drawn with one cached brush/pen per
-  cluster. Rebuilt only when the data or a cluster's visibility changes.
-* ``selection_scatter`` — just the selected points, enlarged and outlined,
-  on top. Rebuilt on every selection change (cost ∝ selection size).
+Rendering is split in layers so a click does not redraw the whole map:
+
+* ``scatter`` — every *visible* point. Each cluster has one point sprite: a
+  vivid dot with a soft ring, drawn by a radial-gradient brush. PyQtGraph
+  renders each (symbol, size, pen, brush) once into its symbol atlas, keyed by
+  the brush object, so the sprite is a cached pixmap and thousands of points
+  are pixmap fragments (no per-point effects). Rebuilt only when the data or
+  a cluster's visibility changes.
+* ``selection_scatter`` — just the selected points, outlined in the accent,
+  on top. Rebuilt on every selection change (cost ∝ selection size). While
+  something is selected the base layer is dimmed with one item opacity.
+* ``hover_scatter`` — a single ring around the point under the cursor.
 """
 from __future__ import annotations
 
@@ -35,8 +47,18 @@ MODE_PAN = "pan"
 MODE_RECT = "rect"
 MODE_LASSO = "lasso"
 
-_POINT_SIZE = 9
-_SELECTED_SIZE = 13
+#: Sprite size: the vivid core is ~60 % of it, the rest is the soft ring.
+_POINT_SIZE = 14
+_SELECTED_SIZE = 11
+_HOVER_SIZE = 20
+#: Base-layer opacity while a selection exists (the selection reads on top).
+_DIMMED = 0.5
+#: Grid lines: the text colour at this opacity.
+GRID_ALPHA = 0.07
+
+#: Well corner radius and how far the view sits inside it.
+_WELL_RADIUS = 20
+_WELL_INSET = 6
 
 
 def _cluster_colour(index: int, total: int) -> QtGui.QColor:
@@ -48,6 +70,31 @@ def _cluster_colour(index: int, total: int) -> QtGui.QColor:
 #: Noise points are deliberately desaturated so they read as "leftovers"
 #: rather than as just another cluster competing for attention.
 NOISE_COLOUR = QtGui.QColor(140, 140, 150)
+
+
+def point_brush(colour: QtGui.QColor, *, noise: bool = False) -> QtGui.QBrush:
+    """The point sprite's brush: a vivid core and a soft ring that fades out.
+
+    Drawn in the symbol's own unit square (PyQtGraph scales the 'o' path,
+    radius 0.5, to the point size), so one brush serves any size."""
+    core = QtGui.QColor(colour)
+    if noise:
+        core.setAlpha(170)
+    light = QtGui.QColor(core).lighter(118)
+    ring = QtGui.QColor(core)
+    ring.setAlpha(110 if not noise else 50)
+    faint = QtGui.QColor(core)
+    faint.setAlpha(36 if not noise else 0)
+    clear = QtGui.QColor(core)
+    clear.setAlpha(0)
+    grad = QtGui.QRadialGradient(QtCore.QPointF(0, 0), 0.5)
+    grad.setColorAt(0.0, light)
+    grad.setColorAt(0.50, core)
+    grad.setColorAt(0.58, core)
+    grad.setColorAt(0.64, ring)
+    grad.setColorAt(0.82, faint)
+    grad.setColorAt(1.0, clear)
+    return QtGui.QBrush(grad)
 
 
 def unavailable_reason() -> str:
@@ -65,6 +112,19 @@ def unavailable_reason() -> str:
         "Reinstalling it (pip install --force-reinstall pyqtgraph) usually fixes a "
         "missing dependency."
     )
+
+
+def _nice_step(span: float, target_lines: int = 8) -> float:
+    """A 1/2/5 × 10ⁿ step giving about ``target_lines`` lines over ``span``."""
+    import math
+
+    if span <= 0 or not math.isfinite(span):
+        return 1.0
+    raw = span / max(target_lines, 1)
+    exp = math.floor(math.log10(raw))
+    base = raw / 10 ** exp
+    nice = 1 if base < 1.5 else 2 if base < 3.5 else 5 if base < 7.5 else 10
+    return nice * 10 ** exp
 
 
 if pg is not None:
@@ -98,8 +158,49 @@ if pg is not None:
             else:
                 self.drag_moved.emit(point)
 
+    class _HairlineGrid(pg.UIGraphicsItem):
+        """A 1 px grid in view coordinates: it pans and zooms with the points.
+
+        About eight lines across the longer side at a 1/2/5 step; the colour
+        is the material's hairline. Cheap: a handful of cosmetic lines."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self._pen = QtGui.QPen(QtGui.QColor(255, 255, 255, 20), 1.0)
+            self._pen.setCosmetic(True)
+            self.setZValue(-100)
+
+        def set_colour(self, colour: QtGui.QColor) -> None:
+            self._pen = QtGui.QPen(colour, 1.0)
+            self._pen.setCosmetic(True)
+            self.update()
+
+        def paint(self, p, *args):  # noqa: D401 - PyQtGraph API
+            import math
+
+            rect = self.boundingRect()
+            if rect.isNull() or rect.width() <= 0 or rect.height() <= 0:
+                return
+            step = _nice_step(max(abs(rect.width()), abs(rect.height())))
+            p.setPen(self._pen)
+            left, right = min(rect.left(), rect.right()), max(rect.left(), rect.right())
+            top, bottom = min(rect.top(), rect.bottom()), max(rect.top(), rect.bottom())
+            x = math.ceil(left / step) * step
+            for _ in range(64):
+                if x > right:
+                    break
+                p.drawLine(QtCore.QPointF(x, top), QtCore.QPointF(x, bottom))
+                x += step
+            y = math.ceil(top / step) * step
+            for _ in range(64):
+                if y > bottom:
+                    break
+                p.drawLine(QtCore.QPointF(left, y), QtCore.QPointF(right, y))
+                y += step
+
 else:  # pragma: no cover - placeholder so the module imports without PyQtGraph
     _SelectionViewBox = None  # type: ignore[assignment]
+    _HairlineGrid = None  # type: ignore[assignment]
 
 
 class InteractiveScatterPlot(QtWidgets.QWidget):
@@ -131,8 +232,10 @@ class InteractiveScatterPlot(QtWidgets.QWidget):
         self._metadata: List[dict] = []
         self._colours: List[QtGui.QColor] = []
         self._palette: Dict[int, QtGui.QColor] = {}
-        self._brushes: Dict[int, object] = {}
-        self._pens: Dict[int, object] = {}
+        self._brushes: Dict[int, object] = {}      # point sprites (gradient)
+        self._solid: Dict[int, object] = {}        # selected points' fill
+        self._no_pen = None
+        self._no_brush = None
 
         # State
         self._selected: set[int] = set()
@@ -142,6 +245,7 @@ class InteractiveScatterPlot(QtWidgets.QWidget):
         self._drag_points: List[QtCore.QPointF] = []
         self._additive = False
         self._highlight_pen = None
+        self._hover_pen = None
 
         self._available = pg is not None
         if self._available:
@@ -160,9 +264,11 @@ class InteractiveScatterPlot(QtWidgets.QWidget):
 
     def _build_unavailable_notice(self) -> None:
         layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(24, 24, 24, 24)
         label = QtWidgets.QLabel(
             unavailable_reason() + "\n\nThe 3D browser view is unaffected and still works."
         )
+        label.setObjectName("mutedLabel")
         label.setWordWrap(True)
         label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(label)
@@ -170,18 +276,28 @@ class InteractiveScatterPlot(QtWidgets.QWidget):
 
     def _build_plot(self) -> None:
         layout = QtWidgets.QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setContentsMargins(_WELL_INSET, _WELL_INSET, _WELL_INSET, _WELL_INSET)
 
         self._view_box = _SelectionViewBox()
         self.plot_widget = pg.PlotWidget(viewBox=self._view_box)
         self.plot_widget.setMenuEnabled(False)
+        # Transparent: this widget paints the glass well underneath.
+        self.plot_widget.setBackground(None)
+        self.plot_widget.viewport().setAutoFillBackground(False)
         # The embedding axes carry no interpretable units — only relative
         # position means anything — so the axes are hidden rather than
-        # labelled with numbers that invite over-reading.
+        # labelled with numbers that invite over-reading. The hairline grid
+        # still gives pan and zoom something to move against.
         self.plot_widget.hideAxis("bottom")
         self.plot_widget.hideAxis("left")
+        self.plot_widget.getPlotItem().setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self.plot_widget)
 
+        self._grid = _HairlineGrid()
+        self._view_box.addItem(self._grid, ignoreBounds=True)
+
+        self._no_pen = pg.mkPen(None)
+        self._no_brush = pg.mkBrush(None)
         self.scatter = pg.ScatterPlotItem(pxMode=True, hoverable=False)
         self.scatter.sigClicked.connect(self._on_points_clicked)
         self.plot_widget.addItem(self.scatter)
@@ -192,6 +308,12 @@ class InteractiveScatterPlot(QtWidgets.QWidget):
         self.selection_scatter.setZValue(10)
         self.selection_scatter.setAcceptedMouseButtons(QtCore.Qt.MouseButton.NoButton)
         self.plot_widget.addItem(self.selection_scatter)
+
+        # The ring under the cursor (one point; cheap to move).
+        self.hover_scatter = pg.ScatterPlotItem(pxMode=True, hoverable=False)
+        self.hover_scatter.setZValue(20)
+        self.hover_scatter.setAcceptedMouseButtons(QtCore.Qt.MouseButton.NoButton)
+        self.plot_widget.addItem(self.hover_scatter)
 
         # Overlay used to draw the in-progress rectangle or lasso.
         self._marquee = QtWidgets.QGraphicsPathItem()
@@ -204,21 +326,51 @@ class InteractiveScatterPlot(QtWidgets.QWidget):
         self._view_box.drag_finished.connect(self._on_drag_finished)
         self.plot_widget.scene().sigMouseMoved.connect(self._on_mouse_moved)
 
-    @QtCore.Slot(object)
-    def _apply_theme(self, tokens) -> None:
-        """Follow the app theme: plot background, selection outline, marquee."""
+    def well_surface(self):
+        """The surface the plot sits on (the material's well)."""
+        from gui.themes.glass import current_material
+
+        return current_material().well
+
+    def paintEvent(self, event: QtGui.QPaintEvent) -> None:  # noqa: N802
         if not self._available:
             return
-        self.plot_widget.setBackground(QtGui.QColor(tokens.card_bg))
-        # The outline must contrast with the background (white vanished on
-        # light themes), so it uses the primary text colour.
-        self._highlight_pen = pg.mkPen(QtGui.QColor(tokens.text_primary), width=2)
+        from gui.themes.glass import paint_surface
+
+        p = QtGui.QPainter(self)
+        try:
+            paint_surface(p, QtCore.QRectF(self.rect()), self.well_surface(), radius=_WELL_RADIUS)
+        finally:
+            p.end()
+
+    @QtCore.Slot(object)
+    def _apply_theme(self, tokens) -> None:
+        """Follow the app theme: grid, selection ring, hover ring, marquee.
+
+        The point sprites are theme-independent (cluster colours), so a theme
+        switch never rebuilds the base layer."""
+        if not self._available:
+            return
+        from gui.themes.glass import qcolor
+
+        # A faint line of the text colour: visible on the translucent well and
+        # on the opaque one (classic themes, Reduce transparency) alike.
+        self._grid.set_colour(qcolor(tokens.text_primary, GRID_ALPHA))
         accent = QtGui.QColor(tokens.accent)
+        # Selection and lasso use the accent.
+        self._highlight_pen = pg.mkPen(accent, width=2)
+        ring = QtGui.QColor(tokens.text_primary)
+        ring.setAlpha(230)
+        self._hover_pen = pg.mkPen(ring, width=1.5)
         fill = QtGui.QColor(accent)
         fill.setAlpha(40)
-        self._marquee.setPen(pg.mkPen(accent, width=1.5))
+        marquee = pg.mkPen(accent, width=1.5)
+        marquee.setStyle(QtCore.Qt.PenStyle.DashLine)
+        self._marquee.setPen(marquee)
         self._marquee.setBrush(pg.mkBrush(fill))
         self._render_selection()
+        self._render_hover()
+        self.update()
 
     # ── Data ──────────────────────────────────────────────────────────────
 
@@ -261,11 +413,14 @@ class InteractiveScatterPlot(QtWidgets.QWidget):
         self._colours = [palette[c] for c in clusters]
         self._visibility = {c: self._visibility.get(c, True) for c in ordered}
         if self._available:
-            # One brush and pen per cluster, shared by all of its points.
-            self._brushes = {c: pg.mkBrush(col) for c, col in palette.items()}
-            self._pens = {c: pg.mkPen(col.darker(140), width=0.5) for c, col in palette.items()}
+            # One sprite brush (and one solid brush for selected points) per
+            # cluster, shared by all of its points: the symbol atlas renders
+            # each once.
+            self._brushes = {c: point_brush(col, noise=c == NOISE_LABEL) for c, col in palette.items()}
+            self._solid = {c: pg.mkBrush(col) for c, col in palette.items()}
 
         self._render()
+        self._render_hover()
         if self._available and self._xy:
             self.plot_widget.autoRange()
 
@@ -288,17 +443,13 @@ class InteractiveScatterPlot(QtWidgets.QWidget):
         """Return the colour used for *cluster_id* (for a matching legend)."""
         return self._palette.get(cluster_id, NOISE_COLOUR)
 
+    def point_count(self) -> int:
+        return len(self._xy)
+
     # ── Rendering ─────────────────────────────────────────────────────────
 
     def _is_visible(self, index: int) -> bool:
         return self._visibility.get(self._clusters[index], True)
-
-    def _spot_arrays(self, indices: Sequence[int], size: int, pen=None) -> dict:
-        xs = [self._xy[i][0] for i in indices]
-        ys = [self._xy[i][1] for i in indices]
-        brushes = [self._brushes[self._clusters[i]] for i in indices]
-        pens = [pen] * len(indices) if pen is not None else [self._pens[self._clusters[i]] for i in indices]
-        return dict(x=xs, y=ys, brush=brushes, pen=pens, size=size, data=list(indices))
 
     def _render(self) -> None:
         """Redraw the base layer (data or visibility changed) and the selection."""
@@ -306,7 +457,15 @@ class InteractiveScatterPlot(QtWidgets.QWidget):
             return
         visible = [i for i in range(len(self._xy)) if self._is_visible(i)]
         if visible:
-            self.scatter.setData(**self._spot_arrays(visible, _POINT_SIZE))
+            xy, clusters, brushes = self._xy, self._clusters, self._brushes
+            self.scatter.setData(
+                x=[xy[i][0] for i in visible],
+                y=[xy[i][1] for i in visible],
+                brush=[brushes[clusters[i]] for i in visible],
+                pen=self._no_pen,
+                size=_POINT_SIZE,
+                data=visible,
+            )
         else:
             self.scatter.clear()
         self._render_selection()
@@ -317,11 +476,31 @@ class InteractiveScatterPlot(QtWidgets.QWidget):
             return
         chosen = [i for i in sorted(self._selected) if self._is_visible(i)]
         if chosen:
+            xy, clusters, solid = self._xy, self._clusters, self._solid
             self.selection_scatter.setData(
-                **self._spot_arrays(chosen, _SELECTED_SIZE, pen=self._highlight_pen)
+                x=[xy[i][0] for i in chosen],
+                y=[xy[i][1] for i in chosen],
+                brush=[solid[clusters[i]] for i in chosen],
+                pen=self._highlight_pen,
+                size=_SELECTED_SIZE,
+                data=chosen,
             )
         else:
             self.selection_scatter.clear()
+        # Everything else steps back while a selection exists (one opacity,
+        # no per-point work).
+        self.scatter.setOpacity(_DIMMED if chosen else 1.0)
+
+    def _render_hover(self) -> None:
+        if not self._available or self._hover_pen is None:
+            return
+        i = self._hovered
+        if 0 <= i < len(self._xy) and self._is_visible(i):
+            x, y = self._xy[i]
+            self.hover_scatter.setData(x=[x], y=[y], pen=self._hover_pen,
+                                       brush=self._no_brush, size=_HOVER_SIZE)
+        else:
+            self.hover_scatter.clear()
 
     # ── Selection ─────────────────────────────────────────────────────────
 
@@ -447,10 +626,22 @@ class InteractiveScatterPlot(QtWidgets.QWidget):
         view_pos = self._view_box.mapSceneToView(scene_pos)
         hits = self.scatter.pointsAt(view_pos)
         index = int(hits[0].data()) if len(hits) else -1
+        self._set_hovered(index)
+
+    def _set_hovered(self, index: int) -> None:
         if index != self._hovered:
             self._hovered = index
             self.scatter.setToolTip(self._tooltip_for(index) if index >= 0 else "")
+            self._render_hover()
             self.hover_changed.emit(index)
+
+    def leaveEvent(self, event: QtCore.QEvent) -> None:  # noqa: N802
+        if self._available:
+            self._set_hovered(-1)
+        super().leaveEvent(event)
+
+    def hovered(self) -> int:
+        return self._hovered
 
     def _tooltip_for(self, index: int) -> str:
         if not (0 <= index < len(self._labels)):
@@ -476,6 +667,7 @@ class InteractiveScatterPlot(QtWidgets.QWidget):
             self._selected = {i for i in self._selected if self._clusters[i] != cluster_id}
             dropped = len(self._selected) != before
         self._render()
+        self._render_hover()
         if dropped:
             self.points_selected.emit(self.get_selection())
 

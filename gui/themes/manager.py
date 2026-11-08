@@ -295,7 +295,15 @@ QLabel#experimentalNote {{
 
 
 /* [area:sound_map] begin */
-
+QLabel#soundMapHeroTitle, QLabel#clusterLegendName, QLabel#clusterLegendCount {{
+    color: palette(window-text);
+}}
+QLabel#clusterLegendName:disabled, QLabel#clusterLegendCount:disabled {{
+    color: palette(placeholder-text);
+}}
+QLabel#clusterPlaylistsHeader, QLabel#qualityReportNote {{
+    color: palette(shadow);
+}}
 /* [area:sound_map] end */
 
 
@@ -371,7 +379,8 @@ _THEMED_OBJECT_NAMES = frozenset({
     frozenset(),
 
     # [area:sound_map]
-    frozenset(),
+    frozenset({"soundMapHeroTitle", "clusterLegendName", "clusterLegendCount",
+               "clusterPlaylistsHeader", "qualityReportNote"}),
 
     # [area:takeaway_settings]
     frozenset(),

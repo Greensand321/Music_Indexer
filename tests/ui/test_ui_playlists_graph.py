@@ -138,13 +138,22 @@ def test_hover_previews_when_nothing_is_pinned(make_workspace, tmp_path):
 
 
 def test_plot_background_follows_theme_switches(make_workspace, tmp_path):
+    """The plot sits on the glass: the PyQtGraph view is transparent and the
+    widget paints the material's well under it (opaque in classic themes).
+    Selection and lasso use the accent; the grid is a faint text-colour line."""
+    from gui.compat import QtCore
+    from gui.themes.glass import qcolor
+
     ws, _lib = _graph(make_workspace, tmp_path, n=4)
     mgr = get_manager()
-    for key in ("pearl", "midnight"):
+    for key in ("pearl", "midnight", "glass"):
         mgr.apply(key)
-        expected = QtGui.QColor(mgr.current.card_bg).name()
-        assert ws._plot.plot_widget.backgroundBrush().color().name() == expected
-        assert ws._plot._highlight_pen.color().name() == QtGui.QColor(mgr.current.text_primary).name()
+        assert ws._plot.plot_widget.backgroundBrush().style() == QtCore.Qt.BrushStyle.NoBrush
+        assert ws._plot.well_surface() == mgr.current.material.well
+        accent = QtGui.QColor(mgr.current.accent).name()
+        assert ws._plot._highlight_pen.color().name() == accent
+        assert ws._plot._marquee.pen().color().name() == accent
+        assert ws._plot._grid._pen.color() == qcolor(mgr.current.text_primary, isp.GRID_ALPHA)
 
 
 # ── PL-25 ────────────────────────────────────────────────────────────────

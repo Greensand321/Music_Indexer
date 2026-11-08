@@ -132,10 +132,26 @@ def test_quality_report_rows_are_visible(qtbot):
     d = ClusterQualityReportDialog(metrics, info)
     qtbot.addWidget(d)
     d.show()
+    # The overall scores are a StatRow (painted tiles), toned by quality.
+    values = d.stat_values()
+    assert values == {"silhouette": "0.420", "davies_bouldin": "1.100",
+                      "calinski_harabasz": "230.0", "noise": "10%"}
+    assert d.stat_tones()["silhouette"] == "warning"       # 0.42 is fair
     texts = visible_texts(d)
-    assert "0.420" in texts and "1.100" in texts and "230.0" in texts
     assert "Cluster 0" in texts and "12 tracks" in texts and "3 tracks" in texts
     assert any(t.startswith("• ") for t in texts), "suggestions are missing"
+
+
+def test_quality_report_sections_are_glass_cards(qtbot):
+    """The report's sections are GlassCards (no plain frames borrowing the
+    card name), so the dialog's contents match the pages."""
+    from gui.widgets.glass import GlassCard
+
+    d = ClusterQualityReportDialog({"silhouette_score": 0.61}, {0: {"size": 9}})
+    qtbot.addWidget(d)
+    named = [f for f in d.findChildren(QtWidgets.QFrame) if f.objectName() == "workspaceCard"]
+    assert named and all(isinstance(f, GlassCard) for f in named)
+    assert d.stat_tones() == {"silhouette": "success"}
 
 
 # ── Worker lifecycle (PL-07 / PL-08 / PL-09 / PL-02) ─────────────────────
@@ -155,7 +171,7 @@ def test_run_disables_buttons_and_never_blocks_or_double_runs(make_workspace, tm
     fake.release.set()
     _wait_idle(ws, qtbot)
     assert all(b.isEnabled() for b in ws._run_buttons)
-    assert "Clusters created:" in _results_text(ws)
+    assert ws.stat_values().get("clusters")
 
 
 def test_cancel_reaches_the_extraction_loop(make_workspace, tmp_path, qtbot, monkeypatch):
@@ -183,7 +199,7 @@ def test_stale_result_from_an_abandoned_run_is_ignored(make_workspace, tmp_path,
     assert not ws.is_busy()
     assert threads.wait_all(5000) == []
     process_events(50)
-    assert "Clusters created:" not in _results_text(ws)
+    assert ws.stat_values() == {}
     assert ws._current_result is None
 
 
@@ -215,7 +231,9 @@ def test_wizard_kmeans_reaches_the_backend_and_survives_quick_start(make_workspa
 
     dialogs.on_exec(configure)
     ws._on_configure_wizard()
-    assert "K-Means Parameters:" in ws._config_display.toPlainText()
+    # The wizard's answers fill in the settings card (what Run uses).
+    assert ws.settings_config()["algorithm"] == "kmeans"
+    assert ws.settings_config()["k"] == 3
 
     ws._on_run_quick_start()
     _wait_idle(ws, qtbot)
@@ -233,9 +251,9 @@ def test_noise_is_not_counted_as_a_cluster(make_workspace, tmp_path, qtbot, monk
     ws, _lib = _ws(make_workspace, tmp_path, 10)
     ws._on_run_quick_start()
     _wait_idle(ws, qtbot)
-    texts = _results_text(ws)
-    assert texts[texts.index("Clusters created:") + 1] == "2"
-    assert "Unclustered (noise):" in texts
+    stats = ws.stat_values()
+    assert stats["clusters"] == "2"
+    assert stats["noise"] == "3"
 
 
 def test_metrics_exclude_noise():
@@ -271,13 +289,20 @@ def test_results_point_to_save_cluster_playlists(qtbot, tmp_path, monkeypatch):
 
 
 def test_advanced_summary_describes_the_playlist_offer(make_workspace, tmp_path):
+    """CP-43/44 on the settings card: the offer is a real, labelled option and
+    the summary line says when it is on (and never that playlists are written
+    automatically)."""
     ws, _lib = _ws(make_workspace, tmp_path)
-    ws._display_config({"algorithm": "kmeans", "features": {}, "create_playlists": False})
-    text = ws._config_display.toPlainText()
-    assert "Save cluster playlists… writes one playlist per cluster" in text
+    assert ws._offer_cb.text() == "Offer to save a playlist per cluster when the analysis finishes"
+    assert "Nothing is written until you click Save" in ws._offer_cb.toolTip()
+    ws._display_config({"algorithm": "kmeans", "features": {"tempo": True}, "create_playlists": False})
+    text = ws._settings_summary.text()
+    assert not ws._offer_cb.isChecked()
     assert "Offers to save them" not in text and "not written automatically" not in text
-    ws._display_config({"algorithm": "kmeans", "features": {}, "create_playlists": True})
-    assert "Offers to save them when the run finishes" in ws._config_display.toPlainText()
+    ws._display_config({"algorithm": "kmeans", "features": {"tempo": True}, "create_playlists": True})
+    assert ws._offer_cb.isChecked()
+    assert "Offers to save them when the run finishes" in ws._settings_summary.text()
+    assert ws.settings_config()["create_playlists"] is True
 
 
 # ── CP-44: offer to save after a successful run ──────────────────────────
