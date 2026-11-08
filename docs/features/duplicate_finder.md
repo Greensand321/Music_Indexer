@@ -7,6 +7,15 @@ behind it without code or jargon.*
 
 ---
 
+**Where to find it.** In the app the Duplicate Finder is the **Duplicates** page, and
+its first section, **Duplicates → Find duplicates**, is the workflow this document
+describes. The page has two more working sections: **Compare two files**, which
+explains the verdict for any two files you pick, and **Pair review**, which walks
+through duplicate pairs side by side (both are covered below). Three more sections
+are marked *Experimental* — Fuzzy finder, Scan engine and Bucketing. They are
+prototypes of other ways to find duplicates; Find duplicates does not use their
+results, and the app itself says they are not ready to test.
+
 ## What "duplicate" really means here
 
 The naive idea of a duplicate is "two files with the same name." That idea is almost
@@ -55,8 +64,10 @@ counterpart (beyond the small alignment window) as unrelated audio: a clip is
 *not* a duplicate of the song it was cut from, a copy missing its last tenth is
 only a near duplicate (flagged for review), and copies a few fractions of a second
 apart still score 0. (Before, a clip scored 0.0 against its song and the two were
-grouped as exact duplicates — with the clip kept if it was the FLAC. The Similarity
-page and Library Sync still compare only the overlapping part.)
+grouped as exact duplicates — with the clip kept if it was the FLAC.
+**Duplicates → Compare two files** gives its verdict with this same length-aware
+distance and shows the overlap-only distance beside it, and Library Sync's matcher
+uses a port of it.)
 
 This is the engine's entire notion of similarity. Everything else — what counts as a
 duplicate, which copy wins — is built on top of this one distance number.
@@ -153,8 +164,9 @@ first and only then removed; if the original cannot be removed (it is open in a 
 read-only, …) the copy is removed again and the loser simply stays in the library,
 reported as not moved.
 
-The one-pair-at-a-time tool, **Utilities → Pair Review**, follows the same rule. It
-used to delete the inferior file with a single click; its action is now
+The one-pair-at-a-time tool, **Duplicates → Pair review** (its **Open Pair Review…**
+button opens it in its own window), follows the same rule. It used to delete the
+inferior file with a single click; its action is now
 "Quarantine inferior…", which names both files, asks, moves the loser into
 `Quarantine/` under a name that never overwrites anything, points playlist entries at
 the kept file, and logs the move to `Docs/duplicate_pair_review_log.txt`. It reviews
@@ -240,8 +252,9 @@ page shows which groups are flagged and why, and lets you either override ("exec
 all groups exactly as previewed") or stop with nothing moved; refusals are reported
 with their reason. A per-group accept/skip review stage is planned (see
 **ROADMAP.md**). If you change a disposition after scanning, the preview
-(`Docs/duplicate_preview.html`, plus `Docs/duplicate_preview.json` for Tools → Pair
-Review) is rewritten before you confirm, so what executes is what the preview shows.
+(`Docs/duplicate_preview.html`, plus `Docs/duplicate_preview.json` for Duplicates →
+Pair review) is rewritten before you confirm, so what executes is what the preview
+shows.
 
 Deletion carries an extra, deliberate double gate — it only happens if the caller
 both allows deletion in general *and* explicitly confirms this specific run, and the
@@ -286,6 +299,11 @@ pair** of files and shows you, step by step, exactly why they were or weren't
 matched: which metadata bucket each landed in, whether they shared any coarse
 fingerprint keys, the raw distance between them, and which threshold applied. It's
 the tool to reach for when the finder's verdict on a particular pair surprises you.
+It is reached from the legacy Tkinter app only. In the Qt app,
+**Duplicates → Compare two files** answers the same question for any two files —
+both fingerprint distances, the thresholds that applied (including the mixed-codec
+allowance) and the verdict — using, by default, the Duplicate Finder's own
+fingerprint cache and thresholds, though without the bucket and coarse-key steps.
 
 *(Historical note: this tool used to crash on every invocation — it looked up each
 track's metadata bucket using a dictionary operation against what is actually a
@@ -350,5 +368,6 @@ run plan before you approve it.** Your own eyes are the final threshold.
 *Related: **Library Sync** (next) uses fingerprint-and-distance machinery for a
 different purpose — merging a new folder into your library rather than cleaning
 duplicates within it. Note that it uses the vendored engine copy under
-`library_sync_indexer_engine/`, which still compares compressed fingerprints; the
-decoding described above has not been ported there.*
+`library_sync_indexer_engine/`; the decoded-fingerprint comparison and the
+length-aware distance described above were ported there deliberately (see
+**architecture.md**, "two indexer engines").*
