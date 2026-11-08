@@ -290,21 +290,26 @@ def test_activity_lists_and_cancels_a_job(main_window, qtbot, threads):
     worker = _GateWorker()
     start_worker(worker, owner=main_window._workspaces["indexer"], name="Test job")
     process_events(10)
-    table = activity._jobs_table
-    rows = [table.item(r, 0).text() for r in range(table.rowCount())]
-    assert "Test job" in rows
-    row = rows.index("Test job")
-    assert table.item(row, 1).text() == "Indexer"
-    assert table.item(row, 2).text().endswith(" s")
+    rows = activity.job_rows()
+    names = [r.job.name for r in rows]
+    assert "Test job" in names
+    row = rows[names.index("Test job")]
+    assert row.owner_label == "Indexer"
+    assert row.elapsed_text.endswith(" s")
+    assert "Indexer" in row.detail_label.text()
+    assert row.fraction is None, "no progress signal: running, amount unknown"
     assert main_window._sidebar._buttons["activity"].badge == 1
 
-    cancel = table.cellWidget(row, 3)
+    cancel = row.cancel_btn
+    assert not cancel.icon().isNull(), "a glyph button"
     cancel.click()
     assert worker.cancelled
     assert cancel.text() == "Stopping…" and not cancel.isEnabled()
     assert threads.wait_all(5000) == []
     assert wait_until(lambda: activity._jobs_empty.isVisible(), 3000)
     assert main_window._sidebar._buttons["activity"].badge == 0
+    finished = [f for f in activity.finished_jobs() if f.name == "Test job"]
+    assert finished and finished[0].stopped and finished[0].owner == "Indexer"
 
 
 def test_activity_keeps_the_log_and_the_problems(main_window):

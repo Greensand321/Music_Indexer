@@ -1,11 +1,16 @@
-"""Activity page: running jobs, the full log history, and the latest problems.
+"""Activity page: running and recent jobs, the full log history, and problems.
 
-* **Running jobs** — every background job in ``gui.workers.JobRegistry``
-  (live: the list follows ``jobs_changed``), with the page that started it,
-  how long it has run, and a Cancel button (``gui.workers.cancel_thread``:
-  the job stops at its next safe point, as on quit).
+* **Jobs** — every background job in ``gui.workers.JobRegistry`` as a glass
+  row (live: the list follows ``jobs_changed``): what it is, the page that
+  started it, how long it has run, a thin progress bar, and Cancel
+  (``gui.workers.cancel_thread``: the job stops at its next safe point, as
+  on quit). Below them, the jobs that finished this session (newest first).
+  The bar shows real progress when the job reports it in a form that says
+  what it is (``progress(int)`` is a percentage, ``progress(int, int[, str])``
+  is done and total); otherwise it is a faint full bar: running, amount
+  unknown. Nothing is guessed.
 * **Log** — every message any page logged this session (the Activity Log
-  drawer keeps working too; it holds the last 500 lines, this keeps more).
+  strip keeps working too; it holds the last 500 lines, this keeps more).
 * **Problems** — this session's warnings and errors, and the tail of the
   crash logs (``crash_logger``; the same files the old Crash Log viewer read).
 
@@ -15,13 +20,19 @@ from __future__ import annotations
 
 import datetime
 import time
+from dataclasses import dataclass
 
 from gui.compat import QtCore, QtGui, QtWidgets, Slot
 from gui.workspaces.base import WorkspaceBase
 
 _HISTORY_LIMIT = 5000
 _PROBLEM_LIMIT = 200
+_RECENT_LIMIT = 8
 _LEVELS = ("info", "ok", "warn", "error")
+
+# Progress signatures whose meaning is known (see the module docstring).
+_PERCENT = "progress(int)"
+_DONE_TOTAL = ("progress(int,int)", "progress(int,int,QString)")
 
 
 def _elapsed(seconds: float) -> str:
@@ -50,105 +61,289 @@ def crash_log_text() -> str:
     return f"No crash log found. AlphaDEX records crashes in {paths[0]}."
 
 
+def progress_kind(thread) -> str:
+    """"percent", "done_total" or "" for a job thread's ``progress`` signal."""
+    try:
+        meta = thread.metaObject()
+    except RuntimeError:
+        return ""
+    # The most derived class's ``progress`` is the one ``thread.progress``
+    # names (a subclass may redeclare it with other arguments).
+    while meta is not None:
+        for i in range(meta.methodOffset(), meta.methodCount()):
+            method = meta.method(i)
+            if method.methodType() != QtCore.QMetaMethod.MethodType.Signal:
+                continue
+            sig = method.methodSignature().data().decode("latin-1")
+            if sig.startswith("progress("):
+                if sig == _PERCENT:
+                    return "percent"
+                return "done_total" if sig in _DONE_TOTAL else ""
+        meta = meta.superClass()
+    return ""
+
+
+@dataclass
+class FinishedJob:
+    name: str
+    owner: str
+    took: float          # seconds
+    ended: float         # epoch seconds
+    stopped: bool        # cancel was requested before it ended
+
+
+def _paint_bar(p: QtGui.QPainter, rect: QtCore.QRectF, fraction: float | None) -> None:
+    """A thin pill bar: the track, and the accent fill (None: running, amount
+    unknown — the whole track faintly tinted)."""
+    from gui.themes.glass import current_material, qcolor
+    from gui.themes.manager import get_manager
+
+    t = get_manager().current
+    r = rect.height() / 2
+    p.setPen(QtCore.Qt.PenStyle.NoPen)
+    p.setBrush(qcolor(current_material().track))
+    p.drawRoundedRect(rect, r, r)
+    if fraction is None:
+        p.setBrush(qcolor(t.accent, 0.35))
+        p.drawRoundedRect(rect, r, r)
+        return
+    fraction = max(0.0, min(1.0, fraction))
+    if fraction > 0:
+        fill = QtCore.QRectF(rect.x(), rect.y(), max(rect.height(), rect.width() * fraction),
+                             rect.height())
+        p.setBrush(qcolor(t.accent))
+        p.drawRoundedRect(fill, r, r)
+
+
+class _Row(QtWidgets.QWidget):
+    """A glass list row (radius 14, the material's hover fill)."""
+
+    def paint_row(self, p: QtGui.QPainter) -> None:
+        from gui.themes.glass import current_material, paint_surface
+        from gui.themes.tokens import Surface
+
+        paint_surface(p, QtCore.QRectF(self.rect()), Surface(current_material().hover, radius=14))
+
+    def paintEvent(self, event: QtGui.QPaintEvent) -> None:  # noqa: N802
+        p = QtGui.QPainter(self)
+        try:
+            p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+            self.paint_row(p)
+        finally:
+            p.end()
+
+
+def _label(text: str, role: str, *, muted: bool = False, weight: int | None = None):
+    from gui.themes.glass import apply_font
+    from gui.widgets.glass import ElidedLabel
+
+    label = ElidedLabel(text)
+    if muted:
+        label.setObjectName("mutedLabel")
+    apply_font(label, role, **({"weight": weight} if weight else {}))
+    return label
+
+
+class JobRow(_Row):
+    """A running job: name, owner and time, a thin progress bar, Cancel."""
+
+    BAR_H = 4
+
+    def __init__(self, job, owner_label: str, on_cancel, parent: QtWidgets.QWidget | None = None) -> None:
+        super().__init__(parent)
+        from gui.widgets.glyphs import set_glyph
+
+        self.setObjectName("activityJobRow")
+        self.job = job
+        self.job_thread = job.thread
+        self.owner_label = owner_label
+        self.fraction: float | None = None
+        lay = QtWidgets.QHBoxLayout(self)
+        lay.setContentsMargins(16, 10, 10, 10 + self.BAR_H + 8)
+        lay.setSpacing(12)
+        text = QtWidgets.QVBoxLayout()
+        text.setSpacing(1)
+        self.name_label = _label(job.name, "body", weight=600)
+        if job.group:
+            self.name_label.setToolTip("Changes files in your library")
+        self.detail_label = _label("", "caption", muted=True)
+        text.addWidget(self.name_label)
+        text.addWidget(self.detail_label)
+        lay.addLayout(text, 1)
+        self.cancel_btn = QtWidgets.QPushButton("Cancel")
+        self.cancel_btn.setObjectName("activityCancelBtn")
+        self.cancel_btn.setToolTip(
+            f"Stop “{job.name}” at its next safe point; whatever it finished is kept and logged")
+        self.cancel_btn.setAccessibleName(f"Cancel {job.name}")
+        set_glyph(self.cancel_btn, "stop", size=14)
+        self.cancel_btn.clicked.connect(on_cancel)
+        lay.addWidget(self.cancel_btn, 0, QtCore.Qt.AlignmentFlag.AlignVCenter)
+        self._connect_progress()
+        self.update_elapsed()
+
+    # Progress: only signatures whose meaning is known (module docstring).
+    def _connect_progress(self) -> None:
+        kind = progress_kind(self.job_thread)
+        try:
+            if kind == "percent":
+                self.job_thread.progress.connect(self._on_percent)
+            elif kind == "done_total":
+                self.job_thread.progress.connect(self._on_done_total)
+        except (RuntimeError, AttributeError, TypeError):
+            pass
+
+    @Slot(int)
+    def _on_percent(self, pct: int) -> None:
+        self.set_fraction(pct / 100.0)
+
+    @Slot(int, int)
+    def _on_done_total(self, done: int, total: int, *_rest) -> None:
+        self.set_fraction(done / total if total and total > 0 else None)
+
+    def set_fraction(self, fraction: float | None) -> None:
+        self.fraction = None if fraction is None else max(0.0, min(1.0, float(fraction)))
+        self.update()
+
+    def update_elapsed(self, now: float | None = None) -> None:
+        now = time.monotonic() if now is None else now
+        self.elapsed_text = _elapsed(now - self.job.started_at)
+        self.detail_label.setText(f"{self.owner_label}  ·  running for {self.elapsed_text}")
+
+    def set_stopping(self) -> None:
+        self.cancel_btn.setText("Stopping…")
+        self.cancel_btn.setEnabled(False)
+
+    def paintEvent(self, event: QtGui.QPaintEvent) -> None:  # noqa: N802
+        p = QtGui.QPainter(self)
+        try:
+            p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+            self.paint_row(p)
+            bar = QtCore.QRectF(16, self.height() - 12 - self.BAR_H,
+                                max(0, self.width() - 32), self.BAR_H)
+            _paint_bar(p, bar, self.fraction)
+        finally:
+            p.end()
+
+
+class FinishedRow(_Row):
+    """A job that ended this session."""
+
+    def __init__(self, done: FinishedJob, parent: QtWidgets.QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("activityFinishedRow")
+        self.done = done
+        lay = QtWidgets.QHBoxLayout(self)
+        lay.setContentsMargins(32, 7, 12, 7)
+        lay.setSpacing(10)
+        text = QtWidgets.QVBoxLayout()
+        text.setSpacing(1)
+        self.name_label = _label(done.name, "label", weight=600)
+        state = "Stopped on request" if done.stopped else "Ended"
+        when = datetime.datetime.fromtimestamp(done.ended).strftime("%H:%M:%S")
+        self.detail_label = _label(
+            f"{state}  ·  {done.owner}  ·  took {_elapsed(done.took)}  ·  {when}", "caption", muted=True)
+        text.addWidget(self.name_label)
+        text.addWidget(self.detail_label)
+        lay.addLayout(text, 1)
+
+    def paintEvent(self, event: QtGui.QPaintEvent) -> None:  # noqa: N802
+        from gui.themes.glass import qcolor
+        from gui.themes.manager import get_manager
+
+        t = get_manager().current
+        p = QtGui.QPainter(self)
+        try:
+            p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+            self.paint_row(p)
+            p.setPen(QtCore.Qt.PenStyle.NoPen)
+            p.setBrush(qcolor(t.warning if self.done.stopped else t.success))
+            p.drawEllipse(QtCore.QPointF(16.0, self.height() / 2.0), 4.0, 4.0)
+        finally:
+            p.end()
+
+
 class ActivityWorkspace(WorkspaceBase):
     def __init__(self, library_path: str = "", parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(library_path, parent)
         self._owner_labels: dict[str, str] = {}
-        self._row_threads: list = []
+        self._rows: list[JobRow] = []
+        self._known: dict[int, tuple] = {}      # id(thread) → (job, thread)
+        # Threads someone asked to stop (QThread forgets once it has ended).
+        self._stop_requested: set[int] = set()
+        self._recent_shown: list[FinishedJob] | None = None
+        self._finished: list[FinishedJob] = []
         self._history: list[tuple[str, str, str]] = []   # (time, level, message)
+        self._jobs_stale = False
         self._tick = QtCore.QTimer(self)
         self._tick.setInterval(1000)
         self._tick.timeout.connect(self._refresh_elapsed)
         self._build_ui()
         from gui.workers import job_registry
         job_registry().jobs_changed.connect(self._on_jobs_changed)
+        self._track_jobs()
         self.refresh_jobs()
         self.refresh_problems()
 
     # ── UI ────────────────────────────────────────────────────────────────
 
-    def _build_ui(self) -> None:
-        cl = self.content_layout
-        cl.addWidget(self._make_section_title("Activity"))
-        cl.addWidget(self._make_subtitle(
-            "What AlphaDEX is doing now, everything it has reported this session, and "
-            "the latest problems. Cancelling a job stops it at its next safe point; "
-            "whatever it finished is kept and logged."
-        ))
+    def _card(self, title: str) -> tuple[QtWidgets.QFrame, QtWidgets.QVBoxLayout, QtWidgets.QHBoxLayout]:
+        card = self._make_card()
+        lay = QtWidgets.QVBoxLayout(card)
+        lay.setContentsMargins(16, 16, 16, 16)
+        lay.setSpacing(10)
+        head = QtWidgets.QHBoxLayout()
+        head.setSpacing(10)
+        head.addWidget(self._make_card_title(title))
+        head.addStretch(1)
+        lay.addLayout(head)
+        return card, lay, head
 
-        # Running jobs
-        jobs_card = self._make_card()
-        jl = QtWidgets.QVBoxLayout(jobs_card)
-        jl.setContentsMargins(16, 16, 16, 16)
-        jl.setSpacing(8)
-        jl.addWidget(self._make_card_title("Running jobs"))
-        self._jobs_table = QtWidgets.QTableWidget(0, 4)
-        self._jobs_table.setObjectName("activityJobs")
-        self._jobs_table.setHorizontalHeaderLabels(["Job", "Started by", "Running for", ""])
-        header = self._jobs_table.horizontalHeader()
-        header.setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeMode.Stretch)
-        header.setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(2, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(3, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
-        self._jobs_table.verticalHeader().setVisible(False)
-        self._jobs_table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
-        self._jobs_table.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.NoSelection)
-        self._jobs_table.setMinimumHeight(120)
-        self._jobs_table.setMaximumHeight(220)
-        jl.addWidget(self._jobs_table)
-        self._jobs_empty = QtWidgets.QLabel("Nothing is running.")
-        self._jobs_empty.setObjectName("statusHint")
+    @staticmethod
+    def _caption(text: str) -> QtWidgets.QLabel:
+        from gui.themes.glass import apply_font
+
+        label = QtWidgets.QLabel(text)
+        label.setObjectName("mutedLabel")
+        apply_font(label, "caption", weight=600)
+        return label
+
+    def _build_ui(self) -> None:
+        from gui.widgets.glass_parts import EmptyState
+        from gui.widgets.glyphs import set_glyph
+
+        cl = self.content_layout
+        cl.addWidget(self._make_subtitle(
+            "What AlphaDEX is doing now, and everything it reported this session."))
+
+        # Jobs: running rows, then this session's finished ones
+        jobs_card, jl, _head = self._card("Jobs")
+        self._jobs_card = jobs_card
+        self._jobs_box = QtWidgets.QVBoxLayout()
+        self._jobs_box.setSpacing(8)
+        jl.addLayout(self._jobs_box)
+        self._jobs_empty = EmptyState(
+            "Nothing is running",
+            "Scans, previews and file operations show here while they run, with Cancel.")
         jl.addWidget(self._jobs_empty)
+        self._recent_caption = self._caption("Earlier this session")
+        jl.addWidget(self._recent_caption)
+        self._recent_box = QtWidgets.QVBoxLayout()
+        self._recent_box.setSpacing(6)
+        jl.addLayout(self._recent_box)
         cl.addWidget(jobs_card)
 
-        # Problems
-        prob_card = self._make_card()
-        pl = QtWidgets.QVBoxLayout(prob_card)
-        pl.setContentsMargins(16, 16, 16, 16)
-        pl.setSpacing(8)
-        head = QtWidgets.QHBoxLayout()
-        head.addWidget(self._make_card_title("Problems"))
-        head.addStretch(1)
-        self._refresh_problems_btn = QtWidgets.QPushButton("Refresh")
-        self._refresh_problems_btn.setToolTip("Re-read the crash logs")
-        self._refresh_problems_btn.clicked.connect(self.refresh_problems)
-        head.addWidget(self._refresh_problems_btn)
-        pl.addLayout(head)
-        hint = QtWidgets.QLabel("Warnings and errors from this session:")
-        hint.setObjectName("statusHint")
-        pl.addWidget(hint)
-        self._problems = QtWidgets.QPlainTextEdit()
-        self._problems.setObjectName("logText")
-        self._problems.setReadOnly(True)
-        self._problems.setMaximumBlockCount(_PROBLEM_LIMIT)
-        self._problems.setPlaceholderText("No warnings or errors so far.")
-        self._problems.setFixedHeight(110)
-        pl.addWidget(self._problems)
-        crash_hint = QtWidgets.QLabel("Latest crash log entries:")
-        crash_hint.setObjectName("statusHint")
-        pl.addWidget(crash_hint)
-        self._crash_text = QtWidgets.QPlainTextEdit()
-        self._crash_text.setObjectName("logText")
-        self._crash_text.setReadOnly(True)
-        self._crash_text.setFixedHeight(130)
-        pl.addWidget(self._crash_text)
-
         # Log history
-        log_card = self._make_card()
-        ll = QtWidgets.QVBoxLayout(log_card)
-        ll.setContentsMargins(16, 16, 16, 16)
-        ll.setSpacing(8)
-        head = QtWidgets.QHBoxLayout()
-        head.addWidget(self._make_card_title("Log"))
-        head.addStretch(1)
+        log_card, ll, head = self._card("Log")
         self._log_filter = QtWidgets.QComboBox()
         self._log_filter.addItems(["Everything", "Warnings and errors"])
+        self._log_filter.setToolTip("Which lines to show")
         self._log_filter.currentIndexChanged.connect(self._render_history)
         head.addWidget(self._log_filter)
         self._clear_btn = QtWidgets.QPushButton("Clear")
+        self._clear_btn.setToolTip("Clear this page's log (the Activity Log strip keeps its own)")
+        set_glyph(self._clear_btn, "trash", size=14)
         self._clear_btn.clicked.connect(self.clear_history)
         head.addWidget(self._clear_btn)
-        ll.addLayout(head)
         self._history_text = QtWidgets.QPlainTextEdit()
         self._history_text.setObjectName("logText")
         self._history_text.setReadOnly(True)
@@ -156,8 +351,30 @@ class ActivityWorkspace(WorkspaceBase):
         self._history_text.setPlaceholderText("Nothing logged yet.")
         self._history_text.setMinimumHeight(220)
         ll.addWidget(self._history_text)
-        # Order on the page: jobs, the log, then problems.
         cl.addWidget(log_card)
+
+        # Problems
+        prob_card, pl, head = self._card("Problems")
+        self._refresh_problems_btn = QtWidgets.QPushButton("Refresh")
+        self._refresh_problems_btn.setToolTip("Read the crash logs again")
+        set_glyph(self._refresh_problems_btn, "refresh", size=14)
+        self._refresh_problems_btn.clicked.connect(self.refresh_problems)
+        head.addWidget(self._refresh_problems_btn)
+        pl.addWidget(self._caption("Warnings and errors this session"))
+        self._problems = QtWidgets.QPlainTextEdit()
+        self._problems.setObjectName("logText")
+        self._problems.setReadOnly(True)
+        self._problems.setMaximumBlockCount(_PROBLEM_LIMIT)
+        self._problems.setPlaceholderText("No warnings or errors so far.")
+        self._problems.setFixedHeight(110)
+        pl.addWidget(self._problems)
+        pl.addSpacing(4)
+        pl.addWidget(self._caption("Latest crash log entries"))
+        self._crash_text = QtWidgets.QPlainTextEdit()
+        self._crash_text.setObjectName("logText")
+        self._crash_text.setReadOnly(True)
+        self._crash_text.setFixedHeight(130)
+        pl.addWidget(self._crash_text)
         cl.addWidget(prob_card)
         cl.addStretch(1)
 
@@ -180,6 +397,7 @@ class ActivityWorkspace(WorkspaceBase):
 
     @Slot(int)
     def _on_jobs_changed(self, _count: int = 0) -> None:
+        self._track_jobs()
         # Hidden: rebuild once when shown (jobs come and go often at start-up).
         if self.isVisible():
             self.refresh_jobs()
@@ -191,35 +409,75 @@ class ActivityWorkspace(WorkspaceBase):
         from gui.workers import job_registry
         return job_registry().listed_jobs()
 
+    def _track_jobs(self) -> None:
+        """Note the jobs that ended since the last change (cheap; always runs)."""
+        current = {id(j.thread): (j, j.thread) for j in self.jobs()}
+        for key, (_job, thread) in current.items():
+            if self._cancel_requested(thread):
+                self._stop_requested.add(key)
+        ended = [(key, entry) for key, entry in self._known.items() if key not in current]
+        now_m, now = time.monotonic(), time.time()
+        for key, (job, _thread) in ended:
+            self._finished.insert(0, FinishedJob(
+                job.name, self._owner_label(job.owner_name), now_m - job.started_at, now,
+                key in self._stop_requested))
+            self._stop_requested.discard(key)
+        del self._finished[_RECENT_LIMIT:]
+        self._known = current
+        if ended and self.isVisible():
+            self._render_recent()
+
+    def finished_jobs(self) -> list[FinishedJob]:
+        return list(self._finished)
+
+    def job_rows(self) -> list[JobRow]:
+        return list(self._rows)
+
     def refresh_jobs(self) -> None:
         jobs = self.jobs()
-        table = self._jobs_table
-        table.setRowCount(len(jobs))
-        self._row_threads = []
+        threads = [j.thread for j in jobs]
+        if [r.job_thread for r in self._rows] != threads:
+            # Keep the rows of jobs still running (their progress), add new ones.
+            keep = {id(r.job_thread): r for r in self._rows}
+            rows = []
+            for job in jobs:
+                row = keep.pop(id(job.thread), None)
+                if row is None:
+                    row = JobRow(job, self._owner_label(job.owner_name), self._on_cancel_clicked)
+                rows.append(row)
+            for row in keep.values():
+                self._jobs_box.removeWidget(row)
+                row.setParent(None)
+                row.deleteLater()
+            for i, row in enumerate(rows):
+                self._jobs_box.insertWidget(i, row)
+            self._rows = rows
         now = time.monotonic()
-        for row, job in enumerate(jobs):
-            self._row_threads.append(job.thread)
-            name = QtWidgets.QTableWidgetItem(job.name)
-            if job.group:
-                name.setToolTip("Changes files in your library")
-            table.setItem(row, 0, name)
-            table.setItem(row, 1, QtWidgets.QTableWidgetItem(self._owner_label(job.owner_name)))
-            table.setItem(row, 2, QtWidgets.QTableWidgetItem(_elapsed(now - job.started_at)))
-            btn = QtWidgets.QPushButton("Cancel")
-            btn.setObjectName("activityCancelBtn")
-            btn.setToolTip(f"Stop “{job.name}” at its next safe point")
-            btn.clicked.connect(self._on_cancel_clicked)
-            btn.setProperty("jobRow", row)
-            if self._cancel_requested(job.thread):
-                btn.setText("Stopping…")
-                btn.setEnabled(False)
-            table.setCellWidget(row, 3, btn)
+        for row in self._rows:
+            row.owner_label = self._owner_label(row.job.owner_name)
+            row.update_elapsed(now)
+            if self._cancel_requested(row.job_thread):
+                self._stop_requested.add(id(row.job_thread))
+                row.set_stopping()
         self._jobs_empty.setVisible(not jobs)
-        self._jobs_table.setVisible(bool(jobs))
+        self._render_recent()
         if jobs and self.isVisible():
             self._tick.start()
         else:
             self._tick.stop()
+
+    def _render_recent(self) -> None:
+        if self._recent_shown == self._finished:
+            return
+        self._recent_shown = list(self._finished)
+        while self._recent_box.count():
+            widget = self._recent_box.takeAt(0).widget()
+            if widget is not None:
+                widget.setParent(None)
+                widget.deleteLater()
+        for done in self._finished:
+            self._recent_box.addWidget(FinishedRow(done))
+        self._recent_caption.setVisible(bool(self._finished))
 
     @staticmethod
     def _cancel_requested(thread) -> bool:
@@ -231,37 +489,33 @@ class ActivityWorkspace(WorkspaceBase):
     @Slot()
     def _on_cancel_clicked(self) -> None:
         btn = self.sender()
-        row = btn.property("jobRow") if btn is not None else None
-        if row is None or not (0 <= int(row) < len(self._row_threads)):
-            return
-        self.cancel_job(int(row))
+        for i, row in enumerate(self._rows):
+            if row.cancel_btn is btn:
+                self.cancel_job(i)
+                return
 
     def cancel_job(self, row: int) -> None:
         """Ask the job in ``row`` to stop (cooperatively)."""
         from gui.workers import cancel_thread
 
-        thread = self._row_threads[row]
-        name = self._jobs_table.item(row, 0).text() if self._jobs_table.item(row, 0) else "job"
-        cancel_thread(thread)
-        btn = self._jobs_table.cellWidget(row, 3)
-        if btn is not None:
-            btn.setText("Stopping…")
-            btn.setEnabled(False)
-        self._log(f"Cancel requested: {name} (it stops at its next safe point).", "warn")
+        if not 0 <= row < len(self._rows):
+            return
+        job_row = self._rows[row]
+        self._stop_requested.add(id(job_row.job_thread))
+        cancel_thread(job_row.job_thread)
+        job_row.set_stopping()
+        self._log(f"Cancel requested: {job_row.job.name} (it stops at its next safe point).", "warn")
 
     def _refresh_elapsed(self) -> None:
         if not self.isVisible():
             self._tick.stop()
             return
-        jobs = self.jobs()
-        if [j.thread for j in jobs] != self._row_threads:
+        if [j.thread for j in self.jobs()] != [r.job_thread for r in self._rows]:
             self.refresh_jobs()
             return
         now = time.monotonic()
-        for row, job in enumerate(jobs):
-            item = self._jobs_table.item(row, 2)
-            if item is not None:
-                item.setText(_elapsed(now - job.started_at))
+        for row in self._rows:
+            row.update_elapsed(now)
 
     def showEvent(self, event: QtGui.QShowEvent) -> None:  # noqa: N802
         super().showEvent(event)
