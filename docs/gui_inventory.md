@@ -254,20 +254,24 @@ only (fill = `warning` blended over `card_bg`, border = `warning`, text =
 
 ## 4. Log Drawer (`gui/widgets/log_drawer.py`)
 
-A glass strip at the bottom of the content area (the material's card surface). Collapsed by default; expands to
-**220 px** on toggle, or by itself when a `warn` or `error` line arrives. It keeps the
-last 500 lines; the Activity page keeps the session's full history (§6.12).
+The "Activity Log" strip at the bottom of the content area, consistent with the shell: the material's card
+surface, a **pill-shaped bar** (34 px high) while collapsed. Collapsed by default; it opens to **220 px** on
+toggle (Ctrl+L, or a click on the bar), or by itself when a `warn` or `error` line arrives. In a short window
+the open log shrinks (never below 96 px) instead of running past the window's edge. It keeps the last 500
+lines; the Activity page keeps the session's full history (§6.12).
 
 | Element | Purpose |
 |---|---|
-| Handle bar | Click to toggle; shows the status chip |
-| Status chip | One-line status from the active page (`status_changed`) |
-| Log text | Timestamped, colour-coded lines (`info`, `ok`, `warn`, `error`) |
-| Clear | Clears the log |
+| Chevron | Points up while closed, down while open (the only thing that moves: a painter-only turn) |
+| "Activity Log" | Muted 12 px caption |
+| Status dot + text | The active page's status (`status_changed`): the dot carries the colour (the theme's `log_ok` / `log_warn` / `log_err`), the text stays a muted 12 px caption and elides |
+| Clear | Clears the log (Ctrl+W); the Activity page keeps its copy |
+| Log text | Timestamped, colour-coded lines (`info`, `ok`, `warn`, `error`) in a rounded inset |
 
-Colours come from the theme's `log_*` tokens and follow theme switches, including the
-colour of lines already shown. The slide moves a sheet inside a layout-free body, so
-the window is laid out once per toggle rather than on every animation frame.
+Opening and closing are instant: the body is shown or hidden once per toggle, so the window is laid out once
+and nothing slides under the pointer (no geometry animation). Colours follow theme switches, including lines
+already shown. The Now Playing capsule floats inside the page area, which ends where the strip's row begins,
+so it never covers the strip's controls, open or closed (`tests/ui/test_ui_home_glass.py`).
 
 Messages a panel logs while it is still being built are buffered and delivered once
 the window has connected the panel (`WorkspaceBase.flush_pending_logs`).
@@ -378,22 +382,28 @@ the flow, and a neutral "Cancelled" state instead of reporting a cancel as an er
 
 ### 6.1 Home (`home.py`)
 
-The library at a glance. **Read-only and cheap:** it never walks the whole library.
-Its statistics are the top bar's (the main window's existing stats scan hands them
-over), and its own check (`scan_library_health`) only runs the Validator, lists
-`Docs/` and walks the three folders below, in one read-only JobRegistry job
-(`ask_before_quit=False`) started on a library change, by Refresh, or when the page
-is shown again more than 3 s after the last check. A result for an older library is
-ignored.
+The library at a glance, and something to play (the "Refined Liquid Glass" mockup's Home). The page header
+already shows the title and the library path, so the page starts with one muted line. **Read-only and cheap:**
+it never walks the whole library. Its statistics are the header's (the main window's existing stats scan
+hands them over, with the album count the same walk found, `gui.library_stats.last_counts`); its own check
+(`scan_library_health`) only runs the Validator, lists `Docs/`, reads the head of the last duplicate preview
+and walks the three folders below. The albums come from the cover scanner the landing and the backdrop use
+(`_CoverScan`, as `HomeAlbumScan`). Both are read-only JobRegistry jobs (`ask_before_quit=False`), started
+on a library change; the health check also by Refresh, or when the page is shown again more than 3 s after
+the last check. A result for an older library is ignored.
+
+Layout: the hero card across the top, then the other four cards in **two columns** when the content is at
+least 860 px wide (about a 1200 px window), one column below that. Nothing scrolls sideways at 900 px.
 
 | Card | Contents |
 |---|---|
-| Library | Full path (selectable), tracks · GB · artists, "Checked at HH:MM", Refresh |
-| Library health | The Validator (formerly a Utilities tile): ✓ "Organized" when `By Artist/` / `By Year/` exist, or its explanation. Then **Manual Review/**, **Quarantine/** and **Not Sorted/** with their audio-file counts (or "not created yet") and an "Open folder" button each. |
-| Latest runs | The newest of each kind in `Docs/`, newest first, each with **Open**: Indexer run (`indexer_executed_*.txt`), Duplicate cleanup (`duplicate_execution_reports/consolidation_run_*/reports/execution_report.html`), Library Sync run (`LibrarySyncExecuted_*.html`, else `LibrarySyncExecuted.html`, else `LibrarySyncAudit_*.json`), Tag changes (newest `tag_changes_<tool>_*.jsonl` per tool), File cleanup (`file_cleanup_*.jsonl`). "No runs yet…" when there are none. |
-| Quick actions | Organize folders (Indexer), Merge new music (Library Sync), Clean up file names (File Cleanup), Find duplicates, Fix tags (Metadata → Tag Fixer), Explore the Sound Map, Make a playlist. |
+| Spin something (hero) | Six random albums as tiles (cover, radius 20, painted shadow, inset ring; title and artist under it). Click one to play it (`play_tracks_requested` → the Player). **Shuffle again** shows six others (every album found is shown before any repeats; disabled, with a tooltip, when all are showing). The scan collects up to 24 albums with cover art *and* tracks, skipping the reserved folders; each album's tracks are the audio files of its folder whose album tag matches (untagged ones in a folder named after the album), in disc/track order. Placeholder tiles while it runs. Kept per library, so coming back is instant. Empty states: no library chosen; no albums with cover art and tracks. |
+| Library health | Stat tiles: tracks, on disk, artists, albums (when the header's scan counted them), then **Manual Review/**, **Quarantine/** and **Not Sorted/** with their audio-file counts ("–" when the folder does not exist; Manual Review and Quarantine turn amber when not empty), each with an "Open folder" glyph button. "Checked HH:MM" and a Refresh glyph button. **Layout check:** "matches the Indexer's layout" (green) or "not organised by the Indexer yet" (amber; the Validator's explanation in the tooltip) with **Organize with the Indexer** (→ Indexer). |
+| Recent runs | Up to six glass rows, newest first: what ran ("Tag changes · Fill genres"), when and which file, and **Open**. Sources: Indexer run (`indexer_executed_*.txt`), Duplicate cleanup (`duplicate_execution_reports/consolidation_run_*/reports/execution_report.html`), Library Sync run (`LibrarySyncExecuted_*.html`, else `LibrarySyncExecuted.html`, else `LibrarySyncAudit_*.json`), Tag changes (newest `tag_changes_<tool>_*.jsonl` per tool), File cleanup (`file_cleanup_*.jsonl`). An empty state when there are none. |
+| Duplicates | The last scan's own summary from `Docs/duplicate_preview.json` (written by the Duplicates page): groups found and how many need review, when, whether a cleanup has run since, and **Open preview**. Without one: "No duplicate scan yet". Always **Find duplicates** (→ Duplicates · Find). Never a made-up count. |
+| Quick actions | Glass pills with glyphs: Organize folders (Indexer), Merge new music (Library Sync), Clean up file names (File Cleanup), Fix tags (Metadata · Tag Fixer), Explore the Sound Map, Make a playlist. |
 
-Without a library it starts no job and says "No library selected".
+Without a library it starts no job and every card says so.
 
 ### 6.2 Indexer (`indexer.py`)
 
@@ -795,9 +805,11 @@ library change does not re-enable Open buttons for the old library).
 
 Read-only.
 
+One muted line, then three glass cards.
+
 | Card | Contents |
 |---|---|
-| Running jobs | Every running job in the JobRegistry, live (`jobs_changed`): Job, Started by (the page · section that owns it), Running for, and **Cancel** (`gui.workers.cancel_thread`: the job stops at its next safe point, as on quit; the button then reads "Stopping…"). "Nothing is running." when empty. |
+| Jobs | Every running job in the JobRegistry as a glass row, live (`jobs_changed`): the job, the page · section that started it and how long it has run, a thin pill progress bar, and **Cancel** (glyph; `gui.workers.cancel_thread`: the job stops at its next safe point, as on quit; the button then reads "Stopping…"). The bar shows real progress only when the job reports it in a form that says what it is (`progress(int)` = percent, `progress(int, int[, str])` = done and total); otherwise a faint full bar (running, amount unknown). "Nothing is running" when empty. Below, **Earlier this session**: the last eight jobs that ended ("Stopped on request" when someone cancelled them, else "Ended"), with who started them, how long they took and when. |
 | Log | Every line any page logged this session (up to 5000), with a filter (Everything / Warnings and errors) and Clear. |
 | Problems | This session's warnings and errors, and the tail of `~/.alphadex/crash.log` and `~/.alphadex/faults.log` (what the old Crash Log viewer showed), with Refresh. |
 
@@ -834,11 +846,15 @@ re-read their thresholds there), and applies a changed default library through
 
 ### 6.14 Help (`help.py`)
 
-| Element | Purpose |
+One muted line, then three glass cards (Keyboard shortcuts and About side by side when the content is at least
+860 px wide). No emoji; links are text in the accent colour (`gui/widgets/link_button.LinkButton`), and page
+names follow `gui/navigation.py`.
+
+| Card | Contents |
 |---|---|
-| Documentation | One button per maintained doc: `docs/README.md`, overview, architecture, every `docs/features/` page, `gui_inventory.md` and `ROADMAP.md` (a test checks that each exists) |
-| Keyboard Shortcuts | The app-wide shortcuts (Ctrl+O, Ctrl+, for the Settings page, Ctrl+L, Ctrl+1–9 for the first nine pages, Ctrl+W). The Player's own shortcuts are not listed here. |
-| About AlphaDEX | Former name, config file location, supported formats, and a Report an Issue (GitHub) button |
+| Documentation | One link per maintained doc, two columns, each with a one-line note: Documentation index (`docs/README.md`), Overview, Architecture, Indexer, Library Sync, Duplicates, Metadata: Tag Fixer and genres, Sound Map and Playlists, Every page and control (`gui_inventory.md`), Roadmap and known bugs (a test checks that each exists). They open in the browser. |
+| Keyboard shortcuts | The app-wide shortcuts as key chips: Ctrl+O (Change library), Ctrl+, (Settings), Ctrl+1–9 (the first nine pages), Ctrl+L (show or hide the Activity Log), Ctrl+W (clear it), Ctrl+Q (quit); then one line naming the Player page's own keys (Space, N, P, Shift+Left/Right). |
+| About AlphaDEX | What it is (formerly SoundVault), where settings live (`~/.soundvault_config.json`), the supported formats, and **Report an issue on GitHub** |
 
 ---
 
@@ -923,6 +939,7 @@ Every option, checkbox and committed name edit re-plans on the GUI thread with t
 | `widgets/glass.py` (`GlassCard`, `GlassPanel`, `ShadowLayer`, `ElidedLabel`) | Live — §5.5 |
 | `widgets/sidebar.py` (`Sidebar`) | Live — §3.1 |
 | `widgets/log_drawer.py` (`LogDrawer`) | Live — §4 |
+| `widgets/link_button.py` (`LinkButton`) | Live — accent-coloured text links (Home's Recent runs, Help) |
 | `widgets/now_playing_bar.py` (`NowPlayingBar`) | Live — §1.1 |
 | `widgets/gradient_bg.py` (`GradientWidget`) | Live — §5.5 (transparent scroll surface; painted card shadows) |
 | `widgets/landing.py` (`MosaicLanding`) | Live — §0 |
