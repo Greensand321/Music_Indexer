@@ -581,12 +581,27 @@ class _GroupRowDelegate(QtWidgets.QStyledItemDelegate):
         state = option.state
         selected = bool(state & QtWidgets.QStyle.StateFlag.State_Selected)
         hovered = bool(state & QtWidgets.QStyle.StateFlag.State_MouseOver)
-        rect = QtCore.QRectF(option.rect).adjusted(0, self.ROW_GAP / 2, 0, -self.ROW_GAP / 2)
-        fill = m.selection if selected else (m.pressed if hovered else m.well.fill)
-        paint_surface(painter, rect, m.well, radius=RADIUS.sm, fill=fill)
+        rect = QtCore.QRectF(option.rect).adjusted(0.5, self.ROW_GAP / 2, -0.5, -self.ROW_GAP / 2)
+        if selected:
+            # A tint and an accent ring rather than a solid fill: classic
+            # themes' selection is the opaque accent, which would swallow the
+            # pills and need inverse text.
+            tint = qcolor(m.selection)
+            tint.setAlphaF(min(tint.alphaF(), 0.30))
+            paint_surface(painter, rect, m.well, radius=RADIUS.sm, fill=tint)
+            painter.save()
+            painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+            painter.setPen(QtGui.QPen(qcolor(t.accent, 0.85), 1.2))
+            painter.setBrush(QtCore.Qt.BrushStyle.NoBrush)
+            inner = rect.adjusted(0.6, 0.6, -0.6, -0.6)
+            painter.drawRoundedRect(inner, RADIUS.sm - 0.6, RADIUS.sm - 0.6)
+            painter.restore()
+        else:
+            paint_surface(painter, rect, m.well, radius=RADIUS.sm,
+                          fill=m.pressed if hovered else m.well.fill)
 
-        primary = qcolor(m.selection_text if selected else t.text_primary)
-        muted = qcolor(m.selection_text, 0.78) if selected else qcolor(t.text_secondary)
+        primary = qcolor(t.text_primary)
+        muted = qcolor(t.text_secondary)
         pfont = pill_font()
         tags = [_KEEP_TAG[0]] + [label for label, _tone in _DISPOSITION_TAGS.values()]
         tag_w = max(tone_pill_size(text, pfont).width() for text in tags)
