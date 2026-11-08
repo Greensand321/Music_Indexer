@@ -208,14 +208,18 @@ def test_keyboard_mode_ignores_modal_dialogs(main_window, kb, qtbot):
 # ── navigation (SHELL-27, SHELL-25 hook) ────────────────────────────────────
 
 def test_shortcut_order_is_the_sidebar_order():
+    from gui.navigation import PAGE_BY_KEY
+
     sidebar_order = [i.key for s in NAV_STRUCTURE for i in s.items]
-    assert _NAV_ORDER[: len(sidebar_order)] == [k for k in sidebar_order if k in mw._WORKSPACE_MAP]
-    assert set(_NAV_ORDER) == set(mw._WORKSPACE_MAP)
+    assert _NAV_ORDER == sidebar_order
+    assert set(_NAV_ORDER) == set(PAGE_BY_KEY)
 
 
 def test_status_bar_uses_sidebar_labels(main_window):
     main_window._on_nav_changed("graph")
-    assert main_window.statusBar().currentMessage() == "Music Graph"
+    assert main_window.statusBar().currentMessage() == "Sound Map · Map"
+    main_window._on_nav_changed("player")
+    assert main_window.statusBar().currentMessage() == "Player"
 
 
 def test_on_activated_hook_runs_when_a_page_is_shown(main_window, monkeypatch):
@@ -228,38 +232,36 @@ def test_on_activated_hook_runs_when_a_page_is_shown(main_window, monkeypatch):
 
 # ── dialogs owned by the window (SHELL-17, SHELL-09) ────────────────────────
 
-def test_settings_dialog_is_deleted_after_each_open(main_window, dialogs):
+def test_settings_open_as_a_page_not_a_dialog(main_window, dialogs, qtbot):
+    """Settings is a page now: Ctrl+, and the top bar's Settings button go
+    there, and no modal dialog is opened (the harness would fail on one)."""
     from gui.dialogs.settings_drawer import SettingsDrawer
 
-    for _ in range(3):
-        dialogs.on_exec(QtWidgets.QDialog.DialogCode.Rejected)
-        main_window._on_settings()
-    QtCore.QCoreApplication.sendPostedEvents(None, QtCore.QEvent.Type.DeferredDelete.value)
-    process_events(10)
+    main_window._top_bar.settings_requested.emit()
+    assert main_window.current_page() is main_window._pages["settings"]
+    main_window.select_page("home")
+    qtbot.keyClick(main_window, QtCore.Qt.Key.Key_Comma, QtCore.Qt.KeyboardModifier.ControlModifier)
+    process_events(5)
+    assert main_window.current_page() is main_window._pages["settings"]
+    assert dialogs.calls_of("exec") == []
     assert main_window.findChildren(SettingsDrawer) == []
 
 
-def test_theme_button_reuses_an_open_picker(main_window):
+def test_theme_button_opens_settings_appearance(main_window):
     main_window._on_theme_requested()
-    first = main_window._theme_picker
-    process_events(10)
-    main_window._on_theme_requested()
-    assert main_window._theme_picker is first
-    first.close()
+    page = main_window._pages["settings"]
+    assert main_window.current_page() is page
+    assert page.current_section() == "appearance"
+    panel = main_window._workspaces["settings"]
+    assert panel.theme_picker.isVisible()
 
 
 def test_settings_default_library_switches_once(main_window, tmp_path, threads, dialogs, fanouts):
-    from gui.dialogs.settings_drawer import SettingsDrawer
-
     lib = make_album_tree(tmp_path / "Lib")
-
-    def save_with_library(dlg: SettingsDrawer):
-        dlg._library_entry.setText(lib)
-        dlg._on_save()
-        return QtWidgets.QDialog.DialogCode.Accepted
-
-    dialogs.on_exec(save_with_library)
     main_window._on_settings()
+    settings = main_window._workspaces["settings"]
+    settings._library_entry.setText(lib)
+    assert settings._on_save()
     assert main_window._library_path == os.path.normpath(lib)
     assert fanouts == [os.path.normpath(lib)]
     assert threads.wait_all(10_000) == []

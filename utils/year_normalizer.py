@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import re
 
 UNKNOWN_YEAR = "Unknown"
@@ -7,9 +8,11 @@ _YEAR_PATTERN = re.compile(r"(1[0-9]{3}|2[0-9]{3})")
 
 
 def normalize_year(value: object) -> str:
-    if value is None:
+    if value is None or isinstance(value, bool):
         return UNKNOWN_YEAR
     if isinstance(value, (int, float)):
+        if isinstance(value, float) and not math.isfinite(value):
+            return UNKNOWN_YEAR  # int(nan) / int(inf) used to raise
         return _format_year(int(value))
     try:
         text = str(value).strip()

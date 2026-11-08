@@ -224,14 +224,14 @@ def test_sidebar_pill_uses_slow_emphasis_and_is_reused(qtbot, motion):
     sb.resize(360, 900)
     sb.show()
     process_events(30)
-    for key in ("duplicates", "player", "tools"):
+    for key in ("duplicates", "player", "exports"):
         sb.activate(key)
     anim = sb._nav_container._pill_anim
     assert anim.duration() == mo.SLOW
     assert anim.easingCurve().type() == QtCore.QEasingCurve.Type.OutBack
     assert len(_helper_children(sb._nav_container)) == 1
     motion.settle(3000)
-    btn = sb._buttons["tools"]
+    btn = sb._buttons["exports"]
     assert sb._nav_container._pill_y == pytest.approx(float(btn.y()))
     assert motion.orphans() == []
 

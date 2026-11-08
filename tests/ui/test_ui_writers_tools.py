@@ -51,7 +51,7 @@ def test_undo_last_cleanup_previews_restores_names_and_playlists(
     lib = _cleanup_library(tmp_path / "Music")
     playlist = lib.root / "Playlists" / "mix.m3u"
     original_playlist = playlist.read_bytes()
-    ws = make_workspace("tools", library_path=lib.root)
+    ws = make_workspace("file_cleanup", library_path=lib.root)
     _run_cleanup(ws, dialogs, qtbot)
     assert (lib.root / "Band/LP/Song.mp3").exists()
     assert b"Song (1)" not in playlist.read_bytes()
@@ -91,7 +91,7 @@ def test_undo_last_cleanup_previews_restores_names_and_playlists(
 def test_undo_with_no_cleanup_log_says_so(make_workspace, dialogs, tmp_path):
     lib = tmp_path / "Empty"
     lib.mkdir()
-    ws = make_workspace("tools", library_path=lib)
+    ws = make_workspace("file_cleanup", library_path=lib)
     ws._cleanup_undo_btn.click()
     assert not dialogs.calls_of("exec")
     assert "no file cleanup to undo" in dialogs.calls_of("information")[-1].text
@@ -99,7 +99,7 @@ def test_undo_with_no_cleanup_log_says_so(make_workspace, dialogs, tmp_path):
 
 def test_declined_undo_changes_nothing(make_workspace, dialogs, threads, qtbot, tmp_path):
     lib = _cleanup_library(tmp_path / "Music")
-    ws = make_workspace("tools", library_path=lib.root)
+    ws = make_workspace("file_cleanup", library_path=lib.root)
     _run_cleanup(ws, dialogs, qtbot)
     after_cleanup = sorted(p.name for p in (lib.root / "Band/LP").iterdir())
     dialogs.on_exec(QtWidgets.QDialog.DialogCode.Rejected)
@@ -113,7 +113,7 @@ def test_undo_is_a_library_write(make_workspace, dialogs, threads, qtbot, tmp_pa
     from controllers import tag_write_guard
 
     lib = _cleanup_library(tmp_path / "Music")
-    ws = make_workspace("tools", library_path=lib.root)
+    ws = make_workspace("file_cleanup", library_path=lib.root)
     _run_cleanup(ws, dialogs, qtbot)
     exec_calls = len(dialogs.calls_of("exec"))
 
@@ -159,7 +159,7 @@ def test_library_change_lets_a_confirmed_cleanup_finish(
 
     monkeypatch.setattr(file_cleanup, "execute_cleanup_plan", slow_execute)
     lib = _cleanup_library(tmp_path / "Music")
-    ws = make_workspace("tools", library_path=lib.root)
+    ws = make_workspace("file_cleanup", library_path=lib.root)
     dialogs.on_exec(QtWidgets.QDialog.DialogCode.Accepted)
     ws._cleanup_run_btn.click()
     qtbot.waitUntil(entered.is_set, timeout=15000)
@@ -192,7 +192,7 @@ def test_library_change_still_cancels_read_only_exports(
         return real(path)
 
     monkeypatch.setattr(reader, "read_tags", slow)
-    ws = make_workspace("tools", library_path=library.root)
+    ws = make_workspace("exports", library_path=library.root)
     ws._at_run_btn.click()
     worker = ws._at_worker
     other = tmp_path / "Other"
@@ -215,7 +215,7 @@ def test_export_finishing_after_library_change_keeps_open_disabled(
 
     old = tmp_path / "Old"
     old.mkdir()
-    ws = make_workspace("tools", library_path=old)
+    ws = make_workspace("exports", library_path=old)
     if kind == "at":
         worker = ArtistTitleWorker(str(old), False, False, parent=ws)
         worker.finished.connect(ws._on_at_finished)
@@ -248,7 +248,7 @@ def test_signal_from_an_untracked_export_is_ignored(make_workspace, qtbot, tmp_p
 
     lib = tmp_path / "Lib"
     lib.mkdir()
-    ws = make_workspace("tools", library_path=lib)
+    ws = make_workspace("exports", library_path=lib)
     stray = CodecExportWorker(str(lib), {".mp3"}, False, parent=ws)
     stray.finished.connect(ws._on_codec_finished)
     stray.finished.emit(str(lib / "Docs" / "x.txt"), 1)

@@ -64,6 +64,17 @@ applying, the written rows drop out of the table and the log is kept; there is n
 automatic re-scan. Only one tag-writing job runs at a time across the Tag Fixer and
 both Genre Normalizer tabs.
 
+**Undoing an apply.** Those logs are enough to put the old values back, and
+`controllers/tag_revert.py` does it the preview-first way: pick a log (newest first),
+see per file and field what would be restored, then write exactly that. A file whose
+tags changed since the logged write is skipped and reported, never overwritten; a
+file that has been moved or deleted is reported as missing. Every value of a
+multi-value field comes back, a field that did not exist before is removed again, and
+WAV files with ID3 tags work too. The revert is itself logged
+(`Docs/tag_changes_revert_<timestamp>.jsonl`), so it can be reverted. In the app this is
+**Metadata → Undo changes**: pick an apply, **Preview undo** (writes nothing), then
+**Undo these changes**.
+
 ### An honest note on the "score tiers"
 
 If you read the code, you'll find two named thresholds:  a 0.90 "apply
@@ -189,7 +200,11 @@ different tools, and they are two tabs because they answer two different questio
   that table is written. A genre the file already has is kept, with the new tags
   added after it. Files that already carry two or more genres are skipped, so this
   fills gaps rather than second-guessing choices you've already made. Opus files are
-  included, like everywhere else.
+  included, like everywhere else. The command-line version
+  (`python update_genres.py [folder] [--yes]`) follows the same rules and is now
+  preview-first too: it lists every planned change and asks before writing (it used
+  to write each file as soon as its lookup returned), writes exactly that list, and
+  logs to `Docs/genre_update_log.txt` and `Docs/tag_changes_genre_fill_cli_*.jsonl`.
 
 - **Normalize with a mapping** — *"my genres are a mess of spellings."* This is the
   canonical-mapping workflow: collapse "Hip Hop," "hip-hop," "hiphoprap," and "Rap"

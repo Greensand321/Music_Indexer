@@ -242,12 +242,41 @@ def test_nonexistent_library_is_not_created(make_workspace, tmp_path, dialogs, q
 
 
 def test_ignored_options_are_disabled_and_say_why(make_workspace, library):
-    """LIB-12: Phase C / flush cache / max workers are ignored by the engine."""
+    """LIB-12: Phase C and flush cache are ignored by the engine."""
     ws = _indexer(make_workspace, library.root)
-    for widget in (ws._cross_album_cb, ws._flush_cache_cb, ws._max_workers_spin):
+    for widget in (ws._cross_album_cb, ws._flush_cache_cb):
         assert not widget.isEnabled()
-        assert "ignores" in widget.toolTip()
+        assert widget.toolTip().startswith("Not used")
+    assert "no cache" in ws._flush_cache_cb.toolTip()
     assert ws._phase_bars[2][0].text() == "Phase C — Applying changes"
+
+
+def test_max_workers_reaches_the_engine_and_defaults_to_one(make_workspace, library, qtbot,
+                                                             threads, monkeypatch):
+    """Max workers is real now. 1 is the default because more is slower on a local disk."""
+    import music_indexer_api as api
+
+    ws = _indexer(make_workspace, library.root)
+    assert ws._max_workers_spin.isEnabled()
+    assert ws._max_workers_spin.value() == 1
+    assert "network" in ws._max_workers_spin.toolTip()
+
+    seen = []
+    real = api.run_full_indexer
+
+    def spy(*args, **kwargs):
+        seen.append(kwargs.get("max_workers"))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(api, "run_full_indexer", spy)
+    ws._max_workers_spin.setValue(3)
+    qtbot.mouseClick(ws._run_btn, QtCore.Qt.MouseButton.LeftButton)
+    assert not ws._max_workers_spin.isEnabled()      # locked while the preview runs
+    threads.wait_all()
+    qtbot.waitUntil(lambda: ws._worker is None or not ws._worker.isRunning(), timeout=20000)
+    assert seen == [3]
+    assert ws._fresh_plan() is not None
+    assert ws._max_workers_spin.isEnabled()
 
 
 def test_quit_during_preview_cancels_and_waits(main_window, library, dialogs, qtbot, monkeypatch):

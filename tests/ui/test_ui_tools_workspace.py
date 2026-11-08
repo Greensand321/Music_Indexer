@@ -1,9 +1,11 @@
-"""Utilities (Tools) workspace regressions.
+"""File Cleanup and Exports pages (the old Utilities page), and the dialog
+launchers that replaced its Diagnostics tile.
 
 TOOL-01/02 File Cleanup preview-first · TOOL-04 worker lifetime · TOOL-14
 exports skip reserved folders · TOOL-17 status chip · TOOL-19 codec export off
-the GUI thread · TOOL-21/DUP-20 diagnostic dialogs · DS-06 chip transitions ·
-DS-08 light-theme tint · DS-09 hover timers · DS-20 colour flashes.
+the GUI thread · TOOL-21/DUP-20 one live dialog per tool (now the Duplicates
+page's Pair review / prototype sections) · DS-06 chip transitions · DS-08
+light-theme tint · DS-09 hover timers · DS-20 colour flashes.
 """
 from __future__ import annotations
 
@@ -45,7 +47,7 @@ def test_file_cleanup_previews_then_renames_exactly_the_plan(
     make_workspace, dialogs, threads, qtbot, tmp_path
 ):
     lib = _cleanup_library(tmp_path / "Music")
-    ws = make_workspace("tools", library_path=lib.root)
+    ws = make_workspace("file_cleanup", library_path=lib.root)
     seen: dict = {}
 
     def review(dlg):
@@ -83,7 +85,7 @@ def test_file_cleanup_cancelled_preview_changes_nothing(
 ):
     lib = _cleanup_library(tmp_path / "Music")
     before = _files(lib.root)
-    ws = make_workspace("tools", library_path=lib.root)
+    ws = make_workspace("file_cleanup", library_path=lib.root)
     dialogs.on_exec(QtWidgets.QDialog.DialogCode.Rejected)
     ws._cleanup_run_btn.click()
     qtbot.waitUntil(lambda: bool(dialogs.calls_of("exec")) and _cleanup_idle(ws), timeout=15000)
@@ -106,7 +108,7 @@ def test_file_cleanup_passes_library_root_to_playlist_update(
 
     monkeypatch.setattr(playlist_generator, "update_playlists", fake_update)
     lib = _cleanup_library(tmp_path / "Music")
-    ws = make_workspace("tools", library_path=lib.root)
+    ws = make_workspace("file_cleanup", library_path=lib.root)
     dialogs.on_exec(QtWidgets.QDialog.DialogCode.Accepted)
     ws._cleanup_run_btn.click()
     qtbot.waitUntil(lambda: bool(dialogs.calls_of("exec")) and _cleanup_idle(ws), timeout=15000)
@@ -118,7 +120,7 @@ def test_file_cleanup_repeated_runs_do_not_crash(make_workspace, threads, qtbot,
     """TOOL-04: the old unparented worker aborted the process within ~20 runs."""
     lib = tmp_path / "Empty"
     lib.mkdir()
-    ws = make_workspace("tools", library_path=lib)
+    ws = make_workspace("file_cleanup", library_path=lib)
     for _ in range(15):
         ws._cleanup_run_btn.click()
         qtbot.waitUntil(lambda: _cleanup_idle(ws), timeout=5000)
@@ -139,7 +141,7 @@ def test_cleanup_button_is_disabled_while_running(make_workspace, qtbot, tmp_pat
     monkeypatch.setattr(file_cleanup, "build_cleanup_plan", slow_plan)
     lib = tmp_path / "Empty"
     lib.mkdir()
-    ws = make_workspace("tools", library_path=lib)
+    ws = make_workspace("file_cleanup", library_path=lib)
     ws._cleanup_run_btn.click()
     assert not ws._cleanup_run_btn.isEnabled()
     ws._on_file_cleanup()          # a second trigger is ignored
@@ -155,7 +157,7 @@ def test_artist_title_export_skips_reserved_folders(make_workspace, library, qtb
         TrackSpec("Ghost", "Quarantined Loser", "X", 1, relpath="Quarantine/loser.mp3"),
         TrackSpec("Ghost", "Trashed", "X", 1, relpath="Trash/old.mp3"),
     ])
-    ws = make_workspace("tools", library_path=library.root)
+    ws = make_workspace("exports", library_path=library.root)
     ws._at_run_btn.click()
     qtbot.waitUntil(lambda: ws._at_worker is None and ws._at_run_btn.isEnabled(), timeout=15000)
     text = (library.root / "Docs" / "artist_title_list.txt").read_text(encoding="utf-8")
@@ -177,7 +179,7 @@ def test_artist_title_export_can_be_cancelled(make_workspace, library, qtbot, th
         return real(path)
 
     monkeypatch.setattr(reader, "read_tags", slow)
-    ws = make_workspace("tools", library_path=library.root)
+    ws = make_workspace("exports", library_path=library.root)
     ws._at_run_btn.click()
     assert ws._at_cancel_btn.isEnabled() and not ws._at_run_btn.isEnabled()
     ws._at_cancel_btn.click()
@@ -191,7 +193,7 @@ def test_codec_export_runs_in_a_worker_and_skips_reserved(make_workspace, librar
     build_library(library.root, [
         TrackSpec("Ghost", "Loser", "X", 1, relpath="Quarantine/loser.mp3"),
     ])
-    ws = make_workspace("tools", library_path=library.root)
+    ws = make_workspace("exports", library_path=library.root)
     ws._codec_run_btn.click()
     assert "CodecExportWorker" in threads.started, "the walk must not run on the GUI thread"
     qtbot.waitUntil(lambda: ws._codec_worker is None, timeout=15000)
@@ -202,7 +204,7 @@ def test_codec_export_runs_in_a_worker_and_skips_reserved(make_workspace, librar
 
 
 def test_library_change_resets_stale_results(make_workspace, library, qtbot, threads, tmp_path):
-    ws = make_workspace("tools", library_path=library.root)
+    ws = make_workspace("exports", library_path=library.root)
     ws._codec_run_btn.click()
     qtbot.waitUntil(lambda: ws._codec_worker is None, timeout=15000)
     assert ws._codec_open.isEnabled()
@@ -213,23 +215,34 @@ def test_library_change_resets_stale_results(make_workspace, library, qtbot, thr
     assert ws._codec_out_path is None
 
 
-# ── Diagnostics dialogs (TOOL-21 / DUP-20) ────────────────────────────────────
+# ── Dialog launchers: Duplicates → Pair review / prototypes (TOOL-21 / DUP-20) ─
 
 def _children(ws, cls_name: str) -> list:
     QtCore.QCoreApplication.sendPostedEvents(None, QtCore.QEvent.Type.DeferredDelete.value)
     return [c for c in ws.findChildren(QtWidgets.QDialog) if type(c).__name__ == cls_name]
 
 
-def test_diagnostic_dialogs_do_not_leak(make_workspace, dialogs, qtbot):
-    ws = make_workspace("tools")
+@pytest.mark.parametrize("key, dialog", [
+    ("fuzzy_finder", "FuzzyDupeDialog"),
+    ("scan_engine", "ScanEngineDialog"),
+    ("bucketing", "BucketingPocDialog"),
+])
+def test_launcher_dialogs_do_not_leak(make_workspace, dialogs, qtbot, tmp_path, key, dialog):
+    ws = make_workspace(key, library_path=tmp_path)
+    btn = ws.findChild(QtWidgets.QPushButton, "launcherOpenBtn")
     for _ in range(3):
         dialogs.on_exec(QtWidgets.QDialog.DialogCode.Rejected)
-        ws.findChild(QtWidgets.QPushButton, "diag_viewcrashlog").click()
-    assert _children(ws, "CrashLogDialog") == []
-    for name in ("diag_m4atester", "diag_opustester"):
-        dialogs.on_exec(QtWidgets.QDialog.DialogCode.Rejected)
-        ws.findChild(QtWidgets.QPushButton, name).click()
-    assert _children(ws, "MediaTesterDialog") == []
+        btn.click()
+    assert [c.widget for c in dialogs.calls_of("exec")] and len(dialogs.calls_of("exec")) == 3
+    assert _children(ws, dialog) == []
+
+
+def test_pair_review_without_a_preview_says_so(make_workspace, dialogs, tmp_path):
+    ws = make_workspace("pair_review", library_path=tmp_path)
+    ws.findChild(QtWidgets.QPushButton, "launcherOpenBtn").click()
+    (info,) = dialogs.calls_of("information")
+    assert "No duplicate preview found" in info.text
+    assert dialogs.calls_of("exec") == []
 
 
 class _BusyWorker(QtCore.QThread):
@@ -260,8 +273,8 @@ def test_reopening_a_busy_scan_reuses_its_dialog(make_workspace, dialogs, qtbot,
             self._worker.start()
 
     monkeypatch.setattr(mod, "ScanEngineDialog", FakeScanDialog)
-    ws = make_workspace("tools")
-    btn = ws.findChild(QtWidgets.QPushButton, "diag_scanengine")
+    ws = make_workspace("scan_engine")
+    btn = ws.findChild(QtWidgets.QPushButton, "launcherOpenBtn")
 
     def start_then_close(dlg):
         dlg.start_scan()
@@ -286,7 +299,7 @@ def test_reopening_a_busy_scan_reuses_its_dialog(make_workspace, dialogs, qtbot,
 
 def test_status_chip_survives_repeated_transitions(make_workspace, qtbot, motion):
     """DS-06: the second transition used to raise 'Internal C++ object already deleted'."""
-    ws = make_workspace("tools")
+    ws = make_workspace("exports")
     chip = ws._at_tile.status_chip
     for i in range(4):
         chip.show_success(f"ok {i}")
@@ -302,9 +315,9 @@ def test_status_chip_survives_repeated_transitions(make_workspace, qtbot, motion
 def test_tile_hover_timers_stop_when_idle_or_hidden(make_workspace, qtbot):
     from gui.workspaces.tools import ToolTile
 
-    ws = make_workspace("tools")
+    ws = make_workspace("exports")
     tiles = ws.findChildren(ToolTile)
-    assert len(tiles) == 5
+    assert len(tiles) == 2      # Artist/Title export, Codec list export
     assert not any(t.glow_animating for t in tiles), "no timer may run without hover"
 
     tile = tiles[0]
@@ -335,7 +348,7 @@ def test_light_theme_tiles_use_the_light_tint(make_workspace, qtbot, monkeypatch
     from gui.workspaces.tools import ToolTile
 
     get_manager().apply("pearl")
-    ws = make_workspace("tools")
+    ws = make_workspace("exports")
     tile = ws.findChildren(ToolTile)[0]
     light = _mean_lightness(tile)
     tokens = get_manager().current
@@ -350,7 +363,7 @@ def test_colour_flash_reuses_one_animation_and_never_restyles(make_workspace, qt
     """DS-20: one animation per label, palette only (no setStyleSheet per frame)."""
     from gui.workspaces.label_tone import tone_color, tone_of
 
-    ws = make_workspace("tools")
+    ws = make_workspace("exports")
     label = ws._codec_status
     sheet = label.styleSheet()
     ws._flash_label(label, "success")
@@ -368,10 +381,28 @@ def test_status_tones_follow_theme_changes(make_workspace, qtbot, motion):
     from gui.themes.manager import get_manager
     from gui.workspaces.label_tone import tone_color
 
-    ws = make_workspace("tools")
+    ws = make_workspace("exports")
     ws._flash_label(ws._codec_status, "success")
     motion.settle(100)
     get_manager().apply("pearl")
     expected = QtGui.QColor(get_manager().current.text_secondary)
     assert ws._codec_status.palette().color(QtGui.QPalette.ColorRole.WindowText) == expected
     assert tone_color("secondary") == expected
+
+
+def test_a_full_width_tile_spans_a_one_column_grid(make_workspace, qtbot):
+    """Going from two columns to one left the second column stretching, so a
+    lone (or full-width) tile took half the page."""
+    from gui.workspaces.tools import TileGrid, ToolTile
+
+    ws = make_workspace("file_cleanup")
+    ws.resize(1300, 760)
+    process = QtWidgets.QApplication.processEvents
+    process()
+    ws.resize(900, 760)          # < 2 × TileGrid._TILE_MIN_WIDTH: one column
+    for _ in range(5):
+        process()
+    grid = ws.findChild(TileGrid)
+    (tile,) = ws.findChildren(ToolTile)
+    assert grid._current_cols == 1
+    assert tile.width() >= grid.width() - 2

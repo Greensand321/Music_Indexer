@@ -13,9 +13,11 @@ no database other than SQLite caches.
 **Two GUI entry points exist (read this carefully):**
 
 - `python alpha_dex_gui.py` — **PySide6 / Qt rebuild. This is the active,
-  primary app** and where new feature work lands. It uses an Option A
-  Navigator + Workspace layout (`gui/` package: `main_window.py` plus ~14
-  user-facing workspaces under `gui/workspaces/`). Most "implemented" features
+  primary app** and where new feature work lands. Sidebar **pages**, each made of
+  one or more **sections** (tabs), each section backed by a **panel** (a
+  `WorkspaceBase` subclass under `gui/workspaces/`). `gui/navigation.py` is the
+  single source for pages, sections and key routing (old per-panel keys such as
+  `similarity`, `graph`, `genres` still route). Most "implemented" features
   described below — clustering wizard, interactive graph, Library Sync per-item
   flags, splash/landing — live here.
 - `python main_gui.py` — **Tkinter app (~11,600 lines). Legacy.** Still
@@ -52,11 +54,16 @@ The core workflows, in order of user importance:
 ```
 alpha_dex_gui.py             # PySide6/Qt entry point — ACTIVE app (landing → main window)
 main_gui.py                  # Tkinter entry point (~11 600 lines) — LEGACY
-gui/                         # Qt app: main_window.py, qt_launcher.py, theme/icons
-gui/workspaces/              # ~14 user-facing workspaces (indexer, library_sync,
-                             #   duplicates, similarity, tag_fixer, genres, playlists,
-                             #   clustered, clustered_enhanced, graph, player,
-                             #   compression, tools, help); base.py is the shared template
+gui/                         # Qt app: main_window.py, qt_launcher.py, theme/icons,
+                             #   navigation.py (pages → sections → panels), pages.py
+                             #   (the section host, SoundMapPage)
+gui/workspaces/              # Panels: home, indexer, library_sync, tools (File Cleanup,
+                             #   Exports), duplicates, similarity, launchers (Pair review
+                             #   + the Experimental prototypes), tag_fixer, genres,
+                             #   tag_history (Undo changes), player, clustered_enhanced
+                             #   (Analyse), graph (Map), playlists, compression,
+                             #   mirror_verify, activity, settings, help; base.py is the
+                             #   shared template
 gui/widgets/                 # Qt widgets (interactive scatter plots, cluster legend, etc.)
 gui/dialogs/                 # Qt dialogs (clustering wizard, quality report, settings)
 music_indexer_api.py         # Core scan / relocation logic
@@ -257,7 +264,16 @@ All user settings are read/written through `config.load_config()` /
 
 ## Common patterns
 
-**Adding a new Tools menu item**
+**Adding a page or a section (Qt app)**
+1. Write the panel as a `WorkspaceBase` subclass in `gui/workspaces/` (use
+   `_make_card()`, `_make_section_title()`, theme tokens; no hex colours or inline
+   style sheets — the ratchets count them).
+2. Register it in `gui/main_window._WORKSPACE_MAP` under a panel key.
+3. Add a `Section(...)` to its page (or a new `Page`) in `gui/navigation.PAGES`.
+   Prototypes get `experimental=True`, which shows the "Experimental" pill.
+4. Update `docs/gui_inventory.md` and `tests/test_navigation_ia.py`.
+
+**Adding a new Tools menu item (legacy Tk app only)**
 1. Add the `tools_menu.add_command(...)` entry in `_build_menu()` (~line 8103
    of `main_gui.py`).
 2. Implement the handler as a method on `SoundVaultImporterApp`.
@@ -270,7 +286,7 @@ All user settings are read/written through `config.load_config()` /
 - Import it in `main_gui.py` only if a GUI hook is needed; keep the module
   importable without Tkinter.
 
-**Adding a Playlist Creator sub-panel**
+**Adding a Playlist Creator sub-panel (legacy Tk app only)**
 - Add the panel name to the `plugin_list.insert` block (~line 8326).
 - Add an `elif name == "Your Panel Name":` branch in
   `create_panel_for_plugin()` (~line 216).
@@ -363,7 +379,8 @@ section kept separate from planned-but-unbuilt features. Summary:
 - **Decorative controls were wired or switched off** in the 2026-11 fix phase (the
   Duplicates per-group disposition, the Playlist Generator's tempo/energy ranges and
   "Prefer Opus" now work; controls the engine ignores — e.g. the Indexer's Phase C /
-  Flush cache / Max workers — are disabled with an explanatory tooltip). Don't add
+  Flush cache — are disabled with an explanatory tooltip; Max workers became real,
+  default 1). Don't add
   new controls that nothing reads; `docs/ROADMAP.md` "Controls that are still
   switched off" lists the rest.
 - **Every file-changing job takes the library-write lock.** Start it with

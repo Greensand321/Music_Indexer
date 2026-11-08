@@ -6,7 +6,8 @@ import os
 import re
 import shutil  # used for relocating special folders
 import unicodedata
-from collections import defaultdict
+from collections import defaultdict, deque
+from contextlib import closing
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import List
@@ -172,8 +173,63 @@ def _select_canonical_primary(casing_counts: dict[str, dict[str, int]]) -> dict[
     return canonical
 
 
+# ─── Tag reading (optionally on a bounded thread pool) ─────────────────
+#
+# Reading tags is most of the Indexer's preview time. ``max_workers`` > 1
+# reads them on a bounded thread pool; results always come back in the
+# original order, so the plan is identical to a serial run. Python's GIL
+# means threads only pay off when the reads *wait* (network shares, cold
+# spinning disks): on a local SSD with the files in the OS cache, mutagen's
+# parsing is CPU-bound and a pool is slower than one thread. The default
+# (``None``) stays serial.
+MAX_TAG_WORKERS = 32
+
+
+def _tag_workers(max_workers) -> int:
+    """Number of tag-reading threads for ``max_workers`` (1 = serial)."""
+    try:
+        workers = int(max_workers or 1)
+    except (TypeError, ValueError):
+        return 1
+    return max(1, min(workers, MAX_TAG_WORKERS))
+
+
+def _iter_tags(paths, max_workers=None):
+    """Yield ``(path, get_tags(path))`` for every path, in input order.
+
+    With more than one worker the reads run on a thread pool, at most
+    ``8 × workers`` ahead of the consumer, so a consumer that stops early
+    (cancellation raises out of its loop) leaves only a few reads in flight;
+    closing the generator cancels the queued ones and waits for the running
+    ones, so no thread outlives the scan.
+    """
+    workers = _tag_workers(max_workers)
+    if workers <= 1:
+        for path in paths:
+            yield path, get_tags(path)
+        return
+    from concurrent.futures import ThreadPoolExecutor
+
+    window = workers * 8
+    pending = deque()
+    pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="indexer-tags")
+    try:
+        for path in paths:
+            pending.append((path, pool.submit(get_tags, path)))
+            if len(pending) >= window:
+                done_path, future = pending.popleft()
+                yield done_path, future.result()
+        while pending:
+            done_path, future = pending.popleft()
+            yield done_path, future.result()
+    finally:
+        for _path, future in pending:
+            future.cancel()
+        pool.shutdown(wait=True, cancel_futures=True)
+
+
 def build_primary_counts(root_path, progress_callback=None, phase="A", log_callback=None,
-                         library_root=None):
+                         library_root=None, max_workers=None, tags_out=None):
     """
     Walk the entire vault (By Artist, By Year, Incoming, etc.) and
     return a dict mapping each lowercase-normalized artist → total file count,
@@ -187,6 +243,10 @@ def build_primary_counts(root_path, progress_callback=None, phase="A", log_callb
     The reserved folders (Quarantine/, Trash/, Docs/, …) are not counted;
     ``library_root`` is the library top when ``root_path`` is its ``Music/``
     sub-folder.
+
+    ``max_workers`` > 1 reads the tags on a bounded thread pool (same result,
+    see ``_iter_tags``). When ``tags_out`` is a dict, every file's tags are
+    stored in it (path → tags) so the caller need not read them again.
     """
     if progress_callback is None:
         def progress_callback(_c, _t, _m, _p):
@@ -198,14 +258,18 @@ def build_primary_counts(root_path, progress_callback=None, phase="A", log_callb
     counts = {}
     casing_counts = defaultdict(lambda: defaultdict(int))
     idx = 0
-    for dirpath, _, files in _iter_scan_dirs(library_root or root_path, root_path):
-        for fname in files:
-            ext = os.path.splitext(fname)[1].lower()
-            if ext not in SUPPORTED_EXTS:
-                continue
 
-            path = os.path.join(dirpath, fname)
-            tags = get_tags(path)
+    def audio_paths():
+        for dirpath, _, files in _iter_scan_dirs(library_root or root_path, root_path):
+            for fname in files:
+                if os.path.splitext(fname)[1].lower() in SUPPORTED_EXTS:
+                    yield os.path.join(dirpath, fname)
+
+    with closing(_iter_tags(audio_paths(), max_workers)) as tagged:
+        for path, tags in tagged:
+            if tags_out is not None:
+                tags_out[path] = tags
+            fname = os.path.basename(path)
 
             idx += 1
             if idx % 100 == 0:
@@ -577,8 +641,18 @@ def compute_moves_and_tag_index(
       - tag_index: { new_path: { "leftover_tags": [...], "old_paths": [...] }, ... }
       - decision_log: list of strings explaining each track’s decision
 
-    ``enable_phase_c``, ``flush_cache``, ``max_workers``, and ``coord`` are
-    retained for backward compatibility but are ignored.
+    ``max_workers`` > 1 reads the tags on a bounded thread pool (see
+    ``_iter_tags``): the result is identical to a serial run, in the same
+    order. ``None`` (the default) reads serially, as before. Each file's tags
+    are read once (by the artist pre-scan) and reused for the plan.
+
+    ``flush_cache`` is accepted and ignored: this engine keeps no cache to
+    flush. It reads every tag from the files on every scan and computes no
+    fingerprints. (It used to delete ``Docs/.soundvault.db`` back when the
+    Indexer fingerprinted files; that database is now the Duplicate
+    Finder's fingerprint cache, which a scan here neither reads nor needs.)
+    ``enable_phase_c`` and ``coord`` are also accepted for backward
+    compatibility and ignored.
     """
     _verify_dependencies()
     if log_callback is None:
@@ -594,12 +668,15 @@ def compute_moves_and_tag_index(
     MUSIC_ROOT = _music_root_for(root_path)
 
     # --- Phase 0: Pre-scan entire vault (under MUSIC_ROOT) ---
+    tags_by_path = {}
     global_counts, canonical_primary_map = build_primary_counts(
         MUSIC_ROOT,
         progress_callback,
         phase="A",
         log_callback=log_callback,
         library_root=root_path,
+        max_workers=max_workers,
+        tags_out=tags_by_path,
     )
     log_callback(f"   → Pre-scan: found {len(global_counts)} unique artists")
     log_callback(f"   → Music root: {MUSIC_ROOT}")
@@ -639,7 +716,9 @@ def compute_moves_and_tag_index(
             log_callback(f"   • Reading metadata {idx}/{total_files}")
         progress_callback(idx, total_files, f"Metadata {os.path.relpath(fullpath, root_path)}", "B")
 
-        data = get_tags(fullpath)
+        data = tags_by_path.pop(fullpath, None)
+        if data is None:  # not seen by the pre-scan (created since): read it now
+            data = get_tags(fullpath)
         tag_artist = _normalize_tag_value(data.get("artist"), "artist", log_callback)
         tag_title = _normalize_tag_value(data.get("title"), "title", log_callback)
         name_artist, name_title = ("", "")
@@ -1329,13 +1408,17 @@ def build_indexer_plan(
     progress_callback=None,
     cancel_event=None,
     exclude=(),
+    max_workers=None,
 ) -> IndexerPlan:
     """Compute the complete Indexer plan (no file is touched).
 
     ``cancel_event`` (a ``threading.Event``) is honoured at every progress/log
     callback, as is the process-global ``indexer_control.cancel_event``.
     ``exclude`` lists files that must never be swept (e.g. the report being
-    written).
+    written). ``max_workers`` > 1 reads tags on that many threads (capped at
+    ``MAX_TAG_WORKERS``); the plan is identical to a serial one. It helps on
+    slow storage (network shares) and is slower on a fast local disk, so the
+    default (``None``) stays serial.
     """
     if not os.path.isdir(root_path):
         raise FileNotFoundError(f"Library folder not found: {root_path}")
@@ -1354,7 +1437,7 @@ def build_indexer_plan(
 
     _raise_if_cancelled(cancel_event)
     moves, tag_index, decision_log = compute_moves_and_tag_index(
-        root_path, _log, _progress, dry_run=True, coord=None,
+        root_path, _log, _progress, dry_run=True, coord=None, max_workers=max_workers,
     )
     _raise_if_cancelled(cancel_event)
     moves, tag_index = _preview_trailing_suffix_cleanup(moves, tag_index)
@@ -1722,10 +1805,13 @@ def build_dry_run_html(
     Compute the Indexer plan and write it as a dry-run HTML to
     ``output_html_path``. Does NOT move any files.
 
-    ``enable_phase_c``, ``flush_cache`` and ``max_workers`` are accepted for
-    backward compatibility and ignored.
+    ``max_workers``: see ``build_indexer_plan``. ``enable_phase_c`` and
+    ``flush_cache`` are accepted for backward compatibility and ignored (see
+    ``compute_moves_and_tag_index``).
     """
-    plan = build_indexer_plan(root_path, log_callback, None, exclude=[output_html_path])
+    plan = build_indexer_plan(
+        root_path, log_callback, None, exclude=[output_html_path], max_workers=max_workers,
+    )
     write_indexer_preview(plan, output_html_path, log_callback)
     return {"moved": 0, "html": output_html_path, "dry_run": True, "plan": plan}
 
@@ -1746,9 +1832,12 @@ def apply_indexer_moves(
 
     Prefer ``build_indexer_plan`` → preview → ``apply_indexer_plan`` so the
     executed plan is the reviewed one. Returns the ``apply_indexer_plan``
-    summary (``{"moved": <count>, "errors": [...], ...}``).
+    summary (``{"moved": <count>, "errors": [...], ...}``). ``max_workers``:
+    see ``build_indexer_plan``.
     """
-    plan = build_indexer_plan(root_path, log_callback, progress_callback, cancel_event)
+    plan = build_indexer_plan(
+        root_path, log_callback, progress_callback, cancel_event, max_workers=max_workers,
+    )
     return apply_indexer_plan(
         plan,
         log_callback,
@@ -1781,14 +1870,18 @@ def run_full_indexer(
     Returns ``{"moved", "html", "dry_run", "plan"}`` plus, after an execute,
     ``"summary"``, ``"errors"`` and ``"cancelled"``.
 
-    ``enable_phase_c``, ``flush_cache`` and ``max_workers`` are accepted for
-    backward compatibility and ignored.
+    ``max_workers`` > 1 reads tags on that many threads; the plan (and so
+    the preview and what executes) is identical to a serial run — see
+    ``build_indexer_plan``. ``enable_phase_c`` and ``flush_cache`` are
+    accepted for backward compatibility and ignored (the engine keeps no
+    cache; see ``compute_moves_and_tag_index``).
     """
     if log_callback is None:
         def log_callback(msg): pass
 
     plan = build_indexer_plan(
-        root_path, log_callback, progress_callback, cancel_event, exclude=[output_html_path]
+        root_path, log_callback, progress_callback, cancel_event, exclude=[output_html_path],
+        max_workers=max_workers,
     )
     write_indexer_preview(
         plan,
@@ -1840,8 +1933,10 @@ def main(argv: List[str] | None = None) -> None:
     parser.add_argument("root", help="Library root path")
     parser.add_argument("--dry-run", action="store_true", help="Preview only")
     parser.add_argument("--enable-phase-c", action="store_true", help="(Ignored) kept for backward compatibility")
-    parser.add_argument("--flush-cache", action="store_true", help="(Ignored) kept for backward compatibility")
-    parser.add_argument("--max-workers", type=int, default=None, help="(Ignored) kept for backward compatibility")
+    parser.add_argument("--flush-cache", action="store_true",
+                        help="(Ignored: the indexer keeps no cache) kept for backward compatibility")
+    parser.add_argument("--max-workers", type=int, default=None,
+                        help="Read tags on this many threads (helps on network shares; default: serial)")
     parser.add_argument("--no-playlists", action="store_true", help="Skip playlist creation")
     args = parser.parse_args(argv)
 

@@ -101,10 +101,22 @@ fingerprint, whatever its format or position in the library. When that finds no 
 it is also compared with every track of about the same length (±3 s or 2 %) after a
 quick check of the first ~16 seconds. Fingerprints too short or too uniform to identify
 a recording (under about 4 seconds, silence) never match anything. Building the index
-decodes each library fingerprint once — about 30 seconds for 20,000 tracks — and
-Recompute Matches reuses it. A threshold saved before this change that equals the old
+needs every library fingerprint decoded — about 30 seconds for 20,000 tracks. The
+decoded form is saved in Library Sync's fingerprint cache next to the fingerprint, so
+only the first scan (and files that changed since: a different mtime or size) pays
+that; later scans read it back. Recompute Matches reuses the index outright. A threshold saved before this change that equals the old
 default (0.3 / 0.35, which meant something else on the old scale) is replaced by 0.2
 once, with a line in the log; any other saved value is kept.
+
+**Short tracks are fingerprinted as they are.** The fingerprint covers the first
+two minutes of a track (the fingerprint duration setting). A track shorter than that
+used to be padded with silence up to the full window, so the prints of two
+*different* short tracks agreed on all that silence: unrelated 5-second clips scored
+about 0.01 (an "exact match"), 20-second clips about 0.05 and 40-second clips about
+0.1 — so interludes, intros and short songs of similar length were matched to each
+other. Nothing is padded now (`audio_norm.normalize_for_fp`). Fingerprints already in
+the cache from before this change are still padded until those files are
+fingerprinted again.
 
 Alongside the match, Library Sync also weighs **quality**: it compares the incoming
 file's format and bitrate against the existing one and labels the pairing as a
@@ -204,12 +216,10 @@ maintained copy of the Indexer's scanning/fingerprinting logic, not the same mod
 the Indexer and Duplicate Finder use. See **architecture.md**'s "two indexer
 engines" note for what that means in practice — most importantly, that the
 fingerprint cache Library Sync uses has a different schema than the one the rest of
-the app uses, and the two can drift apart. One drift matters for matching today: the
-vendored copy still compares the *compressed* fingerprint text, while the Duplicate
-Finder now decodes fingerprints first. Under the old metric a FLAC and its own MP3 can
-score 0.08–0.46, so a transcode may come back as "new" or "low confidence" rather than
-as a match or an upgrade — another reason to read the review list before building the
-plan. This is listed under Known bugs in **ROADMAP.md**.)*
+the app uses, and the two can drift apart. Fingerprint *matching* no longer drifts: the vendored copy decodes
+Chromaprint fingerprints and compares raw sub-fingerprints, the same metric as the
+Duplicate Finder (same recording in any codec ≈ 0.01, different recordings ≥ 0.43), and
+Library Sync's cache keeps the decoded form so later runs skip the decode.)*
 
 ## Committing the changes, safely
 
@@ -267,12 +277,11 @@ discipline: "The export routine deliberately avoids any move/replace logic and o
 writes the requested report file after the caller has previewed counts." Exporting a
 report can never itself move or replace a file — it's a read-only summary, full stop.
 
-*(One inert detail worth knowing if you ever open the HTML report format directly:
-it renders three action buttons — "Replace All," "Replace with Better," "Cancel" —
-styled to look clickable. They currently do nothing; no script wires them to
-anything, and the backend function they'd need to call exists but isn't connected to
-any live control in either app. Treat the HTML report as a read-only summary, not an
-in-report control surface.)*
+*(The HTML report used to render three "Replace All," "Replace with Better" and
+"Cancel" buttons that did nothing. They are gone: a static file cannot safely drive
+file operations. In their place the report says "To replace, flag tracks in AlphaDEX
+→ Library Sync and build a plan" — replacing always goes through the normal
+flag → Build Plan → preview → execute flow.)*
 
 ---
 

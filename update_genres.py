@@ -14,15 +14,19 @@ Rules, shared with the Qt app's "Fill from MusicBrainz" tab:
   nothing already on the file is removed (see
   ``controllers.normalize_controller.add_genres``).
 
-The Qt app looks everything up first, shows the result, and writes only after
-the user confirms (``normalize_controller.plan_genre_fill`` +
-``apply_genre_changes``). This script's ``main()`` is the legacy command-line
-version and writes as it goes.
+Preview first, in the app and here: every file is looked up first
+(``normalize_controller.plan_genre_fill`` — nothing is written), the planned
+changes are listed, and only after the user confirms are exactly those files
+written (``apply_genre_changes``, which skips a file whose genres changed
+since the preview). The command line used to write each file the moment its
+lookup returned.
 
-While processing, the script prints simple progress messages like
-``[index/total] Processing <file>``.
+Run ``python update_genres.py [folder] [--yes]``; without a folder a folder
+picker opens, without ``--yes`` the script asks before writing.
 
-Produces a log file “genre_update_log.txt” summarizing each file’s result.
+Produces ``Docs/genre_update_log.txt`` (the plan and each file's outcome) and
+``Docs/tag_changes_genre_fill_cli_<time>.jsonl`` (before/after of every
+write, failure and skip).
 
 Prerequisites:
     pip install mutagen musicbrainzngs
@@ -110,19 +114,33 @@ def extract_genre_list(filepath):
         return []
 
 
+def write_genre_tag(filepath, new_genres):
+    """Write ``new_genres`` into the file's genre tag; raise on failure.
+
+    Raises :class:`utils.tag_writer.TagWriteError` whose message says why
+    (a locked or read-only file, an unsupported format, ...), so a caller can
+    log the reason instead of a bare "failed".
+    """
+    try:
+        write_fields(filepath, {"genre": [str(g) for g in new_genres]})
+    except TagWriteError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - one plain error type for callers
+        raise TagWriteError(str(exc) or type(exc).__name__) from exc
+
+
 def update_genre_tag(filepath, new_genres):
     """
     Write new_genres (list of strings) into file’s 'genre' tag. Return True/False.
 
     Writes a real multi-value genre list in every supported format, including
-    WAV/AIFF files with ID3 tags (which the easy interface can't write).
+    WAV/AIFF files with ID3 tags (which the easy interface can't write). Use
+    :func:`write_genre_tag` to learn why a write failed.
     """
     try:
-        write_fields(filepath, {"genre": [str(g) for g in new_genres]})
+        write_genre_tag(filepath, new_genres)
         return True
     except TagWriteError:
-        return False
-    except Exception:
         return False
 
 
@@ -170,17 +188,26 @@ def lookup_musicbrainz_genres(filepath, top_n=3):
 # ─── CORE PROCESSING ───────────────────────────────────────────────────
 
 def process_file(filepath, logfile):
-    """Legacy one-shot path (CLI): look up and write immediately.
+    """Look up and write one file immediately — no preview.
 
-    Same rules as the app's preview: skip files with 2+ genres, otherwise add
-    the MusicBrainz tags after the existing genre.
+    Kept for scripts that call it; :func:`main` no longer does (it previews
+    every change and asks first). Same rules as the app: skip files with 2+
+    genres, otherwise add the MusicBrainz tags after the existing genre. A
+    file whose genres cannot be read is never written: its existing genres
+    are unknown, and writing would replace them.
     """
     from controllers.normalize_controller import FILL_SKIP_AT, add_genres
+    from utils.audio_metadata_reader import read_genres_checked
 
     # Relative to the working directory for a short log line; another drive
     # on Windows has no relative path, so the absolute path is logged then.
     relative = safe_relpath(filepath)
     existing = extract_genre_list(filepath)
+    if not existing:
+        _genres, read_error = read_genres_checked(filepath)
+        if read_error:
+            log_line(logfile, f"{relative}  → skipped (could not read its tags: {read_error}).")
+            return
     if len(existing) >= FILL_SKIP_AT:
         log_line(logfile, f"{relative}  → skipped (already has genres {existing}).")
         return
@@ -196,14 +223,15 @@ def process_file(filepath, logfile):
     if after == existing:
         log_line(logfile, f"{relative}  → already has [{', '.join(existing)}].")
         return
-    success = update_genre_tag(filepath, after)
-    if success:
-        log_line(logfile, f"{relative}  → updated genres to [{', '.join(after)}].")
+    try:
+        write_genre_tag(filepath, after)
+    except TagWriteError as exc:
+        log_line(logfile, f"{relative}  → failed to write genres [{', '.join(after)}]: {exc}.")
     else:
-        log_line(logfile, f"{relative}  → failed to write genres [{', '.join(after)}].")
+        log_line(logfile, f"{relative}  → updated genres to [{', '.join(after)}].")
 
 
-def main():
+def _pick_folder():
     import tkinter as tk
     from tkinter import filedialog
 
@@ -213,42 +241,103 @@ def main():
     except Exception:
         pass
     root.withdraw()
-    folder = filedialog.askdirectory(title="Select Music Folder to Update Genres")
-    if not folder:
-        print("No folder selected; exiting.")
-        sys.exit(0)
+    return filedialog.askdirectory(title="Select Music Folder to Update Genres")
+
+
+def run_cli(folder, *, assume_yes=False, ask=input, out=print, plan_kwargs=None, apply_kwargs=None):
+    """Preview-first genre fill for ``folder``; returns the number of files written.
+
+    1. Look every file up (nothing is written) and list each planned change.
+    2. Ask ``ask(prompt)`` — unless ``assume_yes`` — and stop on anything but
+       "y"/"yes".
+    3. Write exactly the listed changes; a file whose genres changed since the
+       preview is skipped. Every outcome goes to ``Docs/`` (see the module
+       docstring).
+
+    ``plan_kwargs`` / ``apply_kwargs`` are passed on to ``plan_genre_fill`` /
+    ``apply_genre_changes`` (tests inject the lookup and the writer there).
+    """
+    from controllers.normalize_controller import apply_genre_changes, plan_genre_fill
+    from controllers.tagfix_controller import discover_files
+    from utils.tag_change_log import TagChangeLog
 
     docs_dir = os.path.join(folder, "Docs")
     os.makedirs(docs_dir, exist_ok=True)
     logpath = os.path.join(docs_dir, "genre_update_log.txt")
-    try:
-        logfile = open(logpath, "w", encoding="utf-8")
-    except Exception as e:
-        print(f"Cannot open log file: {e}")
+    with open(logpath, "w", encoding="utf-8") as logfile:
+        log_line(logfile, f"Genre Update Log for: {folder}")
+        log_line(logfile, f"Started: {time.ctime()}")
+        log_line(logfile, "--------------------------------------")
+
+        # Same discovery as the app: reserved folders (Not Sorted,
+        # Quarantine…) are never entered.
+        files = discover_files(folder)
+        total = len(files)
+
+        def _progress(index, count):
+            if index:
+                rel = safe_relpath(files[index - 1], folder)
+                out(f"[{index}/{count}] Looking up: {rel}")
+
+        plan = plan_genre_fill(
+            folder, _progress, files=files,
+            log_callback=lambda m: log_line(logfile, f"lookup: {m}"),
+            **(plan_kwargs or {}),
+        )
+        out("")
+        out(
+            f"{len(plan.changes)} of {total} file(s) would get new genres "
+            f"({len(plan.skipped_multi)} already have 2+, {len(plan.no_match)} without a match, "
+            f"{len(plan.blocked)} not writable, {len(plan.errors)} lookup errors)."
+        )
+        for change in plan.changes:
+            rel = safe_relpath(change.path, folder)
+            line = f"{rel}: [{', '.join(change.before)}] → [{', '.join(change.after)}]"
+            out("  " + line)
+            log_line(logfile, f"planned: {line}")
+        if not plan.changes:
+            log_line(logfile, "Nothing to write.")
+            out("Nothing to write.")
+            return 0
+        if not assume_yes:
+            answer = ask(f"Write these genres to {len(plan.changes)} file(s)? [y/N] ")
+            if str(answer).strip().lower() not in ("y", "yes"):
+                log_line(logfile, "Not confirmed; nothing was written.")
+                out("Nothing was written.")
+                return 0
+
+        with TagChangeLog(folder, "genre_fill_cli") as change_log:
+            result = apply_genre_changes(
+                plan.changes, change_log=change_log, **(apply_kwargs or {})
+            )
+        for path in result.applied:
+            log_line(logfile, f"written: {safe_relpath(path, folder)}")
+        for path in result.skipped:
+            log_line(logfile, f"skipped (genres changed since the preview): {safe_relpath(path, folder)}")
+        for path in result.failed:
+            log_line(logfile, f"failed: {safe_relpath(path, folder)}")
+        log_line(logfile, "--------------------------------------")
+        log_line(logfile, f"Finished: {time.ctime()}")
+        log_line(logfile, f"Total files checked: {total}")
+        out(
+            f"Wrote {len(result.applied)} file(s); {len(result.skipped)} skipped, "
+            f"{len(result.failed)} failed. Log: {logpath}"
+        )
+        return len(result.applied)
+
+
+def main(argv=None):
+    args = list(sys.argv[1:] if argv is None else argv)
+    assume_yes = "--yes" in args
+    args = [a for a in args if a != "--yes"]
+    folder = args[0] if args else _pick_folder()
+    if not folder:
+        print("No folder selected; exiting.")
+        sys.exit(0)
+    if not os.path.isdir(folder):
+        print(f"Not a folder: {folder}")
         sys.exit(1)
-
-    log_line(logfile, f"Genre Update Log for: {folder}")
-    log_line(logfile, f"Started: {time.ctime()}")
-    log_line(logfile, "--------------------------------------")
-
-    # Same discovery as the app: reserved folders (Not Sorted, Quarantine…)
-    # are never entered.
-    from controllers.tagfix_controller import discover_files
-
-    all_files = discover_files(folder)
-
-    total = len(all_files)
-
-    for index, fullpath in enumerate(all_files, 1):
-        rel = os.path.relpath(fullpath, folder)
-        print(f"[{index}/{total}] Processing: {rel}")
-        process_file(fullpath, logfile)
-
-    log_line(logfile, "--------------------------------------")
-    log_line(logfile, f"Finished: {time.ctime()}")
-    log_line(logfile, f"Total files checked: {total}")
-    logfile.close()
-    print(f"Done. Check log at: {logpath}")
+    run_cli(folder, assume_yes=assume_yes)
 
 
 if __name__ == "__main__":

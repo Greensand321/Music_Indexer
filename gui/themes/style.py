@@ -547,7 +547,15 @@ class AlphaDEXStyle(QtWidgets.QProxyStyle):
                 if active:
                     font.setWeight(QtGui.QFont.Weight.DemiBold)
                 painter.setFont(font)
-                painter.drawText(opt.rect,
+                text_rect = QR(opt.rect)
+                # A tab button (e.g. the "Experimental" pill on a section
+                # tab) sits at the right edge: centre the label in what is
+                # left, so the two never overlap.
+                button_w = opt.rightButtonSize.width()
+                if button_w > 0:
+                    pad = self.pixelMetric(PM.PM_TabBarTabHSpace, opt, widget) // 2
+                    text_rect.adjust(pad // 2, 0, -(button_w + pad), 0)
+                painter.drawText(text_rect,
                                  int(Qt.AlignmentFlag.AlignCenter), opt.text)
             else:
                 painter.restore()

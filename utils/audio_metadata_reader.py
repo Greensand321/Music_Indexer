@@ -8,6 +8,7 @@ from collections.abc import Mapping
 from typing import Dict, Iterable, List, Optional, Tuple
 
 from utils.path_helpers import ensure_long_path
+from utils.text_decoding import decode_tag_bytes
 from utils.year_normalizer import normalize_year
 from utils.opus_metadata_reader import read_opus_metadata
 
@@ -49,12 +50,7 @@ def _normalize_text_value(value: object, key: str) -> str | None:
     if value is None:
         return None
     if isinstance(value, bytes):
-        for encoding in ("utf-8", "utf-16", "latin-1"):
-            try:
-                return value.decode(encoding)
-            except UnicodeDecodeError:
-                continue
-        return value.decode("utf-8", errors="replace")
+        return decode_tag_bytes(value).strip() or None
     if isinstance(value, (int, float)):
         return str(value)
     if isinstance(value, str):
@@ -98,12 +94,7 @@ def _first_value(value: object) -> object:
     if isinstance(value, tuple):
         return _first_value(value[0]) if value else None
     if isinstance(value, bytes):
-        for encoding in ("utf-8", "utf-16", "latin-1"):
-            try:
-                return value.decode(encoding)
-            except UnicodeDecodeError:
-                continue
-        return value.decode("utf-8", errors="replace")
+        return decode_tag_bytes(value)
     if hasattr(value, "text"):
         try:
             text_value = value.text
@@ -169,8 +160,16 @@ def _tags_from_mp4_mapping(tags: Mapping[str, object]) -> Dict[str, object]:
     values["genre"] = atom("\xa9gen")
     values["compilation"] = atom("cpil")
 
-    track_raw, track_num = _format_part_of_set(atom("trkn"))
-    disc_raw, disc_num = _format_part_of_set(atom("disk"))
+    def part_of_set(key: str) -> object:
+        # trkn/disk hold [(number, total)]; _first_value would unpack the
+        # tuple to its number and lose the total ("3/12" read as 3).
+        raw = tags.get(key)
+        if isinstance(raw, list):
+            raw = raw[0] if raw else None
+        return raw
+
+    track_raw, track_num = _format_part_of_set(part_of_set("trkn"))
+    disc_raw, disc_num = _format_part_of_set(part_of_set("disk"))
 
     values["tracknumber"] = track_raw
     values["track"] = track_num
@@ -349,6 +348,19 @@ def read_metadata(
     ext = os.path.splitext(path)[1].lower()
     if ext == ".opus":
         tags, cover_payloads, error = read_opus_metadata(path)
+        if error and error.startswith("read failed") and MutagenFile is not None:
+            # Not an Opus stream after all — e.g. Ogg Vorbis or FLAC saved
+            # with an .opus name. Read it as what it is rather than as blank.
+            try:
+                actual = MutagenFile(ensure_long_path(path))
+            except Exception:  # noqa: BLE001 - keep the Opus reader's error
+                actual = None
+            if actual is not None:
+                tags, cover_payloads, _extra, reader_hint = read_metadata_from_mutagen(
+                    actual, path, include_cover=include_cover,
+                    reader_hint_suffix="not an Opus stream",
+                )
+                return tags, cover_payloads, None, reader_hint
         if not include_cover:
             cover_payloads = []
         reader_hint = "opus metadata"

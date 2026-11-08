@@ -47,9 +47,74 @@ def _ensure_db(db_path: str) -> sqlite3.Connection:
         conn.execute("ALTER TABLE fingerprints ADD COLUMN duration INT")
     if "fingerprint" not in cols:
         conn.execute("ALTER TABLE fingerprints ADD COLUMN fingerprint TEXT")
+    if "decoded" not in cols:
+        # Library Sync's decoded Chromaprint items (see pack_decoded). Old rows
+        # get NULL and are decoded on first use, then written back.
+        conn.execute("ALTER TABLE fingerprints ADD COLUMN decoded BLOB")
     conn.commit()
 
     return conn
+
+
+# ── Decoded fingerprints ─────────────────────────────────────────────────────
+#
+# Library Sync's candidate index needs every library print *decoded* (raw
+# 32-bit Chromaprint items); decoding is pure Python, ~1.5 ms per print, so a
+# 20k-track library cost ~30 s on every Build Plan. The decoded form is kept
+# in the ``decoded`` column next to the compressed ``fingerprint``. A row is
+# only trusted for a file whose path, mtime and size still match (exactly as
+# for the fingerprint), and the blob also carries a digest of the compressed
+# text it was decoded from, so a fingerprint rewritten by any other statement
+# can never be paired with a stale decode. Every ``INSERT OR REPLACE`` of a
+# new fingerprint resets the column to NULL.
+#
+# Blob layout: version (1 byte) | blake2b-64 digest of the stripped text (8) |
+# algorithm (1) | items as packed little-endian uint32. A blob with nothing
+# after the digest records "not a Chromaprint print" (so it is not retried).
+
+DECODED_BLOB_VERSION = 1
+_DIGEST_SIZE = 8
+
+
+def _text_digest(text: str) -> bytes:
+    import hashlib
+
+    return hashlib.blake2b(text.encode("utf-8", "surrogatepass"), digest_size=_DIGEST_SIZE).digest()
+
+
+def pack_decoded(text: str, decoded: "tuple[int, bytes] | None") -> bytes:
+    """Serialise ``decoded`` (``(algorithm, packed_items)`` or ``None``) for ``text``."""
+    head = bytes([DECODED_BLOB_VERSION]) + _text_digest(text)
+    if decoded is None:
+        return head
+    algorithm, packed = decoded
+    return head + bytes([int(algorithm) & 0xFF]) + bytes(packed)
+
+
+_NOT_STORED = object()
+
+
+def unpack_decoded(text: str, blob: object) -> object:
+    """``(algorithm, packed)`` or ``None`` stored for ``text``; ``_NOT_STORED``
+    when ``blob`` is missing, malformed or was decoded from another text."""
+    if not isinstance(blob, (bytes, bytearray, memoryview)):
+        return _NOT_STORED
+    blob = bytes(blob)
+    head = 1 + _DIGEST_SIZE
+    if len(blob) < head or blob[0] != DECODED_BLOB_VERSION:
+        return _NOT_STORED
+    if blob[1:head] != _text_digest(text):
+        return _NOT_STORED
+    if len(blob) == head:
+        return None
+    packed = blob[head + 1:]
+    if len(packed) % 4:
+        return _NOT_STORED
+    return blob[head], packed
+
+
+def is_stored(value: object) -> bool:
+    return value is not _NOT_STORED
 
 
 # In-process memo of recent lookups. It used to be ``@lru_cache`` on

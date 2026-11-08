@@ -22,31 +22,24 @@ class NavSection:
     items: list[NavItem] = field(default_factory=list)
 
 
-NAV_STRUCTURE: list[NavSection] = [
-    NavSection("ORGANIZE", [
-        NavItem("indexer",      "Indexer",        "🗂"),
-        NavItem("library_sync", "Library Sync",   "🔄"),
-    ]),
-    NavSection("CLEAN UP", [
-        NavItem("duplicates",   "Duplicates",     "🔍"),
-        NavItem("similarity",   "Similarity",     "⚖"),
-        NavItem("tag_fixer",    "Tag Fixer",      "🏷"),
-        NavItem("genres",       "Genre Normalizer","🎸"),
-    ]),
-    NavSection("PLAYLISTS", [
-        NavItem("playlists",    "Playlists",      "🎵"),
-        NavItem("clustered",    "Clustered",      "📊"),
-        NavItem("graph",        "Music Graph",    "🌐"),
-    ]),
-    NavSection("PLAYER", [
-        NavItem("player",       "Player",         "▶"),
-        NavItem("compression",  "Compression",    "📦"),
-    ]),
-    NavSection("TOOLS", [
-        NavItem("tools",        "Utilities",      "🛠"),
-        NavItem("help",         "Help",           "?"),
-    ]),
-]
+def _build_nav_structure() -> list[NavSection]:
+    """Sidebar groups from the information architecture (gui/navigation.py).
+    A group with an empty title is drawn under a separator instead of a
+    heading (Activity · Settings · Help)."""
+    from gui.navigation import nav_groups
+
+    return [
+        NavSection(title, [NavItem(p.key, p.label, p.icon) for p in pages])
+        for title, pages in nav_groups()
+    ]
+
+
+NAV_STRUCTURE: list[NavSection] = _build_nav_structure()
+
+
+def _nav_tooltips() -> dict[str, str]:
+    from gui.navigation import PAGES
+    return {p.key: p.intent for p in PAGES}
 
 
 # ── Sliding pill container ─────────────────────────────────────────────────────
@@ -178,20 +171,36 @@ class Sidebar(QtWidgets.QWidget):
         nav_layout.setContentsMargins(0, 0, 0, 0)
         nav_layout.setSpacing(1)
 
+        tooltips = _nav_tooltips()
+        self._group_separators: list[_Separator] = []
         for section in NAV_STRUCTURE:
-            hdr = QtWidgets.QLabel(section.title)
-            hdr.setObjectName("sidebarSectionLabel")
-            hdr.setFixedHeight(20)
             if nav_layout.count() > 0:
                 spacer = QtWidgets.QWidget()
                 spacer.setFixedHeight(2)
                 spacer.setStyleSheet("background: transparent;")
                 nav_layout.addWidget(spacer)
-            nav_layout.addWidget(hdr)
+            if section.title:
+                hdr = QtWidgets.QLabel(section.title)
+                hdr.setObjectName("sidebarSectionLabel")
+                hdr.setFixedHeight(20)
+                nav_layout.addWidget(hdr)
+            else:
+                # The untitled bottom group (Activity · Settings · Help) sits
+                # under a hairline instead of a heading; same 20 px slot.
+                holder = QtWidgets.QWidget()
+                holder.setFixedHeight(20)
+                hl = QtWidgets.QVBoxLayout(holder)
+                hl.setContentsMargins(8, 9, 8, 10)
+                rule = _Separator()
+                hl.addWidget(rule)
+                self._group_separators.append(rule)
+                nav_layout.addWidget(holder)
 
             for item in section.items:
                 btn = AnimatedNavButton(item.label, item.key, item.icon)
                 btn.clicked_key.connect(self._on_nav_click)
+                if tooltips.get(item.key):
+                    btn.setToolTip(tooltips[item.key])
                 nav_layout.addWidget(btn)
                 self._buttons[item.key] = btn
 

@@ -66,9 +66,9 @@ class HelpWorkspace(WorkspaceBase):
 
         shortcuts = [
             ("Ctrl+O", "Change Library"),
-            ("Ctrl+,", "Open Settings"),
+            ("Ctrl+,", "Settings page"),
             ("Ctrl+L", "Toggle Activity Log"),
-            ("Ctrl+1–9", "Switch workspace (by position)"),
+            ("Ctrl+1–9", "Go to the first nine pages (sidebar order)"),
             ("Ctrl+W", "Clear activity log"),
         ]
         table = QtWidgets.QTableWidget(len(shortcuts), 2)
