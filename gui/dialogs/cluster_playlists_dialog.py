@@ -9,7 +9,9 @@ written here. After ``exec()`` returns Accepted the caller reads
 :meth:`ClusterPlaylistsDialog.plan` and writes exactly that plan.
 
 Theming: object names and theme roles only (no colours, font sizes or inline
-style sheets; see tests/test_gui_hygiene_ratchets.py).
+style sheets; see tests/test_gui_hygiene_ratchets.py). The options and the
+table share a glass card; the table is transparent, 34 px rows with no grid
+lines, the cluster colour a round dot; warnings sit in a well with a glyph.
 """
 from __future__ import annotations
 
@@ -19,12 +21,41 @@ from typing import Callable, Iterable
 
 import cluster_playlist_export as cpe
 from gui.compat import QtCore, QtGui, QtWidgets
+from gui.themes.glass import apply_font
+from gui.themes.manager import get_manager
+from gui.widgets.glass import GlassCard, GlassPanel
+from gui.widgets.glyphs import glyph_icon, set_glyph
 
 _COL_SAVE, _COL_COLOUR, _COL_NAME, _COL_TRACKS, _COL_MISSING, _COL_ACTION = range(6)
 _HEADERS = ("Save", "", "Name", "Tracks", "Missing", "Action")
 _ACTION_TEXT = {cpe.ACTION_NEW: "New", cpe.ACTION_REPLACE: "Replace", cpe.ACTION_SKIP: "Skip"}
 _ROLE_CLUSTER = QtCore.Qt.ItemDataRole.UserRole
 _MISSING_TOOLTIP_LIMIT = 20
+_ROW_HEIGHT = 34
+_DOT = 12
+
+
+def _dot_icon(colour: QtGui.QColor, size: int = _DOT) -> QtGui.QIcon:
+    """A round colour dot (the map's cluster colour) with a soft ring."""
+    icon = QtGui.QIcon()
+    for dpr in (1.0, 2.0):
+        pm = QtGui.QPixmap(int(size * dpr), int(size * dpr))
+        pm.setDevicePixelRatio(dpr)
+        pm.fill(QtCore.Qt.GlobalColor.transparent)
+        p = QtGui.QPainter(pm)
+        try:
+            p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+            halo = QtGui.QColor(colour)
+            halo.setAlpha(60)
+            p.setPen(QtCore.Qt.PenStyle.NoPen)
+            p.setBrush(halo)
+            p.drawEllipse(QtCore.QRectF(0, 0, size, size))
+            p.setBrush(colour)
+            p.drawEllipse(QtCore.QRectF(2, 2, size - 4, size - 4))
+        finally:
+            p.end()
+        icon.addPixmap(pm)
+    return icon
 
 
 def _created_text(run: dict) -> str:
@@ -79,11 +110,11 @@ class ClusterPlaylistsDialog(QtWidgets.QDialog):
     def _build_ui(self) -> None:
         s = self._summary
         root = QtWidgets.QVBoxLayout(self)
-        root.setContentsMargins(16, 16, 16, 16)
-        root.setSpacing(10)
+        root.setContentsMargins(22, 20, 22, 18)
+        root.setSpacing(12)
 
         title = QtWidgets.QLabel("Save a playlist per cluster")
-        title.setObjectName("cardTitle")
+        title.setObjectName("sectionTitle")
         root.addWidget(title)
 
         run = s.run
@@ -101,20 +132,35 @@ class ClusterPlaylistsDialog(QtWidgets.QDialog):
             )
         self._header = QtWidgets.QLabel("\n".join(header_lines))
         self._header.setObjectName("clusterPlaylistsHeader")
+        apply_font(self._header, "label")
         self._header.setWordWrap(True)
         self._header.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
         root.addWidget(self._header)
 
-        self._warnings = QtWidgets.QLabel("\n".join(f"⚠ {w}" for w in s.warnings))
-        self._warnings.setObjectName("statusHint")
+        # Warnings: a well with a warning glyph, shown only when there are any.
+        self._warnings_panel = GlassPanel(surface="well", radius=14)
+        wl = QtWidgets.QHBoxLayout(self._warnings_panel)
+        wl.setContentsMargins(12, 8, 12, 8)
+        wl.setSpacing(10)
+        icon = QtWidgets.QLabel()
+        icon.setPixmap(glyph_icon("warning", get_manager().current.warning, 18).pixmap(18, 18))
+        wl.addWidget(icon, 0, QtCore.Qt.AlignmentFlag.AlignTop)
+        self._warnings = QtWidgets.QLabel("\n".join(s.warnings))
+        apply_font(self._warnings, "label")
         self._warnings.setWordWrap(True)
+        wl.addWidget(self._warnings, 1)
         self._warnings.setVisible(bool(s.warnings))
-        root.addWidget(self._warnings)
+        self._warnings_panel.setVisible(bool(s.warnings))
+        root.addWidget(self._warnings_panel)
 
-        # ── Options ────────────────────────────────────────────────────────
+        # ── Options + table, in one glass card ─────────────────────────────
+        card = GlassCard()
+        cl = QtWidgets.QVBoxLayout(card)
+        cl.setContentsMargins(14, 12, 14, 12)
+        cl.setSpacing(10)
         options = QtWidgets.QHBoxLayout()
         options.setSpacing(8)
-        options.addWidget(QtWidgets.QLabel("Order:"))
+        options.addWidget(self._caption("Order"))
         self._order_combo = QtWidgets.QComboBox()
         self._order_combo.setObjectName("clusterPlaylistsOrder")
         self._order_combo.setSizeAdjustPolicy(QtWidgets.QComboBox.SizeAdjustPolicy.AdjustToContents)
@@ -131,7 +177,7 @@ class ClusterPlaylistsDialog(QtWidgets.QDialog):
         self._order_combo.currentIndexChanged.connect(self._on_option_changed)
         options.addWidget(self._order_combo)
         options.addSpacing(16)
-        options.addWidget(QtWidgets.QLabel("Minimum tracks:"))
+        options.addWidget(self._caption("Minimum tracks"))
         self._min_spin = QtWidgets.QSpinBox()
         self._min_spin.setObjectName("clusterPlaylistsMinSize")
         self._min_spin.setRange(*cpe.MIN_SIZE_RANGE)
@@ -144,13 +190,18 @@ class ClusterPlaylistsDialog(QtWidgets.QDialog):
         self._min_spin.valueChanged.connect(self._on_option_changed)
         options.addWidget(self._min_spin)
         options.addStretch(1)
-        root.addLayout(options)
+        cl.addLayout(options)
 
         # ── Table ──────────────────────────────────────────────────────────
         self.table = QtWidgets.QTableWidget(0, len(_HEADERS))
         self.table.setObjectName("clusterPlaylistsTable")
         self.table.setHorizontalHeaderLabels(list(_HEADERS))
         self.table.verticalHeader().setVisible(False)
+        self.table.verticalHeader().setDefaultSectionSize(_ROW_HEIGHT)
+        self.table.setShowGrid(False)
+        self.table.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        self.table.setWordWrap(False)
+        self.table.setIconSize(QtCore.QSize(_DOT, _DOT))
         self.table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setEditTriggers(
             QtWidgets.QAbstractItemView.EditTrigger.DoubleClicked
@@ -160,8 +211,11 @@ class ClusterPlaylistsDialog(QtWidgets.QDialog):
         header = self.table.horizontalHeader()
         header.setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
         header.setSectionResizeMode(_COL_NAME, QtWidgets.QHeaderView.ResizeMode.Stretch)
+        header.setDefaultAlignment(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter)
+        header.setHighlightSections(False)
         self.table.itemChanged.connect(self._on_item_changed)
-        root.addWidget(self.table, 1)
+        cl.addWidget(self.table, 1)
+        root.addWidget(card, 1)
 
         self._left_unchanged = QtWidgets.QLabel("")
         self._left_unchanged.setObjectName("statusHint")
@@ -180,28 +234,41 @@ class ClusterPlaylistsDialog(QtWidgets.QDialog):
 
         # ── Buttons ────────────────────────────────────────────────────────
         buttons = QtWidgets.QHBoxLayout()
+        buttons.setSpacing(6)
         self._all_btn = QtWidgets.QPushButton("Select all")
+        set_glyph(self._all_btn, "check")
         self._all_btn.clicked.connect(self._select_all)
         self._none_btn = QtWidgets.QPushButton("Select none")
+        set_glyph(self._none_btn, "minus")
         self._none_btn.clicked.connect(self._select_none)
         self._open_btn = QtWidgets.QPushButton("Open folder")
+        set_glyph(self._open_btn, "folder")
         self._open_btn.setToolTip(s.run_folder)
         self._open_btn.clicked.connect(self._open_folder)
         self._open_btn.setVisible(bool(s.run_folder) and os.path.isdir(s.run_folder))
         for b in (self._all_btn, self._none_btn, self._open_btn):
             b.setAutoDefault(False)
+            b.setFlat(True)
             buttons.addWidget(b)
         buttons.addStretch(1)
-        self.save_btn = QtWidgets.QPushButton("Save")
-        self.save_btn.setObjectName("primaryBtn")
-        self.save_btn.setAutoDefault(False)
-        self.save_btn.clicked.connect(self.accept)
         self.cancel_btn = QtWidgets.QPushButton("Cancel")
         self.cancel_btn.setDefault(True)   # Enter must not write files
         self.cancel_btn.clicked.connect(self.reject)
-        buttons.addWidget(self.save_btn)
+        self.save_btn = QtWidgets.QPushButton("Save")
+        self.save_btn.setObjectName("primaryBtn")
+        set_glyph(self.save_btn, "save", role="inverse")
+        self.save_btn.setAutoDefault(False)
+        self.save_btn.clicked.connect(self.accept)
         buttons.addWidget(self.cancel_btn)
+        buttons.addWidget(self.save_btn)
         root.addLayout(buttons)
+
+    @staticmethod
+    def _caption(text: str) -> QtWidgets.QLabel:
+        label = QtWidgets.QLabel(text)
+        label.setObjectName("mutedLabel")
+        apply_font(label, "caption", weight=600)
+        return label
 
     # ── Planning ──────────────────────────────────────────────────────────
 
@@ -290,9 +357,7 @@ class ClusterPlaylistsDialog(QtWidgets.QDialog):
         if colour.icon().isNull():
             qcolour = self._colour(cid)
             if qcolour is not None:
-                pix = QtGui.QPixmap(12, 12)
-                pix.fill(qcolour)
-                colour.setIcon(QtGui.QIcon(pix))
+                colour.setIcon(_dot_icon(qcolour))
 
         name = self.table.item(r, _COL_NAME)
         name.setData(_ROLE_CLUSTER, cid)
