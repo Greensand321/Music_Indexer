@@ -327,15 +327,16 @@ derived from their colours, so they render through the same glass components.
 
 ### 5.3 Theme picker (`picker.py`)
 
-`ThemePickerPanel` is embedded in **Settings → Appearance**. Changes apply instantly,
-and the selection follows switches made elsewhere.
+`ThemePickerPanel` is embedded in **Settings → Appearance** (the "Theme" card). Changes
+apply instantly, and the selection follows switches made elsewhere. Order: Liquid Glass,
+then Auto, then the classic themes.
 
 | Element | Purpose |
 |---|---|
 | Liquid Glass row | Its swatch, the four accent discs, and **Reduce transparency** |
-| Auto card | Configure… and Select buttons; always names the configured night and day themes |
-| Classic themes | Swatch cards for the 14 classic themes (dark row, light row) |
-| Swatch card | Mini preview with its name drawn in the theme's own text colour; checkmark when active |
+| Auto row (on a well) | A painted half-disc mark, the configured night and day themes, Configure… and Select (primary, check glyph; "Active" when on) |
+| Classic themes | "Dark" and "Light" groups, each a responsive grid (`_GridFlow`): as many equal columns as fit (cells ≥ 104 px), the same cell width in both groups, more rows when narrow |
+| Swatch card | A miniature of the theme (sidebar strip, top bar, card) above a name strip, both on the theme's own background, so the name (in the theme's own text colour) never overlaps the preview; accent ring and checkmark when active |
 
 `ThemePickerDialog` (the same panel in a non-modal window) still exists but the app no
 longer opens it.
@@ -343,7 +344,8 @@ longer opens it.
 ### 5.4 AutoThemeDialog
 
 Modal child of the picker ("Auto Theme — Select Pair"): a night-theme grid, a
-day-theme grid, Cancel, and **Apply Auto Theme**, which saves the pair and turns Auto on.
+day-theme grid (the same responsive swatch grid), and on the footer band Cancel and
+**Apply Auto Theme** (primary, the default button), which saves the pair and turns Auto on.
 
 ### 5.5 The backdrop, glass surfaces and card shadows
 
@@ -835,22 +837,34 @@ planning (and clears the preview) but not a confirmed write.
 
 #### 6.10.1 Build the mirror (`compression.py`)
 
-Formerly the Compression page (still titled "Library Compression"). **A FLAC → Opus
-library mirror.** Output is always Opus in a separate folder; other
-files are copied, and copied playlists have their FLAC entries pointed at the `.opus`.
+Formerly the Compression page. **A FLAC → Opus library mirror.** Output is always Opus
+in a separate folder; other files are copied, and copied playlists have their FLAC
+entries pointed at the `.opus`. No in-page title (the shell header says "Mirror", the
+segmented control "Build the mirror"); one muted purpose line, then two cards.
+
+**Hero card "Folders and format"** (`headerCard`):
 
 | Element | Type | Purpose |
 |---|---|---|
-| Source / Destination | Entry + Browse… | Refused, before anything is created: the same folder, a destination inside the source, or a source inside the destination (`check_mirror_folders`) |
-| Opus bitrate (kbps) | SpinBox | 48–320, default 96; disabled during a run |
+| Source / Destination | `PathField` rows (`gui/widgets/path_field.py`): the path middle-elided on a well, full path in the tooltip, a folder glyph button (and a click anywhere on the row) to choose | Refused, before anything is created: the same folder, a destination inside the source, or a source inside the destination (`check_mirror_folders`) |
+| Format: Opus at N kbps | SpinBox with a " kbps" suffix | 48–320, default 96; disabled during a run |
 | Update mirror files whose source has changed | Checkbox | Checked by default. A mirrored file older than its changed source is redone; unchecked, it is kept and reported as out of date |
-| Overwrite every existing file in destination | Checkbox | Redo the whole mirror. The confirmation states the choice |
-| 🔍 Estimate Space Savings | Button (primary) | Runs in a worker; never creates the destination |
-| ▶ Start Compression | Button | Enabled only by an estimate for the current source / destination / bitrate; changing any of them invalidates the estimate. Needs FFmpeg on `PATH`. |
-| ■ Cancel | Button | Real cancel: terminates ffmpeg and removes partial output |
-| Progress + counter | Bar + label | |
-| Open Report | Button | `<destination>/Docs/opus_library_mirror_reports/opus_library_mirror_report_<timestamp>.html` |
-| Remove N orphaned file(s)… | Button | Shown after a complete run that found mirror files with no source any more (deleted or renamed in the library). Lists them, asks, then deletes only those, only inside the mirror (never one whose source came back), in a worker; every outcome is logged in the mirror's `Docs/`. Changing the folders hides it. |
+| Overwrite every existing file in the destination | Checkbox | Redo the whole mirror. The confirmation states the choice |
+| Estimate savings | Button (search glyph) | The preview. Runs in a worker; never creates the destination |
+| Build mirror | Button (primary, play glyph) | Enabled only by an estimate for the current source / destination / bitrate; changing any of them invalidates the estimate. Asks first ("Build the Mirror"). Needs FFmpeg on `PATH` (the "Needs FFmpeg" note) |
+| Cancel | Button (stop glyph) | Real cancel: terminates ffmpeg and removes partial output |
+
+**Results card:**
+
+| Element | Type | Purpose |
+|---|---|---|
+| Empty state | `EmptyState` | "No estimate yet": what to do first. Hidden once anything has happened |
+| Status line | Label (toned) | What happened, plus only the explanations that need action: out-of-date files kept (tick "Update mirror files…"), files with no source left. The counts are in the tiles; the full summary still goes to the Activity log |
+| Progress | Bar + "N of M files" | While running; the first row of run tiles updates live |
+| Estimate | `StatRow`: FLAC to convert (with size) · Opus size at N kbps · Estimated saving · Other files to copy (with size) | |
+| Run summary | Two `StatRow`s: Converted · Copied · Skipped · Errors / Updated · Out of date, kept · Partials removed · Orphans (tones: errors danger, kept and orphans warning; each tile has a tooltip) | |
+| Open report | Button (external glyph) | `<destination>/Docs/opus_library_mirror_reports/opus_library_mirror_report_<timestamp>.html` |
+| Remove N orphaned file(s)… | Button (`dangerBtn`, trash glyph) | Shown after a complete run that found mirror files with no source any more (deleted or renamed in the library). Lists up to 15 of them, asks (default No), then deletes only those, only inside the mirror (never one whose source came back), in a worker; every outcome is logged in the mirror's `Docs/`. Changing the folders hides it. |
 
 Quarantine/, Trash/ and Docs/ are not mirrored. Output is encoded and tagged under a
 temporary name and renamed when complete. Two sources that would land on the same
@@ -860,9 +874,18 @@ removed. A library change during a run is applied after the run.
 
 #### 6.10.2 Verify the mirror (`mirror_verify.py`)
 
-The Opus and M4A testers (formerly Utilities → Diagnostics dialogs), **embedded** side by
-side as `MediaTesterPanel`s: Browse… a file and see what `utils.audio_metadata_reader.read_metadata`
-(the reader the Indexer, Tag Fixer and Player use) finds — its tags and cover art. Read-only.
+The Opus and M4A testers (formerly Utilities → Diagnostics dialogs), **embedded** as
+`MediaTesterPanel`s in two cards, side by side (stacked below ~960 px). Open a file and
+see what `utils.audio_metadata_reader.read_metadata` (the reader the Indexer, Tag Fixer
+and Player use) finds. Read-only.
+
+| Element | Purpose |
+|---|---|
+| File row | `PathField` (folder glyph button, "Open a .opus file") |
+| Empty state | "No file opened" until a file is open |
+| Stat row | Tags found (of 10) · Cover art (Yes / No) · Problems (toned) |
+| Problem rows | One glass row per problem (`find_problems`): could not read tags (danger), a reader warning, no title / artist / album tag, no cover art, cover not a readable image, cover only in the MP4 `covr` atom; or one "Tags and cover art came through." row |
+| Cover + tags | The cover on a rounded well; the tags as text on a well |
 
 ### 6.11 Exports (`tools.py`, `ExportsWorkspace`)
 
@@ -894,22 +917,27 @@ Read-only.
 
 ### 6.13 Settings (`settings.py`, form in `gui/dialogs/settings_drawer.py`)
 
-A page now (the sidebar and Ctrl+,). **Save settings** and **Revert** sit above the sections. The controls and
-the save logic are `SettingsForm`, the same form the old dialog had, so **every
-control persists under the same config key:**
+A page now (the sidebar and Ctrl+,). No in-page title; one header action row above the
+sections: the purpose in one muted line, the save state, **Revert** and **Save settings**
+(primary). Then one glass card per group (`SECTION_GROUPS` in `settings_drawer.py`). The
+controls and the save logic are `SettingsForm`, the same form the old dialog had, so
+**every control persists under the same config key:**
 
-| Section | Control | Config key |
+| Section · card | Control | Config key |
 |---|---|---|
-| Metadata services | Service (AcoustID / MusicBrainz / Last.fm; Spotify and Gracenote shown disabled with a tooltip) | `metadata_service` |
-| | API key, shown for AcoustID and Last.fm — **one field, a separate key per service** | `metadata_api_key` (AcoustID; empty = built-in key) / `lastfm_api_key` |
+| Metadata services · Lookup service | Service rows (`ServiceList`): AcoustID / MusicBrainz / Last.fm, each with a one-line note; Spotify and Gracenote shown disabled ("Not available yet") with the "not yet implemented, see ROADMAP.md" tooltip | `metadata_service` |
+| Metadata services · Connection | API key (a pill password field labelled with the service), shown for AcoustID and Last.fm — **one field, a separate key per service** | `metadata_api_key` (AcoustID; empty = built-in key) / `lastfm_api_key` |
 | | MusicBrainz app name / version / contact, shown for MusicBrainz | `musicbrainz_useragent` |
-| | Test Connection | Real checks: AcoustID and Last.fm test the entered key; MusicBrainz runs a search. Runs off the GUI thread. |
-| General | Default library (validated if you change it) | `library_root` |
-| | Near-duplicate threshold | `near_duplicate_threshold` |
-| | Exact-duplicate threshold (range wide enough that saved values aren't clamped) | `exact_duplicate_threshold` |
-| Appearance | Theme picker (§5.3): theme, accent, Reduce transparency — apply instantly, no Save needed | `theme`, `glass_accent`, `reduce_transparency` (via ThemeManager) |
-| | Backdrop: Album art / Gradient / Plain — applies on Save | `backdrop_mode` (and the legacy `bg_gradient_enabled`, kept in step: False = Plain) |
-| | Reduce motion — applies on Save | `reduced_motion` |
+| | Test connection (refresh glyph) + a toned status | Real checks: AcoustID and Last.fm test the entered key; MusicBrainz runs a search. Runs off the GUI thread. |
+| General · Default library | `PathField` (folder button, clear button; validated if you change it) | `library_root` |
+| General · Duplicate thresholds | Near duplicate / Exact duplicate: spin, unit ("fingerprint distance, 0–1") and an info dot, all with the help tooltip | `near_duplicate_threshold` / `exact_duplicate_threshold` (range wide enough that saved values aren't clamped) |
+| General · Motion | Reduce motion — applies on Save | `reduced_motion` |
+| Appearance · Theme | Theme picker (§5.3): theme, accent, Reduce transparency — apply instantly, no Save needed | `theme`, `glass_accent`, `reduce_transparency` (via ThemeManager) |
+| Appearance · Backdrop | Album art / Gradient / Plain as a segmented pill (`SegmentedChoice`, the page tabs' look) — applies on Save | `backdrop_mode` (and the legacy `bg_gradient_enabled`, kept in step: False = Plain) |
+
+The service rows and the backdrop pill keep a `QComboBox`-like API (`currentText` /
+`setCurrentText` / `findText`, and `findData` / `currentData` / `setCurrentIndex`), so the
+names `_service_combo` and `_backdrop_combo` still work.
 
 Unsaved edits survive leaving and coming back; with no edits the page re-reads the
 config when shown (so a library chosen with Change Library appears). Revert shows the
@@ -935,10 +963,34 @@ re-read their thresholds there), and applies a changed default library through
 
 ## 7. Dialogs
 
+### 7.0 Dialog chrome (every dialog)
+
+Top-level dialogs stay **opaque** (a translucent top-level window is unreliable on
+Windows), but read as part of the glass family:
+
+* the window fill is the palette's Window role, the material's `backdrop_base`;
+* `AlphaDEXStyle` paints a raised content surface (the theme's opaque card colour) down
+  to the bottom button box, which sits on a footer band of the base fill under a
+  hairline (`paint_dialog_chrome`, `dialog_footer_top` in `gui/themes/style.py`);
+* pill buttons; the default button of a button box is the primary pill (unless the box
+  has its own accent button); mnemonic markers are not drawn ("Yes", not "&Yes");
+  button boxes show no icons;
+* message boxes: painted 40 px icons (a tone-tinted disc: accent for information and
+  questions, warning, danger for critical), body-size text close to the icon, the
+  informative text muted;
+* dialogs that keep Qt's default layout margins (message, input, progress and file
+  dialogs) get 22 / 20 / 22 / 16 px margins; item views in dialogs are 12 px-radius wells;
+* the non-native file dialog (landing, Change library) gets line icons for its tool
+  buttons.
+
+Covered by `tests/ui/test_ui_takeaway_settings_glass.py` (palette, roles and painted
+regions in Liquid Glass and Midnight).
+
 ### 7.1 SettingsDrawer (`gui/dialogs/settings_drawer.py`)
 
-The same `SettingsForm` in a modal dialog (Metadata Services and General tabs). **The
-app no longer opens it** (Settings is a page, §6.13); it is kept as a thin wrapper.
+The same `SettingsForm` in a modal dialog (Metadata services and General tabs, the same
+cards; Save is the primary, default button on the footer band). **The app no longer opens
+it** (Settings is a page, §6.13); it is kept as a thin wrapper.
 
 ### 7.2 ClusteringWizardDialog (`gui/dialogs/clustering_wizard_dialog.py`)
 
@@ -971,6 +1023,11 @@ action.
 ### 7.4 ThemePickerDialog / AutoThemeDialog
 
 See §5.3 and §5.4. Only AutoThemeDialog is still opened (from the picker's Configure…).
+
+`CrashLogDialog` (`gui/dialogs/crash_log_dialog.py`): a title, both log paths as one
+middle-elided muted line (full paths in the tooltip), the log tail in monospace on a
+rounded well, Close on the footer band. `MediaTesterDialog` wraps the Verify panel the
+same way.
 
 ### 7.5 Dialogs opened from the Duplicates page
 
@@ -1043,6 +1100,7 @@ window (the shell styles its chrome) whose contents use the glass parts:
 | `widgets/gradient_bg.py` (`GradientWidget`) | Live — §5.5 (transparent scroll surface; painted card shadows) |
 | `widgets/landing.py` (`MosaicLanding`) | Live — §0 |
 | `widgets/pill.py` (`Pill`, `ExperimentalPill`) | Live — §3.2 |
+| `widgets/path_field.py` (`PathField`) | Live — a chosen path as a middle-elided row on a well with a glyph button; `QLineEdit`-like text API (§6.10, §6.13) |
 | `widgets/interactive_scatter_plot.py` (`InteractiveScatterPlot`) | Live — the Map's plot |
 | `widgets/cluster_legend.py` (`ClusterLegendWidget`) | Live — Map legend |
 | `widgets/track_details_panel.py` (`TrackDetailsPanel`) | Live — Map details |

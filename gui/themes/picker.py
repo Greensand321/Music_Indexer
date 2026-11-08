@@ -2,10 +2,18 @@
 
 The panel (Settings → Appearance) leads with **Liquid Glass**, the default
 look: its swatch, the four accents and "Reduce transparency". Below it,
-Auto, then the 14 **Classic** themes (dark and light). Everything here
-applies instantly through the ThemeManager (which persists it).
+Auto (on a well row), then the 14 **Classic** themes (dark, then light) in a
+responsive grid: as many equal columns as fit the width, the same cell width
+in both groups. Everything here applies instantly through the ThemeManager
+(which persists it).
+
+A swatch is a miniature of its theme: a preview (sidebar strip, top bar,
+card) above a name strip, both on the theme's own background, so the name is
+drawn in the theme's own text colour and never overlaps the preview.
 """
 from __future__ import annotations
+
+import math
 
 from gui.compat import QtCore, QtGui, QtWidgets, Signal
 from gui.themes.tokens import (
@@ -17,18 +25,27 @@ from gui.themes.manager import get_manager
 # ── Swatch card ───────────────────────────────────────────────────────────────
 
 class _SwatchCard(QtWidgets.QAbstractButton):
-    """Single theme swatch: coloured preview block + name label."""
+    """Single theme swatch: a preview of the theme over its name."""
 
     SIZE = QtCore.QSize(120, 88)
+    MIN_WIDTH = 104
+    NAME_H = 22
 
-    def __init__(self, tokens: ThemeTokens, parent: QtWidgets.QWidget | None = None) -> None:
+    def __init__(self, tokens: ThemeTokens, parent: QtWidgets.QWidget | None = None,
+                 *, fixed: bool = True) -> None:
         super().__init__(parent)
         self._tokens = tokens
         self._selected = False
-        self.setFixedSize(self.SIZE)
+        if fixed:
+            self.setFixedSize(self.SIZE)
+        else:
+            # In a _SwatchGrid: the grid sets the width (all cells equal).
+            self.setMinimumSize(self.MIN_WIDTH, self.SIZE.height())
+            self.setMaximumHeight(self.SIZE.height())
         self.setCheckable(True)
         self.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
         self.setToolTip(tokens.name)
+        self.setAccessibleName(f"{tokens.name} theme")
 
     @property
     def tokens(self) -> ThemeTokens:
@@ -39,37 +56,40 @@ class _SwatchCard(QtWidgets.QAbstractButton):
         self.setChecked(val)
         self.update()
 
+    def sizeHint(self) -> QtCore.QSize:  # noqa: N802
+        return QtCore.QSize(self.SIZE)
+
     def label_color(self) -> QtGui.QColor:
         """The name sits on the swatch's own ``content_bg``, so it is drawn in
         the swatch's own ``text_primary`` (DS-15: it used the *active*
         theme's text colour, illegible on dark swatches under a light theme)."""
         return QtGui.QColor(self._tokens.text_primary)
 
-    def paintEvent(self, event: QtGui.QPaintEvent) -> None:
+    def preview_rect(self) -> QtCore.QRectF:
+        """Where the miniature is drawn (above the name strip)."""
+        card = QtCore.QRectF(self.rect()).adjusted(3, 3, -3, -3)
+        return card.adjusted(6, 6, -6, -self.NAME_H)
+
+    def name_rect(self) -> QtCore.QRectF:
+        card = QtCore.QRectF(self.rect()).adjusted(3, 3, -3, -3)
+        return QtCore.QRectF(card.left() + 4, card.bottom() - self.NAME_H,
+                             card.width() - 8, self.NAME_H)
+
+    def paintEvent(self, event: QtGui.QPaintEvent) -> None:  # noqa: N802
         p = QtGui.QPainter(self)
         p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
         t = self._tokens
-        mgr = get_manager()
-        current = mgr.current
-
-        r = self.rect()
+        current = get_manager().current
+        selected = self._selected or self.isChecked()
 
         # ── Card background ───────────────────────────────────────────────
-        card_r = r.adjusted(4, 4, -4, -4)
+        card_r = QtCore.QRectF(self.rect()).adjusted(3, 3, -3, -3)
         path = QtGui.QPainterPath()
-        path.addRoundedRect(QtCore.QRectF(card_r), 10, 10)
-
-        if self._selected or self.isChecked():
-            # Accent border glow
-            p.setPen(QtGui.QPen(QtGui.QColor(current.accent), 2.5))
-        else:
-            p.setPen(QtGui.QPen(QtGui.QColor(current.card_border), 1.0))
-
+        path.addRoundedRect(card_r, 12, 12)
         if t.is_glass:
             # A hint of the glass look: an accent glow behind the panels.
-            glass_accent = get_manager().current.accent if current.is_glass else t.accent
-            grad = QtGui.QRadialGradient(QtCore.QPointF(card_r.right(), card_r.top()),
-                                         card_r.width())
+            glass_accent = current.accent if current.is_glass else t.accent
+            grad = QtGui.QRadialGradient(card_r.topRight(), card_r.width())
             glow = QtGui.QColor(glass_accent)
             glow.setAlpha(110)
             grad.setColorAt(0.0, glow)
@@ -77,103 +97,173 @@ class _SwatchCard(QtWidgets.QAbstractButton):
             p.setBrush(QtGui.QBrush(grad))
         else:
             p.setBrush(QtGui.QColor(t.content_bg))
+        if selected:
+            p.setPen(QtGui.QPen(QtGui.QColor(current.accent), 2.0))
+        elif self.underMouse():
+            p.setPen(QtGui.QPen(QtGui.QColor(current.text_secondary), 1.0))
+        else:
+            p.setPen(QtGui.QPen(QtGui.QColor(current.card_border), 1.0))
         p.drawPath(path)
 
-        # ── Preview rows (sidebar strip + content area) ───────────────────
-        inner = card_r.adjusted(6, 6, -6, -6)
-
-        # Sidebar strip (left 28px)
-        sb_rect = QtCore.QRectF(inner.left(), inner.top(), 28, inner.height())
-        sb_path = QtGui.QPainterPath()
-        sb_path.addRoundedRect(sb_rect, 5, 5)
+        # ── Preview (sidebar strip + top bar + card), above the name ──────
+        inner = self.preview_rect()
         p.setPen(QtCore.Qt.PenStyle.NoPen)
+        sb_rect = QtCore.QRectF(inner.left(), inner.top(), 24, inner.height())
         p.setBrush(QtGui.QColor(t.sidebar_bg))
-        p.drawPath(sb_path)
-
-        # Sidebar accent dots
-        dot_x = sb_rect.left() + sb_rect.width() / 2
+        p.drawRoundedRect(sb_rect, 5, 5)
+        dot_x = sb_rect.center().x()
         for i, colour in enumerate([t.sidebar_accent, t.accent, t.text_muted]):
-            dot_y = sb_rect.top() + 8 + i * 10
             p.setBrush(QtGui.QColor(colour))
-            p.drawEllipse(QtCore.QPointF(dot_x, dot_y), 3, 3)
+            p.drawEllipse(QtCore.QPointF(dot_x, sb_rect.top() + 8 + i * 9), 2.6, 2.6)
 
-        # Content area
-        ct_rect = QtCore.QRectF(inner.left() + 32, inner.top(), inner.width() - 32, inner.height())
-
-        # Top bar strip
-        tb_rect = QtCore.QRectF(ct_rect.left(), ct_rect.top(), ct_rect.width(), 14)
-        tb_path = QtGui.QPainterPath()
-        tb_path.addRoundedRect(tb_rect, 4, 4)
+        ct = QtCore.QRectF(inner.left() + 28, inner.top(), inner.width() - 28, inner.height())
+        bar = QtCore.QRectF(ct.left(), ct.top(), ct.width(), 12)
         p.setBrush(QtGui.QColor(t.card_bg))
-        p.drawPath(tb_path)
-
-        # Accent button mock
-        btn_w = 24
-        btn_rect = QtCore.QRectF(ct_rect.right() - btn_w - 2, ct_rect.top() + 2, btn_w, 10)
-        btn_path = QtGui.QPainterPath()
-        btn_path.addRoundedRect(btn_rect, 3, 3)
+        p.drawRoundedRect(bar, 4, 4)
+        btn = QtCore.QRectF(ct.right() - 24, ct.top() + 2, 22, 8)
         p.setBrush(QtGui.QColor(t.accent))
-        p.drawPath(btn_path)
-
-        # Card mock below top bar
-        card_mock = QtCore.QRectF(ct_rect.left(), ct_rect.top() + 18, ct_rect.width(), ct_rect.height() - 18)
-        cm_path = QtGui.QPainterPath()
-        cm_path.addRoundedRect(card_mock, 4, 4)
+        p.drawRoundedRect(btn, 3, 3)
+        mock = QtCore.QRectF(ct.left(), ct.top() + 16, ct.width(), ct.height() - 16)
         p.setBrush(QtGui.QColor(t.card_bg))
-        p.drawPath(cm_path)
-
-        # Text lines mock
+        p.drawRoundedRect(mock, 4, 4)
         p.setBrush(QtGui.QColor(t.text_primary))
-        line_rect = QtCore.QRectF(card_mock.left() + 4, card_mock.top() + 5, card_mock.width() * 0.7, 3)
-        lp = QtGui.QPainterPath()
-        lp.addRoundedRect(line_rect, 1.5, 1.5)
-        p.drawPath(lp)
-
+        p.drawRoundedRect(QtCore.QRectF(mock.left() + 5, mock.top() + 6, mock.width() * 0.62, 3),
+                          1.5, 1.5)
         p.setBrush(QtGui.QColor(t.text_muted))
-        line_rect2 = QtCore.QRectF(card_mock.left() + 4, card_mock.top() + 12, card_mock.width() * 0.5, 3)
-        lp2 = QtGui.QPainterPath()
-        lp2.addRoundedRect(line_rect2, 1.5, 1.5)
-        p.drawPath(lp2)
+        p.drawRoundedRect(QtCore.QRectF(mock.left() + 5, mock.top() + 13, mock.width() * 0.42, 3),
+                          1.5, 1.5)
 
-        # ── Theme name label ──────────────────────────────────────────────
-        label_rect = QtCore.QRect(card_r.left(), card_r.bottom() - 20, card_r.width(), 20)
+        # ── Name strip ────────────────────────────────────────────────────
+        from gui.themes.glass import font
+        name_font = font("caption", weight=600 if selected else 500)
+        p.setFont(name_font)
         p.setPen(self.label_color())
-        font = p.font()
-        font.setPointSize(8)
-        font.setBold(self._selected or self.isChecked())
-        p.setFont(font)
-        p.drawText(label_rect, QtCore.Qt.AlignmentFlag.AlignCenter, t.name)
+        rect = self.name_rect()
+        p.drawText(rect, int(QtCore.Qt.AlignmentFlag.AlignCenter),
+                   QtGui.QFontMetrics(name_font).elidedText(
+                       t.name, QtCore.Qt.TextElideMode.ElideRight, int(rect.width())))
 
         # ── Checkmark if selected ─────────────────────────────────────────
-        if self._selected or self.isChecked():
-            ck_size = 16
-            ck_rect = QtCore.QRectF(
-                card_r.right() - ck_size - 2,
-                card_r.top() + 2,
-                ck_size,
-                ck_size,
-            )
-            ck_path = QtGui.QPainterPath()
-            ck_path.addEllipse(ck_rect)
+        if selected:
+            ck = QtCore.QRectF(inner.right() - 16, inner.top() - 2, 18, 18)
+            p.setPen(QtGui.QPen(QtGui.QColor(t.content_bg), 2.0))
             p.setBrush(QtGui.QColor(current.accent))
-            p.setPen(QtCore.Qt.PenStyle.NoPen)
-            p.drawPath(ck_path)
-
-            # Draw checkmark
-            pen = QtGui.QPen(QtGui.QColor(current.text_inverse), 1.5)
+            p.drawEllipse(ck)
+            pen = QtGui.QPen(QtGui.QColor(current.text_inverse), 1.6)
             pen.setCapStyle(QtCore.Qt.PenCapStyle.RoundCap)
             p.setPen(pen)
-            cx, cy = ck_rect.center().x(), ck_rect.center().y()
+            cx, cy = ck.center().x(), ck.center().y()
             p.drawLine(QtCore.QPointF(cx - 3.5, cy), QtCore.QPointF(cx - 1, cy + 2.5))
             p.drawLine(QtCore.QPointF(cx - 1, cy + 2.5), QtCore.QPointF(cx + 3.5, cy - 2.5))
 
+        if self.hasFocus():
+            p.setPen(QtGui.QPen(QtGui.QColor(current.input_focus), 1.5))
+            p.setBrush(QtCore.Qt.BrushStyle.NoBrush)
+            p.drawRoundedRect(card_r.adjusted(-1.5, -1.5, 1.5, 1.5), 13, 13)
         p.end()
 
+    def enterEvent(self, event) -> None:  # noqa: N802
+        self.update()
+        super().enterEvent(event)
 
-# ── Accent swatch ─────────────────────────────────────────────────────────────
+    def leaveEvent(self, event) -> None:  # noqa: N802
+        self.update()
+        super().leaveEvent(event)
+
+
+# ── Responsive swatch grid ────────────────────────────────────────────────────
+
+class _GridFlow(QtWidgets.QLayout):
+    """Equal cells in as many columns as fit ``cell_min``; the cells share
+    the width (up to ``cell_max``) and wrap onto more rows when narrow.
+    Height-for-width, so a scroll area or a card gives it exactly the rows it
+    needs."""
+
+    def __init__(self, parent: QtWidgets.QWidget | None = None, *, cell_min: int = 104,
+                 cell_max: int = 150, cell_h: int = 88, spacing: int = 10) -> None:
+        super().__init__(parent)
+        self._items: list[QtWidgets.QLayoutItem] = []
+        self._cell_min, self._cell_max, self._cell_h = cell_min, cell_max, cell_h
+        self.setSpacing(spacing)
+        self.setContentsMargins(0, 0, 0, 0)
+
+    # QLayout API
+    def addItem(self, item: QtWidgets.QLayoutItem) -> None:  # noqa: N802
+        self._items.append(item)
+
+    def count(self) -> int:
+        return len(self._items)
+
+    def itemAt(self, index: int):  # noqa: N802
+        return self._items[index] if 0 <= index < len(self._items) else None
+
+    def takeAt(self, index: int):  # noqa: N802
+        return self._items.pop(index) if 0 <= index < len(self._items) else None
+
+    def expandingDirections(self) -> QtCore.Qt.Orientation:  # noqa: N802
+        return QtCore.Qt.Orientation(0)
+
+    def hasHeightForWidth(self) -> bool:  # noqa: N802
+        return True
+
+    def heightForWidth(self, width: int) -> int:  # noqa: N802
+        return self._arrange(QtCore.QRect(0, 0, width, 0), apply=False)
+
+    def setGeometry(self, rect: QtCore.QRect) -> None:  # noqa: N802
+        super().setGeometry(rect)
+        self._arrange(rect, apply=True)
+
+    def sizeHint(self) -> QtCore.QSize:  # noqa: N802
+        m = self.contentsMargins()
+        cols = max(1, min(len(self._items), 5))
+        w = cols * self._cell_min + (cols - 1) * self.spacing()
+        return QtCore.QSize(w + m.left() + m.right(), self.heightForWidth(w))
+
+    def minimumSize(self) -> QtCore.QSize:  # noqa: N802
+        m = self.contentsMargins()
+        return QtCore.QSize(self._cell_min + m.left() + m.right(),
+                            self._cell_h + m.top() + m.bottom())
+
+    # Geometry
+    def columns(self, width: int) -> int:
+        sp = self.spacing()
+        return max(1, (width + sp) // (self._cell_min + sp))
+
+    def _arrange(self, rect: QtCore.QRect, *, apply: bool) -> int:
+        m = self.contentsMargins()
+        r = rect.adjusted(m.left(), m.top(), -m.right(), -m.bottom())
+        n = len(self._items)
+        if n == 0:
+            return m.top() + m.bottom()
+        sp = self.spacing()
+        cols = self.columns(r.width())
+        cell_w = min(float(self._cell_max), (r.width() - sp * (cols - 1)) / cols)
+        rows = math.ceil(n / cols)
+        if apply:
+            for i, item in enumerate(self._items):
+                row, col = divmod(i, cols)
+                x = r.x() + col * (cell_w + sp)
+                y = r.y() + row * (self._cell_h + sp)
+                item.setGeometry(QtCore.QRect(int(round(x)), int(y), int(cell_w), self._cell_h))
+        return rows * self._cell_h + (rows - 1) * sp + m.top() + m.bottom()
+
+
+def _swatch_grid(swatches: list[_SwatchCard]) -> QtWidgets.QWidget:
+    box = QtWidgets.QWidget()
+    box.setObjectName("swatchGrid")
+    flow = _GridFlow(box)
+    for sw in swatches:
+        flow.addWidget(sw)
+    policy = box.sizePolicy()
+    policy.setHeightForWidth(True)
+    box.setSizePolicy(policy)
+    return box
+
+
+# ── Small painted parts ───────────────────────────────────────────────────────
 
 class _AccentSwatch(QtWidgets.QAbstractButton):
-    """A 28 px accent disc; the chosen one carries a ring."""
+    """A 24 px accent disc; the chosen one carries a ring."""
 
     SIZE = 34
 
@@ -198,6 +288,10 @@ class _AccentSwatch(QtWidgets.QAbstractButton):
                 p.setPen(QtGui.QPen(QtGui.QColor(t.text_primary), 2.0))
                 p.setBrush(QtCore.Qt.BrushStyle.NoBrush)
                 p.drawEllipse(r.adjusted(1.5, 1.5, -1.5, -1.5))
+            elif self.hasFocus():
+                p.setPen(QtGui.QPen(QtGui.QColor(t.input_focus), 1.5))
+                p.setBrush(QtCore.Qt.BrushStyle.NoBrush)
+                p.drawEllipse(r.adjusted(1.5, 1.5, -1.5, -1.5))
             p.setPen(QtCore.Qt.PenStyle.NoPen)
             p.setBrush(QtGui.QColor(self._colour))
             p.drawEllipse(r.adjusted(5, 5, -5, -5))
@@ -205,15 +299,60 @@ class _AccentSwatch(QtWidgets.QAbstractButton):
             p.end()
 
 
+class _AutoGlyph(QtWidgets.QWidget):
+    """Auto's mark: a circle half filled (day / night), painted."""
+
+    def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setFixedSize(28, 28)
+
+    def paintEvent(self, event: QtGui.QPaintEvent) -> None:  # noqa: N802
+        t = get_manager().current
+        p = QtGui.QPainter(self)
+        try:
+            p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+            r = QtCore.QRectF(4, 4, 20, 20)
+            p.setPen(QtGui.QPen(QtGui.QColor(t.text_primary), 1.6))
+            p.setBrush(QtCore.Qt.BrushStyle.NoBrush)
+            p.drawEllipse(r)
+            half = QtGui.QPainterPath()
+            half.moveTo(r.center())
+            half.arcTo(r, 90, 180)
+            half.closeSubpath()
+            p.setPen(QtCore.Qt.PenStyle.NoPen)
+            p.setBrush(QtGui.QColor(t.text_primary))
+            p.drawPath(half)
+        finally:
+            p.end()
+
+
+class _WellRow(QtWidgets.QWidget):
+    """A row on the material's well (radius 16)."""
+
+    def paintEvent(self, event: QtGui.QPaintEvent) -> None:  # noqa: N802
+        from gui.themes.glass import current_material, paint_surface
+
+        p = QtGui.QPainter(self)
+        try:
+            paint_surface(p, QtCore.QRectF(self.rect()), current_material().well)
+        finally:
+            p.end()
+
+
 # ── Section header label ──────────────────────────────────────────────────────
 
 def _section_label(text: str, parent: QtWidgets.QWidget | None = None) -> QtWidgets.QLabel:
+    from gui.themes.glass import font
+
     lbl = QtWidgets.QLabel(text, parent)
     lbl.setObjectName("sectionHeader")
-    font = lbl.font()
-    font.setPointSize(9)
-    font.setBold(True)
-    lbl.setFont(font)
+    lbl.setFont(font("label", weight=600))
+    return lbl
+
+
+def _group_label(text: str) -> QtWidgets.QLabel:
+    lbl = QtWidgets.QLabel(text)
+    lbl.setObjectName("mutedLabel")
     return lbl
 
 
@@ -247,13 +386,12 @@ class AutoThemeDialog(QtWidgets.QDialog):
 
     def _build_ui(self) -> None:
         root = QtWidgets.QVBoxLayout(self)
-        root.setContentsMargins(20, 20, 20, 20)
-        root.setSpacing(16)
+        root.setContentsMargins(20, 20, 20, 16)
+        root.setSpacing(14)
 
-        # Description
         desc = QtWidgets.QLabel(
-            "Auto mode switches between your chosen dark and light themes "
-            "based on the system day/night cycle (or time of day if unavailable)."
+            "Auto switches between these two themes with your system's day and night "
+            "(or the time of day where the system does not say)."
         )
         desc.setWordWrap(True)
         desc.setObjectName("mutedLabel")
@@ -262,54 +400,45 @@ class AutoThemeDialog(QtWidgets.QDialog):
         scroll = QtWidgets.QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         inner = QtWidgets.QWidget()
         vbox = QtWidgets.QVBoxLayout(inner)
         vbox.setContentsMargins(0, 0, 0, 0)
-        vbox.setSpacing(12)
+        vbox.setSpacing(10)
 
-        # Dark section
         vbox.addWidget(_section_label("Night theme (dark)"))
-        dark_grid = self._make_swatch_grid(DARK_THEMES, self._dark_swatches, is_dark=True)
-        vbox.addLayout(dark_grid)
-
+        vbox.addWidget(self._make_swatch_grid(DARK_THEMES, self._dark_swatches, is_dark=True))
         vbox.addSpacing(8)
-
-        # Light section
         vbox.addWidget(_section_label("Day theme (light)"))
-        light_grid = self._make_swatch_grid(LIGHT_THEMES, self._light_swatches, is_dark=False)
-        vbox.addLayout(light_grid)
+        vbox.addWidget(self._make_swatch_grid(LIGHT_THEMES, self._light_swatches, is_dark=False))
+        vbox.addStretch(1)
 
         scroll.setWidget(inner)
         root.addWidget(scroll, 1)
 
-        # Buttons
-        btn_row = QtWidgets.QHBoxLayout()
-        btn_row.addStretch()
-        cancel_btn = QtWidgets.QPushButton("Cancel")
-        ok_btn = QtWidgets.QPushButton("Apply Auto Theme")
+        buttons = QtWidgets.QDialogButtonBox()
+        cancel_btn = buttons.addButton(QtWidgets.QDialogButtonBox.StandardButton.Cancel)
+        cancel_btn.setAutoDefault(False)
+        ok_btn = buttons.addButton("Apply Auto Theme", QtWidgets.QDialogButtonBox.ButtonRole.AcceptRole)
         ok_btn.setObjectName("primaryBtn")
+        ok_btn.setDefault(True)
         cancel_btn.clicked.connect(self.reject)
         ok_btn.clicked.connect(self._accept)
-        btn_row.addWidget(cancel_btn)
-        btn_row.addWidget(ok_btn)
-        root.addLayout(btn_row)
+        root.addWidget(buttons)
 
     def _make_swatch_grid(
         self,
         keys: list[str],
         swatch_list: list[_SwatchCard],
         is_dark: bool,
-    ) -> QtWidgets.QGridLayout:
-        grid = QtWidgets.QGridLayout()
-        grid.setSpacing(8)
-        cols = 5
-        for i, key in enumerate(keys):
-            t = THEMES[key]
-            card = _SwatchCard(t)
+    ) -> QtWidgets.QWidget:
+        cards = []
+        for key in keys:
+            card = _SwatchCard(THEMES[key], fixed=False)
             card.clicked.connect(lambda checked, k=key, d=is_dark: self._on_swatch_clicked(k, d))
             swatch_list.append(card)
-            grid.addWidget(card, i // cols, i % cols)
-        return grid
+            cards.append(card)
+        return _swatch_grid(cards)
 
     def _on_swatch_clicked(self, key: str, is_dark: bool) -> None:
         if is_dark:
@@ -335,7 +464,7 @@ class AutoThemeDialog(QtWidgets.QDialog):
 # ── ThemePickerPanel ──────────────────────────────────────────────────────────
 
 class ThemePickerPanel(QtWidgets.QWidget):
-    """Swatch grid with all 14 themes + the Auto option. Changes apply
+    """Liquid Glass, Auto and the 14 classic themes. Changes apply
     instantly. Embedded in Settings → Appearance; ``ThemePickerDialog`` wraps
     it in a window."""
 
@@ -366,11 +495,11 @@ class ThemePickerPanel(QtWidgets.QWidget):
         root.addWidget(self._make_auto_card())
 
         # The classic themes, opaque, through the same components
+        root.addSpacing(4)
         root.addWidget(_section_label("Classic themes"))
-        dark_grid = self._make_swatch_grid([k for k in DARK_THEMES if k in CLASSIC_THEMES])
-        root.addLayout(dark_grid)
-        light_grid = self._make_swatch_grid([k for k in LIGHT_THEMES if k in CLASSIC_THEMES])
-        root.addLayout(light_grid)
+        for label, keys in (("Dark", DARK_THEMES), ("Light", LIGHT_THEMES)):
+            root.addWidget(_group_label(label))
+            root.addWidget(self._make_swatch_grid([k for k in keys if k in CLASSIC_THEMES]))
 
     def _make_glass_row(self) -> QtWidgets.QWidget:
         """The Liquid Glass swatch, its four accents and Reduce transparency."""
@@ -387,20 +516,21 @@ class ThemePickerPanel(QtWidgets.QWidget):
         hl.addWidget(glass, 0, QtCore.Qt.AlignmentFlag.AlignTop)
 
         col = QtWidgets.QVBoxLayout()
-        col.setSpacing(8)
+        col.setSpacing(6)
         title = QtWidgets.QLabel("Liquid Glass")
         title.setObjectName("cardTitle")
         desc = QtWidgets.QLabel(
             "Translucent glass over a blurred wall of your own album covers. The default look."
         )
-        desc.setObjectName("statusHint")
+        desc.setObjectName("mutedLabel")
         desc.setWordWrap(True)
         col.addWidget(title)
         col.addWidget(desc)
 
         accents = QtWidgets.QHBoxLayout()
-        accents.setSpacing(10)
-        accents.addWidget(QtWidgets.QLabel("Accent"))
+        accents.setSpacing(6)
+        accents.addWidget(_group_label("Accent"))
+        accents.addSpacing(4)
         self._accent_buttons: dict[str, _AccentSwatch] = {}
         for key, accent in ACCENTS.items():
             sw = _AccentSwatch(accent.key, accent.name, accent.base)
@@ -434,27 +564,23 @@ class ThemePickerPanel(QtWidgets.QWidget):
         current = get_manager().accent()
         for key, sw in getattr(self, "_accent_buttons", {}).items():
             sw.setChecked(key == current)
+
     def _make_auto_card(self) -> QtWidgets.QWidget:
-        """Build the special Auto-mode card row."""
-        container = QtWidgets.QWidget()
+        """Build the special Auto-mode row (on a well)."""
+        from gui.widgets.glyphs import set_glyph
+
+        container = _WellRow()
         container.setObjectName("autoCard")
         hl = QtWidgets.QHBoxLayout(container)
-        hl.setContentsMargins(14, 10, 14, 10)
+        hl.setContentsMargins(14, 10, 10, 10)
         hl.setSpacing(12)
-
-        icon = QtWidgets.QLabel("◑")
-        icon_font = icon.font()
-        icon_font.setPointSize(20)
-        icon.setFont(icon_font)
-        icon.setFixedWidth(32)
 
         text_col = QtWidgets.QVBoxLayout()
         text_col.setSpacing(1)
         name_lbl = QtWidgets.QLabel("Auto")
-        name_font = name_lbl.font()
-        name_font.setBold(True)
-        name_lbl.setFont(name_font)
-        desc_lbl = QtWidgets.QLabel("Switches between dark and light based on system day/night cycle")
+        from gui.themes.glass import font
+        name_lbl.setFont(font("body", weight=600))
+        desc_lbl = QtWidgets.QLabel("Follows your system's day and night")
         desc_lbl.setObjectName("mutedLabel")
 
         mgr = get_manager()
@@ -470,35 +596,30 @@ class ThemePickerPanel(QtWidgets.QWidget):
         text_col.addWidget(desc_lbl)
         text_col.addWidget(pair_lbl)
 
-        hl.addWidget(icon)
+        hl.addWidget(_AutoGlyph(), 0, QtCore.Qt.AlignmentFlag.AlignVCenter)
         hl.addLayout(text_col, 1)
 
-        # Configure button
         cfg_btn = QtWidgets.QPushButton("Configure…")
-        cfg_btn.setFixedWidth(110)
+        cfg_btn.setToolTip("Choose the night and day themes")
         cfg_btn.clicked.connect(self._open_auto_config)
         hl.addWidget(cfg_btn)
 
-        # Select button
         self._auto_select_btn = QtWidgets.QPushButton("Select")
         self._auto_select_btn.setObjectName("primaryBtn")
-        self._auto_select_btn.setFixedWidth(80)
+        set_glyph(self._auto_select_btn, "check", role="inverse")
         self._auto_select_btn.clicked.connect(self._apply_auto)
         hl.addWidget(self._auto_select_btn)
 
         return container
 
-    def _make_swatch_grid(self, keys: list[str]) -> QtWidgets.QGridLayout:
-        grid = QtWidgets.QGridLayout()
-        grid.setSpacing(10)
-        cols = 5
-        for i, key in enumerate(keys):
-            t = THEMES[key]
-            card = _SwatchCard(t)
+    def _make_swatch_grid(self, keys: list[str]) -> QtWidgets.QWidget:
+        cards = []
+        for key in keys:
+            card = _SwatchCard(THEMES[key], fixed=False)
             card.clicked.connect(lambda checked, k=key: self._apply_theme(k))
             self._all_swatches.append(card)
-            grid.addWidget(card, i // cols, i % cols)
-        return grid
+            cards.append(card)
+        return _swatch_grid(cards)
 
     # ── Theme application ─────────────────────────────────────────────────
 
@@ -551,11 +672,10 @@ class ThemePickerPanel(QtWidgets.QWidget):
 
     def _refresh_selection(self) -> None:
         is_auto = self._current_key == "auto"
-        self._auto_select_btn.setText("✓ Active" if is_auto else "Select")
+        self._auto_select_btn.setText("Active" if is_auto else "Select")
         self._auto_select_btn.setEnabled(not is_auto)
         for sw in self._all_swatches:
             sw.setSelected(not is_auto and sw.tokens.key == self._current_key)
-
 
 
 # ── ThemePickerDialog ─────────────────────────────────────────────────────────
@@ -574,15 +694,15 @@ class ThemePickerDialog(QtWidgets.QDialog):
         self.setWindowFlags(
             self.windowFlags() & ~QtCore.Qt.WindowType.WindowContextHelpButtonHint
         )
+        from gui.themes.glass import apply_font
+
         root = QtWidgets.QVBoxLayout(self)
-        root.setContentsMargins(24, 24, 24, 20)
+        root.setContentsMargins(24, 22, 24, 18)
         root.setSpacing(16)
 
         title = QtWidgets.QLabel("Choose Theme")
-        title_font = title.font()
-        title_font.setPointSize(14)
-        title_font.setBold(True)
-        title.setFont(title_font)
+        title.setObjectName("dialogTitle")
+        apply_font(title, "title")
         subtitle = QtWidgets.QLabel("Changes apply instantly")
         subtitle.setObjectName("mutedLabel")
         title_row = QtWidgets.QVBoxLayout()
@@ -598,12 +718,9 @@ class ThemePickerDialog(QtWidgets.QDialog):
         self._auto_pair_label = self.panel._auto_pair_label
         self._all_swatches = self.panel._all_swatches
 
-        btn_row = QtWidgets.QHBoxLayout()
-        btn_row.addStretch()
-        close_btn = QtWidgets.QPushButton("Close")
-        close_btn.clicked.connect(self.close)
-        btn_row.addWidget(close_btn)
-        root.addLayout(btn_row)
+        buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.StandardButton.Close)
+        buttons.rejected.connect(self.close)
+        root.addWidget(buttons)
 
 
 # ── Convenience launcher ──────────────────────────────────────────────────────

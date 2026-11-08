@@ -1,4 +1,19 @@
-"""Library Compression workspace — mirror library converting FLAC → Opus."""
+"""Mirror → "Build the mirror": a portable copy of the library, FLAC → Opus.
+
+Layout (Liquid Glass): a hero card with the source and destination as
+elided path rows, the format and bitrate, the update / overwrite options and
+the actions (Estimate savings → Build mirror, Cancel); then a Results card:
+an empty state until something has happened, the status line, the progress
+bar, the estimate as stat tiles and the run summary as stat tiles (converted,
+copied, skipped, errors / updated, out of date kept, partials removed,
+orphans), with "Remove N orphaned file(s)…" (danger; it lists the files and
+asks first) and Open report.
+
+Safety (unchanged): the estimate is the preview and enables Build mirror; a
+change to the source, destination or bitrate invalidates it; the run asks
+first; the destination is never created before that; Cancel stops FFmpeg and
+removes partial output; a library change mid-run is applied after the run.
+"""
 from __future__ import annotations
 
 import os
@@ -142,8 +157,27 @@ def _fmt(n: int) -> str:
     return f"{n / 1024:.0f} KB"
 
 
+def _count(n: int) -> str:
+    return f"{int(n):,}"
+
+
 class CompressionWorkspace(WorkspaceBase):
     """Mirror a library, converting FLAC → Opus and copying everything else."""
+
+    # Run summary tiles: (key, label, tooltip). Two rows of four.
+    _RUN_TILES = (
+        ("converted", "Converted to Opus", "FLAC files converted"),
+        ("copied", "Copied", "Other files copied as they are (copied playlists point at the .opus)"),
+        ("skipped", "Skipped", "Already in the mirror and up to date"),
+        ("errors", "Errors", "Files that failed; the report lists each one"),
+        ("updated", "Updated", "Mirror files older than their changed source, redone"),
+        ("stale", "Out of date, kept",
+         "Mirror files older than their changed source, kept because "
+         "“Update mirror files…” was off"),
+        ("partials", "Partials removed",
+         "Temporary files left by an interrupted earlier run, removed"),
+        ("orphans", "Orphans", "Files in the mirror whose source was deleted or renamed"),
+    )
 
     def __init__(self, library_path: str = "", parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(library_path, parent)
@@ -159,68 +193,80 @@ class CompressionWorkspace(WorkspaceBase):
         self._build_ui()
 
     def _build_ui(self) -> None:
-        cl = self.content_layout
+        from gui.themes.tokens import SPACE
+        from gui.widgets.glass_parts import EmptyState, StatRow
+        from gui.widgets.glyphs import set_glyph
+        from gui.widgets.path_field import PathField
 
-        cl.addWidget(self._make_section_title("Library Compression"))
+        cl = self.content_layout
         cl.addWidget(self._make_subtitle(
-            "Create a compressed mirror of your library. FLAC files are converted to Opus "
-            "at the chosen bitrate; other files are copied, and copied playlists point at "
-            "the converted .opus files. Originals in the source library are never modified. "
-            "Quarantine/, Trash/ and Docs/ are not mirrored."
+            "A smaller copy of your library for a phone or player. "
+            "Your originals are never changed."
         ))
 
-        # ── Source / Destination ──────────────────────────────────────────
-        paths_card = self._make_card()
-        paths_layout = QtWidgets.QFormLayout(paths_card)
-        paths_layout.setContentsMargins(16, 16, 16, 16)
-        paths_layout.setSpacing(10)
-        paths_layout.addRow(self._make_card_title("Folders"))
+        # ── Hero: folders, format and the main action ─────────────────────
+        hero = self._make_card()
+        hero.setObjectName("headerCard")
+        self._hero = hero
+        hl = QtWidgets.QVBoxLayout(hero)
+        hl.setContentsMargins(16, 16, 16, 16)
+        hl.setSpacing(SPACE.md)
+        head = QtWidgets.QVBoxLayout()
+        head.setSpacing(SPACE.xxs)
+        head.addWidget(self._make_card_title("Folders and format"))
+        hint = QtWidgets.QLabel(
+            "FLAC becomes Opus; other files are copied and copied playlists follow. "
+            "Quarantine/, Trash/ and Docs/ stay out."
+        )
+        hint.setObjectName("mutedLabel")
+        hint.setWordWrap(True)
+        head.addWidget(hint)
+        hl.addLayout(head)
 
-        src_row = QtWidgets.QHBoxLayout()
-        self._source_edit = QtWidgets.QLineEdit()
-        self._source_edit.setPlaceholderText("Source library folder…")
+        grid = QtWidgets.QGridLayout()
+        grid.setHorizontalSpacing(SPACE.md)
+        grid.setVerticalSpacing(SPACE.sm)
+        grid.setColumnStretch(1, 1)
+
+        def row_label(text: str) -> QtWidgets.QLabel:
+            lbl = QtWidgets.QLabel(text)
+            lbl.setObjectName("mutedLabel")
+            return lbl
+
+        self._source_edit = PathField("Choose the library to mirror",
+                                      button_tip="Choose the source folder")
+        self._source_edit.setAccessibleName("Source folder")
         if self._library_path:
             self._source_edit.setText(self._library_path)
-        self._src_browse = QtWidgets.QPushButton("Browse…")
-        self._src_browse.setFixedWidth(80)
-        self._src_browse.clicked.connect(self._browse_source)
-        src_row.addWidget(self._source_edit)
-        src_row.addWidget(self._src_browse)
-        paths_layout.addRow("Source:", src_row)
+        self._source_edit.browse_requested.connect(self._browse_source)
+        self._src_browse = self._source_edit.button
+        grid.addWidget(row_label("Source"), 0, 0)
+        grid.addWidget(self._source_edit, 0, 1)
 
-        dst_row = QtWidgets.QHBoxLayout()
-        self._dest_edit = QtWidgets.QLineEdit()
-        self._dest_edit.setPlaceholderText("Destination (mirror) folder…")
-        self._dst_browse = QtWidgets.QPushButton("Browse…")
-        self._dst_browse.setFixedWidth(80)
-        self._dst_browse.clicked.connect(self._browse_destination)
-        dst_row.addWidget(self._dest_edit)
-        dst_row.addWidget(self._dst_browse)
-        paths_layout.addRow("Destination:", dst_row)
-        cl.addWidget(paths_card)
+        self._dest_edit = PathField("Choose where the mirror goes",
+                                    button_tip="Choose the destination folder")
+        self._dest_edit.setAccessibleName("Destination folder")
+        self._dest_edit.browse_requested.connect(self._browse_destination)
+        self._dst_browse = self._dest_edit.button
+        grid.addWidget(row_label("Destination"), 1, 0)
+        grid.addWidget(self._dest_edit, 1, 1)
 
-        # ── Transcode settings ────────────────────────────────────────────
-        cfg_card = self._make_card()
-        cfg_layout = QtWidgets.QVBoxLayout(cfg_card)
-        cfg_layout.setContentsMargins(16, 16, 16, 16)
-        cfg_layout.setSpacing(10)
-        cfg_layout.addWidget(self._make_card_title("Transcode Settings"))
-
-        info = QtWidgets.QLabel(
-            "FLAC → Opus  |  Other files: copied  |  Playlists: FLAC entries point at the .opus"
-        )
-        info.setObjectName("statusHint")
-        cfg_layout.addWidget(info)
-
-        bitrate_row = QtWidgets.QHBoxLayout()
-        bitrate_row.addWidget(QtWidgets.QLabel("Opus bitrate (kbps):"))
+        fmt = QtWidgets.QHBoxLayout()
+        fmt.setSpacing(SPACE.sm)
+        codec = QtWidgets.QLabel("Opus at")
+        codec.setToolTip("FLAC files are converted to Opus; every other file is copied as it is.")
+        fmt.addWidget(codec)
         self._bitrate_spin = QtWidgets.QSpinBox()
         self._bitrate_spin.setRange(48, 320)
         self._bitrate_spin.setValue(96)
         self._bitrate_spin.setSingleStep(16)
-        bitrate_row.addWidget(self._bitrate_spin)
-        bitrate_row.addStretch(1)
-        cfg_layout.addLayout(bitrate_row)
+        self._bitrate_spin.setSuffix(" kbps")
+        self._bitrate_spin.setAccessibleName("Opus bitrate")
+        self._bitrate_spin.setToolTip("Opus bitrate, 48–320 kbps (default 96).")
+        fmt.addWidget(self._bitrate_spin)
+        fmt.addStretch(1)
+        grid.addWidget(row_label("Format"), 2, 0)
+        grid.addLayout(fmt, 2, 1)
 
         self._update_cb = QtWidgets.QCheckBox("Update mirror files whose source has changed")
         self._update_cb.setChecked(True)
@@ -228,77 +274,154 @@ class CompressionWorkspace(WorkspaceBase):
             "A mirrored file older than its changed source (re-tagged, replaced) is redone.\n"
             "Unchecked: it is kept and only reported as out of date."
         )
-        cfg_layout.addWidget(self._update_cb)
-        self._overwrite_cb = QtWidgets.QCheckBox("Overwrite every existing file in destination")
+        grid.addWidget(self._update_cb, 3, 1)
+        self._overwrite_cb = QtWidgets.QCheckBox("Overwrite every existing file in the destination")
         self._overwrite_cb.setChecked(False)
         self._overwrite_cb.setToolTip("Redo the whole mirror, even files that are up to date.")
-        cfg_layout.addWidget(self._overwrite_cb)
-        cl.addWidget(cfg_card)
+        grid.addWidget(self._overwrite_cb, 4, 1)
+        hl.addLayout(grid)
 
-        # ── Action buttons ────────────────────────────────────────────────
-        btn_row = QtWidgets.QHBoxLayout()
-        self._estimate_btn = self._make_primary_button("🔍  Estimate Space Savings")
+        actions = QtWidgets.QHBoxLayout()
+        actions.setSpacing(SPACE.sm)
+        self._estimate_btn = QtWidgets.QPushButton("Estimate savings")
+        self._estimate_btn.setToolTip(
+            "Count the files and estimate the space saved. Nothing is written; "
+            "the estimate enables Build mirror."
+        )
+        set_glyph(self._estimate_btn, "search")
         self._estimate_btn.clicked.connect(self._on_estimate)
-        self._run_btn = QtWidgets.QPushButton("▶  Start Compression")
+        self._run_btn = self._make_primary_button("Build mirror")
+        self._run_btn.setToolTip(
+            "Convert and copy into the destination (asks first). Needs an estimate for "
+            "these folders and bitrate, and FFmpeg on your PATH."
+        )
+        set_glyph(self._run_btn, "play", role="inverse")
         self._run_btn.setEnabled(False)
         self._run_btn.clicked.connect(self._on_run)
-        self._cancel_btn = QtWidgets.QPushButton("■  Cancel")
+        self._cancel_btn = QtWidgets.QPushButton("Cancel")
         self._cancel_btn.setObjectName("compressionCancelBtn")
+        self._cancel_btn.setToolTip("Stop: FFmpeg is stopped and its partial output removed.")
+        set_glyph(self._cancel_btn, "stop")
         self._cancel_btn.setEnabled(False)
         self._cancel_btn.clicked.connect(self._on_cancel)
-        self._report_btn = QtWidgets.QPushButton("📄  Open Report")
+        actions.addWidget(self._estimate_btn)
+        actions.addWidget(self._run_btn)
+        actions.addWidget(self._cancel_btn)
+        actions.addStretch(1)
+        note = QtWidgets.QLabel("Needs FFmpeg")
+        note.setObjectName("notesHint")
+        note.setToolTip("FFmpeg must be installed and on your PATH for FLAC → Opus conversion.")
+        actions.addWidget(note)
+        hl.addLayout(actions)
+        cl.addWidget(hero)
+
+        # ── Results: estimate, progress, run summary, orphans ─────────────
+        res = self._make_card()
+        rl = QtWidgets.QVBoxLayout(res)
+        rl.setContentsMargins(16, 16, 16, 16)
+        rl.setSpacing(SPACE.sm)
+        top = QtWidgets.QHBoxLayout()
+        top.setSpacing(SPACE.sm)
+        top.addWidget(self._make_card_title("Results"), 1)
+        self._report_btn = QtWidgets.QPushButton("Open report")
+        self._report_btn.setToolTip("The last run's HTML report, in the mirror's Docs/ folder")
+        set_glyph(self._report_btn, "external")
         self._report_btn.setEnabled(False)
         self._report_btn.clicked.connect(self._on_open_report)
-        btn_row.addWidget(self._estimate_btn)
-        btn_row.addWidget(self._run_btn)
-        btn_row.addWidget(self._cancel_btn)
-        btn_row.addWidget(self._report_btn)
-        self._orphans_btn = QtWidgets.QPushButton("Remove orphaned files…")
-        self._orphans_btn.setToolTip(
-            "Files in the mirror whose source was deleted or renamed. Lists them first; "
-            "deletes only those, only inside the mirror."
-        )
-        self._orphans_btn.setVisible(False)
-        self._orphans_btn.clicked.connect(self._on_remove_orphans)
-        btn_row.addWidget(self._orphans_btn)
-        btn_row.addStretch(1)
-        cl.addLayout(btn_row)
+        top.addWidget(self._report_btn)
+        rl.addLayout(top)
 
-        # ── Progress / results card ───────────────────────────────────────
-        prog_card = self._make_card()
-        prog_layout = QtWidgets.QVBoxLayout(prog_card)
-        prog_layout.setContentsMargins(16, 16, 16, 16)
-        prog_layout.setSpacing(8)
-        prog_layout.addWidget(self._make_card_title("Progress"))
-        self._result_lbl = QtWidgets.QLabel(
-            "Run an estimate to preview space savings, then start compression."
+        self._empty = EmptyState(
+            "No estimate yet",
+            "Choose a destination, then estimate the savings: it counts the files "
+            "and enables Build mirror.",
         )
+        rl.addWidget(self._empty)
+
+        self._result_lbl = QtWidgets.QLabel("")
         self._result_lbl.setObjectName("compressionResult")
         self._result_lbl.setWordWrap(True)
+        self._result_lbl.setVisible(False)
         set_tone(self._result_lbl, "muted")
+        rl.addWidget(self._result_lbl)
+
+        self._prog_row = QtWidgets.QWidget()
+        prog = QtWidgets.QHBoxLayout(self._prog_row)
+        prog.setContentsMargins(0, 0, 0, 0)
+        prog.setSpacing(SPACE.sm)
         self._prog_bar = QtWidgets.QProgressBar()
         self._prog_bar.setValue(0)
         self._prog_bar.setFixedHeight(8)
         self._prog_bar.setTextVisible(False)
-        self._prog_bar.setVisible(False)
         self._prog_counter = QtWidgets.QLabel("")
         self._prog_counter.setObjectName("statusHint")
-        prog_layout.addWidget(self._result_lbl)
-        prog_layout.addWidget(self._prog_bar)
-        prog_layout.addWidget(self._prog_counter)
-        cl.addWidget(prog_card)
+        prog.addWidget(self._prog_bar, 1)
+        prog.addWidget(self._prog_counter)
+        self._prog_row.setVisible(False)
+        rl.addWidget(self._prog_row)
 
-        note = QtWidgets.QLabel(
-            "Note: FFmpeg must be installed and on your PATH for FLAC → Opus conversion."
+        self._estimate_stats = StatRow([
+            ("flac", "FLAC to convert"), ("opus", "Estimated Opus size"),
+            ("saving", "Estimated saving"), ("other", "Other files to copy"),
+        ])
+        self._estimate_stats.setVisible(False)
+        rl.addWidget(self._estimate_stats)
+
+        tiles = [(key, label) for key, label, _tip in self._RUN_TILES]
+        self._run_stats = StatRow(tiles[:4])
+        self._run_stats_more = StatRow(tiles[4:])
+        for key, _label, tip in self._RUN_TILES:
+            self._run_tile(key).setToolTip(tip)
+        for row in (self._run_stats, self._run_stats_more):
+            row.setVisible(False)
+            rl.addWidget(row)
+
+        orphan_row = QtWidgets.QHBoxLayout()
+        orphan_row.setContentsMargins(0, SPACE.xxs, 0, 0)
+        self._orphans_btn = QtWidgets.QPushButton("Remove orphaned files…")
+        self._orphans_btn.setObjectName("dangerBtn")
+        self._orphans_btn.setToolTip(
+            "Files in the mirror whose source was deleted or renamed. Lists them first; "
+            "deletes only those, only inside the mirror."
         )
-        note.setObjectName("notesHint")
-        cl.addWidget(note)
+        set_glyph(self._orphans_btn, "trash", role="inverse")
+        self._orphans_btn.setVisible(False)
+        self._orphans_btn.clicked.connect(self._on_remove_orphans)
+        orphan_row.addWidget(self._orphans_btn)
+        orphan_row.addStretch(1)
+        rl.addLayout(orphan_row)
+        cl.addWidget(res)
         cl.addStretch(1)
 
         # Any change to what was estimated invalidates the estimate (TOOL-23).
         self._source_edit.textChanged.connect(self._invalidate_estimate)
         self._dest_edit.textChanged.connect(self._invalidate_estimate)
         self._bitrate_spin.valueChanged.connect(self._invalidate_estimate)
+
+    def _run_tile(self, key: str):
+        row = self._run_stats if key in self._run_stats.keys() else self._run_stats_more
+        return row.tile(key)
+
+    def _show_results(self, *, estimate: bool = False, progress: bool = False,
+                      run: bool = False) -> None:
+        """What the Results card shows: the status line always once anything
+        has happened, plus the estimate tiles, the progress row (with the
+        live first row of run tiles) or the full run summary."""
+        from gui.themes import motion
+
+        was_empty = self._empty.isVisible()
+        self._empty.setVisible(False)
+        self._result_lbl.setVisible(True)
+        self._prog_row.setVisible(progress)
+        self._estimate_stats.setVisible(estimate)
+        self._run_stats.setVisible(run or progress)
+        self._run_stats_more.setVisible(run)
+        if was_empty and self.isVisible():
+            motion.reveal(self._result_lbl, duration="fast")
+
+    def _set_status(self, text: str, tone: str) -> None:
+        self._result_lbl.setText(text)
+        set_tone(self._result_lbl, tone)
 
     # ── Theme ─────────────────────────────────────────────────────────────
 
@@ -396,10 +519,10 @@ class CompressionWorkspace(WorkspaceBase):
             self._estimate_worker.cancel()
         if self._estimate_key is not None:
             self._estimate_key = None
-            self._result_lbl.setText(
-                "Settings changed — run the estimate again before starting."
+            self._set_status(
+                "Settings changed — run the estimate again before starting.", "muted"
             )
-            set_tone(self._result_lbl, "muted")
+            self._show_results()
         self._run_btn.setEnabled(False)
 
     # ── Estimate ──────────────────────────────────────────────────────────
@@ -414,14 +537,14 @@ class CompressionWorkspace(WorkspaceBase):
         source, _ = paths
         self._run_btn.setEnabled(False)
         self._estimate_btn.setEnabled(False)
-        self._result_lbl.setText("Estimating…")
-        set_tone(self._result_lbl, "muted")
+        self._set_status("Estimating…", "muted")
+        self._show_results()
         self._estimate_running_key = self._current_key()
         worker = EstimateWorker(source, parent=self)
         worker.finished.connect(self._on_estimate_done)
         worker.cancelled.connect(self._on_estimate_cancelled)
         self._estimate_worker = worker
-        self._start_worker(worker, "Compression estimate", ask_before_quit=False)
+        self._start_worker(worker, "Mirror estimate", ask_before_quit=False)
 
     @Slot()
     def _on_estimate_cancelled(self) -> None:
@@ -444,18 +567,25 @@ class CompressionWorkspace(WorkspaceBase):
         estimated_opus_bytes = int(flac_bytes * bitrate / 900)
         savings = flac_bytes - estimated_opus_bytes
 
-        msg = (
-            f"FLAC files to convert:    {flac_count}  ({_fmt(flac_bytes)})\n"
-            f"Estimated Opus output:    {_fmt(estimated_opus_bytes)}  ({bitrate} kbps)\n"
-            f"Estimated space saving:   {_fmt(savings)}\n"
-            f"Other files to copy:      {other_count}  ({_fmt(other_bytes)})"
+        stats = self._estimate_stats
+        stats.tile("flac").set_value(_count(flac_count))
+        stats.tile("flac").set_label(f"FLAC to convert · {_fmt(flac_bytes)}")
+        stats.tile("opus").set_value(f"≈ {_fmt(estimated_opus_bytes)}")
+        stats.tile("opus").set_label(f"Opus size at {bitrate} kbps")
+        stats.tile("saving").set_value(f"≈ {_fmt(savings)}", tone="success" if savings > 0 else "")
+        stats.tile("other").set_value(_count(other_count))
+        stats.tile("other").set_label(f"Other files to copy · {_fmt(other_bytes)}")
+        ready = flac_count > 0 or other_count > 0
+        self._set_status(
+            "Estimate ready: Build mirror converts and copies these files."
+            if ready else "Nothing to mirror: the source has no files outside the reserved folders.",
+            "primary",
         )
-        self._result_lbl.setText(msg)
-        set_tone(self._result_lbl, "primary")
+        self._show_results(estimate=True)
         self._estimate_key = key
-        self._run_btn.setEnabled(flac_count > 0 or other_count > 0)
+        self._run_btn.setEnabled(ready)
         self._log(
-            f"Compression estimate: {flac_count} FLAC ({_fmt(flac_bytes)}) → "
+            f"Mirror estimate: {flac_count} FLAC ({_fmt(flac_bytes)}) → "
             f"~{_fmt(estimated_opus_bytes)} Opus, saving ~{_fmt(savings)}",
             "info",
         )
@@ -491,7 +621,7 @@ class CompressionWorkspace(WorkspaceBase):
         else:
             existing = "kept (skipped)"
         reply = QtWidgets.QMessageBox.question(
-            self, "Start Compression",
+            self, "Build the Mirror",
             f"Convert FLAC → Opus ({self._bitrate_spin.value()} kbps) and copy all other files.\n\n"
             f"Source:       {source}\n"
             f"Destination:  {destination}\n"
@@ -507,7 +637,7 @@ class CompressionWorkspace(WorkspaceBase):
         self._report_path = None
         self._report_btn.setEnabled(False)
         self._set_orphans(None)
-        self._log(f"Starting compression: {source} → {destination}", "info")
+        self._log(f"Building the mirror: {source} → {destination}", "info")
 
         worker = MirrorWorker(
             source,
@@ -523,7 +653,7 @@ class CompressionWorkspace(WorkspaceBase):
         worker.finished.connect(self._on_finished)
         worker.error.connect(self._on_error)
         self._worker = worker
-        self._start_worker(worker, "Library compression")
+        self._start_worker(worker, "Build the mirror")
 
     @Slot()
     def _on_cancel(self) -> None:
@@ -531,7 +661,7 @@ class CompressionWorkspace(WorkspaceBase):
             self._worker.cancel()
             self._cancel_btn.setEnabled(False)
             self._prog_counter.setText("Cancelling — stopping FFmpeg…")
-            self._log("Compression: cancelling…", "warn")
+            self._log("Mirror: cancelling…", "warn")
 
     @Slot(str)
     def _on_worker_log(self, msg: str) -> None:
@@ -553,13 +683,16 @@ class CompressionWorkspace(WorkspaceBase):
         self._overwrite_cb.setEnabled(not running)
         self._update_cb.setEnabled(not running)
         self._orphans_btn.setEnabled(not running)
-        self._prog_bar.setVisible(running)
         if running:
             self._prog_bar.setMaximum(0)  # indeterminate until first tick
             self._prog_bar.setValue(0)
             self._prog_counter.setText("Starting…")
-            self._result_lbl.setText("Running…")
-            set_tone(self._result_lbl, "muted")
+            for key in self._run_stats.keys():
+                self._run_tile(key).set_value("0", tone="")
+            self._set_status("Running…", "muted")
+            self._show_results(progress=True)
+        else:
+            self._prog_row.setVisible(False)
 
     def _run_ended(self) -> None:
         self._worker = None
@@ -583,11 +716,23 @@ class CompressionWorkspace(WorkspaceBase):
         if total_tasks > 0:
             self._prog_bar.setMaximum(total_tasks)
             self._prog_bar.setValue(completed)
-        self._prog_counter.setText(
-            f"Progress: {completed} / {total_tasks}  "
-            f"(converted {converted}, copied {copied}, "
-            f"skipped {skipped}, errors {errors})"
-        )
+        self._prog_counter.setText(f"{_count(completed)} of {_count(total_tasks)} files")
+        for key, value in (("converted", converted), ("copied", copied),
+                           ("skipped", skipped), ("errors", errors)):
+            self._run_tile(key).set_value(_count(value), tone="danger" if key == "errors" and value else "")
+
+    def _fill_run_tiles(self, summary: dict, orphans: int) -> None:
+        stale_kept = max(0, int(summary.get("stale", 0) or 0) - int(summary.get("updated", 0) or 0))
+        values = {
+            "converted": summary.get("converted", 0), "copied": summary.get("copied", 0),
+            "skipped": summary.get("skipped", 0), "errors": summary.get("errors", 0),
+            "updated": summary.get("updated", 0) or 0, "stale": stale_kept,
+            "partials": summary.get("partials_removed", 0) or 0, "orphans": orphans,
+        }
+        tones = {"errors": "danger", "stale": "warning", "orphans": "warning"}
+        for key, value in values.items():
+            value = int(value or 0)
+            self._run_tile(key).set_value(_count(value), tone=tones.get(key, "") if value else "")
 
     @Slot(dict)
     def _on_finished(self, summary: dict) -> None:
@@ -598,51 +743,58 @@ class CompressionWorkspace(WorkspaceBase):
         self._prog_bar.setMaximum(100)
         self._prog_bar.setValue(100)
 
+        orphans = list(summary.get("orphan_files") or [])
+        self._fill_run_tiles(summary, len(orphans))
         counts = (
             f"Converted {summary['converted']} FLAC → Opus, "
             f"copied {summary['copied']}, "
             f"skipped {summary['skipped']}, "
             f"errors {summary['errors']}."
         )
-        extras = []
-        if summary.get("updated"):
-            extras.append(f"{summary['updated']} out-of-date file(s) redone")
+        # The tiles carry the numbers; the status line keeps only what needs
+        # explaining (what to do about kept or orphaned files).
+        notes = []
         stale_kept = int(summary.get("stale", 0) or 0) - int(summary.get("updated", 0) or 0)
         if stale_kept > 0:
-            extras.append(
+            notes.append(
                 f"{stale_kept} file(s) older than their changed source were kept "
                 "(tick “Update mirror files…” to redo them)"
             )
+        if orphans:
+            notes.append(f"{len(orphans)} file(s) in the mirror no longer have a source")
+        extras = list(notes)
+        if summary.get("updated"):
+            extras.insert(0, f"{summary['updated']} out-of-date file(s) redone")
         if summary.get("partials_removed"):
             extras.append(f"{summary['partials_removed']} leftover temporary file(s) from an "
                           "interrupted run removed")
-        orphans = list(summary.get("orphan_files") or [])
-        if orphans:
-            extras.append(f"{len(orphans)} file(s) in the mirror no longer have a source")
-        if extras:
-            counts += "  " + "; ".join(extras) + "."
+        note_text = ("  " + "; ".join(notes) + ".") if notes else ""
+        log_counts = counts + (("  " + "; ".join(extras) + ".") if extras else "")
         if summary.get("cancelled"):
-            msg = (
-                f"Cancelled.  {counts}  {summary.get('not_started', 0)} file(s) were not "
-                "processed; no partial files were left behind."
-            )
+            not_started = summary.get("not_started", 0)
+            status = (f"Cancelled.  {not_started} file(s) were not processed; no partial files "
+                      f"were left behind.{note_text}")
+            log_msg = (f"Cancelled.  {log_counts}  {not_started} file(s) were not processed; "
+                       "no partial files were left behind.")
             tone, level = "warning", "warn"
         elif summary["errors"]:
-            msg = f"Done with errors.  {counts}  See the report for the failed files."
+            status = f"Done with errors: see the report for the failed files.{note_text}"
+            log_msg = f"Done with errors.  {log_counts}  See the report for the failed files."
             tone, level = "danger", "error"
         else:
-            msg = f"Done.  {counts}"
+            status = f"Done.{note_text}"
+            log_msg = f"Done.  {log_counts}"
             tone, level = "success", "ok"
-        self._result_lbl.setText(msg)
-        set_tone(self._result_lbl, tone)
+        self._set_status(status, tone)
+        self._show_results(run=True)
         self._prog_counter.setText("")
-        self._log(msg, level)
+        self._log(log_msg, level)
         if (orphans and not summary.get("cancelled") and self._last_run_paths is not None
                 and (self._source_edit.text().strip(), self._dest_edit.text().strip())
                 == self._last_run_paths):
             self._set_orphans((*self._last_run_paths, orphans))
         for path, reason in summary.get("error_files", [])[:20]:
-            self._log(f"Compression error: {path}: {reason}", "error")
+            self._log(f"Mirror error: {path}: {reason}", "error")
 
         if destination:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -664,9 +816,9 @@ class CompressionWorkspace(WorkspaceBase):
     @Slot(str)
     def _on_error(self, error: str) -> None:
         self._run_ended()
-        self._result_lbl.setText(f"Error: {error}")
-        set_tone(self._result_lbl, "danger")
-        self._log(f"Compression failed: {error}", "error")
+        self._set_status(f"Error: {error}", "danger")
+        self._show_results()
+        self._log(f"Building the mirror failed: {error}", "error")
 
     # ── Orphaned mirror files ─────────────────────────────────────────────
 
@@ -732,8 +884,9 @@ class CompressionWorkspace(WorkspaceBase):
             self._log(f"Could not delete {path}: {why}", "error")
         if result.get("log_path"):
             self._log(f"Orphan removal logged to {result['log_path']}", "info")
-        self._result_lbl.setText(msg)
-        set_tone(self._result_lbl, "danger" if failed else "success")
+        remaining = len(refused) + len(failed)
+        self._run_tile("orphans").set_value(_count(remaining), tone="warning" if remaining else "")
+        self._set_status(msg, "danger" if failed else "success")
         self._log(msg, "error" if failed else "ok")
 
     @Slot(str)
@@ -741,8 +894,7 @@ class CompressionWorkspace(WorkspaceBase):
         if self.sender() is not self._orphan_worker:
             return
         self._orphans_done()
-        self._result_lbl.setText(f"Orphan removal failed: {error}")
-        set_tone(self._result_lbl, "danger")
+        self._set_status(f"Orphan removal failed: {error}", "danger")
         self._log(f"Orphan removal failed: {error}", "error")
 
     # ── Open report ───────────────────────────────────────────────────────
@@ -752,7 +904,7 @@ class CompressionWorkspace(WorkspaceBase):
         if not self._report_path or not os.path.exists(self._report_path):
             QtWidgets.QMessageBox.warning(
                 self, "Report Not Found",
-                "The report file could not be found. Run compression again to generate one."
+                "The report file could not be found. Build the mirror again to make one."
             )
             return
         try:

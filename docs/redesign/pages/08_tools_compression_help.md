@@ -144,6 +144,32 @@ worker, a confirmation or a library-write lock. Current screens:
 - **All dialogs:** created with `parent=self` and `exec()`'d, never `deleteLater()`'d, so each open leaks a QDialog (3 opens → 3 live `CrashLogDialog` children, confirmed). Re-opening Scan/Bucketing/Fuzzy while a previous dialog's worker still runs allows a concurrent second run.
 
 ### Compression (`gui/workspaces/compression.py`, class `CompressionWorkspace`)
+
+> **Current state (Liquid Glass R2, 2026-11-08).** This page is now **Mirror → Build the
+> mirror** (Take away group), with **Mirror → Verify the mirror** beside it (the Opus /
+> M4A testers, embedded). The audit below is the 2026-11-07 snapshot (bug status:
+> `docs/redesign/README.md`). The look now:
+>
+> * no in-page title; one muted purpose line;
+> * a hero card "Folders and format": source and destination as elided path rows with a
+>   folder glyph button (`gui/widgets/path_field.py`), "Opus at N kbps", the update /
+>   overwrite options, and Estimate savings → **Build mirror** (primary) → Cancel;
+> * a Results card: an empty state first, a status line that keeps only the
+>   explanations (kept out-of-date files, files with no source), the estimate as four
+>   stat tiles, the run summary as eight (converted · copied · skipped · errors /
+>   updated · out of date kept · partials removed · orphans), Open report, and
+>   **Remove N orphaned file(s)…** as a danger pill that still lists up to 15 and asks;
+> * Verify: per codec a card with the file row, a stat row (tags found · cover art ·
+>   problems), one glass row per problem (or an all-clear row), the cover on a well and
+>   the tags; the two cards stack below ~960 px;
+> * every user-visible "Compression" is gone (job names "Mirror estimate" / "Build the
+>   mirror", the confirmation "Build the Mirror", log lines).
+>
+> The Diagnostics dialogs below are history except `MediaTesterDialog` (wraps the Verify
+> panel) and `CrashLogDialog` (glass dialog chrome: title, elided paths, the log on a
+> monospaced well, Close on the footer band). Settings, which this area also restyled,
+> is described in `docs/gui_inventory.md` §6.13 and the dialog chrome in §7.0.
+
 - **Intent:** make a smaller, portable copy of the library (e.g. for a phone or DAP). FLAC becomes Opus at a chosen bitrate, all other files are copied unchanged, and originals are never touched.
 - **When the user comes here / entry points:** sidebar "Compression" (key `compression`). It sits in the **PLAYER** group (`gui/widgets/sidebar.py:43`), which is an odd IA choice since it is a library-output tool. No shortcut, and nothing navigates here.
 - **Primary flow:**

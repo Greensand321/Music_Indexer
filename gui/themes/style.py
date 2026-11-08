@@ -67,6 +67,200 @@ _TEXT_MARGIN_PROP = "_adxTextMargins"
 
 _ACCENT_BUTTONS = ("primaryBtn", "dangerBtn", "successBtn")
 
+# ── Dialog chrome ─────────────────────────────────────────────────────────────
+#
+# Top-level dialogs stay opaque (translucent top-level windows are unreliable
+# on Windows): the window fill is the material's ``backdrop_base`` (the
+# palette's Window role). Over it this style paints a raised content surface
+# (the theme's opaque card colour) down to the button row, which sits on a
+# footer band of the base fill under a hairline. The default button of a
+# dialog button box is the primary pill (unless the box has its own accent
+# button), message boxes get painted, tone-coloured icons, the non-native
+# file dialog gets line icons for its tool buttons, and dialog layouts that
+# keep Qt's default margins get roomier ones.
+
+_HIDE_MNEMONIC = int(Qt.TextFlag.TextHideMnemonic)   # "&Yes" draws as "Yes"
+_DIALOG_FOOTER_PAD = 12     # the footer band starts this far above the button box
+_DIALOG_FOOTER_MAX = 160    # a button box further from the bottom is inline, not a footer
+_DIALOG_LAYOUT_METRICS = {
+    PM.PM_LayoutLeftMargin: 22,
+    PM.PM_LayoutRightMargin: 22,
+    PM.PM_LayoutTopMargin: 20,
+    PM.PM_LayoutBottomMargin: 16,
+    PM.PM_LayoutHorizontalSpacing: 12,
+    PM.PM_LayoutVerticalSpacing: 12,
+}
+_MESSAGE_ICON_SIZE = 40
+_SP = _S.StandardPixmap
+_MESSAGE_ICONS = {
+    _SP.SP_MessageBoxInformation: "information",
+    _SP.SP_MessageBoxQuestion: "question",
+    _SP.SP_MessageBoxWarning: "warning",
+    _SP.SP_MessageBoxCritical: "critical",
+}
+_FILE_DIALOG_ICONS = {
+    _SP.SP_ArrowBack: "back",
+    _SP.SP_ArrowForward: "forward",
+    _SP.SP_FileDialogBack: "back",
+    _SP.SP_FileDialogToParent: "parent",
+    _SP.SP_FileDialogNewFolder: "new_folder",
+    _SP.SP_FileDialogListView: "list",
+    _SP.SP_FileDialogDetailedView: "details",
+}
+
+
+def _strip_mnemonic(text: str) -> str:
+    """``"&Yes"`` → ``"Yes"``; ``"R&&B"`` → ``"R&B"`` (what is drawn)."""
+    import re
+    return re.sub(r"&(.)", r"\1", text)
+
+
+def dialog_footer_top(dialog: QtWidgets.QWidget) -> int | None:
+    """Where a dialog's footer band starts (y in ``dialog``): just above its
+    bottom button box. None when it has none (the whole dialog is then the
+    raised surface)."""
+    top = None
+    for box in dialog.findChildren(QtWidgets.QDialogButtonBox):
+        if box.window() is not dialog or not box.isVisibleTo(dialog):
+            continue
+        y = box.mapTo(dialog, QtCore.QPoint(0, 0)).y()
+        if dialog.height() - y > _DIALOG_FOOTER_MAX:
+            continue
+        top = y if top is None else min(top, y)
+    if top is None:
+        return None
+    # Halfway between the content above and the buttons (at most the pad),
+    # so the band never cuts into a widget that ends just above it.
+    above = [w.geometry().bottom() + 1 for w in dialog.findChildren(
+                 QtWidgets.QWidget, options=QtCore.Qt.FindChildOption.FindDirectChildrenOnly)
+             if not w.isWindow() and w.isVisibleTo(dialog) and w.geometry().bottom() < top]
+    gap = top - max(above) if above else 2 * _DIALOG_FOOTER_PAD
+    return max(0, top - min(_DIALOG_FOOTER_PAD, gap // 2))
+
+
+def dialog_surface_colours(tokens: ThemeTokens) -> tuple[QC, QC, QC]:
+    """``(base, raised, hairline)`` of the dialog chrome for ``tokens``."""
+    m = tokens.material or classic_material(tokens)
+    hairline = qcolor(m.hairline) if m.is_glass else qcolor(tokens.card_border)
+    return qcolor(m.backdrop_base), qcolor(tokens.card_bg), hairline
+
+
+def paint_dialog_chrome(p: QP, dialog: QtWidgets.QWidget, tokens: ThemeTokens) -> None:
+    """The window fill, the raised content surface and the footer band."""
+    base, raised, hairline = dialog_surface_colours(tokens)
+    full = dialog.rect()
+    p.fillRect(full, base)
+    footer = dialog_footer_top(dialog)
+    if footer is None:
+        p.fillRect(full, raised)
+        return
+    p.fillRect(QR(full.left(), full.top(), full.width(), footer), raised)
+    p.fillRect(QR(full.left(), footer, full.width(), 1), hairline)
+
+
+def _is_dialog_default(widget: QtWidgets.QWidget | None, option: QtWidgets.QStyleOption) -> bool:
+    """The default button of a dialog button box (a message box's, say),
+    painted as the primary pill — unless the box already has an accent
+    button of its own."""
+    if not isinstance(widget, QtWidgets.QPushButton):
+        return False
+    box = widget.parentWidget()
+    if not isinstance(box, QtWidgets.QDialogButtonBox):
+        return False
+    if not (isinstance(option, QtWidgets.QStyleOptionButton)
+            and option.features & QtWidgets.QStyleOptionButton.ButtonFeature.DefaultButton):
+        return False
+    return not any(b.objectName() in _ACCENT_BUTTONS for b in box.buttons())
+
+
+def _icon_from_painter(size: int, paint) -> QtGui.QIcon:
+    icon = QtGui.QIcon()
+    for dpr in (1.0, 2.0):
+        pm = QtGui.QPixmap(int(size * dpr), int(size * dpr))
+        pm.setDevicePixelRatio(dpr)
+        pm.fill(Qt.GlobalColor.transparent)
+        p = QP(pm)
+        try:
+            _aa(p)
+            paint(p, float(size))
+        finally:
+            p.end()
+        icon.addPixmap(pm)
+    return icon
+
+
+def message_icon(kind: str, tokens: ThemeTokens) -> QtGui.QIcon:
+    """A message-box icon: a tone-tinted disc with a ring and its mark
+    (information / question: accent; warning; critical: danger)."""
+    tone = {"warning": tokens.warning, "critical": tokens.danger}.get(kind, tokens.accent)
+
+    def paint(p: QP, s: float) -> None:
+        c = qcolor(tone)
+        k = s / 40.0
+        disc = QRF(1, 1, s - 2, s - 2)
+        fill = QC(c)
+        fill.setAlphaF(0.18)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(fill)
+        p.drawEllipse(disc)
+        ring = QC(c)
+        ring.setAlphaF(0.55)
+        p.setPen(QPen(ring, 1.4))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawEllipse(disc.adjusted(0.7, 0.7, -0.7, -0.7))
+        pen = QPen(c, 2.8 * k, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap,
+                   Qt.PenJoinStyle.RoundJoin)
+        pt = QtCore.QPointF
+        if kind == "question":
+            font = QtGui.QFont()
+            font.setPixelSize(int(round(22 * k)))
+            font.setWeight(QtGui.QFont.Weight.Bold)
+            p.setFont(font)
+            p.setPen(c)
+            p.drawText(disc, int(Qt.AlignmentFlag.AlignCenter), "?")
+        elif kind == "critical":
+            p.setPen(pen)
+            p.drawLine(pt(15 * k, 15 * k), pt(25 * k, 25 * k))
+            p.drawLine(pt(25 * k, 15 * k), pt(15 * k, 25 * k))
+        else:
+            info = kind == "information"
+            p.setPen(pen)
+            p.drawLine(pt(20 * k, (18.5 if info else 11.5) * k), pt(20 * k, (28 if info else 22.5) * k))
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(c)
+            p.drawEllipse(pt(20 * k, (12.5 if info else 28) * k), 1.9 * k, 1.9 * k)
+
+    return _icon_from_painter(_MESSAGE_ICON_SIZE, paint)
+
+
+def file_dialog_icon(kind: str, tokens: ThemeTokens) -> QtGui.QIcon:
+    """Line icons for the non-native file dialog's tool buttons."""
+    colour = qcolor(tokens.text_secondary)
+
+    def paint(p: QP, s: float) -> None:
+        rect = QRF(0, 0, s, s)
+        if kind in ("back", "forward", "parent"):
+            _draw_chevron(p, rect, colour, {"back": "left", "forward": "right",
+                                            "parent": "up"}[kind], size=4.0)
+            return
+        from gui.widgets.glyphs import paint_glyph
+        if kind == "new_folder":
+            paint_glyph(p, rect.adjusted(0, 1, -3, -2), "folder", colour, weight=1.7)
+            pen = QPen(colour, 1.5, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap)
+            p.setPen(pen)
+            p.drawLine(QtCore.QPointF(s - 3.5, 1.5), QtCore.QPointF(s - 3.5, 7.5))
+            p.drawLine(QtCore.QPointF(s - 6.5, 4.5), QtCore.QPointF(s - 0.5, 4.5))
+        elif kind == "list":
+            paint_glyph(p, rect, "list", colour, weight=1.7)
+        else:   # details: a header bar over three rows
+            pen = QPen(colour, 1.5, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap)
+            p.setPen(pen)
+            for y in (3.5, 7.5, 10.5, 13.5):
+                p.drawLine(QtCore.QPointF(2.5, y), QtCore.QPointF(s - 2.5, y))
+
+    return _icon_from_painter(16, paint)
+
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _aa(p: QP) -> None:
@@ -219,6 +413,7 @@ _METRICS: dict = {
     PM.PM_SliderThickness:            20,
     PM.PM_SliderControlThickness:     16,
     PM.PM_SliderLength:               16,
+    PM.PM_MessageBoxIconSize:         _MESSAGE_ICON_SIZE,
 }
 
 
@@ -230,6 +425,7 @@ class AlphaDEXStyle(QtWidgets.QProxyStyle):
     def __init__(self, tokens: ThemeTokens) -> None:
         super().__init__("fusion")
         self._t = tokens
+        self._icons: dict = {}      # painted standard icons, per token set
 
     @property
     def t(self) -> ThemeTokens:
@@ -246,6 +442,7 @@ class AlphaDEXStyle(QtWidgets.QProxyStyle):
         reads ``self._t`` on every call, so swapping it and repainting is
         all a colour change needs (DS-04)."""
         self._t = tokens
+        self._icons = {}
 
     # ── Shared looks ──────────────────────────────────────────────────────
 
@@ -276,8 +473,30 @@ class AlphaDEXStyle(QtWidgets.QProxyStyle):
     def pixelMetric(self, metric: PM,
                     option: QtWidgets.QStyleOption | None = None,
                     widget: QtWidgets.QWidget | None = None) -> int:
+        if metric in _DIALOG_LAYOUT_METRICS and isinstance(widget, QtWidgets.QDialog):
+            # Dialogs that keep Qt's default layout margins (message boxes,
+            # input / progress / file dialogs) get the glass family's room;
+            # a message box keeps its text close to its icon.
+            if (metric == PM.PM_LayoutHorizontalSpacing
+                    and isinstance(widget, QtWidgets.QMessageBox)):
+                return 8
+            return _DIALOG_LAYOUT_METRICS[metric]
         value = _METRICS.get(metric)
         return value if value is not None else super().pixelMetric(metric, option, widget)
+
+    def standardIcon(self, standardIcon, option=None, widget=None) -> QtGui.QIcon:  # noqa: N802,N803
+        """Painted, theme-tinted message-box icons and file-dialog tool icons."""
+        kind = _MESSAGE_ICONS.get(standardIcon)
+        maker = message_icon
+        if kind is None:
+            kind = _FILE_DIALOG_ICONS.get(standardIcon)
+            maker = file_dialog_icon
+        if kind is None:
+            return super().standardIcon(standardIcon, option, widget)
+        icon = self._icons.get(kind)
+        if icon is None:
+            icon = self._icons[kind] = maker(kind, self._t)
+        return QtGui.QIcon(icon)
 
     def sizeFromContents(self, ct: CT,
                          option: QtWidgets.QStyleOption | None,
@@ -311,6 +530,8 @@ class AlphaDEXStyle(QtWidgets.QProxyStyle):
             sunken  = _is_sunken(option)
             ht      = _hover_t(widget, option)
             name = widget.objectName() if widget else ""
+            if name not in _ACCENT_BUTTONS and _is_dialog_default(widget, option):
+                name = "primaryBtn"
             flat = (isinstance(option, QtWidgets.QStyleOptionButton)
                     and bool(option.features & QtWidgets.QStyleOptionButton.ButtonFeature.Flat))
             rect = QRF(option.rect)
@@ -346,6 +567,10 @@ class AlphaDEXStyle(QtWidgets.QProxyStyle):
                     fill = _mix(fill, target, ht)
                 paint_surface(painter, rect, raised, fill=fill,
                               opacity=1.0 if enabled else 0.55)
+
+        # ── Dialog background: base fill, raised content, footer band ─────
+        elif element == PE.PE_Widget and isinstance(widget, QtWidgets.QDialog):
+            paint_dialog_chrome(painter, widget, t)
 
         # ── Line edit / text area frame ────────────────────────────────────
         elif element in (PE.PE_FrameLineEdit, PE.PE_PanelLineEdit):
@@ -495,7 +720,7 @@ class AlphaDEXStyle(QtWidgets.QProxyStyle):
                 return
             opt   = option
             name  = widget.objectName() if widget else ""
-            is_accent = name in _ACCENT_BUTTONS
+            is_accent = name in _ACCENT_BUTTONS or _is_dialog_default(widget, option)
             if not _is_enabled(option):
                 col = t.text_muted
             else:
@@ -504,7 +729,9 @@ class AlphaDEXStyle(QtWidgets.QProxyStyle):
             painter.setPen(QPen(QC(col)))
             rect = QRF(opt.rect)
 
-            text_w = QtGui.QFontMetrics(painter.font()).horizontalAdvance(opt.text) if opt.text else 0
+            # "&Yes": the mnemonic marker is not drawn (the shortcut still works).
+            text_w = (QtGui.QFontMetrics(painter.font()).horizontalAdvance(_strip_mnemonic(opt.text))
+                      if opt.text else 0)
             if opt.icon and not opt.icon.isNull():
                 icon_sz = opt.iconSize
                 gap = 6 if opt.text else 0
@@ -526,7 +753,7 @@ class AlphaDEXStyle(QtWidgets.QProxyStyle):
                 font = painter.font()
                 font.setWeight(QtGui.QFont.Weight.DemiBold)
                 painter.setFont(font)
-                painter.drawText(text_rect.toRect(), int(align), opt.text)
+                painter.drawText(text_rect.toRect(), int(align) | _HIDE_MNEMONIC, opt.text)
 
         # ── Check box ──────────────────────────────────────────────────────
         elif element == CE.CE_CheckBox:
@@ -548,7 +775,7 @@ class AlphaDEXStyle(QtWidgets.QProxyStyle):
                                opt.rect.right() - lx, opt.rect.height())
                     painter.drawText(lrect,
                                      int(Qt.AlignmentFlag.AlignLeft |
-                                         Qt.AlignmentFlag.AlignVCenter),
+                                         Qt.AlignmentFlag.AlignVCenter) | _HIDE_MNEMONIC,
                                      opt.text)
             else:
                 painter.restore()
@@ -575,7 +802,7 @@ class AlphaDEXStyle(QtWidgets.QProxyStyle):
                                opt.rect.right() - lx, opt.rect.height())
                     painter.drawText(lrect,
                                      int(Qt.AlignmentFlag.AlignLeft |
-                                         Qt.AlignmentFlag.AlignVCenter),
+                                         Qt.AlignmentFlag.AlignVCenter) | _HIDE_MNEMONIC,
                                      opt.text)
             else:
                 painter.restore()
@@ -875,6 +1102,10 @@ class AlphaDEXStyle(QtWidgets.QProxyStyle):
 
             if isinstance(obj, QtWidgets.QLineEdit):
                 self._polish_line_edit(obj)
+
+            if isinstance(obj, QtWidgets.QDialog):
+                # Route the background through PE_Widget (paint_dialog_chrome).
+                obj.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
 
             if (isinstance(obj, QtWidgets.QMenu)
                     and not obj.testAttribute(Qt.WidgetAttribute.WA_WState_Created)):

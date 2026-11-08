@@ -63,7 +63,8 @@ def test_estimate_runs_in_a_worker_and_is_invalidated_by_changes(
     ws._dest_edit.setText(str(tmp_path / "Mirror"))
     _estimate(ws, qtbot)
     assert "EstimateWorker" in threads.started, "the walk must not block the GUI thread"
-    assert "FLAC files to convert:    2" in ws._result_lbl.text()
+    assert ws._estimate_stats.tile("flac").value() == "2", "the estimate counts the FLAC files"
+    assert ws._estimate_stats.isVisibleTo(ws)
     assert not (tmp_path / "Mirror").exists(), "estimating must not create the destination"
     assert ws._run_btn.isEnabled()
 
@@ -218,13 +219,14 @@ def test_update_changed_is_on_by_default_and_reaches_the_backend(
     _run(ws, dialogs, qtbot)
     assert seen[-1]["update_changed"] is True
     assert "unless their source changed" in dialogs.calls_of("question")[-1].text
-    assert "3 out-of-date file(s) redone" in ws._result_lbl.text()
+    assert ws._run_tile("updated").value() == "3", "out-of-date files redone"
 
     _fake_mirror(monkeypatch, lambda _d: {"stale": 2}, seen)
     ws._update_cb.setChecked(False)
     _run(ws, dialogs, qtbot)
     assert seen[-1]["update_changed"] is False
     assert "2 file(s) older than their changed source were kept" in ws._result_lbl.text()
+    assert ws._run_tile("stale").value() == "2" and ws._run_tile("stale").tone() == "warning"
 
 
 def test_orphans_are_listed_then_removed_only_after_confirmation(
