@@ -5,7 +5,8 @@ explains the shape of the system and the reasoning behind it, with a handful of
 plain-text diagrams for the parts that are easier to see than to describe. If you
 have read **overview.md**, you already know the vocabulary used here.*
 
-*Last verified against the code: 2026-11-07.*
+*Last verified against the code: 2026-11-07. Page names and navigation updated for
+the adopted page structure on 2026-11-08.*
 
 ---
 
@@ -109,7 +110,7 @@ from that note. In the modern app this hand-off happens through a built-in
 call. The principle is identical: **workers report; only the interface touches the
 screen.** This discipline is what keeps the app from corrupting its own display.
 
-A concrete illustration from the Player workspace, preserved because it states the
+A concrete illustration from the Player page, preserved because it states the
 rule precisely: album-art loading runs on a background `_ArtLoader` thread that
 "emits a `QImage` (NOT a `QPixmap`) so the caller can convert to `QPixmap` on the
 main/GUI thread. Creating `QPixmap` off the GUI thread is undefined behaviour in Qt
@@ -158,7 +159,7 @@ its worker at any moment without risk. The rules every page follows:
 
 **Closing the window** (`AlphaDEXWindow.closeEvent`) follows a fixed protocol:
 
-1. No jobs running: each workspace's `shutdown()` hook runs (stop timers, release the
+1. No jobs running: each panel's `shutdown()` hook runs (stop timers, release the
    playback backend), and the window closes.
 2. Jobs running: if any of them has `ask_before_quit`, a "Background tasks running"
    question lists them; No keeps the window open. Otherwise (or on Yes) the window
@@ -174,11 +175,14 @@ its worker at any moment without risk. The rules every page follows:
 landing's art scanner) after the event loop ends.
 
 Two smaller hooks complete the lifecycle. **`on_settings_saved()`** is called on every
-page after the Settings dialog saves; pages that cache settings (the Duplicates and
-Similarity thresholds) re-read them there, rather than reading the config file every
-time they are shown — the design system forbids config I/O on navigation or paint.
-And the registry's `jobs_changed(int)` signal is ready for a global activity
-indicator, though nothing displays it yet.
+panel after the Settings page saves; panels that cache settings (the duplicate
+thresholds used by Duplicates → Find duplicates and Duplicates → Compare two files)
+re-read them there, rather than reading the config file every time they are shown —
+the design system forbids config I/O on navigation or paint. And the registry's
+`jobs_changed(int)` signal drives the **Activity** page's list of running jobs (each
+with a Cancel button) and the "N running" badge on the sidebar's Activity entry.
+Housekeeping jobs, such as building the album-art backdrop, are marked *quiet*: they
+are kept alive and cancelled on quit like any other job, but not listed or counted.
 
 ## The preview-first contract, structurally
 
@@ -275,7 +279,7 @@ library's `Docs/` folder (timestamps make each run's files unique):
 | Indexer | `MusicIndex.html`, `indexer_log.txt` | `indexer_executed_<date>_<time>.json` and `.txt` — every move, sweep and skip, also when cancelled |
 | Library Sync | `LibrarySyncPreview.html` | `LibrarySyncAudit_<run>.json` and `LibrarySyncExecuted_<run>.html` per run (`LibrarySyncAudit.json` / `LibrarySyncExecuted.html` are copies of the latest); replaced files are backed up under `Backups/LibrarySync/<run>/` |
 | Duplicate Finder | `duplicate_preview.html` and `.json` | `duplicate_execution_reports/` (playlist backups included) |
-| Pair Review | — | `duplicate_pair_review_log.txt` (quarantines), `duplicate_pair_tags.txt` |
+| Pair review (Duplicates) | — | `duplicate_pair_review_log.txt` (quarantines), `duplicate_pair_tags.txt` |
 | Tag Fixer, Genre fill, Genre normalize | the on-screen table | `tag_changes_<tool>_<timestamp>.jsonl` — the before and after values of every write, failure and skip (`utils/tag_change_log.py`). Metadata → Undo changes previews and writes a revert from one of these logs, logged as `tag_changes_revert_<timestamp>.jsonl` (`controllers/tag_revert.py`) |
 | File Cleanup | the preview dialog | `file_cleanup_<timestamp>.jsonl`; "Undo Last Cleanup" reads it back and appends each restore to it |
 | Playlist writes | the confirmation list | `playlist_writes.log`; the generator leaves a timestamped `.bak` beside a playlist it replaces, and `update_playlists` (run after renames and moves) backs each playlist up to `playlist_backups/` before editing only the changed entries |
@@ -472,52 +476,79 @@ gets — are plain constants in `config.py` with no comment explaining how the s
 values were chosen; treat them as tuned defaults you can adjust, not as figures with
 a documented derivation.)
 
-## The workspaces: the modern app's rooms
+## The pages: how the modern app is laid out
 
-The modern app is organized as a **sidebar of workspaces** — each workspace is a
-self-contained "room" dedicated to one job. You move between them from the sidebar,
-and the currently selected room fills the main area. Behind a row of friendly names
-sits a consistent pattern: every workspace is built on a shared template
-(`gui/workspaces/base.py`) that gives it the same skeleton (a place for content, a
-way to report progress to the log drawer at the bottom, a status indicator, and the
-background-job helpers described above).
+The modern app is organized as a **sidebar of pages**, grouped by the job you came to
+do. Choosing a page fills the main area with it. Some pages hold more than one
+**section**, shown as tabs across the top of the page — Duplicates, for example, has
+"Find duplicates" and "Compare two files" — and a page remembers the section you
+looked at last. Behind each section sits a **panel**, and every panel is built on a
+shared template (`gui/workspaces/base.py`) that gives it the same skeleton (a place
+for content, a way to report progress to the log drawer at the bottom, a status
+indicator, and the background-job helpers described above). One panel can serve
+several sections of a page: the genre panel serves both "Fill genres" and "Normalize
+genres", and the page's tabs tell it which to show.
 
-The current rooms are, in plain terms (sidebar label first, since a few of the
-group/room names differ from what you might expect from the feature name):
+The whole structure — the groups, the pages in order, their sections, and which panel
+provides each section — is written down as plain data in one file,
+`gui/navigation.py`. The sidebar, the Ctrl+1…9 shortcuts (the first nine pages, in
+sidebar order) and the "Page · Section" labels all read from it, so they cannot drift
+apart. These documents write a place in the app the same way, as **Page → Section**:
+for example **Duplicates → Compare two files**, or **Sound Map → Map**.
 
-| Sidebar label | What you do there |
-|---|---|
-| **Indexer** | Scan and reorganize your library into clean Artist/Album/Track folders. |
-| **Library Sync** | Merge an incoming folder into your existing library. |
-| **Duplicates** | Find and clear out duplicate copies of songs. |
-| **Similarity** | Compare two specific tracks and see *why* the app thinks they do or don't match — useful for understanding the duplicate detector. |
-| **Tag Fixer** | Look up and correct the artist/album/title/genre information on your tracks. |
-| **Genre Normalizer** | Two tabs: fill missing genres from MusicBrainz, or collapse messy genre spellings with a mapping you build. Both preview first (see **features/tag_fixer.md**). |
-| **Playlists** | Build playlists by folder, tempo, energy, or automatic DJ flow. |
-| **Clustered** | Group tracks by sound (K-Means / HDBSCAN), with a Quick Start or a step-by-step wizard. The analysis writes no playlists itself; the Sound Map's **Save cluster playlists…** previews and saves one per cluster. |
-| **Music Graph** | Explore the clusters on an in-app 2-D map (select, inspect, play, export a playlist), or open the browser-based 3-D view. |
-| **Player** | A built-in audio player — library table, queue, recently-played, shuffle/repeat, a persistent now-playing bar at the bottom of the whole app window. |
-| **Compression** | Mirror your library into a space-saving Opus copy (FLAC → Opus transcoding), estimating savings before you run it. |
-| **Utilities** | A tile grid of exports, diagnostics, and cleanup tools. |
-| **Help** | Documentation, shortcuts, and project links. |
+| Group | Page | Sections | What you do there |
+|---|---|---|---|
+| Library | **Home** | — | See the library at a glance: its size, its health (whether it has the Indexer's layout, and how many tracks wait in `Manual Review/`, `Quarantine/` and `Not Sorted/`), the latest run of each workflow, and shortcuts to the common jobs. Read-only. |
+| Organize | **Indexer** | — | Scan and reorganize your library into clean Artist/Album/Track folders. |
+| | **Library Sync** | — | Merge an incoming folder into your existing library. |
+| | **File Cleanup** | — | Remove copy suffixes such as " (1)" and " - Copy" from file names, with a preview first and an undo afterwards. |
+| Clean up | **Duplicates** | Find duplicates · Compare two files · Pair review · Fuzzy finder, Scan engine and Bucketing (each marked *Experimental*) | Find and clear out duplicate copies of songs; compare two specific files and see *why* the app thinks they do or don't match; review duplicate pairs side by side. The three Experimental sections are prototypes of other ways to find duplicates — they are not part of the real workflow. |
+| | **Metadata** | Tag Fixer · Fill genres · Normalize genres · Undo changes | Look up and correct the artist/title/album/genre information on your tracks; fill missing genres from MusicBrainz; collapse messy genre spellings with a mapping you build; roll back an earlier tag change. Every write is previewed first (see **features/tag_fixer.md**). |
+| Listen | **Player** | — | A built-in audio player — library table, queue, recently played, shuffle/repeat. |
+| | **Sound Map** | Analyse · Map | Group tracks by how they sound (K-Means / HDBSCAN), with a Quick Start or a step-by-step wizard; then explore the groups on an in-app 2-D map (select, inspect, play, export a playlist) or open the browser-based 3-D view. The analysis writes no playlists itself; **Save cluster playlists…**, at the top of the page in both sections, previews and saves one per cluster. |
+| | **Playlists** | — | Build playlists by folder, tempo, energy, or automatic DJ flow, and repair playlists whose entries no longer point at a file. |
+| Take away | **Mirror** | Build the mirror · Verify the mirror | Make a space-saving Opus copy of your library (FLAC → Opus), estimating the savings before you run it; then open a converted file and check that its tags and cover art came through. The originals are never touched. |
+| | **Exports** | — | Write an artist/title list or a per-codec file list of the library into `Docs/`. |
+| *(foot of the sidebar)* | **Activity** | — | The jobs running right now (each with Cancel), every log line of the session, and the latest problems, including the crash log. |
+| | **Settings** | Metadata services · General · Appearance | Online-service keys, the default library and the duplicate thresholds, and the theme, backdrop and motion. |
+| | **Help** | — | Documentation, shortcuts, and project links. |
+
+**If you knew the older layout.** Until 2026-11-07 the sidebar was a flat list of 13
+entries. Similarity is now **Duplicates → Compare two files**; Tag Fixer and the
+Genre Normalizer became **Metadata**'s sections; Clustered and Music Graph became
+**Sound Map → Analyse** and **Sound Map → Map**; Compression is **Mirror → Build the
+mirror**. **Utilities is gone**: File Cleanup became its own page under Organize, the
+exports went to **Exports**, the library Validator became Home's "Library health"
+card, the crash-log viewer became part of **Activity**, the Opus and M4A testers sit
+in **Mirror → Verify the mirror**, and Pair Review and the three duplicate prototypes
+became Duplicates sections. Settings is a page rather than a dialog, and the theme
+picker is its Appearance section. The old navigation keys still route — asking for
+`"graph"` lands on Sound Map → Map, and `"tools"` on Exports — so nothing that
+navigates by an old name breaks. `docs/CONTRADICTING_UPDATES.md` §B records every
+part of this change.
+
+Two leftovers of the old names are worth knowing about. Pair review and the three
+Experimental sections still open their tool in a separate window (an "Open …"
+button in the section). And a few panels still carry their old heading inside the
+new page: Duplicates → Compare two files is headed "Similarity Inspector", the two
+genre sections "Genre Normalizer", and Mirror → Build the mirror "Library
+Compression".
 
 A persistent **Now Playing capsule** floats at the bottom centre of the page area,
-shared across the whole app (not confined to the Player workspace) once a track is
-loaded — it stays visible no matter which workspace you're in, with its own
-transport controls that mirror the Player workspace's. Pages keep room under their
-content so it never covers anything.
+shared across the whole app (not confined to the Player page) once a track is
+loaded — it stays visible no matter which page you're on, with its own transport
+controls that mirror the Player's. Pages keep room under their content so it never
+covers anything.
 
-Two things worth knowing if you go looking for them: an **older "Clustered"
-workspace** (`gui/workspaces/clustered.py`) still exists in the codebase but is
-**dead code** — nothing imports it, its docstring says so, and `main_window.py` wires
-the sidebar's "Clustered" entry to `clustered_enhanced.py`. And of the four widgets
-built for the interactive cluster map, three (`InteractiveScatterPlot`,
-`ClusterLegendWidget`, `TrackDetailsPanel`) are live in the Music Graph; only
-`Interactive3DScatterPlot` is unused — the 3-D view users reach is the browser page.
-See **features/playlists_and_clustering.md** for what currently works.
+The interactive cluster map is made of three widgets (`InteractiveScatterPlot`,
+`ClusterLegendWidget`, `TrackDetailsPanel`), and all three are live in Sound Map →
+Map. An in-app 3-D plot widget was built once but never used, and has been deleted;
+the 3-D view you reach — the Map's **Open 3D view** button — is a standalone browser
+page that `cluster_graph_3d.py` generates. See **features/playlists_and_clustering.md**
+for what currently works.
 
-For the full screen-by-screen breakdown of every control in every workspace and
-dialog — including which controls are fully wired versus decorative — see
+For the full screen-by-screen breakdown of every control on every page and in every
+dialog — including which controls are fully wired and which are switched off — see
 **gui_inventory.md**.
 
 ## How the app wakes up
@@ -527,21 +558,23 @@ screen. It opens with a calm **landing moment**: the window fades in, an animate
 mosaic of album-art tiles builds itself from your library while you confirm which
 library you want to work on (or pick a new one), and then the landing cross-fades
 into the main window. The brief pause between the fade-in and the tiles beginning to
-animate is the "logo moment"; it replaced an earlier splash screen whose code
-(`gui/widgets/splash.py`) is still in the repository but never shown.
+animate is the "logo moment"; it replaced an earlier splash screen, whose code has
+since been deleted.
 
 The choreography is arranged so that nothing heavy happens while you are watching it:
 
-1. The landing appears first. The main window — a big build of every workspace — is
+1. The landing appears first. The main window — a big build of every panel — is
    only constructed once the landing has **fully faded in**, during the logo pause, so
    the first frames are never blocked (it is built on demand if you click very fast).
-2. You confirm the saved library ("Initialize"), choose another ("Choose Library
-   Folder"; a saved library that no longer exists is shown as "not found"), or click an
-   album-art tile, which also opens the Player already playing that album.
+2. You confirm the saved library ("Initialize"), choose another (the "Choose another
+   folder" link, or the "Choose Library Folder" button when no library is saved; a saved
+   library that no longer exists is shown as "not found"), or click an album-art tile,
+   which also opens the Player already playing that album.
 3. The landing fades out while the main window fades in over the same duration.
 4. Only **after the cross-fade** is the chosen library applied — exactly once. That is
-   when every page learns the library, the Player scans it and the top-bar statistics
-   start, so that work never stutters the transition.
+   when every page learns the library, the Player scans it and the library statistics
+   in the page header start, so that work never stutters the transition. The main
+   window opens on **Home**.
 
 The sequence is factored into `Startup` / `build_startup()` in `alpha_dex_gui.py`, so
 the test harness can drive it without running the event loop. If the main window
@@ -559,15 +592,15 @@ today:
 - **Fully working:** AcoustID (fingerprint-based identification), MusicBrainz (the
   open music encyclopedia), and Last.fm (genre and tag data). In the Tag Fixer's scan,
   AcoustID runs whenever fpcalc and the network allow; a MusicBrainz text search joins
-  when MusicBrainz is the service chosen in Settings; and Last.fm joins only when the
-  `LASTFM_API_KEY` environment variable is set (the key field Settings shows for
-  Last.fm is not read by the scan yet — a known bug). Each scan begins by checking
-  every source and says which ones ran and why the others didn't. See
-  **features/tag_fixer.md**.
+  when MusicBrainz is the service chosen in Settings; and Last.fm joins only when a
+  Last.fm API key is set — the one saved in **Settings → Metadata services**, or the
+  `LASTFM_API_KEY` environment variable, which wins when both are set. Each scan
+  begins by checking every source and says which ones ran and why the others didn't.
+  See **features/tag_fixer.md**.
 - **Listed but not yet built:** Spotify and Gracenote appear in the settings as
   options, but their connections are empty placeholders — selecting them currently
-  returns nothing. The Settings screen already marks this honestly: both appear
-  visibly in the service dropdown but are disabled with a tooltip explaining they
+  returns nothing. **Settings → Metadata services** already marks this honestly: both
+  appear visibly in the service dropdown but are disabled with a tooltip explaining they
   aren't implemented yet, rather than being silently hidden. `config.py` names this
   set explicitly as `UNAVAILABLE_SERVICES`, with the comment "The Settings UI shows
   these as disabled so users aren't misled."
@@ -586,7 +619,7 @@ as "the library" goes through it.
 
 - `RESERVED_FOLDERS` is all six. `NON_LIBRARY_FOLDERS` is the four whose contents are
   not your music at all (`Playlists`, `Docs`, `Trash`, `Quarantine`); views that let
-  you browse or play everything — the Player, the Utilities exports — skip only
+  you browse or play everything — the Player, the Exports page — skip only
   these, so tracks waiting in `Manual Review/` or `Not Sorted/` still show up there.
 - `walk_library()` and `iter_library_files()` are `os.walk` wrappers that never descend
   into a reserved folder; `prune_reserved_dirs()` does the same inside a hand-written
@@ -595,7 +628,7 @@ as "the library" goes through it.
   and matching ignores letter case, as Windows and macOS file systems do.
 
 Who uses which set: the Indexer, Duplicate Finder, Library Sync (both sides), File
-Cleanup, Pair Review, clustering, playlist generation and the top-bar statistics skip
+Cleanup, Pair review, clustering, playlist generation and the library statistics skip
 all six. The Tag Fixer skips all of them **except `Manual Review/`**, because those are
 exactly the tracks missing metadata. The Opus mirror leaves out `Quarantine/`,
 `Trash/` and `Docs/`.
@@ -652,10 +685,10 @@ animations kept producing: `animate_value` / `animate_property` build animations
 animation per owner and key** (a new request replaces the old one instead of two
 fighting over a property), and refuse to animate geometry a layout owns (which
 re-laid out the whole window every frame); `fade()` always ends at full opacity or
-hidden, never half-transparent. **Reduced motion** (`ALPHADEX_REDUCED_MOTION=1`, or the
-config key `reduced_motion`; there is no Settings control yet) makes every token 0 ms
-and jumps straight to the end state, running the same callbacks, so the code paths are
-identical either way.
+hidden, never half-transparent. **Reduced motion** (**Settings → Appearance → Reduce
+motion**, saved as the config key `reduced_motion`, or the `ALPHADEX_REDUCED_MOTION=1`
+environment variable) makes every token 0 ms and jumps straight to the end state,
+running the same callbacks, so the code paths are identical either way.
 
 ## Playback: the backend seam
 
@@ -679,9 +712,10 @@ uncaught Python exceptions — on the GUI thread, inside Qt slots (PySide routes
 through `sys.excepthook`) and on worker threads (`threading.excepthook`) — are appended
 to **`~/.alphadex/crash.log`** (rotating, about 1 MB), and native crashes (segfaults,
 aborts) are written by `faulthandler` to **`~/.alphadex/faults.log`**. The hooks chain
-to the previous ones, so tracebacks still reach the console. Utilities → View Crash
-Log reads exactly those two files and names them. (The viewer used to look for a file
-the Qt app never wrote, so it always said "No crash log found.")
+to the previous ones, so tracebacks still reach the console. The **Activity** page's
+Problems card shows the tail of exactly those two files, next to the session's own
+warnings and errors. (The old crash-log viewer, which used to sit under Utilities,
+looked for a file the Qt app never wrote, so it always said "No crash log found.")
 
 ## Testing the GUI: the harness
 
