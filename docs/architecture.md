@@ -174,6 +174,17 @@ its worker at any moment without risk. The rules every page follows:
 `main()` in `alpha_dex_gui.py` also cancels and waits for any stragglers (such as the
 landing's art scanner) after the event loop ends.
 
+**Garbage collection happens on the GUI thread only** (`gui/gc_guard.py`). Python's
+cycle collector normally runs in whichever thread happens to allocate the object that
+crosses its threshold — often a worker. A collection frees every unreachable cycle,
+including windows, dialogs and widgets that live on the GUI thread, so their C++
+destructors ran in the worker. For a running animation that is a crash: it unregisters
+from the *worker's* animation timer (Qt keeps one per thread) and the GUI thread's timer
+segfaults on its next frame. The guard switches automatic collection off at start-up
+and collects from a GUI-thread timer instead, generation by generation with Python's
+own thresholds; the GUI test harness installs it for the whole session too. Objects
+freed by reference counting are unaffected.
+
 Two smaller hooks complete the lifecycle. **`on_settings_saved()`** is called on every
 panel after the Settings page saves; panels that cache settings (the duplicate
 thresholds used by Duplicates → Find duplicates and Duplicates → Compare two files)
@@ -685,7 +696,11 @@ animations kept producing: `animate_value` / `animate_property` build animations
 animation per owner and key** (a new request replaces the old one instead of two
 fighting over a property), and refuse to animate geometry a layout owns (which
 re-laid out the whole window every frame); `fade()` always ends at full opacity or
-hidden, never half-transparent. **Reduced motion** (**Settings → Appearance → Reduce
+hidden, never half-transparent. Page and section switches, and results that appear,
+use `reveal()`, a *snapshot* fade: the page is rendered once and that picture fades in
+over the backdrop before the live page takes over. (An opacity effect alone re-renders
+the whole page on every frame, since Qt caches effect sources only for graphics items.)
+**Reduced motion** (**Settings → Appearance → Reduce
 motion**, saved as the config key `reduced_motion`, or the `ALPHADEX_REDUCED_MOTION=1`
 environment variable) makes every token 0 ms and jumps straight to the end state,
 running the same callbacks, so the code paths are identical either way.
