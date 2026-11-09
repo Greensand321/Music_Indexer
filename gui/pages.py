@@ -90,6 +90,9 @@ class SegmentedTabBar(QtWidgets.QTabBar):
         self._last_index = -1     # the segment the thumb rests on
         self.setUsesScrollButtons(False)
         self.setElideMode(QtCore.Qt.TextElideMode.ElideRight)
+        # Compact widths depend on the current section: re-lay the tabs out
+        # first, then slide the thumb to the new segment.
+        self.currentChanged.connect(self._relayout_compact)
         self.currentChanged.connect(self._slide)
 
     # ── Geometry ──────────────────────────────────────────────────────────
@@ -116,6 +119,10 @@ class SegmentedTabBar(QtWidgets.QTabBar):
         self.setElideMode(self.elideMode())
         self.updateGeometry()
         self.update()
+
+    def _relayout_compact(self, _index: int = -1) -> None:
+        if self._compact and self._room is not None:
+            self.setElideMode(self.elideMode())
 
     def label_font(self, active: bool = False) -> QtGui.QFont:
         """The segment font: label (13 px), caption size when compact."""
@@ -150,13 +157,18 @@ class SegmentedTabBar(QtWidgets.QTabBar):
         return self._label_width(index, chars) + 2 * self.COMPACT_PAD + self._button_width(index)
 
     def _compact_widths(self) -> list[int]:
-        """Each compact segment's width within ``room``: the widest ones are
-        capped first (never below their elided minimum)."""
+        """Each compact segment's width within ``room``: the current section
+        keeps its whole label when it can, then the widest others are capped
+        first (never below their elided minimum)."""
         widths = [self._compact_width(i) for i in range(self.count())]
         room = self._room
         if room is None or sum(widths) <= room:
             return widths
         mins = [min(w, self._compact_width(i, self.MIN_CHARS)) for i, w in enumerate(widths)]
+        current = self.currentIndex()
+        if 0 <= current < len(widths) and \
+                widths[current] + sum(m for i, m in enumerate(mins) if i != current) <= room:
+            mins[current] = widths[current]
 
         def total(cap: int) -> int:
             return sum(max(lo, min(w, cap)) for w, lo in zip(widths, mins))

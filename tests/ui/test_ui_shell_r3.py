@@ -121,6 +121,14 @@ def test_duplicates_tabs_go_compact_at_900_and_back(main_window):
         assert pill.width() <= pill.DOT + 2
     for i in range(tabs.count()):
         assert tabs.tabRect(i).width() >= tabs.minimumTabSizeHint(i).width()
+    for key in page.section_keys():
+        page.show_section(key)
+        process_events(5)
+        current = tabs.currentIndex()
+        assert tabs.tabRect(current).width() >= tabs._compact_width(current), \
+            f"the current section ({key}) keeps its whole label"
+        assert tabs.tabRect(tabs.count() - 1).right() <= tabs.width()
+    page.show_section(page.section_keys()[0])
     main_window.resize(1300, 860)
     process_events(15)
     assert not tabs.is_compact()
