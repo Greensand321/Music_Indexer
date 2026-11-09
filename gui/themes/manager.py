@@ -88,7 +88,11 @@ QToolTip {{
 QAbstractScrollArea {{
     background: transparent;
 }}
-QScrollArea > QWidget > QWidget {{
+/* The content widget only. A bare "QScrollArea > QWidget > QWidget" also
+   matched the scroll bars (they sit in qt_scrollarea_vcontainer), and any
+   rule on a QScrollBar hands it to the stylesheet painter: arrow boxes and a
+   1 px frame instead of AlphaDEXStyle's thin rounded thumb. */
+QScrollArea > QWidget#qt_scrollarea_viewport > QWidget {{
     background: transparent;
 }}
 QAbstractItemView {{
@@ -464,7 +468,8 @@ _THEMED_TYPES = (
 
 
 def _is_scroll_content(w: QtWidgets.QWidget) -> bool:
-    """Matches ``QScrollArea > QWidget > QWidget``. QSS gives these an
+    """Matches ``QScrollArea > QWidget#qt_scrollarea_viewport > QWidget``
+    (a scroll area's content widget). QSS gives these an
     explicit palette at polish time, and their children (a whole workspace)
     inherit it, so they must be re-polished too or hidden pages keep the
     previous theme's palette."""
