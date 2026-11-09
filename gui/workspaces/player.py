@@ -2741,8 +2741,14 @@ class PlayerWorkspace(WorkspaceBase):
     # ── Event filter for hover popup ────────────────────────────────────
 
     def eventFilter(self, obj, event):  # noqa: N802
+        try:
+            viewport = self._lib_table.viewport()
+        except RuntimeError:
+            # The table is being destroyed with the window; its viewport
+            # still receives a few events on the way out.
+            return False
         et = event.type()
-        if obj is self._lib_table.viewport():
+        if obj is viewport:
             if et == QtCore.QEvent.Type.MouseMove:
                 row = self._lib_table.rowAt(int(event.position().y()))
                 self._set_hover_row(row)
