@@ -15,7 +15,7 @@ for every control):
 - **No repeated titles.** Each view has one muted purpose line, then one hero card with
   its main action, then a plan/review card. The "1 · 2 · 3 · 4" step numbers of the
   mapping view are gone (they were decoration; the cards' order says the same).
-- **Glass item views** (`gui/workspaces/metadata_views.py`, Metadata only): rounded rows,
+- **Glass item views** (`gui/widgets/glass_views.py`, shared by every page since R3): rounded rows,
   whole-row hover/selection, the value that would be written on an accent-tinted chip,
   current values muted, tools and "drop" values as pills. Colours are painted from the
   theme at paint time; the panels set no per-item colours (the Undo page's warning and

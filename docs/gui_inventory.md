@@ -83,6 +83,11 @@ The status bar still receives "Page" / "Page · Section" messages but is not sho
 (the page header and the log strip's status chip say the same). Page and section
 changes cross-fade (opacity only; instant with reduced motion).
 
+**At the 900 × 600 minimum** nothing scrolls sideways: the header folds its stats and
+then its search (§2), the section tabs go compact (§3.2), and the pages reflow. Every
+scroll area (pages, the sidebar, dialogs) shows the style's thin rounded thumb on a
+transparent track.
+
 **Panels and pages.** The workspace classes are *panels*. The window builds every
 panel once (`self._workspaces[panel_key]`, signals wired as before) and composes them
 into pages (`self._pages[page_key]`, `gui/pages.py`). `current_page()` and
@@ -137,12 +142,21 @@ Above the page stack, on the backdrop (no card). Always visible.
 |---|---|---|
 | Page title | Label (`#pageTitle`, display 34 px) | The sidebar label of the page on screen |
 | Library chip | Pill with the path (`#libraryPath`, elided in the middle) | The tooltip holds the full path. Muted colour when no library is set. |
-| Library stats | Labels | Tracks · GB · artists, from a background scan. The scan skips the reserved folders and unreadable files; "artists" counts `Artist/Album/track` folders. A newer library's scan cancels and replaces an older one. Shows "–" until it finishes. |
-| Search | Pill line edit | Enter shows the **Player** filtered to the text (the Player's own track filter) |
+| Library stats | Labels (one box, `#headerStatsBox`) | Tracks · GB · artists, from a background scan. The scan skips the reserved folders and unreadable files; "artists" counts `Artist/Album/track` folders. A newer library's scan cancels and replaces an older one. Shows "–" until it finishes. |
+| Search | Pill line edit (`#headerSearch`) | Enter shows the **Player** filtered to the text (the Player's own track filter) |
+| Search button | Round glass button with the search glyph (`#headerSearchButton`) | Only in a narrow header (below). Opens the search field in its place. |
 | Change library | Pill button | Folder picker; emits `library_changed(path)` (also Ctrl+O) |
 
 The brand moved to the sidebar; the Theme and Settings buttons are gone (Settings is in
 the sidebar and on Ctrl+,; the theme is in Settings → Appearance).
+
+**Narrow widths** (`TopBar.fit_mode()`): the library chip keeps a useful width
+(`CHIP_MIN`, 280 px, or its whole path if shorter). When it would get less, the header
+first hides the stats text (`NO_STATS`; the chip's tooltip then adds the counts), then
+folds the search pill into the round search button (`COMPACT`). At 900 px wide the
+header is compact. The button opens the field in place with the cursor in it; the
+field folds back when it loses focus, or on Escape (which also clears it). Enter still
+searches. Nothing animates: the header is laid out once per change.
 
 **Signals:** `library_changed(str)`, `search_requested(str)`, and — kept for callers —
 `settings_requested()`, `theme_requested()`.
@@ -198,7 +212,13 @@ untitled last group (Activity · Settings · Help) sits at the foot of the panel
 
 A page with more than one section shows its **section tabs** above its panels, as a
 glass segmented control (`SegmentedTabBar`: a raised thumb slides to the chosen
-section); a page with one section just shows its panel. A page remembers the section it showed
+section); a page with one section just shows its panel. The control **never scrolls
+sideways**: when its natural width does not fit beside the page actions (Duplicates'
+six sections at 900 px), the section bar switches it to its **compact** form: 10 px
+segment padding, 12 px labels, and each Experimental pill becomes an 8 px dot (the tab's
+tooltip still says "experimental — not ready to test"). If even that is too wide, the
+section on show keeps its whole label and the widest others elide first (never below a
+few characters). It returns to full size when there is room. A page remembers the section it showed
 last. When a page or section becomes visible, the window calls the visible panel's
 optional `on_activated()` hook (Home re-reads `Docs/` if its last check is older than
 3 s; Settings re-reads the config unless there are unsaved edits; Activity refreshes;
@@ -265,7 +285,8 @@ only (fill = `warning` blended over `card_bg`, border = `warning`, text =
 ## 4. Log Drawer (`gui/widgets/log_drawer.py`)
 
 The "Activity Log" strip at the bottom of the content area, consistent with the shell: the material's card
-surface, a **pill-shaped bar** (34 px high) while collapsed. Collapsed by default; it opens to **220 px** on
+surface, a **pill-shaped bar** (34 px high) while collapsed, with the card's soft shadow (painted by the
+backdrop, like the sidebar's: `Backdrop.add_floating`). Collapsed by default; it opens to **220 px** on
 toggle (Ctrl+L, or a click on the bar), or by itself when a `warn` or `error` line arrives. In a short window
 the open log shrinks (never below 96 px) instead of running past the window's edge. It keeps the last 500
 lines; the Activity page keeps the session's full history (§6.12).
@@ -421,8 +442,8 @@ Without a library it starts no job and every card says so.
 
 Preview first; Execute applies **that** preview. Liquid Glass layout (R2): one hero
 card, an Options card, a Progress-and-results card and the Run log. The page does not
-repeat its title (the shell header shows it). The glass parts it uses live in
-`gui/workspaces/organize_parts.py`.
+repeat its title (the shell header shows it). The glass parts it uses are the shared
+ones in `gui/widgets/` (§8).
 
 | Element | Type | Purpose |
 |---|---|---|
@@ -487,7 +508,7 @@ and the review lists reflow, and the plan buttons wrap
 
 Item lists here are "glass" views: transparent on the card, 34 px rows, a rounded
 hover/selection band from the theme's material, muted 12 px headers, no grid, no
-inline stylesheet (`organize_parts.style_item_view`).
+inline stylesheet (`gui/widgets/glass_views.style_item_view`, §8).
 
 **The plan is tied to its inputs.** Changing a path, the transfer mode, a flag, or
 re-scanning or switching library marks the plan out of date and disables Execute,
@@ -519,8 +540,8 @@ resets the tile; a confirmed cleanup or undo finishes.
 
 Six sections (§3.2). The first two are the real workflow; Pair review and the three
 prototypes open their dialogs (§7.5). Every section is drawn in the Liquid Glass card
-language (one hero card, glass rows, stat tiles, glyph buttons; parts in
-`gui/widgets/dupes_parts.py`) and fits the minimum window (900 × 600) without
+language (one hero card, glass rows, stat tiles, glyph buttons; the shared parts
+in `gui/widgets/`, §8) and fits the minimum window (900 × 600) without
 horizontal scrolling. No section repeats the page or section title: the hero card's
 title says what the card is for.
 
@@ -534,7 +555,7 @@ separate path field).
 | Hero "Scan your library" | Library | Glass row, folder glyph + middle-elided path (full path in the tooltip) | The current library |
 | | Find duplicates | Button (primary, search glyph) | Fingerprints and groups. If fpcalc or FFmpeg is missing, asks once (with install links) whether to scan using cached fingerprints only. |
 | | Exact / Near / Mixed-codec boost | `QDoubleSpinBox` ×3, caption above each | Start from the Settings keys (`exact_duplicate_threshold`, `near_duplicate_threshold`, `mixed_codec_threshold_boost`) and follow later Settings saves |
-| | Scan · Review · Execute | Pill row (`dupStepRow`; labels `stepActive` / `stepInactive`) | Where the flow is; moves on after a scan and after an execution |
+| | Scan · Review · Execute | `StepPills` (numbered pills, shared with the Indexer and Library Sync) | Where the flow is; moves on after a scan and after an execution |
 | | Status, Cancel, progress | Label; button (close glyph); thin bar | Cancel and the bar only show while a job runs. Cancel stops the scan, or asks the execution to stop at the next safe point. |
 | "Duplicate groups" | Empty state | `EmptyState` | Before the first scan ("No scan yet"), without a library, while scanning, after a scan with no groups ("No duplicates found"), after a cancel or a failed scan |
 | | Plan tiles | `TileGrid` of `StatTile`s | Groups · Duplicate files · Space reclaimable (size of the copies that will leave the library; not counting copies kept in place) · Flagged for review |
@@ -608,7 +629,7 @@ keeps it, and the next Open re-shows it instead of starting a second run.
 Four sections in the Liquid Glass look (redesign R2). None repeats the page or section
 title: each view starts with one muted purpose line, then **one hero card** (radius 30,
 title role) holding its main action, then a plan/review card. Item views are
-transparent "glass rows" (`gui/workspaces/metadata_views.py`: rounded 34 px rows,
+transparent "glass rows" (`gui/widgets/glass_views.py`: rounded 34 px rows,
 whole-row hover and selection from the material, one hairline between rows; a value
 that would be written sits on an accent-tinted chip, current values are muted, tools and
 "drop" values are pills; all painted from the theme at paint time, no per-item colours).
@@ -1109,15 +1130,19 @@ window (the shell styles its chrome) whose contents use the glass parts:
 | `gui/pages.py` (`SectionedPage`, `SoundMapPage`) | Live — §3.2 |
 | `widgets/top_bar.py` (`TopBar`) | Live — the page header, §2 |
 | `widgets/backdrop.py` (`Backdrop`) | Live — §5.5 (album-art / gradient / plain backdrop) |
-| `widgets/glass.py` (`GlassCard`, `GlassPanel`, `ShadowLayer`, `ElidedLabel`) | Live — §5.5 |
+| `widgets/glass.py` (`GlassCard`, `GlassPanel`, `ShadowLayer`, `ElidedLabel`, `path_label`) | Live — §5.5. `ElidedLabel` is **the** eliding label: full text in `text()`, an optional muted `placeholder`, and with `path=True` / `path_label()` a file path (middle elide, the full path as tooltip and accessible name unless the owner set one). |
+| `widgets/glass_parts.py` | Live — the shared card parts. `StatTile`, `StatRow`, `TileGrid` (tiles in balanced rows), `EmptyState`, `StepPills` (a workflow's real state as numbered pills: Indexer, Library Sync, Duplicates and the clustering wizard; when narrow, the other steps shrink to their number), and builders: `hero_title` (the `heroTitle` role, 20 / 650), `card_heading`, `caption`, `status_label`, `thin_bar`, `glyph_button`, `icon_button`, `path_well` (a glyph and a path label on a well), `section_card`, `fields_row` |
+| `widgets/glass_views.py` | Live — item views on the glass: `GlassRowDelegate` (a 34 px rounded band per row, hover tracked per row, selection, a hairline between rows or a resting fill, cell kinds set with `mark()`: muted, accent chip, pill, pill + reason), `style_item_view(view)`, `GlassTree` / `GlassTable` / `GlassList` (with `fit_rows`), `ChipList`, `stretch_columns`. Views marked `glassView="true"` are transparent on their card. Used by Metadata, Organize, Library Sync, Playlists and the File Cleanup preview; Duplicates' group rows and the Player's rows keep specialised delegates. |
+| `widgets/layouts.py` | Live — `FlowLayout` (wrapping rows: `spacing`, `line_spacing`), `ReflowBox` / `ReflowSplitter` (side by side when wide, stacked when narrow), `ViewTabs`, `fit_stack_to_current` |
 | `widgets/sidebar.py` (`Sidebar`) | Live — §3.1 |
 | `widgets/log_drawer.py` (`LogDrawer`) | Live — §4 |
 | `widgets/link_button.py` (`LinkButton`) | Live — accent-coloured text links (Home's Recent runs, Help) |
 | `widgets/now_playing_bar.py` (`NowPlayingBar`) | Live — §1.1 |
 | `widgets/gradient_bg.py` (`GradientWidget`) | Live — §5.5 (transparent scroll surface; painted card shadows) |
 | `widgets/landing.py` (`MosaicLanding`) | Live — §0 |
-| `widgets/pill.py` (`Pill`, `ExperimentalPill`) | Live — §3.2 |
-| `widgets/path_field.py` (`PathField`) | Live — a chosen path as a middle-elided row on a well with a glyph button; `QLineEdit`-like text API (§6.10, §6.13) |
+| `widgets/pill.py` (`Pill`, `ExperimentalPill`, `ToneBadge`) | Live — §3.2. `Pill.set_dot()` paints it as a small dot (compact section tabs). `ToneBadge` and `paint_tone_pill` are the glass tone pills (verdicts, Kept / Would be quarantined, Cannot be undone, and the pills item delegates paint in rows). |
+| `widgets/glyphs.py` (`set_glyph`, `glyph_icon`, `paint_glyph`, `GlyphLabel`) | Live — painted line glyphs; `GlyphLabel` is a non-button glyph in a tone |
+| `widgets/path_field.py` (`PathField`) | Live — **the** path field: a chosen path on a well (the shared path label) with a glyph button; `QLineEdit`-like text API (§6.10, §6.13) |
 | `widgets/interactive_scatter_plot.py` (`InteractiveScatterPlot`) | Live — the Map's plot |
 | `widgets/cluster_legend.py` (`ClusterLegendWidget`) | Live — Map legend |
 | `widgets/track_details_panel.py` (`TrackDetailsPanel`) | Live — Map details |
@@ -1159,7 +1184,10 @@ SectionedPage tab click ──────────► section_changed → st
 
 JobRegistry.jobs_changed ─► Activity job list + the sidebar's Activity badge
 
-Sidebar.exit_requested ──► AlphaDEXWindow.close()  (closeEvent job protocol)
+Ctrl+Q / the window's close button ──► AlphaDEXWindow.close()  (closeEvent job protocol)
+MosaicLanding.quit_requested ──► Startup quits before the main window opens
+   (Sidebar.exit_requested is still connected to close() for callers, but nothing emits it:
+    the sidebar has had no Exit item since R1)
 
 WorkspaceBase.log_message ──► LogDrawer.append() + Activity log history   (buffered until connected)
 WorkspaceBase.status_changed ─► LogDrawer.set_status() + QStatusBar
