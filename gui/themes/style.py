@@ -331,6 +331,38 @@ def _mix(a: QC, b: QC, t: float) -> QC:
     )
 
 
+def _luminance(c: QC) -> float:
+    """WCAG relative luminance of an opaque colour."""
+    def lin(v: float) -> float:
+        return v / 12.92 if v <= 0.03928 else ((v + 0.055) / 1.055) ** 2.4
+    return 0.2126 * lin(c.redF()) + 0.7152 * lin(c.greenF()) + 0.0722 * lin(c.blueF())
+
+
+# A slider or progress track this close to the card it sits on (contrast
+# ratio) is hard to see; Midnight's progress_bg on card_bg is about 1.05.
+_TRACK_MIN_CONTRAST = 1.3
+
+
+def track_colour(t: ThemeTokens, m) -> QC:
+    """The groove of progress bars and sliders: the material's track, or,
+    when an opaque track nearly matches the card under it (classic themes),
+    the track mixed toward the secondary text until the groove shows."""
+    track = qcolor(m.track)
+    card = qcolor(m.card.fill)
+    if track.alpha() < 255 or card.alpha() < 255:
+        return track          # translucent white on glass: always visible
+    lo, hi = sorted((_luminance(track), _luminance(card)))
+    if (hi + 0.05) / (lo + 0.05) >= _TRACK_MIN_CONTRAST:
+        return track
+    ink = qcolor(t.text_secondary)
+    for step in range(1, 11):
+        mixed = _mix(track, ink, 0.05 * step)
+        lo, hi = sorted((_luminance(mixed), _luminance(card)))
+        if (hi + 0.05) / (lo + 0.05) >= _TRACK_MIN_CONTRAST:
+            return mixed
+    return _mix(track, ink, 0.5)
+
+
 def _draw_check_mark(p: QP, rect: QRF, color: str | QC) -> None:
     """Draw a crisp ✓ checkmark inside rect."""
     p.save()
@@ -811,7 +843,7 @@ class AlphaDEXStyle(QtWidgets.QProxyStyle):
 
         # ── Progress bar groove: a pill track ──────────────────────────────
         elif element == CE.CE_ProgressBarGroove:
-            _rounded(painter, option.rect, option.rect.height() / 2, fill=m.track)
+            _rounded(painter, option.rect, option.rect.height() / 2, fill=track_colour(t, m))
 
         # ── Progress bar contents: accent fill ─────────────────────────────
         elif element == CE.CE_ProgressBarContents:
@@ -1022,7 +1054,7 @@ class AlphaDEXStyle(QtWidgets.QProxyStyle):
                 else:
                     gr = QRF(groove_rect.center().x() - track / 2 + 0.5, groove_rect.y() + 2,
                              track, groove_rect.height() - 4)
-                _rounded(painter, gr, track / 2, fill=m.track)
+                _rounded(painter, gr, track / 2, fill=track_colour(t, m))
 
                 hc = QtCore.QPointF(handle_rect.center())
                 if opt.maximum > opt.minimum:

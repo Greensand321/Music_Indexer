@@ -88,7 +88,7 @@ QToolTip {{
 QAbstractScrollArea {{
     background: transparent;
 }}
-QScrollArea > QWidget > QWidget {{
+QScrollArea > QWidget#qt_scrollarea_viewport > QWidget {{
     background: transparent;
 }}
 QAbstractItemView {{
@@ -159,9 +159,16 @@ QPlainTextEdit#logText, QTextEdit#logText {{
     color: palette(tooltip-text);
     border: none;
     border-radius: 12px;
+    padding: 4px 6px;
     font-family: {MONO_STACK};
     font-size: {caption}px;
     line-height: 1.4;
+}}
+/* The frame paints the rounded inset; the viewport inside it never fills
+   its own square (it would show past the rounded corners). */
+QPlainTextEdit#logText > QWidget#qt_scrollarea_viewport,
+QTextEdit#logText > QWidget#qt_scrollarea_viewport {{
+    background: transparent;
 }}
 QHeaderView {{
     background: transparent;
