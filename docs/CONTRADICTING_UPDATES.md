@@ -535,7 +535,7 @@ short muted line saying what it is for, and buttons use painted glyphs instead o
   - "Apply Selected" → **Apply N changes**;
   - "Select All / Deselect All" → **Tick all / Untick all**;
   - "Fix fields:" → **Show**.
-  - `docs/features/tag_fixer.md` still uses the old labels.
+  - `docs/features/tag_fixer.md` now uses the new labels and describes the folder scope (updated 2026-11-09).
 - **Counts**: the Tag Fixer summary and Normalize's "N of M tagged files would change (…)" sentence → stat tiles.
   The status lines keep only the explanation.
 - **Columns**: Metadata's tables stretch their columns and elide the middle of the text, so nothing scrolls
@@ -572,7 +572,7 @@ short muted line saying what it is for, and buttons use painted glyphs instead o
 - **File Cleanup preview dialog**:
   - The confirm button's object name `cleanupConfirmBtn` → `primaryBtn`.
   - Cancel is still the default button, so Enter never renames.
-- **Docs still using old labels**:
+- **Docs that used the old labels** (updated 2026-11-09):
   - `docs/library_sync_per_item_review_testing.md` (emoji labels);
   - `docs/features/library_sync.md` (old capitalisation);
   - `docs/architecture.md` ("Undo Last Cleanup").

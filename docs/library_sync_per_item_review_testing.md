@@ -53,9 +53,9 @@ These tests require a full working environment with:
 
 **Steps:**
 1. Open Library Sync workspace
-2. Set "Existing Library" to `/tmp/music_existing/`
+2. Set "Library" to `/tmp/music_existing/`
 3. Set "Incoming Folder" to `/tmp/music_incoming/`
-4. Click "🔍 Scan Both Libraries"
+4. Click "Scan both folders"
 
 **Expected Results:**
 - ✓ Scan completes without error
@@ -78,7 +78,7 @@ These tests require a full working environment with:
 2. Observe the context menu
 
 **Expected Results:**
-- ✓ Menu appears with options: 📋 Copy | ↻ Replace | ✕ Clear flag | 📝 Add note
+- ✓ Menu appears with options: Copy | Replace | Clear flag | Add note… (each with a painted icon)
 - ✓ Menu actions are responsive
 
 **Failure Points:**
@@ -91,11 +91,11 @@ These tests require a full working environment with:
 **Objective:** Verify copy flag is set and displayed
 
 **Steps:**
-1. Right-click on a "New" track → select "📋 Copy"
+1. Right-click on a "New" track → select "Copy"
 2. Check the Flag column on that row
 
 **Expected Results:**
-- ✓ Flag column shows "📋 Copy"
+- ✓ Flag column shows "Copy"
 - ✓ Log area shows "Flagged [track_id] for copy"
 - ✓ Flag persists when you click on other rows and back
 - ✓ Can right-click → "✕ Clear flag" to remove it
@@ -112,15 +112,15 @@ These tests require a full working environment with:
 
 **Steps:**
 1. Find a track with match (Status = "Collision" or "Upgrade")
-2. Right-click → select "↻ Replace"
+2. Right-click → select "Replace"
 3. Check Flag column
 
 **Expected Results:**
-- ✓ Flag column shows "↻ Replace"
+- ✓ Flag column shows "Replace"
 - ✓ Log shows "Flagged [track_id] to replace [existing_id]"
 
 **Try on a New track (no match):**
-4. Right-click a "New" track → select "↻ Replace"
+4. Right-click a "New" track → select "Replace"
 
 **Expected Results:**
 - ✓ Warning dialog: "Cannot Replace — No existing match found for this track."
@@ -136,14 +136,14 @@ These tests require a full working environment with:
 **Objective:** Verify notes are stored and displayed
 
 **Steps:**
-1. Right-click a track → select "📝 Add note"
+1. Right-click a track → select "Add note…"
 2. Type a note (e.g., "Higher bitrate version")
 3. Click OK
 
 **Expected Results:**
 - ✓ Note column shows the note text (truncated if long)
 - ✓ Log shows "Added note to [track_id]"
-- ✓ Can edit note again by right-clicking and selecting "📝 Add note"
+- ✓ Can edit note again by right-clicking and selecting "Add note…"
 - ✓ Empty note clears the display
 
 **Failure Points:**
@@ -160,7 +160,7 @@ These tests require a full working environment with:
 1. After scan, flag 1-2 items:
    - Flag a "New" track for copy
    - Flag a matched track for replace
-2. Click "📋 Build Plan"
+2. Click "Build plan"
 3. Wait for plan to complete
 4. Click "👁 Preview Plan" to view HTML
 

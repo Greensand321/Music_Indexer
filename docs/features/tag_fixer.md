@@ -28,7 +28,8 @@ fpcalc (Chromaprint) installed, is api.acoustid.org reachable, is a key set — 
 prints a "Lookup sources: …" line. A source that can't run is **skipped, with the
 reason shown**, instead of every file silently coming back "unmatched".
 
-Then, for every supported audio file under the library (the reserved top-level
+Then, for every supported audio file in the chosen scope (the whole library, or one
+folder inside it, picked in the Tag lookup card; either way the reserved top-level
 folders `Not Sorted/`, `Quarantine/`, `Trash/`, `Docs/` and `Playlists/` are never
 entered; `Manual Review/` *is* scanned, because its tracks are exactly the ones
 missing metadata), the Tag Fixer:
@@ -53,7 +54,7 @@ missing metadata), the Tag Fixer:
 The result is a table: one row per proposed *field* change, built from the same
 function the writer uses, so a row shows exactly what applying it writes. Each row's
 checkbox selects that field change — untick a file's Genre row and keep its Artist
-row, and only the artist is written. The "Fix fields" checkboxes hide or show a
+row, and only the artist is written. The "Show" checkboxes hide or show a
 field's rows; hidden rows are never written. Files nothing could identify are not
 shown as blank proposals: they are listed under "No match found", each with its
 reason (a lookup error, "no lookup source available", a low-confidence match…).
@@ -134,7 +135,7 @@ won't get you there — you'd need to clear the tag by hand first, or use
 
 The Tag Fixer section has a "Dry run (propose only, do not write tags)" checkbox, checked
 by default. It's worth understanding exactly what it does, because it's simpler than
-it sounds: it's a **pure interface gate**. If it's checked, clicking "Apply Selected"
+it sounds: it's a **pure interface gate**. If it's checked, clicking "Apply changes"
 just shows a message telling you to uncheck it — the backend functions that actually
 write tags have no dry-run mode of their own; there is no separate code path that
 "pretends" to write. The checkbox doesn't need to be more than that, because the
@@ -191,9 +192,8 @@ build. With the fixed list, the test fixture never runs in a real scan.
 
 ## The genre tools: Metadata → Fill genres and Normalize genres
 
-The Metadata page has two genre sections. They are one panel underneath — still
-headed "Genre Normalizer", the name its sidebar entry had before the page structure
-changed — and two sections because they answer two genuinely different questions:
+The Metadata page has two genre sections. They are one panel underneath (its
+sidebar entry used to be called "Genre Normalizer"), and two sections because they answer two genuinely different questions:
 
 - **Fill genres** (the panel calls it "Fill from MusicBrainz") — *"some of my tracks
   have no genre at all."* For each

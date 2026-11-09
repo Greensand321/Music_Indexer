@@ -388,8 +388,8 @@ All panels inherit `WorkspaceBase` (`gui/workspaces/base.py`):
 
 A pattern most pages share: a **library change cancels read-only work** (scans,
 previews, lookups) and ignores its late result, while a **write the user already
-confirmed is left to finish** on the library it started on. (Duplicates is the
-exception; see §6.5.1.) Most pages also have a workflow stepper that advances with
+confirmed is left to finish** on the library it started on (Duplicates included;
+see §6.5.1). Most pages also have a workflow stepper that advances with
 the flow, and a neutral "Cancelled" state instead of reporting a cancel as an error.
 
 ### 6.1 Home (`home.py`)

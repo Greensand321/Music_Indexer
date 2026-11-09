@@ -104,7 +104,7 @@ a recording (under about 4 seconds, silence) never match anything. Building the 
 needs every library fingerprint decoded — about 30 seconds for 20,000 tracks. The
 decoded form is saved in Library Sync's fingerprint cache next to the fingerprint, so
 only the first scan (and files that changed since: a different mtime or size) pays
-that; later scans read it back. Recompute Matches reuses the index outright. A threshold saved before this change that equals the old
+that; later scans read it back. Recompute matches reuses the index outright. A threshold saved before this change that equals the old
 default (0.3 / 0.35, which meant something else on the old scale) is replaced by 0.2
 once, with a line in the log; any other saved value is kept.
 
@@ -204,10 +204,10 @@ A few practical notes:
 
 - **Flags are remembered only for the current session.** They live in memory while you
   work, not in a saved file. This is a deliberate simplicity choice (see below).
-  **Save Session** remembers the two folders and the threshold (restored the next time
+  **Save session** remembers the two folders and the threshold (restored the next time
   you open the page), not the flags.
 - **Re-scanning keeps only the flags that still make sense.** If you change the
-  strictness and recompute the matches (the **Recompute Matches** button re-matches the
+  strictness and recompute the matches (the **Recompute matches** button re-matches the
   last scan without re-reading any file), the whole landscape of matches can shift — a
   track you flagged for "Replace" might now match something different, or nothing at
   all. Copy flags and notes are kept for tracks that are still there; a Replace flag is
@@ -272,7 +272,7 @@ rest of the app:
   one folder per run, so an earlier backup is never overwritten) before the new one
   takes its place — so an "upgrade" can always be undone. "Replaced" is only counted
   when a file really was displaced.
-- **If the library changed after Build Plan**, the items it affects are not done: a
+- **If the library changed after Build plan**, the items it affects are not done: a
   Replace whose library file was moved, edited or deleted, or a track whose incoming
   file changed, is skipped and reported ("scan again"), never turned into a plain
   copy. No other existing file is ever overwritten: if a destination appeared after
@@ -289,12 +289,12 @@ This is the same preview-first, no-silent-loss, leave-a-recoverable-copy philoso
 that governs the Indexer and the Duplicate Finder — applied to the act of merging two
 libraries.
 
-## The Export Report
+## The export report
 
 Library Sync can produce a standalone, shareable **report of the review** — a summary
 of every match, its status, the distance and confidence, the quality verdict, and any
 flags or notes you added, available as a web page, a JSON file, or a CSV file. An
-**Export Report** button on the Library Sync page's Plan & Execution card lets you save
+**Export report** button on the Library Sync page's Review matches card lets you save
 one as soon as a scan has finished; it opens a save dialog defaulting into the
 library's `Docs/` folder and writes whichever format you choose based on the file
 extension you pick.
@@ -309,7 +309,7 @@ report can never itself move or replace a file — it's a read-only summary, ful
 "Cancel" buttons that did nothing. They are gone: a static file cannot safely drive
 file operations. In their place the report says "To replace, flag tracks in AlphaDEX
 → Library Sync and build a plan" — replacing always goes through the normal
-flag → Build Plan → preview → execute flow.)*
+flag → Build plan → preview → execute flow.)*
 
 ---
 
