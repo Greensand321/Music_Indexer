@@ -475,7 +475,10 @@ def test_button_disabled_while_an_analysis_runs_on_another_page(make_workspace, 
     assert not flow.button.isEnabled() and flow.button.toolTip() == TIP_ANALYSIS
     assert not flow.start()
     fake.release.set()
-    qtbot.waitUntil(lambda: not analysis.is_busy(), timeout=5000)
+    # The worker then scores the clusters with scikit-learn, whose first
+    # import in the process can take seconds on a loaded machine (this
+    # timed out once in four R3 runs at 5 s while other jobs ran).
+    qtbot.waitUntil(lambda: not analysis.is_busy(), timeout=30_000)
     qtbot.waitUntil(lambda: flow.button.isEnabled(), timeout=5000)
 
 
@@ -487,7 +490,7 @@ def test_analysis_page_uses_the_shared_job_name(make_workspace, tmp_path, qtbot,
     assert fake.started.wait(3)
     assert [j.name for j in job_registry().jobs(owner=analysis)] == [ANALYSIS_JOB_NAME] == ["Clustering"]
     fake.release.set()
-    qtbot.waitUntil(lambda: not analysis.is_busy(), timeout=5000)
+    qtbot.waitUntil(lambda: not analysis.is_busy(), timeout=30_000)
 
 
 # ── CP-35 / CP-36: cancel and library change ──────────────────────────────
