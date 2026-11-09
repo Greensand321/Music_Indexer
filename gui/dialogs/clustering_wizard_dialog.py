@@ -227,7 +227,7 @@ class ClusteringWizardDialog(QtWidgets.QDialog):
         # Title and step indicator (real state: the step being shown).
         title_layout = QtWidgets.QHBoxLayout()
         self._title = QtWidgets.QLabel("Step 1: Feature Selection")
-        self._title.setObjectName("cardTitle")
+        self._title.setObjectName("heroTitle")   # 20 px: cardTitle would force 16
         apply_font(self._title, "title")
         title_layout.addWidget(self._title, 1)
         self._step_indicator = QtWidgets.QLabel("1 of 5")

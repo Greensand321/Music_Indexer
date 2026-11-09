@@ -299,9 +299,15 @@ def test_step_pills_shrink_the_other_steps_when_narrow(qtbot):
     steps.show()
     process_events(2)
     assert not steps.is_compact()
+    steps.resize(full - 10, 30)
+    process_events(2)
+    assert steps.is_compact()
+    labelled = [w > steps._H for w in steps._widths()]
+    assert labelled[1] and sum(labelled) == 2, "one step gives way, nearest-first keep theirs"
     steps.resize(steps.minimumSizeHint().width(), 30)
     process_events(2)
     assert steps.is_compact()
+    assert [w > steps._H for w in steps._widths()] == [False, True, False]
     steps.grab()
     assert steps.accessibleName() == "Step 2 of 3: Scan and match"
 

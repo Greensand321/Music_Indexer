@@ -391,7 +391,16 @@ class StepPills(QtWidgets.QWidget):
     def _widths(self) -> list[int]:
         if not self.is_compact():
             return self._full_widths()
+        full = self._full_widths()
         widths = self._compact_widths()
+        # Give the labels back while they fit, nearest the current step first.
+        order = sorted((i for i in range(len(widths)) if i != self._current),
+                       key=lambda i: (abs(i - self._current), -i))
+        for i in order:
+            trial = list(widths)
+            trial[i] = full[i]
+            if self._total(trial) <= self.width():
+                widths = trial
         spare = self.width() - self._total(widths)
         if spare < 0 and self._steps:
             # Still too wide: the current label elides.

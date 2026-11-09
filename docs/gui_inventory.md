@@ -1033,8 +1033,10 @@ it** (Settings is a page, §6.13); it is kept as a thin wrapper.
 
 A 5-step wizard, opened by **Guided setup…** on Analyse. It opens on the settings card's
 current choices (`set_config`) and its answers fill that card in; it keeps every choice
-when you go Back and Next. A title, a step counter and a row of step pills (done steps
-carry a check, the current one is raised) over one glass card per step; Cancel on the
+when you go Back and Next. A title (the `heroTitle` role), a step counter and the shared
+step pills (`StepPills`, as on the Indexer: numbered, done steps carry a check, the
+current one is accent-tinted; when the dialog is too narrow for every label, the steps
+farthest from the current one show only their number) over one glass card per step; Cancel on the
 left, Back and **Next / Finish** (primary) on the right.
 
 | Step | Contents |
