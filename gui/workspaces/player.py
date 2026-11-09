@@ -1113,6 +1113,7 @@ class PlayerWorkspace(WorkspaceBase):
 
         # Library cache
         self._all_rows: list[dict] = []          # full scan results
+        self._lib_hay: dict[str, str] = {}        # path → lower-cased search text
         self._rows_by_path: dict[str, dict] = {}  # path → row (scan + tag reads)
         self._pending_tag_paths: set[str] = set()
 
@@ -1291,8 +1292,12 @@ class PlayerWorkspace(WorkspaceBase):
         hh.setDefaultAlignment(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter)
         hh.setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeMode.Fixed)
         hh.setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeMode.Stretch)
-        hh.setSectionResizeMode(2, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
-        hh.setSectionResizeMode(3, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
+        # Artist and Album fit their widest text, measured once per new
+        # string as rows arrive (_measure_rows), not by ResizeToContents:
+        # that re-measured up to 1,000 rows through the delegate on every
+        # batch, sort, filter and resize, a ~0.5 s freeze at 5,000 tracks.
+        hh.setSectionResizeMode(2, QtWidgets.QHeaderView.ResizeMode.Fixed)
+        hh.setSectionResizeMode(3, QtWidgets.QHeaderView.ResizeMode.Fixed)
         hh.setSectionResizeMode(4, QtWidgets.QHeaderView.ResizeMode.Fixed)
         for col in (_COL_NUM, _COL_TIME):
             item = self._lib_table.horizontalHeaderItem(col)
@@ -1301,6 +1306,7 @@ class PlayerWorkspace(WorkspaceBase):
                                       | QtCore.Qt.AlignmentFlag.AlignVCenter)
         self._lib_table.setColumnWidth(0, 40)
         self._lib_table.setColumnWidth(4, 60)
+        self._reset_column_fit()
         # Default order: Artist → Album → Track, ascending.
         hh.setSortIndicator(2, QtCore.Qt.SortOrder.AscendingOrder)
         self._lib_table.setSortingEnabled(True)
@@ -1500,6 +1506,58 @@ class PlayerWorkspace(WorkspaceBase):
         w = self._lib_table.width()
         self._lib_table.setColumnHidden(_COL_ALBUM, w < self._HIDE_ALBUM_BELOW)
         self._lib_table.setColumnHidden(_COL_NUM, w < self._HIDE_NUMBER_BELOW)
+        self._apply_column_fit()
+
+    # Artist / Album: as wide as their widest text, at most this share of
+    # the table each, so Title (Stretch) keeps the rest.
+    _FIT_SHARE = 0.27
+    _FIT_KEYS = ((_COL_ARTIST, "artist"), (_COL_ALBUM, "album"))
+
+    def _reset_column_fit(self) -> None:
+        """Start the content widths over (a new scan): the header labels."""
+        hh = self._lib_table.horizontalHeader()
+        hfm = QtGui.QFontMetrics(hh.font())
+        self._fit_metrics = {c: QtGui.QFontMetrics(_TrackTableDelegate.font_for(c))
+                             for c, _k in self._FIT_KEYS}
+        self._fit_seen: set[tuple[int, str]] = set()
+        self._fit_width = {}
+        for c, _k in self._FIT_KEYS:
+            item = self._lib_table.horizontalHeaderItem(c)
+            label = item.text() if item is not None else ""
+            self._fit_width[c] = hfm.horizontalAdvance(label) + 18   # + sort arrow
+        self._apply_column_fit()
+
+    def _measure_rows(self, rows: list) -> None:
+        """Widen Artist / Album for the new rows' text (each distinct string
+        is measured once; most repeat)."""
+        changed = False
+        for c, key in self._FIT_KEYS:
+            fm = self._fit_metrics[c]
+            widest = self._fit_width[c]
+            for row in rows:
+                text = row.get(key) or ""
+                if not text or (c, text) in self._fit_seen:
+                    continue
+                self._fit_seen.add((c, text))
+                widest = max(widest, fm.horizontalAdvance(text))
+            if widest != self._fit_width[c]:
+                self._fit_width[c] = widest
+                changed = True
+        if changed:
+            self._apply_column_fit()
+
+    def _apply_column_fit(self) -> None:
+        widths = getattr(self, "_fit_width", None)
+        if not widths:
+            return
+        # The table's width, not the viewport's: the latter changes when the
+        # scroll bar appears, without a resize to refit on.
+        cap = max(80, int(self._lib_table.width() * self._FIT_SHARE))
+        pad = 2 * _TrackTableDelegate._PAD + 2
+        for c, _k in self._FIT_KEYS:
+            want = min(widths[c] + pad, cap)
+            if self._lib_table.columnWidth(c) != want:
+                self._lib_table.setColumnWidth(c, want)
 
     def _apply_theme(self, tokens=None) -> None:
         """Repaint what paints itself; re-tint the icons that aren't glyph
@@ -1558,6 +1616,7 @@ class PlayerWorkspace(WorkspaceBase):
             return
         self._cancel_scan()
         self._all_rows.clear()
+        self._lib_hay.clear()
         self._lib_table.setRowCount(0)
         self._lib_kb_row = -1
         self._status_lbl.setText("Library changed — click Reload to scan.")
@@ -1588,11 +1647,13 @@ class PlayerWorkspace(WorkspaceBase):
         self._scan_gen += 1
 
         self._all_rows.clear()
+        self._lib_hay.clear()
         self._scan_finished = False
         self._lib_kb_row = -1
 
         self._lib_table.setSortingEnabled(False)
         self._lib_table.setRowCount(0)
+        self._reset_column_fit()
         self._reload_btn.setEnabled(False)
         self._status_lbl.setText("Scanning library…")
 
@@ -1632,6 +1693,7 @@ class PlayerWorkspace(WorkspaceBase):
 
         for i, row in enumerate(batch):
             self._set_table_row(start_row + i, row)
+        self._measure_rows(batch)
 
         loaded = self._lib_table.rowCount()
         self._status_lbl.setText(f"Loading… {loaded} tracks found")
@@ -1645,10 +1707,15 @@ class PlayerWorkspace(WorkspaceBase):
     def _set_table_row(self, r: int, row: dict) -> None:
         keys = _sort_keys(row)
         texts = (row["track_num"], row["title"], row["artist"], row["album"], row["dur"])
+        path = row["path"]
+        role = QtCore.Qt.ItemDataRole.UserRole
+        table = self._lib_table
         for c, (text, key) in enumerate(zip(texts, keys)):
             item = _SortItem(text, key)
-            item.setData(QtCore.Qt.ItemDataRole.UserRole, row["path"])
-            self._lib_table.setItem(r, c, item)
+            item.setData(role, path)
+            table.setItem(r, c, item)
+        # What the search matches (Title, Artist, Album), lower-cased once.
+        self._lib_hay[path] = f"{texts[1]} {texts[2]} {texts[3]}".lower()
 
     @Slot(int, int)
     def _on_scan_complete(self, generation: int, total: int) -> None:
@@ -1671,19 +1738,29 @@ class PlayerWorkspace(WorkspaceBase):
         self._update_library_empty()
 
     def _apply_filter(self, text: str) -> None:
+        """Hide the rows whose Title, Artist and Album don't contain the
+        query. Runs on every keystroke, so it reads each row's lower-cased
+        text from ``_lib_hay`` (one item lookup per row, not three item
+        texts joined): ~3x faster at 5,000 tracks."""
         query = text.strip().lower()
+        table = self._lib_table
+        role = QtCore.Qt.ItemDataRole.UserRole
+        hay = self._lib_hay
         shown = 0
-        for r in range(self._lib_table.rowCount()):
+        for r in range(table.rowCount()):
             if not query:
-                self._lib_table.setRowHidden(r, False)
+                table.setRowHidden(r, False)
                 shown += 1
                 continue
-            row_text = " ".join(
-                (self._lib_table.item(r, c) or QtWidgets.QTableWidgetItem()).text().lower()
-                for c in range(1, 4)  # Title, Artist, Album
-            )
+            item = table.item(r, _COL_TITLE)
+            row_text = hay.get(item.data(role)) if item is not None else None
+            if row_text is None:
+                row_text = " ".join(
+                    (table.item(r, c) or QtWidgets.QTableWidgetItem()).text().lower()
+                    for c in range(1, 4)  # Title, Artist, Album
+                )
             hidden = query not in row_text
-            self._lib_table.setRowHidden(r, hidden)
+            table.setRowHidden(r, hidden)
             shown += not hidden
         self._update_library_empty(no_matches=bool(query) and shown == 0)
 
