@@ -74,6 +74,12 @@ easing="standard", on_finished=None)``
     already carrying a different graphics effect is never clobbered: it is
     just shown or hidden.
 
+``reveal(widget, *, duration="base", on_finished=None)``
+    Fade a just-shown widget in (page and section switches, content that
+    appears). A snapshot fade: the widget is rendered once and that picture
+    fades in over the backdrop, then the live widget takes over. An opacity
+    effect alone re-renders the whole subtree every frame.
+
 ``stop(owner, key)`` stops a helper animation without running callbacks;
 ``animation_for(owner, key)`` returns it (or ``None``) for tests.
 """
@@ -360,6 +366,93 @@ def _layout_contains(layout: QtWidgets.QLayout, widget: QtWidgets.QWidget) -> bo
 # ── Reveal (page / section transitions) ──────────────────────────────────────
 
 REVEAL_KEY = "reveal"
+_OVERLAY_NAME = "adx-reveal-overlay"
+
+
+class _RevealOverlay(QtWidgets.QWidget):
+    """A picture of a widget being revealed, faded in over the backdrop.
+
+    A ``QGraphicsOpacityEffect`` on a widget re-renders the widget's whole
+    subtree into a pixmap on *every* frame (Qt caches effect sources only
+    for graphics items): ~25 ms a frame for a page of glass cards, so page
+    and section fades ran at ~40 fps. ``reveal`` instead renders the widget
+    once (``grab``), paints that picture here, a sibling stacked over it, at
+    the animated opacity, and holds the widget itself fully transparent
+    meanwhile (an opacity effect at 0 draws nothing and costs nothing). A
+    frame is then one blit. The overlay never takes input: clicks reach the
+    live widget underneath."""
+
+    def __init__(self, target: QtWidgets.QWidget) -> None:
+        super().__init__(target.parentWidget())
+        self.setObjectName(_OVERLAY_NAME)
+        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_NoSystemBackground, True)
+        self.setFocusPolicy(QtCore.Qt.FocusPolicy.NoFocus)
+        self.target = target
+        self.picture = None
+        self.opacity = 0.0
+        self.hide()
+        target.destroyed.connect(self.deleteLater)
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        if self.picture is None or self.opacity <= 0.0:
+            return
+        from gui.compat import QtGui
+
+        p = QtGui.QPainter(self)
+        try:
+            p.setOpacity(self.opacity)
+            p.drawPixmap(0, 0, self.picture)
+        finally:
+            p.end()
+
+
+class _RevealWatch(QtCore.QObject):
+    """Ends a snapshot reveal early when its widget is hidden (switched away
+    from mid-fade) or, once the picture is taken, moved or resized (the
+    picture would be stale)."""
+
+    def __init__(self, target: QtWidgets.QWidget, finish: Callable[[], None]) -> None:
+        super().__init__(target)
+        self.setObjectName(_PREFIX + "reveal-watch")
+        self._finish = finish
+        self.geometry = False
+        target.installEventFilter(self)
+
+    def eventFilter(self, obj, event) -> bool:  # noqa: N802
+        kind = event.type()
+        if kind == QtCore.QEvent.Type.Hide or (
+                self.geometry and kind in (QtCore.QEvent.Type.Resize, QtCore.QEvent.Type.Move)):
+            self._finish()
+        return False
+
+
+def _drop_watches(widget: QtWidgets.QWidget) -> None:
+    for child in widget.children():
+        if isinstance(child, _RevealWatch):
+            widget.removeEventFilter(child)
+            child.setParent(None)
+            child.deleteLater()
+
+
+def _overlay_for(widget: QtWidgets.QWidget) -> _RevealOverlay | None:
+    parent = widget.parentWidget()
+    if parent is None:
+        return None
+    for child in parent.children():
+        if isinstance(child, _RevealOverlay) and child.target is widget:
+            return child
+    return _RevealOverlay(widget)
+
+
+def _snapshot(widget: QtWidgets.QWidget, effect: QtWidgets.QGraphicsOpacityEffect):
+    """The widget as it looks at rest (its own effect off)."""
+    effect.setEnabled(False)
+    try:
+        picture = widget.grab()
+    finally:
+        effect.setEnabled(True)
+    return None if picture.isNull() else picture
 
 
 def reveal(
@@ -372,9 +465,12 @@ def reveal(
     just made current). Ends at opacity 1.0 with the effect disabled, so
     nothing renders off-screen at rest; a repeated call restarts it (one
     animation per widget, parented to it). A widget carrying another
-    graphics effect, or reduced motion, is left as is. While the fade runs,
-    Qt caches the page as one pixmap and only blends it, so a frame costs a
-    blit."""
+    graphics effect, or reduced motion, is left as is.
+
+    The fade is a snapshot (see ``_RevealOverlay``): the widget is rendered
+    once, on the first frame (after its layout and any refresh the switch
+    triggered), and that picture fades in; the live widget takes over at
+    the end, or at once if it is hidden, moved or resized meanwhile."""
     effect = widget.graphicsEffect()
     if (effect is not None and not isinstance(effect, QtWidgets.QGraphicsOpacityEffect)) \
             or _resolve(duration) == 0:
@@ -390,13 +486,72 @@ def reveal(
         widget.setGraphicsEffect(effect)
     effect.setEnabled(True)
     effect.setOpacity(0.0)
+    _drop_watches(widget)               # a restarted reveal starts clean
+    overlay = _overlay_for(widget)
+    if overlay is not None:
+        overlay.picture = None
+        overlay.opacity = 0.0
+        overlay.hide()
+    state = {"live": overlay is None}
+    watch = None
+
+    def _go_live() -> None:
+        """The live widget, from now on fading through its own effect."""
+        nonlocal watch
+        if watch is not None:
+            widget.removeEventFilter(watch)
+            watch.deleteLater()
+            watch = None
+        if overlay is not None:
+            overlay.hide()
+            overlay.picture = None
+        state["live"] = True
+
+    def _cut_short() -> None:
+        current = widget.graphicsEffect()
+        anim = animation_for(widget, REVEAL_KEY)
+        value = float(anim.currentValue()) if anim is not None and anim.currentValue() is not None \
+            else 1.0
+        _go_live()
+        if isinstance(current, QtWidgets.QGraphicsOpacityEffect):
+            current.setOpacity(value)
+
+    if overlay is not None:
+        watch = _RevealWatch(widget, _cut_short)
 
     def _value(v) -> None:
+        v = float(v)
         current = widget.graphicsEffect()
-        if isinstance(current, QtWidgets.QGraphicsOpacityEffect):
-            current.setOpacity(float(v))
+        if state["live"]:
+            if isinstance(current, QtWidgets.QGraphicsOpacityEffect):
+                current.setOpacity(v)
+            return
+        if overlay.picture is None:
+            if v <= 0.0:
+                return
+            # Lay out first: a page or panel shown a moment ago may still
+            # have a layout pass (or the refresh its switch triggered) due.
+            QtCore.QCoreApplication.sendPostedEvents(None, QtCore.QEvent.Type.LayoutRequest)
+            if state["live"]:
+                return                  # hidden in the meantime
+            if not isinstance(current, QtWidgets.QGraphicsOpacityEffect) or not widget.isVisible():
+                _go_live()
+                return
+            overlay.picture = _snapshot(widget, current)
+            if overlay.picture is None:
+                _go_live()
+                current.setOpacity(v)
+                return
+            overlay.setGeometry(widget.geometry())
+            overlay.raise_()
+            overlay.show()
+            if watch is not None:
+                watch.geometry = True
+        overlay.opacity = v
+        overlay.update()
 
     def _done() -> None:
+        _go_live()
         current = widget.graphicsEffect()
         if isinstance(current, QtWidgets.QGraphicsOpacityEffect):
             current.setOpacity(1.0)

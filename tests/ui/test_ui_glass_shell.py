@@ -529,6 +529,52 @@ def test_page_switch_stays_within_the_frame_budget(main_window, motion):
     assert eff is None or (not eff.isEnabled() and eff.opacity() == 1.0), "ends fully opaque"
 
 
+@pytest.mark.motion(time_scale=1.0)
+def test_every_page_and_section_switch_stays_within_the_frame_budget(main_window, motion, library,
+                                                                     threads):
+    """Every page from its sidebar neighbour, and every section of every
+    sectioned page from the previous one, with a library loaded (R3 audit:
+    ~10-60 ms offscreen; first visits, which build lazy content, excluded)."""
+    from gui.navigation import PAGES
+
+    main_window.set_library(str(library.root))
+    assert threads.wait_all(20_000) == []
+    pages = [p.key for p in PAGES]
+    sections = [[f"{p.key}/{s.key}" for s in p.sections] for p in PAGES if p.has_sections]
+    for key in pages + [k for group in sections for k in group]:
+        main_window._on_nav_changed(key)          # first visits build lazy content
+        assert threads.wait_all(20_000) == []
+        motion.settle(2000)
+    gaps: dict[str, float] = {}
+    for prev, key in zip([pages[-1]] + pages, pages):
+        main_window._on_nav_changed(prev)
+        motion.settle(2000)
+        with FrameGapMeter() as meter:
+            main_window._on_nav_changed(key)
+            process_events(260)
+        gaps[f"{prev} -> {key}"] = meter.max_gap_ms
+    for group in sections:
+        main_window._on_nav_changed(group[0])
+        motion.settle(2000)
+        for prev, key in zip(group, group[1:] + group[:1]):
+            with FrameGapMeter() as meter:
+                main_window._on_nav_changed(key)
+                process_events(260)
+            gaps[f"{prev} -> {key}"] = meter.max_gap_ms
+    assert threads.wait_all(20_000) == []
+    worst = max(gaps, key=gaps.get)
+    print(f"\n[perf] {len(gaps)} switches, worst {worst}: {gaps[worst]:.0f} ms")
+    over = {k: round(v) for k, v in gaps.items() if v >= SWITCH_BUDGET_MS}
+    assert not over, f"switches over the {SWITCH_BUDGET_MS} ms budget: {over}"
+    assert motion.settle(2000) == []
+    assert motion.orphans() == []
+
+
+# A switch blocks the GUI thread for at most this long (offscreen raster on a
+# shared CI runner; measured 10-60 ms locally, a real desktop is faster).
+SWITCH_BUDGET_MS = 150
+
+
 def test_reduced_motion_switches_pages_without_a_fade(main_window):
     mo.set_reduced_motion(True)
     main_window._on_nav_changed("indexer")
