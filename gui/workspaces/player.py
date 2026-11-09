@@ -31,6 +31,7 @@ from gui.playback_backend import ACTIVE_STATES, PlaybackBackend, PlaybackState
 from gui.themes.manager import get_manager
 from gui.widgets.glass import ElidedLabel, GlassCard, GlassPanel
 from gui.widgets.glass_parts import EmptyState
+from gui.widgets.glass_views import GlassRowDelegate
 from gui.widgets.glyphs import glyph_icon, set_glyph
 from gui.widgets.gradient_bg import GradientWidget
 from gui.workspaces.base import WorkspaceBase
@@ -669,9 +670,10 @@ _ROLE_PLAYING = int(QtCore.Qt.ItemDataRole.UserRole) + 4
 _COL_NUM, _COL_TITLE, _COL_ARTIST, _COL_ALBUM, _COL_TIME = range(5)
 
 
-def _row_fill(selected: bool, playing: bool, hovered: bool, *, base: bool = False):
-    """The fill of one row (``None``: nothing): selection, the playing
-    track's accent tint, hover, or (lists) the resting glass row."""
+def _row_fill(selected: bool, playing: bool, hovered: bool):
+    """The fill of one library-table row (``None``: nothing): selection, the
+    playing track's accent tint or hover. (The queue lists use the shared
+    glass row band.)"""
     from gui.themes.glass import qcolor
 
     t = _tokens()
@@ -681,9 +683,7 @@ def _row_fill(selected: bool, playing: bool, hovered: bool, *, base: bool = Fals
     if playing:
         return qcolor(t.accent, 0.16)
     if hovered:
-        return qcolor(m.pressed if base else m.hover)
-    if base:
-        return qcolor(m.hover, 0.75)
+        return qcolor(m.hover)
     return None
 
 
@@ -787,15 +787,15 @@ class _TrackTableDelegate(QtWidgets.QStyledItemDelegate):
             p.restore()
 
 
-class _QueueRowDelegate(QtWidgets.QStyledItemDelegate):
-    """Queue and Recently played rows: glass rows (34 px, radius 12, a faint
-    fill, 4 px apart) with the position (or the playing glyph), the title
-    and a muted "· artist"."""
+class _QueueRowDelegate(GlassRowDelegate):
+    """Queue and Recently played rows: the shared glass rows (34 px, radius
+    12, a faint fill; the playing track tinted with the accent) with the
+    position (or the playing glyph), the title and a muted "· artist"."""
 
     ROW_H = 38   # 34 px row + 4 px gap
 
     def __init__(self, view: QtWidgets.QListWidget, playing=None) -> None:
-        super().__init__(view)
+        super().__init__(view, row_fill=True, row_height=self.ROW_H)
         self._playing = playing or (lambda: ("", False))
 
     def sizeHint(self, option: QtWidgets.QStyleOptionViewItem,  # noqa: N802
@@ -809,16 +809,12 @@ class _QueueRowDelegate(QtWidgets.QStyledItemDelegate):
         t = _tokens()
         m = t.material
         playing = bool(index.data(_ROLE_PLAYING))
-        selected = bool(option.state & QtWidgets.QStyle.StateFlag.State_Selected)
-        hovered = bool(option.state & QtWidgets.QStyle.StateFlag.State_MouseOver)
-        row = QtCore.QRectF(option.rect).adjusted(0, 2, -1, -2)
+        selected, _hovered = self.paint_band(
+            p, option, index, tint=qcolor(t.accent, 0.16) if playing else None)
+        row = self.band_rect(option.rect)
         p.save()
         try:
             p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
-            path = QtGui.QPainterPath()
-            path.addRoundedRect(row, 12, 12)
-            p.fillPath(path, _row_fill(selected, playing, hovered, base=True))
-
             if selected:
                 ink = quiet = qcolor(m.selection_text)
             else:

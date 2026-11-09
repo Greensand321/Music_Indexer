@@ -25,12 +25,32 @@ from gui.widgets.pill import ExperimentalPill
 
 class _SectionBar(QtWidgets.QWidget):
     """The strip above a page's sections: the segmented control on the left,
-    page actions on the right. Transparent: it sits on the backdrop."""
+    page actions on the right. Transparent: it sits on the backdrop.
+
+    When the segmented control's natural width does not fit next to the
+    actions, it is switched to its compact form (``SegmentedTabBar.set_compact``)."""
 
     def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("pageSectionBar")
         self.setAutoFillBackground(False)
+        self.tabs: "SegmentedTabBar | None" = None
+        self.actions: QtWidgets.QHBoxLayout | None = None
+
+    def tab_room(self, width: int) -> int:
+        """The width the segmented control may use in a bar ``width`` wide."""
+        lay = self.layout()
+        m = lay.contentsMargins()
+        room = width - m.left() - m.right()
+        if self.actions is not None and self.actions.count():
+            room -= self.actions.sizeHint().width() + lay.spacing()
+        return room
+
+    def resizeEvent(self, event: QtGui.QResizeEvent) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        if self.tabs is not None:
+            room = self.tab_room(event.size().width())
+            self.tabs.set_compact(self.tabs.natural_width() > room, room)
 
 
 class SegmentedTabBar(QtWidgets.QTabBar):
@@ -42,13 +62,22 @@ class SegmentedTabBar(QtWidgets.QTabBar):
     ``standard`` easing), never widget geometry. Tab buttons (the
     "Experimental" pills) keep their place at the right of their segment.
     Keyboard focus draws an accent ring round the thumb.
+
+    It never scrolls sideways. When its natural width does not fit
+    (``set_compact``, decided by the section bar), the segments take less
+    padding and an "Experimental" pill becomes a small dot (its tab's
+    tooltip says what it means); if even that is too wide, the labels elide.
     """
 
     PAD = 3          # track → thumb inset
     HEIGHT = 40
+    COMPACT_PAD = 10     # text inset at each end of a compact segment
+    MIN_CHARS = 4        # an elided label keeps at least this many characters
 
     def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(parent)
+        self._compact = False
+        self._room: int | None = None
         self.setObjectName("pageSectionTabs")
         self.setDrawBase(False)
         self.setExpanding(False)
@@ -59,16 +88,149 @@ class SegmentedTabBar(QtWidgets.QTabBar):
         self._to: QtCore.QRectF | None = None
         self._hover = -1
         self._last_index = -1     # the segment the thumb rests on
+        self.setUsesScrollButtons(False)
+        self.setElideMode(QtCore.Qt.TextElideMode.ElideRight)
+        # Compact widths depend on the current section: re-lay the tabs out
+        # first, then slide the thumb to the new segment.
+        self.currentChanged.connect(self._relayout_compact)
         self.currentChanged.connect(self._slide)
 
     # ── Geometry ──────────────────────────────────────────────────────────
 
+    def is_compact(self) -> bool:
+        return self._compact
+
+    def set_compact(self, on: bool, room: int | None = None) -> None:
+        """Compact form (see the class doc). ``room``: the width the bar may
+        use; when even the compact segments are wider, the longest labels
+        give way first (the short ones keep their full text)."""
+        on = bool(on)
+        room = room if on else None
+        if on == self._compact and room == self._room:
+            return
+        if on != self._compact:
+            for i in range(self.count()):
+                button = self.tabButton(i, QtWidgets.QTabBar.ButtonPosition.RightSide)
+                if hasattr(button, "set_dot"):
+                    button.set_dot(on)
+                    button.resize(button.sizeHint())   # the tab bar places it at this size
+        self._compact, self._room = on, room
+        # Re-run the tab layout with the new hints (setElideMode always does).
+        self.setElideMode(self.elideMode())
+        self.updateGeometry()
+        self.update()
+
+    def _relayout_compact(self, _index: int = -1) -> None:
+        if self._compact and self._room is not None:
+            self.setElideMode(self.elideMode())
+
+    def label_font(self, active: bool = False) -> QtGui.QFont:
+        """The segment font: label (13 px), caption size when compact."""
+        f = QtGui.QFont(self.font())
+        if self._compact:
+            from gui.themes.tokens import TYPE
+            f.setPixelSize(TYPE["caption"].px)
+        f.setWeight(QtGui.QFont.Weight.DemiBold if active else QtGui.QFont.Weight.Medium)
+        return f
+
+    def _label_width(self, index: int, chars: int | None = None) -> int:
+        fm = QtGui.QFontMetrics(self.label_font(active=True))
+        text = self.tabText(index)
+        if chars is not None and len(text) > chars:
+            return fm.horizontalAdvance(text[:chars] + "…")
+        return fm.horizontalAdvance(text)
+
+    _BUTTON_GAP = 6      # label → tab button (the "Experimental" pill or dot)
+
+    def _button_width(self, index: int) -> int:
+        button = self.tabButton(index, QtWidgets.QTabBar.ButtonPosition.RightSide)
+        if button is None:
+            return 0
+        return button.sizeHint().width() + self._BUTTON_GAP
+
+    def natural_width(self) -> int:
+        """The full (not compact) width of every segment together."""
+        return sum(super(SegmentedTabBar, self).tabSizeHint(i).width() + 8
+                   for i in range(self.count()))
+
+    def _compact_width(self, index: int, chars: int | None = None) -> int:
+        return self._label_width(index, chars) + 2 * self.COMPACT_PAD + self._button_width(index)
+
+    def _compact_widths(self) -> list[int]:
+        """Each compact segment's width within ``room``: the current section
+        keeps its whole label when it can, then the widest others are capped
+        first (never below their elided minimum)."""
+        widths = [self._compact_width(i) for i in range(self.count())]
+        room = self._room
+        if room is None or sum(widths) <= room:
+            return widths
+        mins = [min(w, self._compact_width(i, self.MIN_CHARS)) for i, w in enumerate(widths)]
+        current = self.currentIndex()
+        if 0 <= current < len(widths) and \
+                widths[current] + sum(m for i, m in enumerate(mins) if i != current) <= room:
+            mins[current] = widths[current]
+
+        def total(cap: int) -> int:
+            return sum(max(lo, min(w, cap)) for w, lo in zip(widths, mins))
+
+        lo, hi = 0, max(widths)
+        while lo < hi:                      # the largest cap that fits
+            mid = (lo + hi + 1) // 2
+            if total(mid) <= room:
+                lo = mid
+            else:
+                hi = mid - 1
+        return [max(m, min(w, lo)) for w, m in zip(widths, mins)]
+
     def tabSizeHint(self, index: int) -> QtCore.QSize:  # noqa: N802
+        if self._compact:
+            widths = self._compact_widths()
+            if 0 <= index < len(widths):
+                return QtCore.QSize(widths[index], self.HEIGHT)
         s = super().tabSizeHint(index)
         return QtCore.QSize(s.width() + 8, self.HEIGHT)
 
     def minimumTabSizeHint(self, index: int) -> QtCore.QSize:  # noqa: N802
-        return self.tabSizeHint(index)
+        """Elided: a few characters and "…", so the bar can always shrink
+        instead of scrolling (or widening the page)."""
+        width = self._compact_width(index, self.MIN_CHARS)
+        return QtCore.QSize(min(width, self.tabSizeHint(index).width()), self.HEIGHT)
+
+    def tabLayoutChange(self) -> None:  # noqa: N802
+        """Compact: each tab button sits ``COMPACT_PAD`` from its segment's
+        end (the style's own place, half the full tab padding in, would
+        leave a gap the compact widths do not budget for)."""
+        super().tabLayoutChange()
+        if not getattr(self, "_compact", False):
+            return
+        for i in range(self.count()):
+            button = self.tabButton(i, QtWidgets.QTabBar.ButtonPosition.RightSide)
+            if button is None:
+                continue
+            rect = self.tabRect(i)
+            size = button.size()
+            button.move(rect.right() + 1 - self.COMPACT_PAD - size.width(),
+                        rect.center().y() - size.height() // 2 + 1)
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        if self._compact:
+            self.tabLayoutChange()
+        if self._thumb_anim is None or self._thumb_anim.state() != QtCore.QAbstractAnimation.State.Running:
+            self._thumb = None
+
+    def _text_rect(self, index: int) -> QtCore.QRectF:
+        """Where a segment's label is drawn (left of its tab button)."""
+        rect = QtCore.QRectF(self.tabRect(index))
+        button = self.tabButton(index, QtWidgets.QTabBar.ButtonPosition.RightSide)
+        if self._compact:
+            right = (button.geometry().left() - self._BUTTON_GAP + 1
+                     if button is not None and button.isVisible() else rect.right() - self.COMPACT_PAD)
+            return QtCore.QRectF(rect.left() + self.COMPACT_PAD, rect.top(),
+                                 max(0.0, right - rect.left() - self.COMPACT_PAD), rect.height())
+        if button is not None and button.isVisible():
+            rect.setRight(button.geometry().left() - 4)
+        return rect
 
     def _segment(self, index: int) -> QtCore.QRectF:
         return QtCore.QRectF(self.tabRect(index)).adjusted(
@@ -123,11 +285,6 @@ class SegmentedTabBar(QtWidgets.QTabBar):
         self._from = self._to = None
         self.update()
 
-    def resizeEvent(self, event) -> None:  # noqa: N802
-        super().resizeEvent(event)
-        if self._thumb_anim is None or self._thumb_anim.state() != QtCore.QAbstractAnimation.State.Running:
-            self._thumb = None
-
     # ── Hover ─────────────────────────────────────────────────────────────
 
     def mouseMoveEvent(self, event: QtGui.QMouseEvent) -> None:  # noqa: N802
@@ -171,15 +328,10 @@ class SegmentedTabBar(QtWidgets.QTabBar):
                     p.setBrush(QtCore.Qt.BrushStyle.NoBrush)
                     ring = thumb.adjusted(-1.5, -1.5, 1.5, 1.5)
                     p.drawRoundedRect(ring, ring.height() / 2, ring.height() / 2)
-            base = QtGui.QFont(self.font())
             for i in range(n):
-                rect = QtCore.QRectF(self.tabRect(i))
-                button = self.tabButton(i, QtWidgets.QTabBar.ButtonPosition.RightSide)
-                if button is not None and button.isVisible():
-                    rect.setRight(button.geometry().left() - 4)
+                rect = self._text_rect(i)
                 active = i == self.currentIndex()
-                f = QtGui.QFont(base)
-                f.setWeight(QtGui.QFont.Weight.DemiBold if active else QtGui.QFont.Weight.Medium)
+                f = self.label_font(active)
                 p.setFont(f)
                 if not self.isTabEnabled(i):
                     colour = t.text_muted
@@ -188,7 +340,12 @@ class SegmentedTabBar(QtWidgets.QTabBar):
                 else:
                     colour = t.text_secondary
                 p.setPen(QtGui.QColor(colour))
-                p.drawText(rect, int(QtCore.Qt.AlignmentFlag.AlignCenter), self.tabText(i))
+                text = self.tabText(i)
+                room = int(rect.width()) + (1 if self._compact else -8)
+                fm = QtGui.QFontMetrics(f)
+                if fm.horizontalAdvance(text) > room:
+                    text = fm.elidedText(text, QtCore.Qt.TextElideMode.ElideRight, max(room, 0))
+                p.drawText(rect, int(QtCore.Qt.AlignmentFlag.AlignCenter), text)
         finally:
             p.end()
 
@@ -233,8 +390,6 @@ class SectionedPage(QtWidgets.QWidget):
             row.setSpacing(8)
             tabs = SegmentedTabBar()
             tabs.setFont(font("label", weight=500))
-            tabs.setUsesScrollButtons(True)
-            tabs.setElideMode(QtCore.Qt.TextElideMode.ElideNone)
             tabs.setFocusPolicy(QtCore.Qt.FocusPolicy.TabFocus)
             for index, section in enumerate(spec.sections):
                 tabs.addTab(section.label)
@@ -251,6 +406,8 @@ class SectionedPage(QtWidgets.QWidget):
             self._actions_layout.setContentsMargins(0, 0, 0, 0)
             self._actions_layout.setSpacing(8)
             row.addLayout(self._actions_layout)
+            bar.tabs = tabs
+            bar.actions = self._actions_layout
             root.addWidget(bar)
             self._bar = bar
             self._tabs = tabs

@@ -17,6 +17,7 @@ from typing import Dict
 
 from gui.compat import QtCore, QtGui, QtWidgets
 from gui.themes.glass import apply_font, current_material, font, paint_surface, qcolor
+from gui.widgets.glass_parts import StepPills
 
 #: Shown on the controls the clustering engine does not implement yet. They
 #: stay visible (the redesign decides their fate) but cannot be changed, so the
@@ -161,75 +162,6 @@ def feature_toggles(parent_layout: QtWidgets.QGridLayout, columns: int = 3) -> D
     return toggles
 
 
-class _StepPills(QtWidgets.QWidget):
-    """The wizard's progress as a compact row of pills: done steps carry a
-    check, the current one is raised, the rest are muted."""
-
-    HEIGHT = 30
-
-    def __init__(self, names: tuple[str, ...], parent: QtWidgets.QWidget | None = None) -> None:
-        super().__init__(parent)
-        self._names = names
-        self._current = 0
-        self.setFont(font("caption", weight=600))
-        self.setFixedHeight(self.HEIGHT)
-        self.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Fixed)
-
-    def set_current(self, index: int) -> None:
-        self._current = index
-        self.setAccessibleName(f"Step {index + 1} of {len(self._names)}: {self._names[index]}")
-        self.update()
-
-    def current(self) -> int:
-        return self._current
-
-    def minimumSizeHint(self) -> QtCore.QSize:  # noqa: N802
-        fm = QtGui.QFontMetrics(self.font())
-        w = sum(fm.horizontalAdvance(n) + 30 for n in self._names) + 4 * (len(self._names) - 1)
-        return QtCore.QSize(min(w, 420), self.HEIGHT)
-
-    def sizeHint(self) -> QtCore.QSize:  # noqa: N802
-        return self.minimumSizeHint()
-
-    def paintEvent(self, event: QtGui.QPaintEvent) -> None:  # noqa: N802
-        from gui.themes.manager import get_manager
-        from gui.widgets.glyphs import paint_glyph
-
-        t = get_manager().current
-        m = current_material()
-        n = len(self._names)
-        gap = 4.0
-        w = (self.width() - gap * (n - 1)) / n
-        fm = QtGui.QFontMetrics(self.font())
-        p = QtGui.QPainter(self)
-        try:
-            p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
-            p.setFont(self.font())
-            for i, name in enumerate(self._names):
-                rect = QtCore.QRectF(i * (w + gap), 0, w, self.height())
-                done = i < self._current
-                check = 16 if done else 0          # room for the check glyph
-                if i == self._current:
-                    paint_surface(p, rect, m.raised, radius=rect.height() / 2)
-                    colour = qcolor(t.text_primary)
-                else:
-                    paint_surface(p, rect, m.well, radius=rect.height() / 2)
-                    colour = qcolor(t.text_secondary if done else t.text_muted)
-                label = fm.elidedText(name, QtCore.Qt.TextElideMode.ElideRight,
-                                      int(rect.width() - 14 - check))
-                tw = fm.horizontalAdvance(label)
-                x = rect.center().x() - (tw + check) / 2
-                if done:
-                    paint_glyph(p, QtCore.QRectF(x, rect.center().y() - 6, 12, 12), "check",
-                                qcolor(t.accent), weight=2.4)
-                    x += 16
-                p.setPen(colour)
-                p.drawText(QtCore.QRectF(x, rect.top(), tw + 2, rect.height()),
-                           int(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter), label)
-        finally:
-            p.end()
-
-
 class ClusteringWizardDialog(QtWidgets.QDialog):
     """Multi-step wizard for clustering configuration.
 
@@ -295,7 +227,7 @@ class ClusteringWizardDialog(QtWidgets.QDialog):
         # Title and step indicator (real state: the step being shown).
         title_layout = QtWidgets.QHBoxLayout()
         self._title = QtWidgets.QLabel("Step 1: Feature Selection")
-        self._title.setObjectName("cardTitle")
+        self._title.setObjectName("heroTitle")   # 20 px: cardTitle would force 16
         apply_font(self._title, "title")
         title_layout.addWidget(self._title, 1)
         self._step_indicator = QtWidgets.QLabel("1 of 5")
@@ -304,7 +236,7 @@ class ClusteringWizardDialog(QtWidgets.QDialog):
         title_layout.addWidget(self._step_indicator)
         layout.addLayout(title_layout)
 
-        self._steps = _StepPills(STEP_NAMES)
+        self._steps = StepPills(STEP_NAMES)
         layout.addWidget(self._steps)
 
         # Stack of pages

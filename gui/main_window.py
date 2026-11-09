@@ -199,6 +199,9 @@ class AlphaDEXWindow(QtWidgets.QMainWindow):
         self._log_drawer = LogDrawer()
         drawer_layout.addWidget(self._log_drawer)
         content_layout.addWidget(drawer_wrap)
+        # Its soft card shadow is painted by the backdrop, under everything
+        # (like the sidebar's): nothing overlaps the strip from below.
+        central.add_floating(self._log_drawer, "card")
 
         root.addWidget(content_frame, stretch=1)
 

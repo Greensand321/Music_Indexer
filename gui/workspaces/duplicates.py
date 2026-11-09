@@ -11,17 +11,19 @@ from gui.themes import motion
 from gui.themes.glass import apply_font, current_material, font, paint_surface, qcolor
 from gui.themes.manager import get_manager
 from gui.themes.tokens import RADIUS, SPACE
-from gui.widgets.dupes_parts import (
-    GlyphLabel, PathLabel, TileGrid, ToneBadge, fit_stack_to_current, hero_title, paint_tone_pill,
-    pill_font, tone_pill_size,
-)
-from gui.widgets.glass import ElidedLabel, GlassPanel
-from gui.widgets.glass_parts import EmptyState
+from gui.widgets.glass import ElidedLabel, GlassPanel, path_label
+from gui.widgets.glass_parts import EmptyState, StepPills, TileGrid, hero_title, path_well
+from gui.widgets.glass_views import GLASS_PROPERTY
 from gui.widgets.glyphs import set_glyph
+from gui.widgets.layouts import fit_stack_to_current
+from gui.widgets.pill import ToneBadge, paint_tone_pill, pill_font, tone_pill_size
 from gui.workspaces.base import WorkspaceBase
 from utils.reserved_folders import iter_library_files
 
 _AUDIO_EXTS = {'.flac', '.m4a', '.aac', '.mp3', '.wav', '.ogg', '.opus'}
+# The step pills show real state: Scan until a plan exists, Review while
+# reviewing it, Execute once it runs or ran.
+_STEPS = ("Scan", "Review", "Execute")
 
 # How many individual fingerprint failures to log before summarising.
 _MAX_LOGGED_FAILURES = 20
@@ -677,7 +679,6 @@ class DuplicatesWorkspace(WorkspaceBase):
         self._preview_html_path: str = ""
         self._last_report_path: str = ""
         self._config_snapshot: tuple[float, float, float] | None = None
-        self._step_labels: list[QtWidgets.QLabel] = []
         self._build_ui()
         self._load_thresholds_from_config(force=True)
         self._last_report_path = _latest_execution_report(library_path)
@@ -721,16 +722,9 @@ class DuplicatesWorkspace(WorkspaceBase):
         top.addWidget(self._scan_btn, 0, QtCore.Qt.AlignmentFlag.AlignTop)
         hl.addLayout(top)
 
-        lib_row = GlassPanel("well", radius=RADIUS.sm)
-        lib_row.setObjectName("dupLibraryRow")
-        lrl = QtWidgets.QHBoxLayout(lib_row)
-        lrl.setContentsMargins(12, 8, 12, 8)
-        lrl.setSpacing(SPACE.sm)
-        lrl.addWidget(GlyphLabel("folder"), 0, QtCore.Qt.AlignmentFlag.AlignVCenter)
-        self._library_lbl = PathLabel(self._library_path, "No library selected")
+        self._library_lbl = path_label(self._library_path, "No library selected")
         self._library_lbl.setObjectName("dupLibraryPath")
-        lrl.addWidget(self._library_lbl, 1)
-        hl.addWidget(lib_row)
+        hl.addWidget(path_well(self._library_lbl, object_name="dupLibraryRow"))
 
         # Scan options: the three thresholds, label above field.
         opts = QtWidgets.QHBoxLayout()
@@ -781,18 +775,9 @@ class DuplicatesWorkspace(WorkspaceBase):
         # Status: the step the flow is at, progress, and Cancel while busy.
         status = QtWidgets.QHBoxLayout()
         status.setSpacing(SPACE.sm)
-        stepper = QtWidgets.QFrame()
-        stepper.setObjectName("dupStepRow")
-        sl = QtWidgets.QHBoxLayout(stepper)
-        sl.setContentsMargins(0, 0, 0, 0)
-        sl.setSpacing(SPACE.xs)
-        for i, step in enumerate(["Scan", "Review", "Execute"]):
-            lbl = QtWidgets.QLabel(step)
-            lbl.setObjectName("stepActive" if i == 0 else "stepInactive")
-            lbl.setToolTip("Where the duplicate workflow is: scan, review the groups, execute the plan.")
-            self._step_labels.append(lbl)
-            sl.addWidget(lbl)
-        status.addWidget(stepper, 0, QtCore.Qt.AlignmentFlag.AlignVCenter)
+        # Where the duplicate workflow is: scan, review the groups, execute.
+        self._steps = StepPills(_STEPS)
+        status.addWidget(self._steps, 0, QtCore.Qt.AlignmentFlag.AlignVCenter)
         self._prog_status = QtWidgets.QLabel("Idle")
         self._prog_status.setObjectName("statusHint")
         self._prog_status.setWordWrap(True)
@@ -880,6 +865,7 @@ class DuplicatesWorkspace(WorkspaceBase):
 
         self._groups_table = QtWidgets.QTreeWidget()
         self._groups_table.setObjectName("dupGroupList")
+        self._groups_table.setProperty(GLASS_PROPERTY, "true")
         self._groups_table.setColumnCount(1)
         self._groups_table.setHeaderHidden(True)
         self._groups_table.setRootIsDecorated(False)
@@ -1033,18 +1019,10 @@ class DuplicatesWorkspace(WorkspaceBase):
         self.status_changed.emit(text, colour)
 
     def _set_step(self, index: int) -> None:
-        for i, lbl in enumerate(self._step_labels):
-            name = "stepActive" if i == index else "stepInactive"
-            if lbl.objectName() != name:
-                lbl.setObjectName(name)
-                lbl.style().unpolish(lbl)
-                lbl.style().polish(lbl)
+        self._steps.set_current(index)
 
     def _current_step(self) -> int:
-        for i, lbl in enumerate(self._step_labels):
-            if lbl.objectName() == "stepActive":
-                return i
-        return 0
+        return self._steps.current()
 
     def _refresh_buttons(self) -> None:
         busy = self._scan_running or self._exec_running

@@ -20,14 +20,14 @@ from pathlib import Path
 from gui.compat import QtCore, QtGui, QtWidgets, Signal, Slot
 from gui.themes import motion
 from gui.themes.manager import get_manager
-from gui.widgets.glass_parts import EmptyState, StatRow
+from gui.widgets.glass_parts import (
+    EmptyState, StatRow, StepPills, caption, glyph_button, hero_title, icon_button, thin_bar,
+)
+from gui.widgets.glass_views import GlassRowDelegate, style_item_view
 from gui.widgets.glyphs import glyph_icon, set_glyph
 from gui.workspaces.base import WorkspaceBase
 from gui.workspaces.label_tone import refresh_tones, set_tone
-from gui.workspaces.organize_parts import (
-    FlowLayout, GlassRowDelegate, ReflowBox, ReflowSplitter, StepPills, caption, glyph_button,
-    hero_title, icon_button, style_item_view, thin_bar,
-)
+from gui.widgets.layouts import FlowLayout, ReflowBox, ReflowSplitter
 
 # The step pills show real state (``_refresh_controls``): 0 until a scan of
 # the current folders exists, 1 while reviewing it, 2 once a plan is built
@@ -803,7 +803,7 @@ class LibrarySyncWorkspace(WorkspaceBase):
         ll.addLayout(log_head)
 
         self._log_area = QtWidgets.QPlainTextEdit()
-        self._log_area.setObjectName("organizeLog")
+        self._log_area.setObjectName("monoText")
         self._log_area.setReadOnly(True)
         self._log_area.setMinimumHeight(130)
         self._log_area.setPlaceholderText("Scan, plan and execute steps are logged here.")

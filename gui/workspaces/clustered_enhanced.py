@@ -321,7 +321,7 @@ class EnhancedClusteredWorkspace(WorkspaceBase):
             # The hero's title is the "title" role (20/650); cardTitle's
             # stylesheet size would override an explicit font.
             head = QtWidgets.QLabel(title)
-            head.setObjectName("soundMapHeroTitle")
+            head.setObjectName("heroTitle")
             apply_font(head, "title")
         else:
             head = self._make_card_title(title)

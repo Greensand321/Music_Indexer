@@ -12,9 +12,10 @@ from typing import Mapping
 from gui.compat import QtCore, QtGui, QtWidgets, Slot
 from gui.themes.glass import apply_font
 from gui.themes.tokens import RADIUS, SPACE
-from gui.widgets.dupes_parts import GlyphLabel, PathLabel, ToneBadge, hero_title
-from gui.widgets.glass import GlassCard, GlassPanel
-from gui.widgets.glyphs import set_glyph
+from gui.widgets.glass import GlassCard, GlassPanel, path_label
+from gui.widgets.glass_parts import hero_title
+from gui.widgets.glyphs import GlyphLabel, set_glyph
+from gui.widgets.pill import ToneBadge
 from utils.reserved_folders import walk_library
 
 # ── Audio extensions (same set as simple_duplicate_finder) ─────────────────
@@ -274,7 +275,7 @@ class _TrackPanel(GlassCard):
         pl.setContentsMargins(10, 6, 10, 6)
         pl.setSpacing(SPACE.xs)
         pl.addWidget(GlyphLabel("file", size=14), 0, QtCore.Qt.AlignmentFlag.AlignVCenter)
-        self._path_lbl = PathLabel("", "")
+        self._path_lbl = path_label("")
         self._path_lbl.setObjectName("mutedLabel")
         apply_font(self._path_lbl, "caption")
         pl.addWidget(self._path_lbl, 1)

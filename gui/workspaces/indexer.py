@@ -17,12 +17,12 @@ from gui.compat import QtCore, QtWidgets, Signal, Slot
 from gui.themes import motion
 from gui.themes.glass import apply_font
 from gui.themes.manager import get_manager
-from gui.widgets.glass import ElidedLabel, GlassPanel
-from gui.widgets.glass_parts import EmptyState, StatRow
-from gui.workspaces.base import WorkspaceBase
-from gui.workspaces.organize_parts import (
-    FlowLayout, StepPills, caption, glyph_button, hero_title, path_well, thin_bar,
+from gui.widgets.glass import ElidedLabel, GlassPanel, path_label
+from gui.widgets.glass_parts import (
+    EmptyState, StatRow, StepPills, caption, glyph_button, hero_title, path_well, thin_bar,
 )
+from gui.workspaces.base import WorkspaceBase
+from gui.widgets.layouts import FlowLayout
 
 # The step pills show real state: no preview → 0, a preview of this library
 # → 1 (review its report), Execute selected or running → 2.
@@ -281,7 +281,7 @@ class IndexerWorkspace(WorkspaceBase):
         self._steps = StepPills(_STEPS)
         hl.addWidget(self._steps)
 
-        self._library_lbl = ElidedLabel("", QtCore.Qt.TextElideMode.ElideMiddle)
+        self._library_lbl = path_label("", _NO_LIBRARY)
         self._library_lbl.setObjectName("indexerLibraryPath")
         hl.addWidget(path_well(self._library_lbl))
         self._show_library(self._library_path)
@@ -338,7 +338,7 @@ class IndexerWorkspace(WorkspaceBase):
         al.setContentsMargins(14, 12, 14, 12)
         al.setSpacing(8)
         al.addWidget(caption("Advanced"))
-        flow = FlowLayout(hspacing=24, vspacing=8)
+        flow = FlowLayout(spacing=24, line_spacing=8)
         self._cross_album_cb = QtWidgets.QCheckBox("Cross-album scan (Phase C)")
         self._cross_album_cb.setEnabled(False)
         self._cross_album_cb.setToolTip(_PHASE_C_TIP)
@@ -430,7 +430,7 @@ class IndexerWorkspace(WorkspaceBase):
         self._log_area.setReadOnly(True)
         self._log_area.setMinimumHeight(160)
         self._log_area.setPlaceholderText("Each run's log lines appear here.")
-        self._log_area.setObjectName("organizeLog")
+        self._log_area.setObjectName("monoText")
         ll.addWidget(self._log_area)
         cl.addWidget(log_card)
 
@@ -439,8 +439,7 @@ class IndexerWorkspace(WorkspaceBase):
     # ── Results ───────────────────────────────────────────────────────────
 
     def _show_library(self, path: str) -> None:
-        self._library_lbl.setText(path or _NO_LIBRARY)
-        self._library_lbl.setToolTip(path or "")
+        self._library_lbl.setText(path or "")
 
     def _show_results_empty(self, title: str, message: str) -> None:
         self._results_empty.set_text(title, message)

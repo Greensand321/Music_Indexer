@@ -379,8 +379,9 @@ The workspace actually has no path entry (it uses the global library), the butto
 are `DupeBuildWorker` / `DupeExecuteWorker`. It also lists Preview/Open Report/Cancel only implicitly.
 
 ## Liquid Glass restyle (R2)
-_2026-11-08. Shared parts: `gui/widgets/dupes_parts.py` (tone pills, `ToneBadge`, `GlyphLabel`, `PathLabel`,
-`TileGrid`, the hero title, dialog section cards); styles in the `[area:duplicates]` block of `gui/themes/manager.py`.
+_2026-11-08. Shared parts (since R3 in `gui/widgets/`: tone pills and `ToneBadge` in `pill.py`, `GlyphLabel` in
+`glyphs.py`, the path label in `glass.py`, `TileGrid`, `StepPills`, the hero title and dialog section cards in
+`glass_parts.py`); the one area-specific style left is in the `[area:duplicates]` block of `gui/themes/manager.py`.
 Tests: `tests/ui/test_ui_dupes_glass.py`._
 
 - **Find duplicates.** A hero card holds the library (elided path), **Find duplicates**, the three thresholds and the

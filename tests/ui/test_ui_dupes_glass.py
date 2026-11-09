@@ -184,9 +184,11 @@ def test_buttons_carry_glyphs_not_emoji(dupes, make_workspace):
 
 def test_steps_are_a_pill_row_that_follows_the_flow(dupes, dialogs, qtbot):
     ws = dupes
-    assert [lbl.text() for lbl in ws._step_labels] == ["Scan", "Review", "Execute"]
-    assert ws._step_labels[0].parentWidget().objectName() == "dupStepRow"
-    assert ws._current_step() == 0
+    from gui.widgets.glass_parts import StepPills
+
+    assert isinstance(ws._steps, StepPills), "the shared step pills"
+    assert ws._steps.steps() == ["Scan", "Review", "Execute"]
+    assert ws._current_step() == ws._steps.current() == 0
     run_scan(ws, qtbot)
     assert ws._current_step() == 1
     _unflag(ws)
@@ -216,7 +218,7 @@ def test_page_has_no_repeated_title(dupes, make_workspace):
                make_workspace("bucketing")):
         titles = [w for w in ws.findChildren(QtWidgets.QLabel) if w.objectName() == "sectionTitle"]
         assert titles == []
-        assert ws.findChild(QtWidgets.QLabel, "dupHeroTitle") is not None
+        assert ws.findChild(QtWidgets.QLabel, "heroTitle") is not None
 
 
 # ── Compare two files ────────────────────────────────────────────────────────
@@ -310,7 +312,7 @@ def test_a_dropped_audio_file_fills_its_row(compare, tmp_path):
 
 def test_launcher_card_keeps_the_pill_beside_its_headline(make_workspace):
     ws = make_workspace("fuzzy_finder")
-    title = ws.findChild(QtWidgets.QLabel, "dupHeroTitle")
+    title = ws.findChild(QtWidgets.QLabel, "heroTitle")
     assert title.text() == ws.HEADLINE != ws.TITLE
     assert ws.pill.isVisible()
     assert abs(ws.pill.geometry().center().y() - title.geometry().center().y()) < 12
@@ -323,7 +325,7 @@ def test_launcher_card_keeps_the_pill_beside_its_headline(make_workspace):
 # ── Shared parts and themes ──────────────────────────────────────────────────
 
 def test_tile_grid_reflows_into_balanced_rows(qtbot):
-    from gui.widgets.dupes_parts import TileGrid
+    from gui.widgets.glass_parts import TileGrid
 
     grid = TileGrid([(str(i), f"Tile {i}") for i in range(5)], min_tile_width=128)
     qtbot.addWidget(grid)

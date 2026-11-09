@@ -37,7 +37,7 @@ def _fault_line(library):
 
 
 def _step(ws) -> int:
-    return [lbl.objectName() for lbl in ws._step_labels].index("stepActive")
+    return ws._steps.current()
 
 
 # ── DUP-01: fresh files really get fingerprinted ─────────────────────────────

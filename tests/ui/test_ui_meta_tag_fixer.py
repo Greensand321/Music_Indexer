@@ -272,7 +272,7 @@ def test_closing_the_app_mid_scan_stops_the_worker(main_window, tmp_path, monkey
 
 def test_empty_state_before_a_scan_then_the_review_grid(make_workspace, tmp_path, monkeypatch, qtbot):
     from gui.compat import QtCore
-    from gui.workspaces.metadata_views import kind_of
+    from gui.widgets.glass_views import kind_of
 
     _library(tmp_path / "lib")
     install_source(monkeypatch, ANSWERS)

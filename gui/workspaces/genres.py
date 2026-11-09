@@ -33,9 +33,10 @@ import threading
 
 from gui.compat import QtCore, QtWidgets, Signal, Slot
 from gui.themes.manager import get_manager
-from gui.widgets.glass_parts import EmptyState, StatRow
+from gui.widgets.glass_parts import EmptyState, StatRow, card_heading, status_label, thin_bar
+from gui.widgets.glass_views import ChipList, GlassTable, GlassTree, mark, stretch_columns
 from gui.widgets.glyphs import set_glyph
-from gui.workspaces import metadata_views as mv
+from gui.widgets.layouts import FlowLayout, ViewTabs
 from gui.workspaces.base import WorkspaceBase
 
 from controllers import normalize_controller as nc
@@ -217,7 +218,7 @@ class GenresWorkspace(WorkspaceBase):
         cl = self.content_layout
         # The page header names the page and the section tabs name the view;
         # each view carries its own one-line purpose (no repeated title).
-        tabs = mv.ViewTabs()
+        tabs = ViewTabs()
         tabs.setSizePolicy(QtWidgets.QSizePolicy.Policy.Preferred, QtWidgets.QSizePolicy.Policy.Preferred)
         tabs.addTab(self._build_fill_tab(), "Fill from MusicBrainz")
         tabs.addTab(self._build_normalize_tab(), "Normalize with a mapping")
@@ -301,7 +302,7 @@ class GenresWorkspace(WorkspaceBase):
         hl.setSpacing(12)
         top = QtWidgets.QHBoxLayout()
         top.setSpacing(10)
-        heading, _t, _s = mv.card_heading(
+        heading, _t, _s = card_heading(
             "Fill missing genres",
             "Looks each track up by artist and title. Genres a file already has are "
             "kept; files with two or more are skipped.",
@@ -321,9 +322,9 @@ class GenresWorkspace(WorkspaceBase):
         top.addWidget(self._cancel_btn, 0, QtCore.Qt.AlignmentFlag.AlignTop)
         top.addWidget(self._run_btn, 0, QtCore.Qt.AlignmentFlag.AlignTop)
         hl.addLayout(top)
-        self._prog_status = mv.status_label("Idle")
+        self._prog_status = status_label("Idle")
         hl.addWidget(self._prog_status)
-        self._prog_bar = mv.thin_progress()
+        self._prog_bar = thin_bar()
         hl.addWidget(self._prog_bar)
         layout.addWidget(hero)
 
@@ -332,7 +333,7 @@ class GenresWorkspace(WorkspaceBase):
         pl = QtWidgets.QVBoxLayout(prev_card)
         pl.setContentsMargins(16, 16, 16, 16)
         pl.setSpacing(12)
-        heading, _t, _s = mv.card_heading(
+        heading, _t, _s = card_heading(
             "Proposed additions", "Apply writes exactly these rows, and logs every change.")
         pl.addWidget(heading)
         self._fill_stats = StatRow([
@@ -343,12 +344,12 @@ class GenresWorkspace(WorkspaceBase):
         pl.addWidget(self._fill_stats)
         self._fill_empty = EmptyState(*_FILL_EMPTY)
         pl.addWidget(self._fill_empty)
-        self._fill_table = mv.GlassTable(0, 4)
+        self._fill_table = GlassTable(0, 4)
         self._fill_table.setObjectName("genreFillPlan")
         self._fill_table.setHorizontalHeaderLabels(
             ["File", "Current genres", "After", "MusicBrainz match"]
         )
-        mv.stretch_columns(self._fill_table.horizontalHeader(), {
+        stretch_columns(self._fill_table.horizontalHeader(), {
             0: "stretch", 1: "stretch", 2: "stretch", 3: "stretch",
         })
         self._fill_table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -356,7 +357,7 @@ class GenresWorkspace(WorkspaceBase):
         pl.addWidget(self._fill_table)
         actions = QtWidgets.QHBoxLayout()
         actions.setSpacing(10)
-        self._fill_summary = mv.status_label(_FILL_READY)
+        self._fill_summary = status_label(_FILL_READY)
         actions.addWidget(self._fill_summary, 1)
         self._fill_apply_btn = QtWidgets.QPushButton("Apply genre additions")
         self._fill_apply_btn.setObjectName("dangerBtn")
@@ -372,7 +373,7 @@ class GenresWorkspace(WorkspaceBase):
         log_layout = QtWidgets.QVBoxLayout(log_card)
         log_layout.setContentsMargins(16, 16, 16, 16)
         log_layout.setSpacing(10)
-        log_layout.addWidget(mv.card_heading("Log")[0])
+        log_layout.addWidget(card_heading("Log")[0])
         self._log_area = QtWidgets.QPlainTextEdit()
         self._log_area.setObjectName("logText")
         self._log_area.setReadOnly(True)
@@ -399,7 +400,7 @@ class GenresWorkspace(WorkspaceBase):
         hl.setSpacing(12)
         top = QtWidgets.QHBoxLayout()
         top.setSpacing(10)
-        heading, _t, _s = mv.card_heading(
+        heading, _t, _s = card_heading(
             "Build the mapping",
             "Scan the raw genres, copy them and the prompt into an LLM, then paste "
             "the JSON it returns. Unmapped genres pass through unchanged.",
@@ -414,7 +415,7 @@ class GenresWorkspace(WorkspaceBase):
         top.addWidget(self._preview_btn, 0, QtCore.Qt.AlignmentFlag.AlignTop)
         hl.addLayout(top)
 
-        raw_row = mv.FlowLayout(spacing=8)
+        raw_row = FlowLayout(spacing=8, line_spacing=8)
         self._scan_btn = QtWidgets.QPushButton("Scan library")
         self._scan_btn.setToolTip("List every distinct genre string in the library")
         set_glyph(self._scan_btn, "search")
@@ -431,14 +432,14 @@ class GenresWorkspace(WorkspaceBase):
         for b in (self._scan_btn, self._copy_raw_btn, self._copy_prompt_btn):
             raw_row.addWidget(b)
         hl.addLayout(raw_row)
-        self._scan_status = mv.status_label("Scan to see every distinct genre string.")
+        self._scan_status = status_label("Scan to see every distinct genre string.")
         hl.addWidget(self._scan_status)
-        self._raw_list = mv.ChipList()
+        self._raw_list = ChipList()
         self._raw_list.setObjectName("genreRawList")
         self._raw_list.setVisible(False)
         hl.addWidget(self._raw_list)
 
-        map_row = mv.FlowLayout(spacing=8)
+        map_row = FlowLayout(spacing=8, line_spacing=8)
         self._load_map_btn = QtWidgets.QPushButton("Load saved mapping")
         self._load_map_btn.setToolTip("Load Docs/.genre_mapping.json (asks before replacing edits)")
         set_glyph(self._load_map_btn, "folder")
@@ -458,7 +459,7 @@ class GenresWorkspace(WorkspaceBase):
         self._map_split.setContentsMargins(0, 0, 0, 0)
         self._map_split.setSpacing(12)
         self._map_edit = QtWidgets.QPlainTextEdit()
-        self._map_edit.setObjectName("genreMapEditor")
+        self._map_edit.setObjectName("monoText")
         self._map_edit.setPlaceholderText('{\n  "rock & roll": ["Rock"],\n  "90s": ["invalid"]\n}')
         self._map_edit.setToolTip(
             'Raw genre → canonical name(s). ["invalid"] or null means "drop this — it isn\'t a genre".'
@@ -470,10 +471,10 @@ class GenresWorkspace(WorkspaceBase):
         self._map_timer.setSingleShot(True)
         self._map_timer.setInterval(150)
         self._map_timer.timeout.connect(self._refresh_map_view)
-        self._map_view = mv.GlassTree()
+        self._map_view = GlassTree()
         self._map_view.setObjectName("genreMapView")
         self._map_view.setHeaderLabels(["Raw genre", "Becomes"])
-        mv.stretch_columns(self._map_view.header(), {0: "stretch", 1: "stretch"})
+        stretch_columns(self._map_view.header(), {0: "stretch", 1: "stretch"})
         self._map_view.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.NoSelection)
         self._map_view.setMinimumHeight(180)
         self._map_view.set_placeholder(
@@ -483,7 +484,7 @@ class GenresWorkspace(WorkspaceBase):
         editors.installEventFilter(self)
         self._map_editors = editors
         hl.addWidget(editors)
-        self._map_status = mv.status_label("No mapping yet.")
+        self._map_status = status_label("No mapping yet.")
         hl.addWidget(self._map_status)
         layout.addWidget(hero)
 
@@ -492,7 +493,7 @@ class GenresWorkspace(WorkspaceBase):
         pl = QtWidgets.QVBoxLayout(prev_card)
         pl.setContentsMargins(16, 16, 16, 16)
         pl.setSpacing(12)
-        heading, _t, _s = mv.card_heading(
+        heading, _t, _s = card_heading(
             "Preview", "Every file whose genre tag would change. Apply writes exactly this list.")
         pl.addWidget(heading)
         self._norm_stats = StatRow([
@@ -501,14 +502,14 @@ class GenresWorkspace(WorkspaceBase):
         ])
         self._norm_stats.setVisible(False)
         pl.addWidget(self._norm_stats)
-        self._preview_status = mv.status_label("")
+        self._preview_status = status_label("")
         pl.addWidget(self._preview_status)
         self._norm_empty = EmptyState(*_NORMALIZE_EMPTY)
         pl.addWidget(self._norm_empty)
-        self._changes_table = mv.GlassTable(0, 3)
+        self._changes_table = GlassTable(0, 3)
         self._changes_table.setObjectName("genreNormalizePlan")
         self._changes_table.setHorizontalHeaderLabels(["File", "Current genres", "After"])
-        mv.stretch_columns(self._changes_table.horizontalHeader(), {
+        stretch_columns(self._changes_table.horizontalHeader(), {
             0: "stretch", 1: "stretch", 2: "stretch",
         })
         self._changes_table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -517,7 +518,7 @@ class GenresWorkspace(WorkspaceBase):
 
         arow = QtWidgets.QHBoxLayout()
         arow.setSpacing(10)
-        self._apply_status = mv.status_label("Apply writes exactly what the preview shows.")
+        self._apply_status = status_label("Apply writes exactly what the preview shows.")
         arow.addWidget(self._apply_status, 1)
         self._apply_cancel_btn = QtWidgets.QPushButton("Cancel")
         self._apply_cancel_btn.setFlat(True)
@@ -534,7 +535,7 @@ class GenresWorkspace(WorkspaceBase):
         arow.addWidget(self._apply_cancel_btn, 0, QtCore.Qt.AlignmentFlag.AlignVCenter)
         arow.addWidget(self._apply_btn, 0, QtCore.Qt.AlignmentFlag.AlignVCenter)
         pl.addLayout(arow)
-        self._norm_bar = mv.thin_progress()
+        self._norm_bar = thin_bar()
         pl.addWidget(self._norm_bar)
         layout.addWidget(prev_card)
         return page
@@ -582,13 +583,13 @@ class GenresWorkspace(WorkspaceBase):
         for raw, values in nc.clean_mapping(data).items():
             if values is None:
                 row = QtWidgets.QTreeWidgetItem([raw, "Drop"])
-                mv.mark(row, "pill", 1, tone="danger")
+                mark(row, "pill", 1, tone="danger")
                 row.setToolTip(1, f'"{raw}" is removed from every file (["invalid"] or null)')
             else:
                 shown = "; ".join(values)
                 row = QtWidgets.QTreeWidgetItem([raw, shown])
                 if [raw] != values:
-                    mv.mark(row, "accent", 1)
+                    mark(row, "accent", 1)
                 row.setToolTip(1, shown)
             row.setToolTip(0, raw)
             rows.append(row)
@@ -819,9 +820,9 @@ class GenresWorkspace(WorkspaceBase):
                 item = QtWidgets.QTableWidgetItem(text)
                 item.setToolTip(change.path if col == 0 else text)
                 if col == 1 or col == 3:
-                    mv.mark(item, "muted")
+                    mark(item, "muted")
                 elif col == 2:
-                    mv.mark(item, "accent")      # what would be written
+                    mark(item, "accent")      # what would be written
                 self._fill_table.setItem(row, col, item)
         n = len(plan.changes)
         problems = len(plan.errors) + len(plan.blocked)
@@ -1049,11 +1050,11 @@ class GenresWorkspace(WorkspaceBase):
                 item = QtWidgets.QTableWidgetItem(text)
                 item.setToolTip(change.path if col == 0 else text)
                 if col == 1:
-                    mv.mark(item, "muted")
+                    mark(item, "muted")
                 elif col == 2 and change.after:
-                    mv.mark(item, "accent")      # what would be written
+                    mark(item, "accent")      # what would be written
                 elif col == 2:
-                    mv.mark(item, "pill", tone="danger", pill="All dropped")
+                    mark(item, "pill", tone="danger", pill="All dropped")
                 self._changes_table.setItem(row, col, item)
 
         n = len(plan.changes)

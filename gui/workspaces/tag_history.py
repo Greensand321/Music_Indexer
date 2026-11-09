@@ -25,7 +25,8 @@ from datetime import datetime
 
 from gui.compat import QtCore, QtGui, QtWidgets, Signal, Slot
 from gui.themes.manager import get_manager
-from gui.workspaces import metadata_views as mv
+from gui.widgets.glass_parts import card_heading, status_label, thin_bar
+from gui.widgets.glass_views import GlassTree, mark, stretch_columns
 from gui.workspaces.base import WorkspaceBase
 
 _WRITE_OWNER = "Undo tag changes"
@@ -176,7 +177,7 @@ class TagHistoryWorkspace(WorkspaceBase):
         ll.setSpacing(12)
         head = QtWidgets.QHBoxLayout()
         head.setSpacing(10)
-        heading, _t, _s = mv.card_heading(
+        heading, _t, _s = card_heading(
             "Past applies",
             "Newest first. An undo is logged too, so it can be undone.",
             hero=True,
@@ -197,11 +198,11 @@ class TagHistoryWorkspace(WorkspaceBase):
         head.addWidget(self._preview_btn, 0, QtCore.Qt.AlignmentFlag.AlignTop)
         ll.addLayout(head)
 
-        self._log_list = mv.GlassTree(row_fill=True)
+        self._log_list = GlassTree(row_fill=True)
         self._log_list.setObjectName("tagHistoryLogs")
         self._log_list.setHeaderLabels(["When", "Tool", "Files", "Tags", "Status"])
         self._log_list.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
-        mv.stretch_columns(self._log_list.header(), {
+        stretch_columns(self._log_list.header(), {
             0: "contents", 1: "contents", 2: "contents", 3: "contents", 4: "stretch",
         })
         self._log_list.itemSelectionChanged.connect(self._on_log_selected)
@@ -220,7 +221,7 @@ class TagHistoryWorkspace(WorkspaceBase):
         pl = QtWidgets.QVBoxLayout(prev_card)
         pl.setContentsMargins(16, 16, 16, 16)
         pl.setSpacing(12)
-        heading, _t, self._summary_lbl = mv.card_heading("What the undo would restore", " ")
+        heading, _t, self._summary_lbl = card_heading("What the undo would restore", " ")
         self._summary_lbl.setObjectName("statusHint")
         self._summary_lbl.setText(_SELECT_HINT)
         pl.addWidget(heading)
@@ -234,21 +235,21 @@ class TagHistoryWorkspace(WorkspaceBase):
         self._preview_empty = EmptyState(*_PREVIEW_EMPTY)
         pl.addWidget(self._preview_empty)
 
-        self._preview = mv.GlassTree()
+        self._preview = GlassTree()
         self._preview.setObjectName("tagHistoryPreview")
         self._preview.setHeaderLabels(["File", "Tag", "Now", "Restores to"])
-        mv.stretch_columns(self._preview.header(), {
+        stretch_columns(self._preview.header(), {
             0: "stretch", 1: "contents", 2: "stretch", 3: "stretch",
         })
         self._preview.setVisible(False)
         pl.addWidget(self._preview)
 
-        self._prog_bar = mv.thin_progress()
+        self._prog_bar = thin_bar()
         pl.addWidget(self._prog_bar)
 
         act_row = QtWidgets.QHBoxLayout()
         act_row.setSpacing(10)
-        self._status_lbl = mv.status_label("Idle")
+        self._status_lbl = status_label("Idle")
         act_row.addWidget(self._status_lbl, 1)
         self._cancel_btn = QtWidgets.QPushButton("Cancel")
         self._cancel_btn.setFlat(True)
@@ -331,13 +332,13 @@ class TagHistoryWorkspace(WorkspaceBase):
             item.setToolTip(3, f"{info.written} tag change(s) written")
             # The tool as a pill; an apply already undone is shown muted.
             if info.reverted_by:
-                mv.mark(item, "muted")
+                mark(item, "muted")
                 item.setToolTip(4, "Already undone by " + ", ".join(
                     os.path.basename(p) for p in info.reverted_by))
             else:
-                mv.mark(item, "muted", 0)
-                mv.mark(item, "muted", 4)
-            mv.mark(item, "pill", 1, tone="text_secondary" if info.reverted_by
+                mark(item, "muted", 0)
+                mark(item, "muted", 4)
+            mark(item, "pill", 1, tone="text_secondary" if info.reverted_by
                     else _TOOL_TONES.get(info.tool, "accent"))
             self._log_list.addTopLevelItem(item)
             if info.path == keep:
@@ -429,9 +430,9 @@ class TagHistoryWorkspace(WorkspaceBase):
 
         def left_alone(row: QtWidgets.QTreeWidgetItem, path: str) -> QtWidgets.QTreeWidgetItem:
             # Muted, with a "Left alone" pill and the reason after it.
-            mv.mark(row, "muted")
+            mark(row, "muted")
             reason = row.text(3).split(": ", 1)[-1]
-            mv.mark(row, "pill_reason", 3, tone="warning", pill="Left alone", detail=reason)
+            mark(row, "pill_reason", 3, tone="warning", pill="Left alone", detail=reason)
             row.setToolTip(0, path)
             row.setToolTip(3, row.text(3))
             return row
@@ -444,8 +445,8 @@ class TagHistoryWorkspace(WorkspaceBase):
                 row.setToolTip(0, item.path)
                 row.setToolTip(2, _fmt(fr.current))
                 row.setToolTip(3, _fmt(fr.restore))
-                mv.mark(row, "muted", 2)
-                mv.mark(row, "accent", 3)          # what the undo writes back
+                mark(row, "muted", 2)
+                mark(row, "accent", 3)          # what the undo writes back
                 rows.append(row)
         for conflict in plan.conflicts:
             for name, (_written, now) in sorted(conflict.fields.items()):
@@ -460,7 +461,7 @@ class TagHistoryWorkspace(WorkspaceBase):
                 [rel(path), "", "", f"Left alone: unreadable ({why})"]), path))
         for path in plan.already_reverted:
             row = QtWidgets.QTreeWidgetItem([rel(path), "", "", "Already holds the previous values"])
-            mv.mark(row, "muted")
+            mark(row, "muted")
             row.setToolTip(0, path)
             rows.append(row)
         self._preview.addTopLevelItems(rows)

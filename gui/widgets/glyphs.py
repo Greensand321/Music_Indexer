@@ -326,3 +326,48 @@ def set_glyph(button: QtWidgets.QAbstractButton, name: str, *, role: str = "text
         get_manager().theme_changed.connect(_retint)
         _CONNECTED = True
     return button
+
+
+# ── A glyph that is not a button ──────────────────────────────────────────────
+
+class GlyphLabel(QtWidgets.QWidget):
+    """A decorative line glyph (before a path, beside a warning), tinted by
+    ``role``: "muted" (default), "text", "accent", "success", "warning" or
+    "danger". Transparent for the mouse; it reads the theme at paint time."""
+
+    def __init__(self, name: str, size: int = 16, *, role: str = "muted",
+                 parent: QtWidgets.QWidget | None = None) -> None:
+        super().__init__(parent)
+        if name not in GLYPHS:
+            raise KeyError(f"unknown glyph {name!r}")
+        self._name = name
+        self._role = role
+        self.setFixedSize(size, size)
+        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+
+    def glyph(self) -> str:
+        return self._name
+
+    def role(self) -> str:
+        return self._role
+
+    def set_glyph(self, name: str, role: str | None = None) -> None:
+        if name not in GLYPHS:
+            raise KeyError(f"unknown glyph {name!r}")
+        self._name = name
+        if role is not None:
+            self._role = role
+        self.update()
+
+    def paintEvent(self, event: QtGui.QPaintEvent) -> None:  # noqa: N802
+        from gui.themes.manager import get_manager
+
+        t = get_manager().current
+        colour = {"text": t.text_primary, "muted": t.text_secondary, "accent": t.accent,
+                  "success": t.success, "warning": t.warning, "danger": t.danger,
+                  }.get(self._role, t.text_secondary)
+        p = QtGui.QPainter(self)
+        try:
+            paint_glyph(p, QtCore.QRectF(self.rect()), self._name, colour)
+        finally:
+            p.end()
