@@ -736,3 +736,48 @@ What looks different:
 - **Activity Log strip**: now has a card shadow. It had none.
 - **`docs/gui_inventory.md` §9**: `Sidebar.exit_requested` is no longer emitted by anything. Quitting is Ctrl+Q,
   the window's close button, or the landing's quit button.
+
+### H3. Quality, motion and stability pass
+- **The animation crash, root cause.** CPython runs its cycle collector in whatever thread happens to trigger it,
+  often a worker thread. GUI objects left over from earlier windows were then destroyed in a worker. A running
+  animation unregistered from the worker's animation timer instead of the GUI thread's, and the GUI thread later
+  crashed on the dangling pointer. This was the R2 segfault (`QUnifiedTimer::updateAnimationTimers`).
+  - **Was**: automatic garbage collection.
+  - **Is**: `gui/gc_guard.py` turns automatic collection off and collects on a GUI-thread timer, using Python's own
+    thresholds. It is installed by `alpha_dex_gui.py` and for the GUI tests. The test teardown also collects once.
+- **Quitting crashed every time** (5 of 5 runs). Two shutdown hooks (the Player's event filter and the Playlists
+  repair list) raised on half-destroyed widgets, and PySide then crashed in `destroyQCoreApplication`. With
+  `crash_logger` on, every quit wrote a native crash to `faults.log`. Quitting now exits cleanly.
+- **Contrast**: an audit of text on the surfaces as they are actually painted found 48 failing pairs and fixed
+  them all. None were in Liquid Glass. `tests/test_material_contrast.py` now covers every theme, accent and Reduce
+  transparency.
+  - Light themes: success, warning and danger use the 700 shades (were 600).
+  - Dark classic themes: danger is red-400 `#f87171` (was `#ef4444`).
+  - Classic hover and pressed: a 6 % / 11 % tint of the text colour over the card. Before, Midnight's hover was its
+    card colour, so hovered rows were invisible, and Pearl's was a heavy grey.
+  - Secondary text in Midnight, Graphite and Navy is slightly lighter.
+  - New `accent_ink` for accent text on accent tints: the playing row and proposed values.
+  - The Player card's cover tint on light themes is 6 % (was 12 %).
+- **Page and section fades**: Qt re-rendered the whole page every frame of a fade, about 25 ms a frame, contrary
+  to `motion.reveal`'s docstring. A fade now renders the page once and fades that picture, then hands over to the
+  live page.
+  - Worst page-switch frame: 34 → 30 ms, p95 31 → 13 ms.
+  - Section switches: 30 → 24 ms, p95 25 → 12 ms.
+- **Player with a 5,000-track library**: Artist and Album widths are fitted to their text and capped at 27 % of
+  the table each, so long names elide. Before, they resized to contents on every change. Search reads cached text.
+  - Load: 345 → 146 ms.
+  - Sort: 167 → 58 ms.
+  - Resize: 256 → 43 ms.
+  - Each search keystroke: up to 90 → 27 ms.
+- **Reduced motion**: three animations ignored it and now honour it.
+  - The Player card's 3.5 s cover cross-fade is instant.
+  - The capsule's keyboard-mode pulse is skipped.
+  - Status-colour flashes step instead of fading.
+  - A static test makes any new animation go through the motion helpers.
+- **Flaky test**: `test_button_disabled_while_an_analysis_runs_on_another_page` waited 5 s for a first
+  scikit-learn import; it now waits 30 s.
+- **Still open**:
+  - A theme, accent or transparency switch re-polishes about 610 widgets, hidden pages included, so the worst
+    frame is 130–180 ms.
+  - Yellow and green Sound Map dots are faint on the white plot well in light themes.
+  - The 5,000-track load still sorts through Python once at the end.
