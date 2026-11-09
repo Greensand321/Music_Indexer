@@ -1065,11 +1065,15 @@ class PlayerWorkspace(WorkspaceBase):
         from gui.themes.tokens import SPACE
 
         outer = QtWidgets.QVBoxLayout(self)
-        outer.setContentsMargins(0, 0, 0, SPACE.page_bottom)
+        outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
         self._inner = GradientWidget()
         self._content_layout = QtWidgets.QVBoxLayout(self._inner)
-        self._content_layout.setContentsMargins(SPACE.gutter, SPACE.xs, SPACE.gutter, 0)
+        # The room is inside the shadow surface (as on scrolling pages): with
+        # it outside, the cards' painted shadows were cut off in a hard line
+        # where the surface ended, just above the capsule.
+        self._content_layout.setContentsMargins(SPACE.gutter, SPACE.xs, SPACE.gutter,
+                                                SPACE.page_bottom)
         self._content_layout.setSpacing(SPACE.sm)
         outer.addWidget(self._inner)
 

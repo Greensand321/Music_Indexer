@@ -487,8 +487,9 @@ def test_capsule_drives_the_player_and_floats_over_the_pages(main_window, monkey
 def test_pages_keep_room_for_the_capsule(main_window):
     for key in ("home", "indexer", "player"):
         ws = main_window._workspaces[key]
-        layout = ws.layout() if key == "player" else ws.content_layout
-        assert layout.contentsMargins().bottom() >= SPACE.page_bottom, key
+        # Inside the shadow surface on every page (the Player's cards' shadows
+        # were cut off in a hard line when its room sat outside it).
+        assert ws.content_layout.contentsMargins().bottom() >= SPACE.page_bottom, key
 
 
 def test_header_search_filters_the_player(main_window, monkeypatch):
