@@ -154,17 +154,31 @@ class ThemeTokens:
     def is_glass(self) -> bool:
         return self.material is not None and self.material.is_glass
 
+    @property
+    def accent_ink(self) -> str:
+        """The accent for *text on an accent tint* (the playing row, a
+        proposed value): the accent itself under Liquid Glass, its darker
+        shade on light themes and its lighter shade on dark classic themes,
+        so it keeps 4.5:1 where the plain accent drops to ~3.7:1."""
+        if self.is_glass:
+            return self.accent
+        return self.accent_pressed if self.variant == "light" else self.accent_hover
+
 
 # ── Helper ────────────────────────────────────────────────────────────────────
 
 def _d(**kw) -> dict:
-    """Shared dark-theme defaults — overridden per theme."""
+    """Shared dark-theme defaults — overridden per theme.
+
+    ``danger`` is red-400, not red-500: red-500 fell to 3.6:1 as text on the
+    darker cards (Graphite, Aurora), and the dark label of a danger button
+    to 3.5:1 on its hover fill (tests/test_material_contrast.py)."""
     base = dict(
         variant="dark",
         success="#22c55e",
         warning="#f59e0b",
-        danger="#ef4444",
-        danger_hover="#dc2626",
+        danger="#f87171",
+        danger_hover="#fca5a5",
         log_ok="#4ade80",
         log_warn="#fbbf24",
         log_err="#f87171",
@@ -174,13 +188,17 @@ def _d(**kw) -> dict:
 
 
 def _l(**kw) -> dict:
-    """Shared light-theme defaults."""
+    """Shared light-theme defaults.
+
+    The status colours are the 700 shades: as text on white cards (a
+    "Flagged" count, a layout warning) and under the white label of a
+    success button, the 600 shades only reached 2.9-3.3:1."""
     base = dict(
         variant="light",
-        success="#16a34a",
-        warning="#d97706",
-        danger="#dc2626",
-        danger_hover="#b91c1c",
+        success="#15803d",
+        warning="#b45309",
+        danger="#b91c1c",
+        danger_hover="#991b1b",
         log_ok="#15803d",
         log_warn="#b45309",
         log_err="#b91c1c",
@@ -197,7 +215,7 @@ MIDNIGHT = ThemeTokens(**_d(
     sidebar_accent="#58a6ff", sidebar_text="#c9d1d9", sidebar_hdr="#484f58",
     content_bg="#161b22",  card_bg="#1c2128",  card_border="#30363d",
     card_shadow="rgba(0,0,0,0.45)",
-    text_primary="#e6edf3", text_secondary="#8b949e", text_muted="#848b93",
+    text_primary="#e6edf3", text_secondary="#959da7", text_muted="#848b93",
     text_inverse="#0d1117",
     accent="#58a6ff",      accent_hover="#79b8ff",   accent_pressed="#388bfd",
     input_bg="#0d1117",    input_border="#30363d",   input_focus="#58a6ff",
@@ -233,7 +251,7 @@ GRAPHITE = ThemeTokens(**_d(
     sidebar_accent="#94a3b8", sidebar_text="#d4d4d4", sidebar_hdr="#5a5a5a",
     content_bg="#242424",  card_bg="#2e2e2e",  card_border="#404040",
     card_shadow="rgba(0,0,0,0.40)",
-    text_primary="#f0f0f0",  text_secondary="#9a9a9a", text_muted="#989898",
+    text_primary="#f0f0f0",  text_secondary="#a6a6a6", text_muted="#989898",
     text_inverse="#1c1c1c",
     accent="#94a3b8",      accent_hover="#b0bec5",   accent_pressed="#708999",
     input_bg="#1c1c1c",    input_border="#404040",   input_focus="#94a3b8",
@@ -251,7 +269,7 @@ NAVY = ThemeTokens(**_d(
     sidebar_accent="#64ffda", sidebar_text="#ccd6f6", sidebar_hdr="#495670",
     content_bg="#0e2040",  card_bg="#112240",  card_border="#233554",
     card_shadow="rgba(0,0,0,0.50)",
-    text_primary="#e6f1ff",  text_secondary="#8892b0", text_muted="#808ca2",
+    text_primary="#e6f1ff",  text_secondary="#949dba", text_muted="#808ca2",
     text_inverse="#0a192f",
     accent="#64ffda",      accent_hover="#a8ffee",   accent_pressed="#00b4d8",
     input_bg="#0a192f",    input_border="#233554",   input_focus="#64ffda",
@@ -573,8 +591,12 @@ def classic_material(t: ThemeTokens) -> Material:
         capsule=Surface(t.sidebar_bg, t.card_border, "", t.card_shadow,
                         blur=40, offset_y=12, radius=PILL),
         well=Surface(t.input_bg, t.input_border, radius=16),
-        hover=t.sidebar_hover,
-        pressed=t.sidebar_active,
+        # Like the glass overlays (white at .08 / .14 over a dark card): a
+        # faint tint of the text colour over the card. The sidebar tokens
+        # used before vanished on dark cards (Midnight's hover *is* its card
+        # colour) and were heavy on light ones (secondary text at 4.2:1).
+        hover=mix(t.card_bg, t.text_primary, 0.06),
+        pressed=mix(t.card_bg, t.text_primary, 0.11),
         selection=t.accent,
         selection_text=t.text_inverse,
         hairline=t.card_border,

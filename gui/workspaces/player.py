@@ -434,7 +434,10 @@ class _LibraryCard(GlassCard):
 
     _BLUR_DIV    = 10    # scale-down factor for a cheap blur
     _ART_OPACITY = 0.22  # glass: how strongly the art shows through
-    _CLASSIC_ART_OPACITY = 0.12   # opaque classic cards: a tint, no more
+    _CLASSIC_ART_OPACITY = 0.12   # opaque dark classic cards: a tint, no more
+    # Light cards: a dark cover at .12 turned the white card a muddy grey
+    # next to its white neighbours; half that is still a tint.
+    _LIGHT_ART_OPACITY = 0.06
     _FADE_MS     = 3500   # cross-fade duration in ms
 
     def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
@@ -539,7 +542,12 @@ class _LibraryCard(GlassCard):
             clip.addRoundedRect(rect.adjusted(1, 1, -1, -1), radius - 1, radius - 1)
             p.setClipPath(clip)
             w, h = self.width(), self.height()
-            strength = self._ART_OPACITY if m.is_glass else self._CLASSIC_ART_OPACITY
+            if m.is_glass:
+                strength = self._ART_OPACITY
+            elif _tokens().variant == "light":
+                strength = self._LIGHT_ART_OPACITY
+            else:
+                strength = self._CLASSIC_ART_OPACITY
 
             def _blit(pm: QtGui.QPixmap | None, op: float) -> None:
                 if pm is None or pm.isNull() or op <= 0.0:
@@ -758,7 +766,7 @@ class _TrackTableDelegate(QtWidgets.QStyledItemDelegate):
                 ink = qcolor(m.selection_text)
                 quiet = ink
             elif playing:
-                ink = qcolor(t.accent)
+                ink = qcolor(t.accent_ink)   # on the accent tint: 4.5:1 in every theme
                 quiet = qcolor(t.text_secondary)
             else:
                 ink = qcolor(t.text_primary)
@@ -822,7 +830,7 @@ class _QueueRowDelegate(QtWidgets.QStyledItemDelegate):
             if selected:
                 ink = quiet = qcolor(m.selection_text)
             else:
-                ink = qcolor(t.accent if playing else t.text_primary)
+                ink = qcolor(t.accent_ink if playing else t.text_primary)
                 quiet = qcolor(t.text_secondary)
 
             x = row.left() + 12
