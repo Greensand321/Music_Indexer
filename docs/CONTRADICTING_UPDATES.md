@@ -684,3 +684,55 @@ short muted line saying what it is for, and buttons use painted glyphs instead o
   rebuild timer could fire in it and start a thread that was then reported as left running.
 - **Hygiene ceilings after R2**: inline `setStyleSheet` 74 → 47, `font-size` literals 28 → 12. Hex colours stay
   at 60.
+
+## H. Polish and shared parts (redesign R3)
+
+### H1. One set of shared parts
+The seven parallel page restyles had each built private helpers. These are now one set:
+- `gui/widgets/glass_views.py`: the glass row delegate and views;
+- `gui/widgets/layouts.py`: `FlowLayout` and the reflow box and splitter;
+- `gui/widgets/glass_parts.py`: `StepPills`, `TileGrid`, `hero_title` and the builders;
+- `ToneBadge` in `gui/widgets/pill.py`;
+- `ElidedLabel.path_label()` and `PathField` for paths.
+
+`organize_parts.py`, `dupes_parts.py` and `metadata_views.py` are deleted, for a net 258 fewer lines in `gui/`.
+What looks different:
+- **Step rows**: Duplicates' plain text pills (G1) and the clustering wizard's equal segments → the shared
+  numbered step pills with chevrons. Steps farthest from the current one shrink to their number when a row is
+  short.
+- **Rows**: the Organize, Library Sync and File Cleanup preview lists go from 34 px rows with the style's per-cell
+  hairline to 38 px rows with one continuous hairline. Their background goes from `material.view` to transparent.
+  Pills inside Metadata rows are glass tone pills, not opaque blends.
+- **Hover**: Playlists and Player queue rows use the resting fill plus the hover overlay. They used the pressed
+  fill.
+- **Paths**:
+  - A path label keeps the accessible name the page gives it ("File A"); before, the path overwrote it.
+  - An empty path label paints its placeholder instead of holding it as text. The Indexer's "No library selected…"
+    is now a placeholder.
+  - Path wells all have radius 12 (were 12 or 14).
+- **FlowLayout**: an item wider than its row now shrinks to its minimum width. Organize's version never shrank
+  it.
+- **Renamed object names**:
+  - the five per-area hero title roles → `heroTitle`;
+  - `organizeLog` / `genreMapEditor` → `monoText`;
+  - `organizeStepPills` → `stepPills`;
+  - the `metaGlass` property → `glassView`.
+- The clustering wizard's title is a real 20 px. The `cardTitle` rule had held it at 16 px.
+
+### H2. Shell
+- **Header** (F3):
+  - **Was**: stats and the search pill always shown.
+  - **Is**: when narrow, the stats hide (they move into the chip's tooltip), then search becomes a round button
+    that opens the field in place. At 900 px the library chip now shows most of the path, not "…".
+- **Section tabs**:
+  - **Was**: Qt's scroll buttons.
+  - **Is**: the tabs never scroll. When short of room they tighten; the Experimental pills become small dots, with
+    "experimental" kept in the tooltip; other labels elide before the current one does.
+- **Scroll bars** (F7 promised thin bars on a transparent track): a stylesheet rule matched the scroll bars'
+  containers, so pages, the sidebar and dialogs drew Qt's old arrow-box bars. They are thin now.
+- **Midnight and other classic themes**: progress and slider grooves too close to their card colour are mixed
+  toward the secondary text colour. Midnight's groove was 1.05:1 against the card.
+- **Log boxes**: transparent viewport, padding 2/4 → 4/6 px.
+- **Activity Log strip**: now has a card shadow. It had none.
+- **`docs/gui_inventory.md` §9**: `Sidebar.exit_requested` is no longer emitted by anything. Quitting is Ctrl+Q,
+  the window's close button, or the landing's quit button.
