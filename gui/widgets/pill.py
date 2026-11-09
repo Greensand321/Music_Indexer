@@ -44,9 +44,14 @@ def pill_colours(tokens, tone: str = "warning") -> tuple[str, str, str]:
 
 
 class Pill(QtWidgets.QWidget):
-    """A compact, rounded label (e.g. "Experimental")."""
+    """A compact, rounded label (e.g. "Experimental").
+
+    ``set_dot(True)`` paints it as a small dot in its tone instead (where
+    there is no room for the word, e.g. a section tab at a narrow width);
+    the tooltip still says what it means."""
 
     _PAD_Y = 2
+    DOT = 8
 
     def __init__(
         self, text: str, tone: str = "warning", tooltip: str = "",
@@ -57,6 +62,7 @@ class Pill(QtWidgets.QWidget):
         self.setObjectName("statusPill")
         self._text = text
         self._tone = tone
+        self._dot = False
         # Compact: inside a section tab, where width is scarce.
         self._pad_x = 5 if compact else 7
         font = QtGui.QFont(self.font())
@@ -82,10 +88,22 @@ class Pill(QtWidgets.QWidget):
     def colours(self) -> tuple[str, str, str]:
         return pill_colours(get_manager().current, self._tone)
 
+    def is_dot(self) -> bool:
+        return self._dot
+
+    def set_dot(self, on: bool) -> None:
+        on = bool(on)
+        if on != self._dot:
+            self._dot = on
+            self.updateGeometry()
+            self.update()
+
     def _repaint_on_theme(self, _tokens=None) -> None:
         self.update()
 
     def sizeHint(self) -> QtCore.QSize:  # noqa: N802
+        if self._dot:
+            return QtCore.QSize(self.DOT + 2, self.DOT + 2)
         fm = QtGui.QFontMetrics(self.font())
         return QtCore.QSize(
             fm.horizontalAdvance(self._text) + 2 * self._pad_x + 2,
@@ -99,6 +117,13 @@ class Pill(QtWidgets.QWidget):
         fill, border, text = self.colours()
         p = QtGui.QPainter(self)
         p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+        if self._dot:
+            c = QtCore.QRectF(self.rect()).center()
+            p.setPen(QtCore.Qt.PenStyle.NoPen)
+            p.setBrush(QtGui.QColor(border))
+            p.drawEllipse(c, self.DOT / 2.0, self.DOT / 2.0)
+            p.end()
+            return
         rect = QtCore.QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
         radius = rect.height() / 2
         p.setPen(QtGui.QPen(QtGui.QColor(border), 1.0))
