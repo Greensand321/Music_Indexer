@@ -18,6 +18,7 @@ from gui.themes.manager import get_manager
 
 _PROP = "alphadexTone"
 _FLASH_NAME = "alphadexToneFlash"
+_STEP_NAME = "alphadexToneStep"     # reduced motion: the flash as one step
 
 # tone -> ThemeTokens attribute
 _TONE_TOKEN = {
@@ -49,6 +50,9 @@ def set_tone(widget: QtWidgets.QWidget, tone: str, tokens=None) -> None:
     anim = widget.findChild(QtCore.QVariantAnimation, _FLASH_NAME)
     if anim is not None:
         anim.stop()
+    step = widget.findChild(QtCore.QTimer, _STEP_NAME)
+    if step is not None:
+        step.stop()
     widget.setProperty(_PROP, tone)
     _paint(widget, tone_color(tone, tokens))
 
@@ -76,13 +80,31 @@ def flash_tone(
     from_tone: str,
     settle_tone: str = "secondary",
     duration: int = 1600,
-) -> QtCore.QVariantAnimation:
+) -> QtCore.QVariantAnimation | None:
     """Fade ``widget``'s text from ``from_tone`` to ``settle_tone``.
 
     One animation per widget, reused: a new flash restarts it instead of
-    starting a second one that would fight the first.
+    starting a second one that would fight the first. With reduced motion
+    the label takes its settled tone at once.
     """
+    from gui.themes import motion
+
     anim = widget.findChild(QtCore.QVariantAnimation, _FLASH_NAME)
+    if motion.duration(duration) == 0:
+        # Reduced motion: no fade. The status colour still shows, and steps
+        # to the settled tone after the same time.
+        if anim is not None:
+            anim.stop()
+        widget.setProperty(_PROP, settle_tone)
+        _paint(widget, tone_color(from_tone))
+        step = widget.findChild(QtCore.QTimer, _STEP_NAME)
+        if step is None:
+            step = QtCore.QTimer(widget)
+            step.setObjectName(_STEP_NAME)
+            step.setSingleShot(True)
+            step.timeout.connect(lambda w=widget: _paint(w, tone_color(tone_of(w) or "secondary")))
+        step.start(max(0, int(duration)))
+        return anim
     if anim is None:
         anim = QtCore.QVariantAnimation(widget)
         anim.setObjectName(_FLASH_NAME)

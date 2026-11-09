@@ -239,6 +239,11 @@ def _prepare_app(app) -> None:
     # High-DPI scaling is always on in Qt 6 (the old AA_* attributes are
     # deprecated no-ops), so nothing to set here.
 
+    # Python's cyclic GC on the GUI thread only: a collection a worker thread
+    # triggers must never delete GUI objects there (gui/gc_guard.py).
+    from gui import gc_guard
+    gc_guard.install()
+
     # Register Inter + JetBrains Mono before any widget is created
     from gui.fonts import load_fonts
     load_fonts()

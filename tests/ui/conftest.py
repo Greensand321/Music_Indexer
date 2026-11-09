@@ -84,6 +84,18 @@ if HAVE_QT:
             self.threads = threads
             self.motion = motion
 
+    @pytest.fixture(scope="session", autouse=True)
+    def _gc_on_gui_thread(qapp):
+        """Python's cyclic GC runs on the GUI thread only, as in the app
+        (``gui.gc_guard``; ``alpha_dex_gui`` installs it at start-up).
+        Without it a collection triggered by a worker thread could free an
+        earlier test's window there, mid-animation: the native segfault in
+        ``QUnifiedTimer::updateAnimationTimers`` seen during R2."""
+        from gui import gc_guard
+        guard = gc_guard.install()
+        yield guard
+        gc_guard.uninstall()
+
     @pytest.fixture(autouse=True)
     def _ui(request, qapp, qtlog, monkeypatch, _isolated_home):
         marker = request.node.get_closest_marker("motion")
@@ -139,6 +151,9 @@ if HAVE_QT:
         dialogs.uninstall()
         _reset_theme_manager()
         _reset_appearance_caches()
+        # Free this test's cycles now, on the GUI thread, with its windows
+        # already closed (``gui.gc_guard`` would otherwise collect them on
+        # its next tick, during the next test).
         gc.collect()
 
         if problems:

@@ -294,7 +294,9 @@ class GlassRowDelegate(QtWidgets.QStyledItemDelegate):
             elif selected and m.kind == "classic":
                 pen = qcolor(m.selection_text)
             else:
-                pen = qcolor(t.accent)
+                # accent_ink: the accent darkened/lightened until it reads on
+                # an accent tint (plain accent was 3.8:1 on Pearl).
+                pen = qcolor(t.accent_ink)
             painter.setPen(pen)
             painter.setFont(opt.font)
             inner = chip.adjusted(_CHIP_PAD, 0, -_CHIP_PAD + 2, 0)

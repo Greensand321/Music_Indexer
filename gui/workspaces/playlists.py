@@ -661,7 +661,12 @@ class PlaylistsWorkspace(WorkspaceBase):
         return self._mode
 
     def _update_repair_empty(self, *args) -> None:
-        self._repair_empty.setVisible(self._repair_list.count() == 0)
+        try:
+            self._repair_empty.setVisible(self._repair_list.count() == 0)
+        except RuntimeError:
+            # The list's model empties itself while the window is destroyed,
+            # after the list's C++ object is gone: nothing left to show.
+            return
 
     def _toggle_details(self, on: bool) -> None:
         from gui.widgets.glyphs import set_glyph

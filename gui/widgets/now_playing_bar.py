@@ -660,8 +660,14 @@ class NowPlayingBar(QtWidgets.QWidget):
         self.keyboard_mode_toggled.emit(checked)
 
     def _animate_kb_press(self, active: bool) -> None:
-        """Short opacity pulse when toggling keyboard mode."""
+        """Short opacity pulse when toggling keyboard mode (none with
+        reduced motion: the toggle's checked look says it all)."""
+        from gui.themes import motion
+
         self._kb_anim.stop()
+        if motion.duration(self._KB_PULSE_MS) == 0:
+            self._on_kb_pulse_finished()
+            return
         self._kb_fx.setEnabled(True)
         self._kb_fx.setOpacity(1.0)
         self._kb_anim.start()

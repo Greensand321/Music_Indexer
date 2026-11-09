@@ -261,11 +261,30 @@ def paint_glyph(painter: QtGui.QPainter, rect: QtCore.QRectF | QtCore.QRect, nam
         painter.restore()
 
 
+_ICON_CACHE: dict[tuple[str, int, int], QtGui.QIcon] = {}
+
+
 def glyph_icon(name: str, colour: QtGui.QColor | str | None = None, size: int = 16) -> QtGui.QIcon:
-    """A QIcon of glyph ``name`` in ``colour`` (default: the theme's text)."""
+    """A QIcon of glyph ``name`` in ``colour`` (default: the theme's text).
+
+    Cached per (name, colour, size): a theme switch re-tints ~370 glyph
+    buttons, which share a few dozen distinct icons (QIcon is implicitly
+    shared, so handing out the same one is safe)."""
     if colour is None:
         from gui.themes.manager import get_manager
         colour = get_manager().current.text_primary
+    key = (name, QtGui.QColor(colour).rgba(), int(size))
+    cached = _ICON_CACHE.get(key)
+    if cached is not None:
+        return QtGui.QIcon(cached)
+    if len(_ICON_CACHE) > 512:
+        _ICON_CACHE.clear()
+    icon = _render_icon(name, colour, size)
+    _ICON_CACHE[key] = icon
+    return QtGui.QIcon(icon)
+
+
+def _render_icon(name: str, colour: QtGui.QColor | str, size: int) -> QtGui.QIcon:
     icon = QtGui.QIcon()
     for dpr in (1.0, 2.0):
         pm = QtGui.QPixmap(int(size * dpr), int(size * dpr))
@@ -303,8 +322,13 @@ def _apply(button: QtWidgets.QAbstractButton) -> None:
               "accent": t.accent, "inverse": t.text_inverse,
               "danger": t.danger}.get(role, t.text_primary)
     size = int(button.property("glyphSize") or 16)
-    button.setIcon(glyph_icon(str(button.property("glyphName")), colour, size))
+    name = str(button.property("glyphName"))
+    key = f"{name}|{colour}|{size}"
+    if button.property("glyphKey") == key:
+        return            # already this icon (e.g. a theme switch that kept the colour)
+    button.setIcon(glyph_icon(name, colour, size))
     button.setIconSize(QtCore.QSize(size, size))
+    button.setProperty("glyphKey", key)
 
 
 def set_glyph(button: QtWidgets.QAbstractButton, name: str, *, role: str = "text",
@@ -319,6 +343,7 @@ def set_glyph(button: QtWidgets.QAbstractButton, name: str, *, role: str = "text
     button.setProperty("glyphName", name)
     button.setProperty("glyphRole", role)
     button.setProperty("glyphSize", size)
+    button.setProperty("glyphKey", None)     # set_glyph always (re)sets the icon
     _apply(button)
     _FOLLOWERS.add(button)
     if not _CONNECTED:
