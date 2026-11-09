@@ -8,7 +8,7 @@ from pathlib import Path
 
 from gui.compat import QtCore, QtWidgets, Signal, Slot
 from gui.themes.tokens import SPACE
-from gui.widgets.dupes_parts import hero_title, section_card
+from gui.widgets.glass_parts import hero_title, section_card
 from gui.widgets.glyphs import set_glyph
 from gui.workers import start_worker
 

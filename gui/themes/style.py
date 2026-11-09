@@ -1155,7 +1155,7 @@ class AlphaDEXStyle(QtWidgets.QProxyStyle):
 
         if name == "appTitle":
             _assign(role_font("title", weight=700))
-        elif name == "sectionTitle":
+        elif name in ("sectionTitle", "heroTitle"):
             _assign(role_font("title"))
         elif name in ("sectionSubtitle", "mutedLabel"):
             _assign(role_font("label"))

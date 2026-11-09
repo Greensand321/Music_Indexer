@@ -213,10 +213,13 @@ class TagFixerWorkspace(WorkspaceBase):
 
     def _build_ui(self) -> None:
         from gui.widgets.glass import ElidedLabel
-        from gui.widgets.glass_parts import EmptyState, StatRow
+        from gui.widgets.glass_parts import (
+            EmptyState, StatRow, card_heading, status_label, thin_bar,
+        )
+        from gui.widgets.glass_views import GlassList, GlassTree, stretch_columns
         from gui.widgets.glyphs import set_glyph
+        from gui.widgets.layouts import FlowLayout
         from gui.widgets.pill import Pill
-        from gui.workspaces import metadata_views as mv
 
         cl = self.content_layout
         cl.addWidget(self._make_subtitle(
@@ -233,7 +236,7 @@ class TagFixerWorkspace(WorkspaceBase):
 
         top = QtWidgets.QHBoxLayout()
         top.setSpacing(10)
-        heading, _title, self._reason_lbl = mv.card_heading("Tag lookup", " ", hero=True)
+        heading, _title, self._reason_lbl = card_heading("Tag lookup", " ", hero=True)
         # The sources line: which lookup services ran, and why nothing
         # matched when nothing did (filled after each scan).
         self._reason_lbl.setObjectName("statusHint")
@@ -281,7 +284,7 @@ class TagFixerWorkspace(WorkspaceBase):
 
         foot = QtWidgets.QHBoxLayout()
         foot.setSpacing(10)
-        self._prog_status = mv.status_label("Idle")
+        self._prog_status = status_label("Idle")
         foot.addWidget(self._prog_status, 1)
         self._sources_btn = QtWidgets.QPushButton("Lookup sources")
         self._sources_btn.setFlat(True)
@@ -290,7 +293,7 @@ class TagFixerWorkspace(WorkspaceBase):
         self._sources_btn.clicked.connect(self._on_open_sources)
         foot.addWidget(self._sources_btn, 0, QtCore.Qt.AlignmentFlag.AlignTop)
         hl.addLayout(foot)
-        self._prog_bar = mv.thin_progress()
+        self._prog_bar = thin_bar()
         hl.addWidget(self._prog_bar)
         cl.addWidget(hero)
 
@@ -299,7 +302,7 @@ class TagFixerWorkspace(WorkspaceBase):
         rl = QtWidgets.QVBoxLayout(review)
         rl.setContentsMargins(16, 16, 16, 16)
         rl.setSpacing(12)
-        heading, _t, _s = mv.card_heading(
+        heading, _t, _s = card_heading(
             "Review fixes", "Each row is one field of one file. Apply writes exactly the ticked rows.")
         rl.addWidget(heading)
 
@@ -313,7 +316,7 @@ class TagFixerWorkspace(WorkspaceBase):
         # Field filter: shows/hides that field's rows. Apply writes exactly
         # the rows that are visible *and* ticked.
         self._filter_row = QtWidgets.QWidget()
-        fields_row = mv.FlowLayout(self._filter_row, spacing=14)
+        fields_row = FlowLayout(self._filter_row, spacing=14, line_spacing=8)
         show = QtWidgets.QLabel("Show")
         show.setObjectName("mutedLabel")
         fields_row.addWidget(show)
@@ -331,11 +334,11 @@ class TagFixerWorkspace(WorkspaceBase):
         self._empty = EmptyState(*_EMPTY_BEFORE)
         rl.addWidget(self._empty)
 
-        self._table = mv.GlassTree()
+        self._table = GlassTree()
         self._table.setObjectName("tagFixerProposals")
         self._table.setHeaderLabels(["", "File", "Field", "Current", "Proposed", "Score"])
         self._table.headerItem().setToolTip(0, "Ticked rows are written when you apply")
-        mv.stretch_columns(self._table.header(), {
+        stretch_columns(self._table.header(), {
             0: 40, 1: "stretch", 2: "contents", 3: "stretch", 4: "stretch", 5: 64,
         })
         self._table.setSortingEnabled(True)
@@ -357,7 +360,7 @@ class TagFixerWorkspace(WorkspaceBase):
         set_glyph(self._deselect_btn, "minus")
         self._deselect_btn.setEnabled(False)
         self._deselect_btn.clicked.connect(self._on_deselect_all)
-        self._summary_lbl = mv.status_label("")
+        self._summary_lbl = status_label("")
         self._dry_run_cb = QtWidgets.QCheckBox("Dry run")
         self._dry_run_cb.setToolTip(
             "While ticked, Apply only reminds you that nothing is written. "
@@ -384,10 +387,10 @@ class TagFixerWorkspace(WorkspaceBase):
         nl = QtWidgets.QVBoxLayout(self._nomatch_card)
         nl.setContentsMargins(16, 16, 16, 16)
         nl.setSpacing(10)
-        heading, self._nomatch_title, _s = mv.card_heading(
+        heading, self._nomatch_title, _s = card_heading(
             "No match found", "Nothing is written to these files.")
         nl.addWidget(heading)
-        self._nomatch_list = mv.GlassList(max_rows=5)
+        self._nomatch_list = GlassList(max_rows=5)
         nl.addWidget(self._nomatch_list)
         self._nomatch_card.setVisible(False)
         cl.addWidget(self._nomatch_card)
@@ -397,7 +400,7 @@ class TagFixerWorkspace(WorkspaceBase):
         log_layout = QtWidgets.QVBoxLayout(log_card)
         log_layout.setContentsMargins(16, 16, 16, 16)
         log_layout.setSpacing(10)
-        log_layout.addWidget(mv.card_heading("Log")[0])
+        log_layout.addWidget(card_heading("Log")[0])
         self._log_area = QtWidgets.QPlainTextEdit()
         self._log_area.setObjectName("logText")
         self._log_area.setReadOnly(True)
@@ -549,7 +552,7 @@ class TagFixerWorkspace(WorkspaceBase):
     def _render_rows(self, keep_unticked: set | None = None) -> None:
         """(Re)build the grid from ``self._records`` via planned_changes."""
         from tag_fixer import planned_changes
-        from gui.workspaces.metadata_views import mark
+        from gui.widgets.glass_views import mark
 
         keep_unticked = keep_unticked or set()
         self._table.blockSignals(True)

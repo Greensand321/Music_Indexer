@@ -235,7 +235,7 @@ def test_unsaved_mapping_survives_a_library_switch(make_workspace, tmp_path, qtb
 
 
 def _map_rows(ws):
-    from gui.workspaces.metadata_views import PILL_ROLE, kind_of
+    from gui.widgets.glass_views import PILL_ROLE, kind_of
 
     tree = ws._map_view
     out = {}
@@ -265,7 +265,7 @@ def test_mapping_table_shows_drop_values_as_a_pill(make_workspace, tmp_path, qtb
 
 
 def test_preview_card_counts_and_marks_what_changes(make_workspace, tmp_path, qtbot):
-    from gui.workspaces.metadata_views import kind_of
+    from gui.widgets.glass_views import kind_of
 
     build_genre_library(tmp_path / "lib", [
         ("m.flac", "A", "T1", ["rock", "90s"]),

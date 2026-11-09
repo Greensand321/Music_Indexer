@@ -38,7 +38,7 @@ PREVIOUS_THEME_KEY = "theme_before_glass"
 # AlphaDEXStyle paints the widgets (buttons, fields, checkboxes, tabs,
 # scrollbars, sliders, progress bars). This stylesheet covers what a
 # QProxyStyle cannot reach: tooltips, text areas, item views and headers,
-# menus and popups, card frames, the stepper and the typography roles.
+# menus and popups, card frames, the glass item views and the typography roles.
 #
 # The stylesheet is STATIC: it is installed once and never replaced. Any
 # change to the application stylesheet makes Qt re-polish every widget in
@@ -207,26 +207,6 @@ QFrame#actionCard[glass="true"] {{
     border: none;
 }}
 
-/* ── Workflow stepper ── */
-QFrame#workflowStepper {{
-    background: palette(alternate-base);
-    border: 1px solid palette(light);
-    border-radius: 12px;
-}}
-QLabel#stepActive {{
-    color: palette(link);
-    font-weight: 700;
-    font-size: {caption}px;
-}}
-QLabel#stepInactive {{
-    color: palette(placeholder-text);
-    font-size: {caption}px;
-}}
-QLabel#stepArrow {{
-    color: palette(placeholder-text);
-    font-size: {caption}px;
-}}
-
 /* ── Workspace typography (one ramp: gui.themes.tokens.TYPE) ── */
 QLabel#sectionTitle {{
     color: palette(window-text);
@@ -242,14 +222,12 @@ QLabel#cardTitle {{
     font-weight: 600;
     font-size: {heading}px;
 }}
-QLabel#phaseLabel {{
+/* A hero card's title (gui.widgets.glass_parts.hero_title): the title role.
+   The size lives here so no other rule (cardTitle's 16 px) can override the
+   explicit 20 / 650 font; the family and weight come from that font. */
+QLabel#heroTitle {{
     color: palette(window-text);
-    font-weight: 600;
-    font-size: {label}px;
-}}
-QLabel#phaseDesc {{
-    color: palette(placeholder-text);
-    font-size: {caption}px;
+    font-size: {title}px;
 }}
 QLabel#statusHint {{
     color: palette(placeholder-text);
@@ -272,100 +250,17 @@ QLabel#sidebarSectionLabel {{
     color: palette(placeholder-text);
 }}
 
-/* ── Page roles (R2). One block per area so parallel edits merge cleanly;
-   add rules for your area's objectNames inside your own block only. ── */
-
-/* [area:home] begin */
-
-/* [area:home] end */
-
-
-/* [area:organize] begin */
-/* Hero card titles (font: the title role, set in code). */
-QLabel#organizeHeroTitle {{
-    color: palette(window-text);
+/* ── Glass item views and text (gui/widgets/glass_views.py, glass_parts.py) ──
+   Item views marked glassView="true" sit transparent on their card: their
+   delegate paints the rows. */
+QAbstractItemView[glassView="true"] {{
+    background: transparent;
 }}
-/* Run logs on the Organize pages and Exports: mono, on the normal field. */
-QPlainTextEdit#organizeLog {{
+/* Mono text on the normal field (run logs, the genre mapping editor). */
+QPlainTextEdit#monoText {{
     font-family: {MONO_STACK};
     font-size: {caption}px;
 }}
-/* [area:organize] end */
-
-
-/* [area:duplicates] begin */
-/* Find duplicates: the Scan · Review · Execute steps as a compact pill row. */
-QFrame#dupStepRow QLabel#stepActive, QFrame#dupStepRow QLabel#stepInactive {{
-    border-radius: 9px;
-    padding: 3px 10px;
-    font-size: {caption}px;
-}}
-QFrame#dupStepRow QLabel#stepActive {{
-    background: palette(highlight);
-    color: palette(highlighted-text);
-    border: 1px solid palette(link);
-    font-weight: 600;
-}}
-QFrame#dupStepRow QLabel#stepInactive {{
-    background: palette(midlight);
-    color: palette(placeholder-text);
-    border: 1px solid palette(light);
-}}
-/* The group list paints its own glass rows (a delegate): no view fill. */
-QTreeWidget#dupGroupList {{
-    background: transparent;
-    border: none;
-}}
-/* Hero card titles (title role font; cardTitle's 16 px rule would override it). */
-QLabel#dupHeroTitle {{
-    color: palette(window-text);
-}}
-/* Prototype launchers: the "not ready to test" note inside its well. */
-QLabel#experimentalNote {{
-    color: palette(window-text);
-}}
-/* [area:duplicates] end */
-
-
-/* [area:metadata] begin */
-QAbstractItemView[metaGlass="true"] {{
-    background: transparent;
-}}
-QLabel#metaHeroTitle {{
-    color: palette(window-text);
-}}
-QPlainTextEdit#genreMapEditor {{
-    font-family: {MONO_STACK};
-    font-size: {caption}px;
-}}
-/* [area:metadata] end */
-
-
-/* [area:player] begin */
-/* Player + Playlists item views sit on their glass card: no view fill (the
-   row delegates paint hover, selection and the playing row). */
-QTableWidget#playerLibraryTable, QListWidget#playerQueueList,
-QListWidget#playerRecentList, QListWidget#playlistResults,
-QListWidget#playlistRepairList {{
-    background: transparent;
-}}
-/* [area:player] end */
-
-
-/* [area:sound_map] begin */
-QLabel#soundMapHeroTitle, QLabel#clusterLegendName, QLabel#clusterLegendCount {{
-    color: palette(window-text);
-}}
-QLabel#clusterLegendName:disabled, QLabel#clusterLegendCount:disabled {{
-    color: palette(placeholder-text);
-}}
-QLabel#clusterPlaylistsHeader, QLabel#qualityReportNote {{
-    color: palette(shadow);
-}}
-/* [area:sound_map] end */
-
-
-/* [area:takeaway_settings] begin */
 /* Text on a painted well (a GlassPanel "well" behind it): the panel draws
    the rounded surface, so the editor itself stays transparent (an editor's
    own background fills its viewport square, past its rounded border). */
@@ -378,7 +273,39 @@ QPlainTextEdit#wellMono {{
     font-family: {MONO_STACK};
     font-size: {caption}px;
 }}
-/* [area:takeaway_settings] end */
+
+/* ── Area roles: only what one area really needs. Add an area's rules to its
+   own block, so parallel edits merge cleanly. ── */
+
+/* [area:duplicates] begin */
+/* Prototype launchers: the "not ready to test" note inside its well. */
+QLabel#experimentalNote {{
+    color: palette(window-text);
+}}
+/* [area:duplicates] end */
+
+
+/* [area:player] begin */
+/* The Player's item views sit on their glass card: no view fill (the row
+   delegates paint hover, selection and the playing row). */
+QTableWidget#playerLibraryTable, QListWidget#playerQueueList,
+QListWidget#playerRecentList {{
+    background: transparent;
+}}
+/* [area:player] end */
+
+
+/* [area:sound_map] begin */
+QLabel#clusterLegendName, QLabel#clusterLegendCount {{
+    color: palette(window-text);
+}}
+QLabel#clusterLegendName:disabled, QLabel#clusterLegendCount:disabled {{
+    color: palette(placeholder-text);
+}}
+QLabel#clusterPlaylistsHeader, QLabel#qualityReportNote {{
+    color: palette(shadow);
+}}
+/* [area:sound_map] end */
 
 
 /* ── Menus and the menu bar (popups: opaque) ── */
@@ -421,38 +348,24 @@ def _residual_qss(t: ThemeTokens | None = None) -> str:
 # Widgets whose look comes from a colour rule above. Only these need a
 # re-polish when the palette changes (QSS resolves palette() at polish time).
 _THEMED_OBJECT_NAMES = frozenset({
-    "workspaceCard", "headerCard", "actionCard", "workflowStepper",
-    "stepActive", "stepInactive", "stepArrow", "sectionTitle",
-    "sectionSubtitle", "cardTitle", "phaseLabel", "phaseDesc",
+    "workspaceCard", "headerCard", "actionCard", "sectionTitle",
+    "sectionSubtitle", "cardTitle", "heroTitle",
     "statusHint", "notesHint", "logText",
     "mutedLabel", "headerStats", "capsuleMeta", "capsuleTime", "landingHint",
     "landingFolderStats", "pageTitle", "brandName", "capsuleTitle", "landingTitle",
     "sidebarSectionLabel",
+    # Message-box labels (the dialog rules above).
+    "qt_msgbox_label", "qt_msgbox_informativelabel",
 }) | frozenset().union(*(
-    # Page roles (R2): add an area's objectNames to its own set only, so
-    # parallel edits merge cleanly. Keep in step with the QSS blocks above.
-
-    # [area:home]
-    frozenset(),
-
-    # [area:organize]
-    frozenset({"organizeHeroTitle"}),
+    # Area roles: add an area's objectNames to its own set only, so parallel
+    # edits merge cleanly. Keep in step with the QSS blocks above.
 
     # [area:duplicates]
-    frozenset({"dupStepRow", "dupGroupList", "dupHeroTitle", "experimentalNote"}),
-
-    # [area:metadata]
-    frozenset({"metaHeroTitle", "genreMapEditor"}),
-
-    # [area:player]
-    frozenset(),
+    frozenset({"experimentalNote"}),
 
     # [area:sound_map]
-    frozenset({"soundMapHeroTitle", "clusterLegendName", "clusterLegendCount",
-               "clusterPlaylistsHeader", "qualityReportNote"}),
-
-    # [area:takeaway_settings]  (message-box labels: the global dialog rules)
-    frozenset({"qt_msgbox_label", "qt_msgbox_informativelabel"}),
+    frozenset({"clusterLegendName", "clusterLegendCount", "clusterPlaylistsHeader",
+               "qualityReportNote"}),
 ))
 _THEMED_TYPES = (
     QtWidgets.QAbstractScrollArea,   # item views, headers, text edits, scroll areas

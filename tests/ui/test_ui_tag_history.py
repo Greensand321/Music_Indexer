@@ -160,7 +160,7 @@ def test_glass_rows_pills_and_left_alone_rows(make_workspace, changed_library, d
     """Liquid Glass (R2): the tool is a pill, "Left alone" rows are muted with
     a pill and their reason, the value to restore is accent-tinted, and the
     preview starts as an empty state."""
-    from gui.workspaces.metadata_views import DETAIL_ROLE, PILL_ROLE, TONE_ROLE, kind_of
+    from gui.widgets.glass_views import DETAIL_ROLE, PILL_ROLE, TONE_ROLE, kind_of
     from _helpers.meta_tags import set_genres
 
     root, files, _log = changed_library

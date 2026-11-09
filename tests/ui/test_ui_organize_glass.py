@@ -158,16 +158,17 @@ def test_plan_stats_follow_the_plan_and_hide_when_it_goes_stale(
 
 
 def test_sync_lists_are_glass_item_views(make_workspace):
-    from gui.workspaces.organize_parts import ROW_HEIGHT, GlassRowDelegate
+    from gui.widgets.glass_views import GLASS_PROPERTY, ROW_HEIGHT, GlassRowDelegate
 
     ws = make_workspace("library_sync")
     for view in (ws._incoming_table, ws._existing_table):
         assert isinstance(view.itemDelegate(), GlassRowDelegate)
+        assert view.property(GLASS_PROPERTY) == "true", "transparent on its card"
         assert not view.alternatingRowColors()
         assert view.styleSheet() == ""
         view.addTopLevelItem(QtWidgets.QTreeWidgetItem(["a track.flac", "NEW", "1.000", "", ""]))
         assert view.sizeHintForRow(0) >= ROW_HEIGHT
-    assert ws._log_area.objectName() == "organizeLog" and ws._log_area.styleSheet() == ""
+    assert ws._log_area.objectName() == "monoText" and ws._log_area.styleSheet() == ""
 
 
 # ── Indexer: hero, step pills, stats, empty state ─────────────────────────────

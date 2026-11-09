@@ -10,10 +10,11 @@ from gui.themes import motion
 from gui.themes.glass import apply_font
 from gui.themes.manager import get_manager
 from gui.themes.tokens import RADIUS, SPACE
-from gui.widgets.dupes_parts import PathLabel, TileGrid, ToneBadge, fit_stack_to_current, hero_title
-from gui.widgets.glass import GlassPanel
-from gui.widgets.glass_parts import EmptyState
+from gui.widgets.glass import GlassPanel, path_label
+from gui.widgets.glass_parts import EmptyState, TileGrid, hero_title
 from gui.widgets.glyphs import set_glyph
+from gui.widgets.layouts import fit_stack_to_current
+from gui.widgets.pill import ToneBadge
 from gui.workspaces.base import WorkspaceBase
 
 # What the Duplicate Finder passes to chromaprint_utils.fingerprint_fpcalc
@@ -235,7 +236,7 @@ class _FileRow(GlassPanel):
         lay.setSpacing(SPACE.sm)
         badge = ToneBadge(letter, "accent", weight=700, pad_x=9)
         lay.addWidget(badge, 0, QtCore.Qt.AlignmentFlag.AlignVCenter)
-        self.path_label = PathLabel("", "No file chosen — Browse, or drop an audio file here")
+        self.path_label = path_label("", "No file chosen — Browse, or drop an audio file here")
         self.path_label.setAccessibleName(f"File {letter}")
         lay.addWidget(self.path_label, 1)
         browse = QtWidgets.QPushButton("Browse…")

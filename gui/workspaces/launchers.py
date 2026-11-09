@@ -16,9 +16,9 @@ from __future__ import annotations
 from gui.compat import QtCore, QtWidgets, Slot
 from gui.themes.glass import apply_font
 from gui.themes.tokens import RADIUS, SPACE
-from gui.widgets.dupes_parts import GlyphLabel, hero_title
 from gui.widgets.glass import GlassPanel
-from gui.widgets.glyphs import set_glyph
+from gui.widgets.glass_parts import hero_title
+from gui.widgets.glyphs import GlyphLabel, set_glyph
 from gui.widgets.pill import ExperimentalPill
 from gui.workspaces.base import WorkspaceBase
 

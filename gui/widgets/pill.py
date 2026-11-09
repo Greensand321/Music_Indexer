@@ -1,13 +1,22 @@
-"""Small rounded status pills, painted from the active theme's tokens.
+"""Small rounded pills, painted from the active theme's tokens.
 
-``ExperimentalPill`` marks a prototype (Fuzzy finder, Scan engine, Bucketing
-on the Duplicates page): it is offered so the owner can see where it would
-live, but it is not ready to test.
+Two looks, one module:
 
-Colours come only from tokens (no literals): the fill is the tone colour
-blended over ``card_bg``, the border is the tone colour itself and the text
-is ``text_primary``, so the label stays readable in every theme (checked by
-``tests/test_design_contrast.py``).
+``Pill`` / ``ExperimentalPill``
+    A fixed label on an opaque fill: the tone colour blended over
+    ``card_bg``, the tone colour as the border, ``text_primary`` text, so it
+    stays readable in every theme (checked by ``tests/test_design_contrast.py``).
+    ``ExperimentalPill`` marks a prototype (Fuzzy finder, Scan engine,
+    Bucketing): offered so the owner can see where it would live, not ready
+    to test. ``compact=True`` paints it as a small dot (section tabs at
+    narrow widths); the tooltip still says what it means.
+
+``ToneBadge`` / ``paint_tone_pill`` / ``tone_pill_size`` / ``pill_font``
+    The glass pill (a translucent tone fill, a tone border, primary text;
+    neutral is the material's well) whose text and tone change in place:
+    verdicts, "Kept" / "Would be quarantined", "Cannot be undone", and the
+    pills item delegates paint inside rows (``gui.widgets.glass_views``).
+    Tones: "" (neutral), "accent", "success", "warning", "danger".
 """
 from __future__ import annotations
 
@@ -113,3 +122,114 @@ class ExperimentalPill(Pill):
     ) -> None:
         super().__init__("Experimental", "warning", EXPERIMENTAL_TIP, parent,
                          clickthrough=clickthrough, compact=compact)
+
+
+# ── Glass tone pills (ToneBadge, and pills painted inside rows) ──────────────
+
+TONES = ("", "accent", "success", "warning", "danger")
+
+_TONE_PAD_X = 8
+_TONE_PAD_Y = 2
+
+
+def tone_colours(tone: str) -> tuple[QtGui.QColor, QtGui.QColor, QtGui.QColor]:
+    """``(fill, border, text)`` of a glass pill in ``tone`` for the active theme."""
+    from gui.themes.glass import current_material, qcolor
+
+    t = get_manager().current
+    value = {"accent": t.accent, "success": t.success, "warning": t.warning,
+             "danger": t.danger}.get(tone)
+    if value is None:
+        m = current_material()
+        return qcolor(m.well.fill), qcolor(m.well.border or m.hairline), qcolor(t.text_secondary)
+    return qcolor(value, 0.18), qcolor(value, 0.45), qcolor(t.text_primary)
+
+
+def pill_font() -> QtGui.QFont:
+    """The small pill font: caption size, semibold, no extra tracking."""
+    from gui.themes.glass import font
+
+    return font("caption", weight=600)
+
+
+def tone_pill_size(text: str, font: QtGui.QFont, *, pad_x: int = _TONE_PAD_X,
+                   pad_y: int = _TONE_PAD_Y) -> QtCore.QSize:
+    fm = QtGui.QFontMetrics(font)
+    return QtCore.QSize(fm.horizontalAdvance(text) + 2 * pad_x + 2, fm.height() + 2 * pad_y + 2)
+
+
+def paint_tone_pill(painter: QtGui.QPainter, rect: QtCore.QRect | QtCore.QRectF, text: str,
+                    tone: str, font: QtGui.QFont, *, opacity: float = 1.0) -> None:
+    """Paint a glass pill filling ``rect`` (fully rounded), ``text`` centred
+    and elided to fit."""
+    fill, border, colour = tone_colours(tone)
+    r = QtCore.QRectF(rect).adjusted(0.5, 0.5, -0.5, -0.5)
+    radius = r.height() / 2
+    painter.save()
+    try:
+        painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+        if opacity < 1.0:
+            painter.setOpacity(painter.opacity() * opacity)
+        painter.setPen(QtGui.QPen(border, 1.0))
+        painter.setBrush(fill)
+        painter.drawRoundedRect(r, radius, radius)
+        painter.setPen(colour)
+        painter.setFont(font)
+        fm = QtGui.QFontMetrics(font)
+        painter.drawText(QtCore.QRectF(rect), int(QtCore.Qt.AlignmentFlag.AlignCenter),
+                         fm.elidedText(text, QtCore.Qt.TextElideMode.ElideRight,
+                                       max(0, int(r.width()) - 2 * _TONE_PAD_X)))
+    finally:
+        painter.restore()
+
+
+class ToneBadge(QtWidgets.QWidget):
+    """A glass pill whose text and tone change in place."""
+
+    def __init__(self, text: str = "", tone: str = "", *, role: str = "caption",
+                 weight: int = 600, pad_x: int = _TONE_PAD_X, pad_y: int = _TONE_PAD_Y,
+                 parent: QtWidgets.QWidget | None = None) -> None:
+        from gui.themes.glass import font
+
+        super().__init__(parent)
+        self._text = text
+        self._tone = tone if tone in TONES else ""
+        self._font = font(role, weight=weight)
+        self._pad = (pad_x, pad_y)
+        self.setSizePolicy(QtWidgets.QSizePolicy.Policy.Fixed, QtWidgets.QSizePolicy.Policy.Fixed)
+        self.setAccessibleName(text)
+
+    def text(self) -> str:
+        return self._text
+
+    def tone(self) -> str:
+        return self._tone
+
+    def set_text(self, text: str, tone: str | None = None) -> None:
+        self._text = text
+        if tone is not None:
+            self._tone = tone if tone in TONES else ""
+        self.setAccessibleName(text)
+        self.updateGeometry()
+        self.update()
+
+    def set_tone(self, tone: str) -> None:
+        self._tone = tone if tone in TONES else ""
+        self.update()
+
+    def sizeHint(self) -> QtCore.QSize:  # noqa: N802
+        if not self._text:
+            return QtCore.QSize(0, 0)
+        return tone_pill_size(self._text, self._font, pad_x=self._pad[0], pad_y=self._pad[1])
+
+    def minimumSizeHint(self) -> QtCore.QSize:  # noqa: N802
+        return self.sizeHint()
+
+    def paintEvent(self, event: QtGui.QPaintEvent) -> None:  # noqa: N802
+        if not self._text:
+            return
+        p = QtGui.QPainter(self)
+        try:
+            paint_tone_pill(p, self.rect(), self._text, self._tone, self._font)
+        finally:
+            p.end()

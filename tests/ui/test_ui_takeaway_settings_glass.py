@@ -137,7 +137,9 @@ def test_path_field_behaves_like_a_line_edit(qtbot):
     field.clear_button.click()
     assert field.text() == "" and seen[-1] == ""
     assert not field.clear_button.isVisibleTo(field)
-    assert field.label.text() == "Nothing yet"
+    assert field.label.text() == "" and field.label.placeholder() == "Nothing yet", \
+        "an empty field paints its placeholder"
+    assert field.toolTip() == "Nothing yet"
     field.button.click()
     qtbot.mouseClick(field, QtCore.Qt.MouseButton.LeftButton, pos=QtCore.QPoint(30, 20))
     assert browse == [1, 1]

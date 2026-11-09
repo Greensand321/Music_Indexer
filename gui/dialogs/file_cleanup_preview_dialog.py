@@ -15,9 +15,9 @@ import os
 
 from gui.compat import QtCore, QtWidgets
 from gui.widgets.glass import GlassPanel
-from gui.widgets.glass_parts import StatRow
+from gui.widgets.glass_parts import StatRow, caption, hero_title
+from gui.widgets.glass_views import style_item_view
 from gui.widgets.glyphs import set_glyph
-from gui.workspaces.organize_parts import caption, hero_title, style_item_view
 
 _RESERVED_NOTE = (
     "Reserved folders (Quarantine, Trash, Docs, Playlists, Not Sorted, Manual Review) "

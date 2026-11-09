@@ -4,8 +4,9 @@
 shows a chosen path (Mirror's source and destination, the default library in
 Settings, the file a Mirror → Verify tester opened):
 
-* the path is an ``ElidedLabel`` with a *middle* elide, so a long path never
-  widens or wraps its card; the full path is the tooltip;
+* the path is the shared path label (``gui.widgets.glass.path_label``: a
+  *middle* elide, so a long path never widens or wraps its card, the full
+  path in the tooltip, the placeholder painted muted while it is empty);
 * a round glyph button (``folder`` by default) asks to choose another one —
   the field only emits ``browse_requested``: the owner opens the dialog, so
   tests keep answering ``QFileDialog`` through the ``dialogs`` fixture;
@@ -20,7 +21,7 @@ time; a theme switch only needs a repaint.
 from __future__ import annotations
 
 from gui.compat import QtCore, QtGui, QtWidgets, Signal
-from gui.widgets.glass import ElidedLabel
+from gui.widgets.glass import path_label
 from gui.widgets.glyphs import set_glyph
 
 
@@ -48,7 +49,7 @@ class PathField(QtWidgets.QWidget):
         lay = QtWidgets.QHBoxLayout(self)
         lay.setContentsMargins(16, 4, 4, 4)
         lay.setSpacing(2)
-        self.label = ElidedLabel("", QtCore.Qt.TextElideMode.ElideMiddle)
+        self.label = path_label("", placeholder)
         self.label.setObjectName("pathFieldText")
         self.label.setAttribute(QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         lay.addWidget(self.label, 1)
@@ -104,15 +105,9 @@ class PathField(QtWidgets.QWidget):
     # ── Internals ─────────────────────────────────────────────────────────
 
     def _sync(self) -> None:
-        role = QtGui.QPalette.ColorRole
-        if self._text:
-            self.label.setText(self._text)
-            self.label.setForegroundRole(role.WindowText)
-            self.setToolTip(self._text)
-        else:
-            self.label.setText(self._placeholder)
-            self.label.setForegroundRole(role.PlaceholderText)
-            self.setToolTip(self._placeholder)
+        self.label.set_placeholder(self._placeholder)
+        self.label.setText(self._text)
+        self.setToolTip(self._text or self._placeholder)
         self.label.setToolTip(self.toolTip())
         if self.clear_button is not None:
             self.clear_button.setVisible(bool(self._text))

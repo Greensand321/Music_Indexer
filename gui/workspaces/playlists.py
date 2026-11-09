@@ -14,6 +14,7 @@ from pathlib import Path
 
 from gui.compat import QtCore, QtGui, QtWidgets, Signal, Slot
 from gui.themes.manager import get_manager
+from gui.widgets.glass_views import ROW_HEIGHT, GlassRowDelegate, style_item_view
 from gui.workspaces.base import WorkspaceBase
 
 _AUDIO_EXTS = {".mp3", ".flac", ".m4a", ".aac", ".ogg", ".wav", ".opus"}
@@ -256,12 +257,16 @@ _ROLE_BADGE = int(QtCore.Qt.ItemDataRole.UserRole) + 2
 _ROLE_TONE = int(QtCore.Qt.ItemDataRole.UserRole) + 3
 
 
-class _PlanRowDelegate(QtWidgets.QStyledItemDelegate):
-    """A planned playlist as a glass row: the name, then a small status
-    pill ("new", "replace", "written", …) and a muted detail on the right.
-    Also used, without pills, for the repair list."""
+class _PlanRowDelegate(GlassRowDelegate):
+    """A planned playlist as a glass row (the shared row band: resting fill,
+    hover, selection): the name, then a small status pill ("new",
+    "replace", "written", …) and a muted detail on the right. Also used,
+    without pills, for the repair list."""
 
-    ROW_H = 38   # 34 px row + 4 px gap
+    ROW_H = ROW_HEIGHT   # a 34 px band with a 2 px gap above and below
+
+    def __init__(self, view: QtWidgets.QAbstractItemView) -> None:
+        super().__init__(view, row_fill=True)
 
     def sizeHint(self, option: QtWidgets.QStyleOptionViewItem,  # noqa: N802
                  index: QtCore.QModelIndex) -> QtCore.QSize:
@@ -274,17 +279,11 @@ class _PlanRowDelegate(QtWidgets.QStyledItemDelegate):
 
         t = get_manager().current
         m = t.material
-        selected = bool(option.state & QtWidgets.QStyle.StateFlag.State_Selected)
-        hovered = bool(option.state & QtWidgets.QStyle.StateFlag.State_MouseOver)
-        row = QtCore.QRectF(option.rect).adjusted(0, 2, -1, -2)
+        selected, _hovered = self.paint_band(p, option, index)
+        row = self.band_rect(option.rect)
         p.save()
         try:
             p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
-            path = QtGui.QPainterPath()
-            path.addRoundedRect(row, 12, 12)
-            fill = (qcolor(m.selection) if selected
-                    else qcolor(m.pressed) if hovered else qcolor(m.hover, 0.75))
-            p.fillPath(path, fill)
             ink = qcolor(m.selection_text if selected else t.text_primary)
             quiet = qcolor(m.selection_text if selected else t.text_secondary)
 
@@ -331,13 +330,8 @@ def _glass_list(name: str) -> QtWidgets.QListWidget:
     """A transparent list of glass rows (``_PlanRowDelegate``)."""
     view = QtWidgets.QListWidget()
     view.setObjectName(name)
-    view.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
-    view.setUniformItemSizes(True)
-    view.setMouseTracking(True)
-    view.viewport().setAttribute(QtCore.Qt.WidgetAttribute.WA_Hover, True)
+    style_item_view(view, delegate=_PlanRowDelegate(view))
     view.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-    view.setVerticalScrollMode(QtWidgets.QAbstractItemView.ScrollMode.ScrollPerPixel)
-    view.setItemDelegate(_PlanRowDelegate(view))
     return view
 
 
@@ -392,7 +386,7 @@ class PlaylistsWorkspace(WorkspaceBase):
         from gui.pages import SegmentedTabBar
         from gui.themes.glass import font
         from gui.widgets.glass import GlassPanel
-        from gui.widgets.glass_parts import EmptyState, StatRow
+        from gui.widgets.glass_parts import EmptyState, StatRow, hero_title
         from gui.widgets.glyphs import set_glyph
 
         cl = self.content_layout
@@ -409,12 +403,7 @@ class PlaylistsWorkspace(WorkspaceBase):
         hl.setContentsMargins(16, 16, 16, 16)
         hl.setSpacing(12)
 
-        # The hero title (20/650): a plain label, so the cardTitle role's
-        # 16 px rule doesn't override the title font.
-        title = QtWidgets.QLabel("Make playlists")
-        title.setObjectName("playlistHeroTitle")
-        title.setFont(font("title"))
-        hl.addWidget(title)
+        hl.addWidget(hero_title("Make playlists"))
 
         self._mode_tabs = SegmentedTabBar()
         self._mode_tabs.setObjectName("playlistModeTabs")

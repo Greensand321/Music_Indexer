@@ -25,12 +25,12 @@ from gui.themes.glass import apply_font as glass_apply_font
 from gui.themes.glass import current_material, qcolor
 from gui.themes.glass import font as glass_font
 from gui.themes.manager import get_manager
-from gui.widgets.glass import ElidedLabel, GlassCard
-from gui.widgets.glass_parts import EmptyState
+from gui.widgets.glass import GlassCard, path_label
+from gui.widgets.glass_parts import EmptyState, hero_title, path_well, thin_bar
 from gui.widgets.glyphs import paint_glyph, set_glyph
 from gui.workspaces.base import WorkspaceBase
 from gui.workspaces.label_tone import flash_tone, refresh_tones, set_tone
-from gui.workspaces.organize_parts import FlowLayout, hero_title, path_well, thin_bar
+from gui.widgets.layouts import FlowLayout
 from utils.reserved_folders import NON_LIBRARY_FOLDERS, walk_library
 
 _SUPPORTED_EXTS = {".mp3", ".flac", ".m4a", ".aac", ".ogg", ".wav", ".opus"}
@@ -586,7 +586,7 @@ class ToolTile(GlassCard):
         self.status_label.setWordWrap(True)
         glass_apply_font(self.status_label, "label")
 
-        self._output_lbl = ElidedLabel("", QtCore.Qt.TextElideMode.ElideMiddle)
+        self._output_lbl = path_label("")
         self._output_lbl.setObjectName("toolOutputPath")
         self._output_row = path_well(self._output_lbl, "file")
         self._output_row.setVisible(False)
@@ -594,7 +594,7 @@ class ToolTile(GlassCard):
         self.log_box = QtWidgets.QPlainTextEdit()
         self.log_box.setReadOnly(True)
         self.log_box.setFixedHeight(log_height)
-        self.log_box.setObjectName("organizeLog")
+        self.log_box.setObjectName("monoText")
 
         drawer_l.addWidget(self.progress_bar)
         drawer_l.addWidget(self.status_label)
@@ -688,7 +688,6 @@ class ToolTile(GlassCard):
     def set_output(self, path: str | None) -> None:
         """Show the file a run wrote (middle-elided; full path in the tooltip)."""
         self._output_lbl.setText(path or "")
-        self._output_lbl.setToolTip(path or "")
         self._output_row.setVisible(bool(path))
 
     def output_path(self) -> str:
@@ -1110,7 +1109,7 @@ class ExportsWorkspace(_ToolPanel):
 
         self._exclude_flac_cb = _PillToggle("Exclude FLAC files")
         self._dupe_tracks_cb  = _PillToggle("Include per-album duplicate titles")
-        toggles = FlowLayout(hspacing=24, vspacing=10)
+        toggles = FlowLayout(spacing=24, line_spacing=10)
         toggles.addWidget(self._exclude_flac_cb)
         toggles.addWidget(self._dupe_tracks_cb)
         tile.add_option_layout(toggles)
@@ -1137,7 +1136,7 @@ class ExportsWorkspace(_ToolPanel):
         self._codec_tile = tile
         tile.log_box.setVisible(False)      # one file, one line: no log to show
 
-        chips = FlowLayout(hspacing=8, vspacing=8)
+        chips = FlowLayout(spacing=8, line_spacing=8)
         self._codec_ext_cbs: dict[str, _ChipToggle] = {}
         for ext in (".flac", ".mp3", ".m4a", ".aac", ".wav", ".opus", ".ogg"):
             cb = self._make_chip(ext)
