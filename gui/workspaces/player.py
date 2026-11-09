@@ -489,9 +489,19 @@ class _LibraryCard(GlassCard):
             self._prune_scaled()
             self.update()
             return
+        from gui.themes import motion
+
+        duration = motion.duration(self._FADE_MS)
+        if duration == 0:
+            # Reduced motion: the new cover replaces the old one at once.
+            self._pm_cur = new
+            self._prune_scaled()
+            self.update()
+            return
         self._pm_nxt = new
         self._fading = True
         self._fade_val = 0.0
+        self._anim.setDuration(duration)
         self._anim.setStartValue(0.0)
         self._anim.setEndValue(1.0)
         self._anim.start()
